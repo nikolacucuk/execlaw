@@ -48,4 +48,4 @@ service-manager = "0.11"
 # control messages (start/stop/PowerEvent) — service-manager only
 # handles registration with the SCM, not the runtime loop.
 [target.'cfg(windows)'.dependencies]
-windows-service = "0.7"
+windows-service = "0.8"
