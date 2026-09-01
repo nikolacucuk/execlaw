@@ -69,13 +69,33 @@ cd /mnt/AI_Pool/execlaw-source
 ```
 
 Create `.env` beside the compose file. `DOCKER_GID` must be the numeric group
-that owns `/var/run/docker.sock` on the TrueNAS Docker host:
+that owns `/var/run/docker.sock` on the TrueNAS Docker host. First, run this
+in the shell and note the number it prints:
 
 ```bash
-DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+sudo stat -c '%g' /var/run/docker.sock
+```
+
+Next, open `.env` in an editor and make its **entire content** exactly the
+following three lines. Replace `568` with the number from the preceding
+command:
+
+```text
+DOCKER_GID=568
 EXECLAW_DATA_DIR=/mnt/AI_Pool/execlaw
 OLLAMA_OPENAI_URL=http://192.168.1.76:30068/v1
 ```
+
+For example:
+
+```bash
+vim .env
+cat .env
+```
+
+The `cat` output must contain only these three `KEY=value` lines. Do not put
+`sudo stat`, `printf`, `$SOCKET_GID`, `$(...)`, quotes, or shell redirects in
+the `.env` file.
 
 Create `compose.yaml` beside `.env`:
 
@@ -137,6 +157,30 @@ control-plane container, and calls Ollama through the reachable LAN endpoint.
 The initial setup wizard detects the mounted Docker socket directly, so it
 should report Docker as available even though the minimal control-plane image
 does not include the Docker CLI.
+
+### SPA bundle not found
+
+If `http://TRUENAS_IP:3031/` displays `execlaw SPA bundle not found`, the
+control-plane image was built from a Dockerfile that compiled Rust before
+building `web/dist/`. Update `Dockerfile.control-plane` from the current
+repository revision, then rebuild both images and recreate the control plane:
+
+```bash
+cd /mnt/AI_Pool/execlaw-source
+sudo docker compose build --no-cache execlaw runner-image
+sudo docker compose up -d --force-recreate execlaw
+sudo docker compose logs -f execlaw
+```
+
+Verify the image serves the SPA from the TrueNAS shell:
+
+```bash
+curl -I http://127.0.0.1:3031/
+```
+
+The response must be `HTTP/1.1 200 OK`. A successful rebuild also creates the
+`execlaw/runner:truenas` image; the log warning that the runner image is
+missing then disappears on the next control-plane restart.
 
 ### Build failure: Cargo registry cache
 

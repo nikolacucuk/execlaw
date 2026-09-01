@@ -4234,6 +4234,7 @@ async fn run_incognito_send(
         content: Some(execlaw_inference_api::MessageContent::Text(
             req.text.clone(),
         )),
+        reasoning_content: None,
         tool_call_id: None,
         name: None,
         tool_calls: vec![],

@@ -122,6 +122,10 @@ pub struct ChatMessage {
     pub role: Role,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<MessageContent>,
+    /// Some local OpenAI-compatible reasoning backends place their
+    /// response text here while leaving `content` empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -136,6 +140,7 @@ impl ChatMessage {
         Self {
             role: Role::System,
             content: Some(MessageContent::Text(content.into())),
+            reasoning_content: None,
             tool_call_id: None,
             name: None,
             tool_calls: Vec::new(),
@@ -145,6 +150,7 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: Some(MessageContent::Text(content.into())),
+            reasoning_content: None,
             tool_call_id: None,
             name: None,
             tool_calls: Vec::new(),
@@ -171,6 +177,7 @@ impl ChatMessage {
         Self {
             role: Role::User,
             content: Some(MessageContent::Parts(parts)),
+            reasoning_content: None,
             tool_call_id: None,
             name: None,
             tool_calls: Vec::new(),
@@ -180,6 +187,7 @@ impl ChatMessage {
         Self {
             role: Role::Assistant,
             content: Some(MessageContent::Text(content.into())),
+            reasoning_content: None,
             tool_call_id: None,
             name: None,
             tool_calls: Vec::new(),
@@ -189,6 +197,7 @@ impl ChatMessage {
         Self {
             role: Role::Tool,
             content: Some(MessageContent::Text(result_json.into())),
+            reasoning_content: None,
             tool_call_id: Some(tool_call_id.into()),
             name: None,
             tool_calls: Vec::new(),
@@ -971,6 +980,29 @@ mod tests {
             "read_memory"
         );
         assert_eq!(resp.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+    }
+
+    #[test]
+    fn chat_response_decodes_reasoning_content_when_content_is_empty() {
+        let json_str = r#"{
+            "id": "abc",
+            "model": "Qwen3.5-27B-AWQ",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "reasoning_content": "{\"thesis\":\"t\",\"steps\":[{\"query\":\"q\"}]}"
+                },
+                "finish_reason": "stop"
+            }]
+        }"#;
+
+        let response: ChatResponse = serde_json::from_str(json_str).unwrap();
+        assert_eq!(
+            response.choices[0].message.reasoning_content.as_deref(),
+            Some(r#"{"thesis":"t","steps":[{"query":"q"}]}"#)
+        );
     }
 
     #[test]

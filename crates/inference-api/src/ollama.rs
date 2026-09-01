@@ -308,6 +308,7 @@ fn response_to_openai(raw: OllamaChatResponse, request_model: &ModelId) -> ChatR
         } else {
             Some(crate::MessageContent::Text(raw.message.content))
         },
+        reasoning_content: None,
         tool_call_id: None,
         name: None,
         tool_calls: raw

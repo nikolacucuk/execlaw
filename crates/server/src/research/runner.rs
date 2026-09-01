@@ -930,7 +930,7 @@ async fn call_planner(
             ChatMessage::system(PLANNER_SYSTEM_PROMPT),
             ChatMessage::user(query.to_owned()),
         ],
-        max_tokens: Some(1024),
+        max_tokens: Some(4096),
         temperature: Some(0.2),
         stream: false,
         tools: None,
@@ -975,7 +975,7 @@ async fn call_planner(
                     "Original research query:\n{query}\n\nPrevious invalid planner output (repair this into one valid JSON object):\n{previous_output}"
                 )),
             ],
-            max_tokens: Some(1024),
+            max_tokens: Some(4096),
             temperature: Some(0.0),
             stream: false,
             tools: None,

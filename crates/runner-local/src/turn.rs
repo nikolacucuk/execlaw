@@ -532,6 +532,7 @@ impl TurnExecutor {
             messages.push(ChatMessage {
                 role: Role::Assistant,
                 content: choice.message.content.clone(),
+                reasoning_content: choice.message.reasoning_content.clone(),
                 tool_call_id: None,
                 name: None,
                 tool_calls: choice.message.tool_calls.clone(),

@@ -336,6 +336,7 @@ mod tests {
                 message: ChatMessage {
                     role: Role::Assistant,
                     content: Some(MessageContent::Text(text.into())),
+                    reasoning_content: None,
                     tool_call_id: None,
                     name: None,
                     tool_calls: vec![],
@@ -509,6 +510,17 @@ mod tests {
         );
         assert_eq!(r.content, "visible");
         assert_eq!(r.reasoning.as_deref(), Some("x"));
+    }
+
+    #[test]
+    fn structured_response_uses_reasoning_content_when_content_is_empty() {
+        let mut response = resp_with_content("");
+        response.choices[0].message.content = None;
+        response.choices[0].message.reasoning_content =
+            Some(r#"{"thesis":"t","steps":[{"query":"q"}]}"#.into());
+
+        let adapted = Qwen3Adapter.process_response(response, OutputHint::StructuredJson);
+        assert_eq!(adapted.content, r#"{"thesis":"t","steps":[{"query":"q"}]}"#);
     }
 
     // --- factory ---

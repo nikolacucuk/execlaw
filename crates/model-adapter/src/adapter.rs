@@ -101,6 +101,8 @@ pub(crate) fn first_choice(
             .content
             .as_ref()
             .map(|c| c.as_text())
+            .filter(|content| !content.trim().is_empty())
+            .or_else(|| choice.message.reasoning_content.clone())
             .unwrap_or_default();
         let finish = choice.finish_reason.clone();
         let tools = choice.message.tool_calls.clone();

@@ -949,6 +949,7 @@ function ChatPane({
     // safe to call here (always-on chat shell); it does one HTTP RTT
     // on mount and re-fetches when the token rotates.
     const caps = useBackendCapabilities(getToken, true);
+    const auth = useAuth();
     const messages = useChatState((s) =>
         activeId ? s.messages[activeId] ?? null : null,
     );
