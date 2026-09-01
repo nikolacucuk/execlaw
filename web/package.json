@@ -17,9 +17,9 @@
     "build-all-plugins": "node ../scripts/build-plugin-ui.mjs --all"
   },
   "dependencies": {
-    "@fontsource/ibm-plex-sans": "^5.2.8",
+    "@fontsource/ibm-plex-sans": "^5.3.0",
     "@gsap/react": "2.1.2",
-    "@xyflow/react": "^12.10.2",
+    "@xyflow/react": "^12.11.5",
     "bootstrap": "5.3.8",
     "bootstrap-icons": "1.13.1",
     "gsap": "3.15.0",
@@ -29,7 +29,7 @@
     "react-bootstrap": "2.10.10",
     "react-dom": "19.2.6",
     "react-markdown": "^10.1.0",
-    "react-router-dom": "7.15.0",
+    "react-router-dom": "7.18.3",
     "remark-breaks": "^4.0.0",
     "remark-gfm": "^4.0.1"
   },
@@ -40,12 +40,12 @@
     "@testing-library/user-event": "14.6.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
-    "@vitejs/plugin-react": "6.0.1",
+    "@vitejs/plugin-react": "6.1.1",
     "esbuild": "^0.28.0",
     "jsdom": "29.1.1",
-    "sass": "1.99.0",
+    "sass": "1.103.1",
     "typescript": "6.0.3",
-    "vite": "8.0.12",
+    "vite": "8.2.2",
     "vitest": "4.1.6"
   }
 }
