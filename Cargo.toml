@@ -107,7 +107,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # --- auth / crypto ---
 # JWT EdDSA (Ed25519) signing; no RSA.
-jsonwebtoken = "9"
+jsonwebtoken = "11"
 argon2 = "0.5"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.8"
