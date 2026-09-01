@@ -34,14 +34,14 @@ to reach it too.
 ## 1. Create persistent storage
 
 In the TrueNAS UI, create a dataset such as `tank/apps/execlaw`. Its mounted
-path is commonly `/mnt/tank/apps/execlaw`; substitute your real pool and
+path is commonly `/mnt/AI_Pool/execlaw`; substitute your real pool and
 dataset name in every command below. Create the directory and give the image's
 non-root user ownership:
 
 ```bash
-sudo mkdir -p /mnt/tank/apps/execlaw/backups
-sudo chown -R 1000:1000 /mnt/tank/apps/execlaw
-sudo chmod 700 /mnt/tank/apps/execlaw
+sudo mkdir -p /mnt/AI_Pool/execlaw/backups
+sudo chown -R 1000:1000 /mnt/AI_Pool/execlaw
+sudo chmod 700 /mnt/AI_Pool/execlaw
 ```
 
 The following persistent files/directories will appear there after first boot:
@@ -61,11 +61,11 @@ verified without the matching key.
 ## 2. Get the source and prepare Compose
 
 Clone a pinned execlaw revision in a separate directory, for example
-`/mnt/tank/apps/execlaw-source`. Do not place source code in the data dataset:
+`/mnt/AI_Pool/execlaw-source`. Do not place source code in the data dataset:
 
 ```bash
-git clone https://github.com/crockpotveggies/execlaw.git /mnt/tank/apps/execlaw-source
-cd /mnt/tank/apps/execlaw-source
+git clone https://github.com/nikolacucuk/execlaw.git /mnt/AI_Pool/execlaw-source
+cd /mnt/AI_Pool/execlaw-source
 ```
 
 Create `.env` beside the compose file. `DOCKER_GID` must be the numeric group
@@ -73,7 +73,7 @@ that owns `/var/run/docker.sock` on the TrueNAS Docker host:
 
 ```bash
 DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
-EXECLAW_DATA_DIR=/mnt/tank/apps/execlaw
+EXECLAW_DATA_DIR=/mnt/AI_Pool/execlaw
 OLLAMA_OPENAI_URL=http://192.168.1.76:30068/v1
 ```
 
@@ -120,12 +120,14 @@ networks:
     driver: bridge
 ```
 
-Build both images, then start only the control plane:
+Build both images, then start only the control plane. On a default TrueNAS
+installation, Docker's socket is root-owned, so use `sudo` consistently unless
+you have explicitly granted your account access to that socket:
 
 ```bash
-docker compose build execlaw runner-image
-docker compose up -d execlaw
-docker compose logs -f execlaw
+sudo docker compose build execlaw runner-image
+sudo docker compose up -d execlaw
+sudo docker compose logs -f execlaw
 ```
 
 The runner image is intentionally built separately: execlaw's control plane
@@ -135,6 +137,27 @@ control-plane container, and calls Ollama through the reachable LAN endpoint.
 The initial setup wizard detects the mounted Docker socket directly, so it
 should report Docker as available even though the minimal control-plane image
 does not include the Docker CLI.
+
+### Build failure: Cargo registry cache
+
+If the initial build fails with messages such as `failed to unpack package`,
+`File exists (os error 17)`, or a missing `Cargo.toml` below
+`/usr/local/cargo/registry`, BuildKit's shared Cargo cache was corrupted by
+the two parallel image builds. The Dockerfiles in the current repository lock
+that cache correctly. Update your checkout, clear only build cache data, and
+retry:
+
+```bash
+cd /mnt/AI_Pool/execlaw-source
+git pull --ff-only
+sudo docker builder prune -af
+sudo docker compose build execlaw runner-image
+```
+
+`docker builder prune -af` removes cached build layers only. It does not
+remove running containers, images currently in use, named volumes, or the
+`/mnt/AI_Pool/execlaw` data directory. Do not use `docker system prune --volumes`
+for this recovery.
 
 ## 3. Configure the backend in execlaw
 

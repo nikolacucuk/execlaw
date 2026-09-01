@@ -44,9 +44,9 @@ COPY crates ./crates
 COPY plugins ./plugins
 COPY vendor ./vendor
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release --bin execlaw-runner --no-default-features \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo build --locked --release --bin execlaw-runner --no-default-features \
     && cp target/release/execlaw-runner /tmp/execlaw-runner
 
 # ---- runtime ----

@@ -24,9 +24,9 @@ COPY scripts ./scripts
 COPY spec ./spec
 
 # Build the control-plane CLI binary.
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/build/target \
-    cargo build --release -p execlaw \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/build/target,sharing=locked \
+    cargo build --locked --release -p execlaw \
     && cp target/release/execlaw /tmp/execlaw
 
 FROM debian:bookworm-slim
