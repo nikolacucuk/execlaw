@@ -1542,7 +1542,7 @@ dependencies = [
  "thiserror 2.0.18",
  "toml",
  "tracing",
- "zip 2.4.2",
+ "zip",
 ]
 
 [[package]]
@@ -1709,7 +1709,7 @@ dependencies = [
  "uuid",
  "webauthn-rs",
  "webauthn-rs-proto",
- "zip 2.4.2",
+ "zip",
 ]
 
 [[package]]
@@ -5648,7 +5648,7 @@ dependencies = [
  "serde_json",
  "url",
  "utoipa",
- "zip 3.0.0",
+ "zip",
 ]
 
 [[package]]
@@ -6666,23 +6666,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
-]
-
-[[package]]
-name = "zip"
-version = "2.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fabe6324e908f85a1c52063ce7aa26b68dcb7eb6dbc83a2d148403c9bc3eba50"
-dependencies = [
- "arbitrary",
- "crc32fast",
- "crossbeam-utils",
- "displaydoc",
- "flate2",
- "indexmap 2.14.0",
- "memchr",
- "thiserror 2.0.18",
- "zopfli",
 ]
 
 [[package]]
