@@ -122,6 +122,7 @@ impl SkillsListTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: classes_for_read(),
+                sensitive: false,
             },
             store,
         }
@@ -177,6 +178,7 @@ impl SkillsViewTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: classes_for_read(),
+                sensitive: false,
             },
             store,
         }
@@ -256,6 +258,7 @@ impl SkillsResourceTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: classes_for_read(),
+                sensitive: false,
             },
             store,
         }
@@ -326,6 +329,7 @@ impl SkillsSearchTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: classes_for_read(),
+                sensitive: false,
             },
             store,
         }
@@ -429,6 +433,7 @@ impl SkillsCreateTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: classes_for_admin_write(),
+                sensitive: false,
             },
             store,
         }
@@ -543,6 +548,7 @@ impl SkillsUpdateTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: classes_for_admin_write(),
+                sensitive: false,
             },
             store,
         }
@@ -617,6 +623,7 @@ impl SkillsPromoteTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: classes_for_admin_write(),
+                sensitive: false,
             },
             store,
         }
@@ -679,6 +686,7 @@ impl SkillsArchiveTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: classes_for_admin_write(),
+                sensitive: false,
             },
             store,
         }

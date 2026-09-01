@@ -139,6 +139,7 @@ fn build_noop_tool(name: &str) -> Arc<dyn ToolImpl> {
             latency: ToolLatency::Low,
             capabilities: vec![],
             default_allowed_classes: vec!["Controller".into()],
+            sensitive: false,
         },
     })
 }

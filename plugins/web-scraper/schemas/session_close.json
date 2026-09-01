@@ -1,0 +1,11 @@
+{
+    "type": "object",
+    "properties": {
+        "session_id": {
+            "type": "string",
+            "description": "Session identifier to close and evict from sidecar memory."
+        }
+    },
+    "required": ["session_id"],
+    "additionalProperties": false
+}

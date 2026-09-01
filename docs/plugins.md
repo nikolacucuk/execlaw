@@ -6,6 +6,7 @@ Relationship to other docs:
 
 - [`architecture.md`](architecture.md) — full system topology + the design principles (esp. #6 _"Plugins, not hardcoded built-ins"_) that this doc operationalises.
 - [`sidecar-supervisor-design.md`](sidecar-supervisor-design.md) — deep dive on the supervised-container layer plugins compose against via `[[services]]`.
+- [`operator-decision-rubric.md`](operator-decision-rubric.md) — structured scorecard for deciding plugin vs MCP vs host-core placement.
 - [`MIGRATION_PLAN.md`](../MIGRATION_PLAN.md) — design rationale and trade-off discussion.
 
 ---

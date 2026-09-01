@@ -873,7 +873,8 @@ mod tests {
             is_pinned: false,
             is_ephemeral: false,
             ephemeral_expires_at: None,
-            last_activity_at: now,
+            last_activity_at: 0,
+            context_window_policy: None,
         };
         conversations.upsert(&row).unwrap();
         pg_store

@@ -360,6 +360,83 @@ export async function postMessage(
     );
 }
 
+// ---- /api/admin/graphify/graph ------------------------------------
+
+export interface GraphifyGraphNode {
+    id: string;
+    label: string;
+    community: number;
+    file?: string | null;
+    source_location?: string | null;
+    file_type?: string | null;
+}
+
+export interface GraphifyGraphEdge {
+    source: string;
+    target: string;
+}
+
+export interface GraphifyGraphPageResponse {
+    source_path: string;
+    total_nodes: number;
+    total_edges: number;
+    filtered_nodes: number;
+    filtered_edges: number;
+    node_offset: number;
+    node_limit: number;
+    node_has_more: boolean;
+    edge_offset: number;
+    edge_limit: number;
+    edge_has_more: boolean;
+    nodes: GraphifyGraphNode[];
+    edges: GraphifyGraphEdge[];
+}
+
+export interface GraphifyGraphPageQuery {
+    node_offset?: number;
+    node_limit?: number;
+    edge_offset?: number;
+    edge_limit?: number;
+    q?: string;
+    file_contains?: string;
+    label_contains?: string;
+    community?: number;
+}
+
+export async function listGraphifyGraphPage(
+    tokenAccessor: () => string | null,
+    query: GraphifyGraphPageQuery = {},
+): Promise<GraphifyGraphPageResponse> {
+    const qs = new URLSearchParams();
+    if (query.node_offset !== undefined) {
+        qs.set("node_offset", String(query.node_offset));
+    }
+    if (query.node_limit !== undefined) {
+        qs.set("node_limit", String(query.node_limit));
+    }
+    if (query.edge_offset !== undefined) {
+        qs.set("edge_offset", String(query.edge_offset));
+    }
+    if (query.edge_limit !== undefined) {
+        qs.set("edge_limit", String(query.edge_limit));
+    }
+    if (query.q) {
+        qs.set("q", query.q);
+    }
+    if (query.file_contains) {
+        qs.set("file_contains", query.file_contains);
+    }
+    if (query.label_contains) {
+        qs.set("label_contains", query.label_contains);
+    }
+    if (query.community !== undefined) {
+        qs.set("community", String(query.community));
+    }
+
+    const path = `/api/admin/graphify/graph${qs.toString() ? `?${qs.toString()}` : ""}`;
+    return apiFetch<GraphifyGraphPageResponse>(path, {}, tokenAccessor);
+}
+
 // ---- /api/chats/:id/stop -------------------------------------------
 
 /// Halt the in-flight turn for a conversation (chat stop button).

@@ -63,9 +63,9 @@ pub(crate) use prompt::{assemble_system_prompt, build_tool_routing_prose, humani
 // is consumed by callers outside chats (cli). Everything else is
 // crate-internal.
 pub(crate) use helpers::{
-    BusPhaseObserver, IdlePhaseGuard, ensure_conversation, err_500, event_log,
-    refresh_conversation_kind, resolve_skill_prepend, rewrite_url_for_container,
-    sanitize_generated_title,
+    BusPhaseObserver, IdlePhaseGuard, ensure_conversation, ensure_openai_base_v1, err_500,
+    event_log, fallback_title_from_user_text, leading_sentences, refresh_conversation_kind,
+    resolve_skill_prepend, rewrite_url_for_container, sanitize_generated_title,
 };
 // `rewrite_url_with_alias` is consumed by this file's in-line test
 // module via `super::rewrite_url_with_alias(...)`. Gated to test
@@ -215,11 +215,23 @@ pub async fn send_message(
     // Step 2 — **policy evaluation** (§7.3). The policy engine sees
     // the resolved trust; same code path handles Controller all the
     // way down to Blocked.
+    //
+    // Pre-compute whether any available tool is flagged sensitive.
+    // `all_builtins()` covers the in-process built-in tools
+    // (read_memory, write_memory, read_chat_history, …); `all_tools()`
+    // covers installed plugin tools. If any has `sensitive: true` we
+    // treat the turn as potentially accessing sensitive data so the
+    // Rule-of-Two gate can fire for trust classes that warrant it.
+    let registry_for_policy = state.plugin_host.registry();
+    let has_sensitive_tools = registry_for_policy
+        .all_builtins()
+        .iter()
+        .any(|t| t.descriptor().sensitive);
     let policy = evaluate_turn(TurnPolicyInput {
         effective_trust: sender_trust,
         sender_trust,
         voice: false,
-        accesses_sensitive_data: false,
+        accesses_sensitive_data: has_sensitive_tools,
         produces_external_effect: false,
     });
     if policy.drop_turn {
@@ -290,7 +302,7 @@ pub async fn send_message(
     // ever emitting a tool call. Combine both so the tool-capable
     // path engages whenever there's ANY tool surface the agent can
     // call.
-    let registry_for_tools = state.plugin_host.registry();
+    let registry_for_tools = registry_for_policy;
     let has_plugin_tools =
         !registry_for_tools.all_tools().is_empty() || !registry_for_tools.all_builtins().is_empty();
     let caller_caps: Vec<String> = policy
@@ -612,6 +624,19 @@ pub async fn send_message(
                             run_id: format!("turn-{}-{}", cid.as_str(), assistant_seq),
                             outcome: "success".into(),
                         });
+                    // new-2 — fire the offline optimizer in a background
+                    // task so it never stalls the HTTP response.
+                    if let Some(opt) = state.optimizer_worker.clone() {
+                        tokio::spawn(async move {
+                            if let Err(e) = opt.maybe_optimize(sk_id).await {
+                                tracing::warn!(
+                                    skill_id = sk_id.0,
+                                    error = %e,
+                                    "optimizer: maybe_optimize failed (best-effort)"
+                                );
+                            }
+                        });
+                    }
                 }
             }
             Err(e) => {
@@ -1769,6 +1794,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     // the runner. selfhosted-claw does the same dance in its
     // `resolveContainerOpenAIBaseUrl`.
     let inference_url = rewrite_url_for_container(&inference_url);
+    let inference_url = ensure_openai_base_v1(&inference_url);
     // 2026-05-13 — sourced from the same resolved row as endpoint +
     // model id; see `ResolvedInference::reasoning_enabled`.
     let reasoning_enabled = resolved.reasoning_enabled;
@@ -1921,14 +1947,23 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     let turn_id_clone = turn_id.clone();
     let cancel_flag_clone = cancel_flag.clone();
     let cancel_watcher = tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_millis(25));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             if cancel_flag_clone.load(std::sync::atomic::Ordering::SeqCst) {
-                supervisor_clone
+                let delivered = supervisor_clone
                     .cancel_turn(&group_id_clone, &turn_id_clone)
                     .await;
+                tracing::info!(
+                    target: "chats::run_runner_turn",
+                    principal_group = %group_id_clone,
+                    turn_id = %turn_id_clone,
+                    delivered,
+                    "cancel flag observed; forwarded CancelTurn to runner"
+                );
                 return;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tick.tick().await;
         }
     });
 
@@ -2106,6 +2141,14 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
                 break;
             }
             TurnEvent::Error { message, cancelled } => {
+                tracing::info!(
+                    target: "chats::run_runner_turn",
+                    conversation_id = %cid.as_str(),
+                    turn_id = %turn_id,
+                    cancelled,
+                    message = %message,
+                    "runner turn ended with error frame"
+                );
                 error_message = Some(message);
                 was_cancelled = cancelled;
                 break;
@@ -2415,6 +2458,34 @@ async fn run_tool_capable_turn(
         reasoning_enabled: resolved.reasoning_enabled,
         inbound_channel_origin: inbound_channel_origin.map(|s| s.to_owned()),
         spotlight_delim,
+        // Context-window policy (§9/§13). Per-conversation override (migration 0013)
+        // takes priority; falls back to empty string (FullReplay) if unset.
+        context_window_policy: ConversationStore::new(&state.db)
+            .get(cid)
+            .ok()
+            .flatten()
+            .and_then(|r| r.context_window_policy)
+            .unwrap_or_default(),
+        // History summarizer (§14/§7). Wire the Small backend client
+        // so dropped context is compressed rather than silently lost.
+        summarizer_client: state
+            .inference
+            .resolve(&state.db, execlaw_core::backends::BackendPurpose::Small)
+            .or_else(|| {
+                state
+                    .inference
+                    .resolve(&state.db, execlaw_core::backends::BackendPurpose::Standard)
+            })
+            .map(|r| {
+                (
+                    (*r.client).clone(),
+                    execlaw_inference_api::ModelId(r.model_id.clone()),
+                )
+            }),
+        // § new-3: Session FSM not yet wired at the chats.rs level;
+        // individual turn executors receive `None` until a dedicated
+        // SessionRegistry ships.
+        session: None,
     };
     let exec_started_at = std::time::Instant::now();
     tracing::debug!(
@@ -3036,7 +3107,12 @@ pub async fn dispatch_external_turn(
         effective_trust: sender_trust,
         sender_trust,
         voice: false,
-        accesses_sensitive_data: false,
+        // Check if any available tool is sensitive — same logic as
+        // the primary chat handler path.
+        accesses_sensitive_data: {
+            let reg = state.plugin_host.registry();
+            reg.all_builtins().iter().any(|t| t.descriptor().sensitive)
+        },
         produces_external_effect: false,
     });
     if policy.drop_turn {
@@ -3832,6 +3908,21 @@ pub async fn stop_turn(
     Path(conversation_id): Path<String>,
 ) -> impl IntoResponse {
     let cancelled = state.turn_cancel.cancel(&conversation_id);
+    if cancelled {
+        // Clear the client-side busy indicator immediately. The turn
+        // worker still commits the final cancelled model_turn and will
+        // emit its own terminal phase as usual.
+        state.events.publish(UiEvent::ConversationPhaseChanged {
+            conversation_id: conversation_id.clone(),
+            phase: Phase::Idle.as_str().to_owned(),
+        });
+    }
+    tracing::info!(
+        target: "chats::stop_turn",
+        conversation_id = %conversation_id,
+        cancelled,
+        "stop requested for conversation"
+    );
     (
         StatusCode::OK,
         Json(serde_json::json!({
@@ -4341,17 +4432,16 @@ pub async fn generate_title(
         }
     }
 
-    // Pull the first user message + first assistant reply from the
-    // log. Don't replay the full transcript — a single round-trip
-    // is plenty of context for a 3-5 word label and saves prompt
-    // tokens on every new chat.
+    // Pull the first user message from the log and feed only its
+    // first three sentences into the title prompt. This keeps titles
+    // anchored to the initial user goal even when the first turn is
+    // verbose.
     let log = event_log(&state);
     let history = match log.replay_since(&cid, EventSeq(0)) {
         Ok(h) => h,
         Err(e) => return err_500(&format!("replay: {e}")),
     };
     let mut user_text = String::new();
-    let mut assistant_text = String::new();
     for ev in &history {
         match ev.kind {
             EventKind::UserMsg if user_text.is_empty() => {
@@ -4359,16 +4449,9 @@ pub async fn generate_title(
                     user_text = p.text;
                 }
             }
-            EventKind::ModelTurn if assistant_text.is_empty() => {
-                if let Ok(p) = ev.decode_payload::<RealModelTurnPayload>() {
-                    assistant_text = p.text;
-                } else if let Ok(p) = ev.decode_payload::<StubModelTurnPayload>() {
-                    assistant_text = p.text;
-                }
-            }
             _ => {}
         }
-        if !user_text.is_empty() && !assistant_text.is_empty() {
+        if !user_text.is_empty() {
             break;
         }
     }
@@ -4402,23 +4485,27 @@ pub async fn generate_title(
     let inference = resolved.client.clone();
     let resolved_model_id = resolved.model_id.clone();
 
+    let user_goal_excerpt = leading_sentences(&user_text, 3);
     let system = "You produce very short titles for chat conversations. \
-                  Reply with ONLY the title — 3 to 5 words, no quotes, no \
+                  Reply with ONLY the title — 3 to 4 words, no quotes, no \
                   punctuation, no preamble. Title-case is fine. Examples: \
                   'Sourdough starter ratio', 'Refactoring axum routes', \
                   'Trip to Lisbon planning'.";
-    let user_prompt = if assistant_text.is_empty() {
-        format!("First message: {user_text}\n\nTitle:")
-    } else {
-        format!("First message: {user_text}\n\nAssistant reply: {assistant_text}\n\nTitle:")
-    };
+    let user_prompt = format!(
+        "First request (first three sentences): {}\n\nTitle:",
+        if user_goal_excerpt.is_empty() {
+            user_text.as_str()
+        } else {
+            user_goal_excerpt.as_str()
+        }
+    );
     let req = ChatRequest {
         model: ModelId(resolved_model_id.clone()),
         messages: vec![ChatMessage::system(system), ChatMessage::user(user_prompt)],
         tools: None,
         stream: false,
         temperature: Some(0.2),
-        max_tokens: Some(20),
+        max_tokens: Some(16),
         // Adapter applies per-family kwargs (Qwen3 forces
         // enable_thinking:false here regardless because Plain hint
         // never wants reasoning).
@@ -4436,6 +4523,37 @@ pub async fn generate_title(
         Ok(a) => a,
         Err(e) => {
             tracing::warn!(error = %e, "title generation failed; leaving display_name unset");
+            let fallback = fallback_title_from_user_text(&user_text);
+            if fallback.is_empty() {
+                return (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "conversation_id": conversation_id,
+                        "title": null,
+                        "skipped": true,
+                    })),
+                )
+                    .into_response();
+            }
+            if let Err(se) = store.set_display_name(&cid, Some(&fallback)) {
+                return err_500(&format!("set_display_name: {se}"));
+            }
+            return (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "conversation_id": conversation_id,
+                    "title": fallback,
+                    "skipped": false,
+                    "source": "fallback",
+                })),
+            )
+                .into_response();
+        }
+    };
+    let title = sanitize_generated_title(&adapted.content);
+    if title.is_empty() {
+        let fallback = fallback_title_from_user_text(&user_text);
+        if fallback.is_empty() {
             return (
                 StatusCode::OK,
                 Json(serde_json::json!({
@@ -4446,15 +4564,16 @@ pub async fn generate_title(
             )
                 .into_response();
         }
-    };
-    let title = sanitize_generated_title(&adapted.content);
-    if title.is_empty() {
+        if let Err(e) = store.set_display_name(&cid, Some(&fallback)) {
+            return err_500(&format!("set_display_name: {e}"));
+        }
         return (
             StatusCode::OK,
             Json(serde_json::json!({
                 "conversation_id": conversation_id,
-                "title": null,
-                "skipped": true,
+                "title": fallback,
+                "skipped": false,
+                "source": "fallback",
             })),
         )
             .into_response();
@@ -5566,6 +5685,47 @@ mod tests {
     }
 
     #[test]
+    fn assemble_system_prompt_injects_hot_memory_between_routing_and_context() {
+        let state = test_app_state();
+        let cid = ConversationId::from("conv-hot-memory");
+        super::ensure_conversation_for(&state.db, &cid);
+
+        let now = chrono::Utc::now().timestamp();
+        execlaw_core::memory::MemoryStore::new(&state.db)
+            .upsert(&execlaw_core::memory::MemoryEntry {
+                scope: "global".into(),
+                trust_class: "Controller".into(),
+                key: "operator_timezone".into(),
+                value_blob: b"America/Los_Angeles".to_vec(),
+                ttl_expires: None,
+                updated_at: now,
+                tier: execlaw_core::memory::MemoryTier::Hot,
+                hits: 3,
+                last_used_at: Some(now),
+                created_at: now,
+            })
+            .expect("seed hot memory");
+
+        let prompt = super::assemble_system_prompt(
+            &state.db,
+            Some(cid.as_str()),
+            "BASE",
+            "ROUTING",
+            "TURN_CONTEXT",
+        );
+
+        assert!(prompt.contains("HOT MEMORY SNAPSHOT"));
+        assert!(prompt.contains("operator_timezone: America/Los_Angeles"));
+        let routing_at = prompt.find("ROUTING").unwrap();
+        let hot_at = prompt.find("HOT MEMORY SNAPSHOT").unwrap();
+        let ctx_at = prompt.find("TURN_CONTEXT").unwrap();
+        assert!(
+            routing_at < hot_at && hot_at < ctx_at,
+            "prompt ordering incorrect: {prompt}"
+        );
+    }
+
+    #[test]
     fn build_turn_context_prose_includes_time_conv_principal_trust() {
         let now = chrono::DateTime::parse_from_rfc3339("2026-05-02T10:23:45Z")
             .unwrap()
@@ -6606,6 +6766,7 @@ required_capabilities = []
                     latency: ToolLatency::Low,
                     capabilities: vec![Capability::MemoryWrite],
                     default_allowed_classes: vec!["Controller".into(), "KnownTrusted".into()],
+                    sensitive: false,
                 },
             }))
             .unwrap();
@@ -6621,6 +6782,7 @@ required_capabilities = []
                     latency: ToolLatency::Low,
                     capabilities: vec![],
                     default_allowed_classes: vec!["Controller".into(), "KnownLimited".into()],
+                    sensitive: false,
                 },
             }))
             .unwrap();
@@ -7829,5 +7991,42 @@ required_capabilities = []
             "second call (binding now present) must return the same group_id via the \
              fast path — NOT mint a duplicate via resolve_chat_group",
         );
+    }
+
+    #[tokio::test]
+    async fn stop_turn_returns_cancelled_false_when_no_turn_in_flight() {
+        let state = test_app_state();
+        let app = crate::routes::build_router(state);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/chats/conv-stop-idle/stop")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(resp.into_body()).await;
+        assert_eq!(body["conversation_id"], "conv-stop-idle");
+        assert_eq!(body["cancelled"], false);
+    }
+
+    #[tokio::test]
+    async fn stop_turn_returns_cancelled_true_when_turn_flag_registered() {
+        let state = test_app_state();
+        let _guard = state.turn_cancel.register("conv-stop-active");
+        let app = crate::routes::build_router(state);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/chats/conv-stop-active/stop")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(resp.into_body()).await;
+        assert_eq!(body["conversation_id"], "conv-stop-active");
+        assert_eq!(body["cancelled"], true);
     }
 }

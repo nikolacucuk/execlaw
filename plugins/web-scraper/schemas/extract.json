@@ -1,0 +1,77 @@
+{
+    "type": "object",
+    "properties": {
+        "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Absolute http(s) URL to extract from."
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["static", "dynamic", "stealthy"],
+            "description": "Rendering strategy before extraction."
+        },
+        "session_id": {
+            "type": "string",
+            "description": "Optional session identifier for cookie/state reuse."
+        },
+        "fields": {
+            "type": "array",
+            "description": "Field extraction rules.",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string" },
+                    "selector": { "type": "string" },
+                    "selector_type": {
+                        "type": "string",
+                        "enum": ["css", "xpath"],
+                        "description": "Defaults to css."
+                    },
+                    "extract": {
+                        "type": "string",
+                        "enum": ["text", "html", "attr"],
+                        "description": "How to read selected nodes. Defaults to text."
+                    },
+                    "attr": {
+                        "type": "string",
+                        "description": "Required when extract=attr."
+                    },
+                    "all": {
+                        "type": "boolean",
+                        "description": "Return all matches when true, first match when false."
+                    }
+                },
+                "required": ["name", "selector"],
+                "additionalProperties": false
+            }
+        },
+        "main_text": {
+            "type": "boolean",
+            "description": "Include readability-style main text extraction."
+        },
+        "include_links": {
+            "type": "boolean",
+            "description": "Include normalized links extracted from the page."
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 180000,
+            "description": "Per-call timeout in milliseconds."
+        },
+        "max_chars": {
+            "type": "integer",
+            "minimum": 512,
+            "maximum": 100000,
+            "description": "Max characters of text fields to return."
+        },
+        "allowed_domains": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional per-call domain allowlist."
+        }
+    },
+    "required": ["url"],
+    "additionalProperties": false
+}

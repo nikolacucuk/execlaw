@@ -70,6 +70,7 @@ pub struct SynthesizeOutcome {
     pub report_markdown: String,
     pub attachment_id: AttachmentId,
     pub attachment_path: String,
+    pub snapshot_path: Option<String>,
 }
 
 const SYNTHESIZE_SYSTEM_PROMPT: &str = "You are the synthesise stage of a deep-research job. You receive the \
@@ -164,7 +165,31 @@ pub async fn run_synthesize(ctx: SynthesizeCtx) -> Result<SynthesizeOutcome, Syn
         ));
     }
 
-    finalize_report(&db, &workspace, &job_id, &conversation_id, report_markdown).await
+    let mut outcome = finalize_report(
+        &db,
+        &workspace,
+        &job_id,
+        &conversation_id,
+        report_markdown.clone(),
+    )
+    .await?;
+
+    // Phase 2: emit a compact research graph snapshot for top-half
+    // visualization and post-run graph workflows.
+    match write_research_graph_snapshot(&job_id, &query, &plan, &notes, &report_markdown) {
+        Ok(path) => {
+            outcome.snapshot_path = Some(path.to_string_lossy().replace('\\', "/"));
+        }
+        Err(e) => {
+            tracing::warn!(
+                job_id = job_id.as_str(),
+                error = %e,
+                "research graph snapshot emit failed",
+            );
+        }
+    }
+
+    Ok(outcome)
 }
 
 /// Test seam: compose the prompt + finalize without going through
@@ -274,7 +299,120 @@ pub async fn finalize_report(
         report_markdown,
         attachment_id: att_id,
         attachment_path: att_path,
+        snapshot_path: None,
     })
+}
+
+fn write_research_graph_snapshot(
+    job_id: &ResearchJobId,
+    query: &str,
+    plan: &ResearchPlan,
+    notes: &[ResearchNote],
+    report_markdown: &str,
+) -> Result<std::path::PathBuf, std::io::Error> {
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    let root = std::path::PathBuf::from(".obsidian")
+        .join("graphify")
+        .join("research-snapshots");
+    std::fs::create_dir_all(&root)?;
+
+    let mut nodes = Vec::new();
+    let mut edges = Vec::new();
+    let mut next_edge_id = 1usize;
+
+    let root_node = format!("job:{}", job_id.as_str());
+    nodes.push(json!({
+        "id": root_node,
+        "label": query,
+        "kind": "job",
+        "community": "research-job",
+    }));
+
+    let thesis_node = format!("thesis:{}", job_id.as_str());
+    nodes.push(json!({
+        "id": thesis_node,
+        "label": plan.thesis,
+        "kind": "thesis",
+        "community": "research-plan",
+    }));
+    edges.push(json!({
+        "id": format!("e{next_edge_id}"),
+        "source": format!("job:{}", job_id.as_str()),
+        "target": format!("thesis:{}", job_id.as_str()),
+        "kind": "has_thesis",
+    }));
+    next_edge_id += 1;
+
+    let mut source_nodes: BTreeMap<String, String> = BTreeMap::new();
+    let mut next_source_id = 1usize;
+    for note in notes {
+        let step_id = format!("step:{}:{}", job_id.as_str(), note.index);
+        nodes.push(json!({
+            "id": step_id,
+            "label": note.sub_query,
+            "kind": "sub_query",
+            "community": "research-gather",
+            "state": format!("{:?}", note.state),
+        }));
+        edges.push(json!({
+            "id": format!("e{next_edge_id}"),
+            "source": format!("job:{}", job_id.as_str()),
+            "target": format!("step:{}:{}", job_id.as_str(), note.index),
+            "kind": "has_step",
+        }));
+        next_edge_id += 1;
+
+        for src in &note.sources {
+            if src.url.trim().is_empty() {
+                continue;
+            }
+            let src_id = if let Some(existing) = source_nodes.get(&src.url) {
+                existing.clone()
+            } else {
+                let minted = format!("source:{next_source_id}");
+                next_source_id += 1;
+                source_nodes.insert(src.url.clone(), minted.clone());
+                minted
+            };
+            if !nodes.iter().any(|n| n["id"] == src_id) {
+                nodes.push(json!({
+                    "id": src_id,
+                    "label": src.url,
+                    "kind": "source",
+                    "community": "research-source",
+                    "fetched_ok": src.fetched_ok,
+                }));
+            }
+            edges.push(json!({
+                "id": format!("e{next_edge_id}"),
+                "source": format!("step:{}:{}", job_id.as_str(), note.index),
+                "target": source_nodes[&src.url],
+                "kind": "cites",
+            }));
+            next_edge_id += 1;
+        }
+    }
+
+    let snapshot = json!({
+        "job_id": job_id.as_str(),
+        "query": query,
+        "generated_at": chrono::Utc::now().timestamp(),
+        "nodes": nodes,
+        "edges": edges,
+        "meta": {
+            "plan_steps": plan.steps.len(),
+            "notes": notes.len(),
+            "report_preview": report_markdown.lines().take(4).collect::<Vec<_>>().join("\n"),
+        }
+    });
+
+    let out_path = root.join(format!("{}.json", job_id.as_str()));
+    let body = serde_json::to_vec_pretty(&snapshot)
+        .map_err(|e| std::io::Error::other(format!("json encode: {e}")))?;
+    std::fs::write(&out_path, body)?;
+    Ok(out_path)
 }
 
 fn build_synthesize_prompt(query: &str, plan: &ResearchPlan, notes: &[&ResearchNote]) -> String {
@@ -344,6 +482,7 @@ mod tests {
                 is_ephemeral: false,
                 ephemeral_expires_at: None,
                 last_activity_at: 0,
+                context_window_policy: None,
             })
             .unwrap();
         cid

@@ -3,6 +3,11 @@
     "private": true,
     "type": "module",
     "description": "Top-level package manifest for repo-root scripts. The SPA itself lives under web/ with its own package.json.",
+    "scripts": {
+        "graphify:sync-preview": "node scripts/graphify_sync_preview.mjs",
+        "graph-memory:maintain": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/post_commit_graphify_memory.ps1",
+        "obsidian:verify": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/verify_copilot_obsidian_pipeline.ps1 -VaultDir .obsidian"
+    },
     "devDependencies": {
         "esbuild": "^0.28.0"
     }

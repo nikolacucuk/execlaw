@@ -1,0 +1,74 @@
+{
+    "type": "object",
+    "properties": {
+        "seed_url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Starting URL for the crawl."
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["static", "dynamic", "stealthy"],
+            "description": "Fetch strategy used for crawled pages."
+        },
+        "max_pages": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 25,
+            "description": "Hard upper bound on pages fetched in this call."
+        },
+        "max_depth": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3,
+            "description": "Maximum link-hop depth from seed_url."
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 300000,
+            "description": "Total crawl timeout in milliseconds."
+        },
+        "include_patterns": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Regex patterns URLs must match to be crawled."
+        },
+        "exclude_patterns": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Regex patterns URLs must not match."
+        },
+        "extract": {
+            "type": "object",
+            "description": "Optional extraction config applied to each crawled page.",
+            "properties": {
+                "main_text": { "type": "boolean" },
+                "fields": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "selector": { "type": "string" },
+                            "selector_type": {
+                                "type": "string",
+                                "enum": ["css", "xpath"]
+                            }
+                        },
+                        "required": ["name", "selector"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "additionalProperties": false
+        },
+        "allowed_domains": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional per-call domain allowlist."
+        }
+    },
+    "required": ["seed_url"],
+    "additionalProperties": false
+}

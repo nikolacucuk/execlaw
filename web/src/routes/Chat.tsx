@@ -530,6 +530,35 @@ export function Chat() {
             case "chat_message_outbound":
             case "chat_message_inbound":
                 if (cid) {
+                    const seq =
+                        typeof ev.seq === "number" ? ev.seq : Date.now();
+                    const text = typeof ev.text === "string" ? ev.text : "";
+                    const committedAt =
+                        typeof ev.committed_at === "number"
+                            ? ev.committed_at
+                            : Math.floor(Date.now() / 1000);
+                    const sender =
+                        typeof ev.sender === "string" ? ev.sender : null;
+                    if (ev.kind === "chat_message_outbound") {
+                        appendMessage(cid, {
+                            seq,
+                            kind: "model_turn",
+                            text,
+                            actor: "agent",
+                            committed_at: committedAt,
+                        });
+                    } else {
+                        // Avoid duplicating our own optimistic user bubble.
+                        if (sender !== auth.user?.user_id) {
+                            appendMessage(cid, {
+                                seq,
+                                kind: "user_msg",
+                                text,
+                                actor: sender,
+                                committed_at: committedAt,
+                            });
+                        }
+                    }
                     clearStreamingBuffer(cid);
                     // Reply / inbound message lands → loader is
                     // unconditionally over for this turn.
@@ -808,7 +837,7 @@ export function Chat() {
                 // Ignore unknown event kinds — additive event vocabulary.
                 break;
         }
-    }, [activeId, getToken]);
+    }, [activeId, getToken, auth.user?.user_id]);
 
     // Keep the WsClient's onEvent indirection pointed at the latest
     // handler. See the long comment next to `handleWsEventRef` above
@@ -849,13 +878,19 @@ export function Chat() {
                     incognito={incognito}
                     onToggleIncognito={() => setIncognito((v) => !v)}
                     onStop={() => {
-                        // 2026-04-28 — fire-and-forget stop. The
-                        // server is idempotent. WelcomeView's
-                        // composer reaches this with whatever
-                        // active thread is current at click time —
-                        // typically the one onSend just minted.
-                        const id = activeId;
+                        // 2026-06-01 — prefer activeId, but fall back
+                        // to any in-flight sending thread. On the first
+                        // send, WelcomeView can briefly hold a stale
+                        // `activeId = null` closure while the store has
+                        // already marked the freshly-minted thread as
+                        // sending. Without this fallback, clicking stop
+                        // in that window becomes a no-op.
+                        const sending = Object.keys(
+                            getChatState().sendingThreads,
+                        );
+                        const id = activeId ?? sending.at(0) ?? null;
                         if (!id) return;
+                        clearSendingThread(id);
                         void postStopTurn(id, getToken).catch((e) => {
                             console.warn("stop turn failed", e);
                         });
@@ -980,6 +1015,16 @@ function ChatPane({
             listSkills(getToken).then((r) => r.skills),
         [getToken],
     );
+    const username = (auth.user?.username ?? "").toLowerCase();
+    const skillDefaultsStorageKey = username
+        ? `execlaw.composer.defaultSkills.${username}`
+        : undefined;
+    const defaultSkillNames = username === "djenka"
+        ? [
+            "humanizer-skills/humanizer",
+            "obsidian-skills/vault-workflow",
+        ]
+        : [];
     // 2026-04-28 dev-only: diagnostic for the incognito flash bug.
     if (
         typeof activeId === "string" &&
@@ -1016,6 +1061,8 @@ function ChatPane({
                     multimodal={caps.multimodal}
                     recommendedImageEdge={caps.recommendedImageEdge}
                     getSkills={getSkills}
+                    skillDefaultsStorageKey={skillDefaultsStorageKey}
+                    defaultSkillNames={defaultSkillNames}
                 />
             </>
         );
@@ -1034,6 +1081,8 @@ function ChatPane({
                 multimodal={caps.multimodal}
                 recommendedImageEdge={caps.recommendedImageEdge}
                 getSkills={getSkills}
+                skillDefaultsStorageKey={skillDefaultsStorageKey}
+                defaultSkillNames={defaultSkillNames}
             />
         </>
     );
@@ -1047,6 +1096,8 @@ function ActiveThreadPane({
     multimodal,
     recommendedImageEdge,
     getSkills,
+    skillDefaultsStorageKey,
+    defaultSkillNames,
 }: {
     conversationId: string;
     onSend: (
@@ -1059,6 +1110,8 @@ function ActiveThreadPane({
     multimodal?: boolean;
     recommendedImageEdge?: number;
     getSkills?: () => Promise<SkillListEntry[]>;
+    skillDefaultsStorageKey?: string;
+    defaultSkillNames?: string[];
 }) {
     const auth = useAuth();
     const getToken = auth.getAccessToken;
@@ -1338,6 +1391,8 @@ function ActiveThreadPane({
                     multimodal={multimodal}
                     recommendedImageEdge={recommendedImageEdge}
                     getSkills={getSkills}
+                    skillDefaultsStorageKey={skillDefaultsStorageKey}
+                    defaultSkillNames={defaultSkillNames}
                     onStop={() => {
                         // 2026-04-28 — POST /api/chats/:id/stop. Fire-and-
                         // forget: server is idempotent. We DON'T clear
@@ -1346,6 +1401,7 @@ function ActiveThreadPane({
                         // do that, otherwise a stale "stopped" state
                         // could overlap with a turn that finished
                         // naturally on its own.
+                        clearSendingThread(conversationId);
                         void postStopTurn(conversationId, getToken).catch((e) => {
                             // Swallow errors — the operator already
                             // sees the typing indicator; if the stop

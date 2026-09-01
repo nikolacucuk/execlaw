@@ -1,0 +1,162 @@
+{
+  "edges": [
+    {
+      "id": "e1",
+      "kind": "has_thesis",
+      "source": "job:1cc29ac1-0d7f-40d0-ae20-f5a792f48353",
+      "target": "thesis:1cc29ac1-0d7f-40d0-ae20-f5a792f48353"
+    },
+    {
+      "id": "e2",
+      "kind": "has_step",
+      "source": "job:1cc29ac1-0d7f-40d0-ae20-f5a792f48353",
+      "target": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:0"
+    },
+    {
+      "id": "e3",
+      "kind": "cites",
+      "source": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:0",
+      "target": "source:1"
+    },
+    {
+      "id": "e4",
+      "kind": "has_step",
+      "source": "job:1cc29ac1-0d7f-40d0-ae20-f5a792f48353",
+      "target": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:1"
+    },
+    {
+      "id": "e5",
+      "kind": "cites",
+      "source": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:1",
+      "target": "source:2"
+    },
+    {
+      "id": "e6",
+      "kind": "has_step",
+      "source": "job:1cc29ac1-0d7f-40d0-ae20-f5a792f48353",
+      "target": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:2"
+    },
+    {
+      "id": "e7",
+      "kind": "cites",
+      "source": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:2",
+      "target": "source:3"
+    },
+    {
+      "id": "e8",
+      "kind": "has_step",
+      "source": "job:1cc29ac1-0d7f-40d0-ae20-f5a792f48353",
+      "target": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:3"
+    },
+    {
+      "id": "e9",
+      "kind": "cites",
+      "source": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:3",
+      "target": "source:4"
+    },
+    {
+      "id": "e10",
+      "kind": "has_step",
+      "source": "job:1cc29ac1-0d7f-40d0-ae20-f5a792f48353",
+      "target": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:4"
+    },
+    {
+      "id": "e11",
+      "kind": "cites",
+      "source": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:4",
+      "target": "source:5"
+    }
+  ],
+  "generated_at": 1780384605,
+  "job_id": "1cc29ac1-0d7f-40d0-ae20-f5a792f48353",
+  "meta": {
+    "notes": 5,
+    "plan_steps": 5,
+    "report_preview": "# Synthesis Report: Rust Programming Language Features and Adoption\n\n**Summary**  \nRust is a systems programming language prioritizing safety, performance, and practicality, with growing adoption in domains like WebAssembly and embedded systems. Its ownership model ensures memory and concurrency safety without garbage collection, while community metrics highlight strong engagement and growth. This synthesis compares Rust’s features and adoption from official and Wikipedia sources, supported by community and crate statistics."
+  },
+  "nodes": [
+    {
+      "community": "research-job",
+      "id": "job:1cc29ac1-0d7f-40d0-ae20-f5a792f48353",
+      "kind": "job",
+      "label": "Use only these URLs and produce a short synthesis with graph snapshot evidence: https://www.rust-lang.org/learn https://en.wikipedia.org/wiki/Rust_(programming_language)"
+    },
+    {
+      "community": "research-plan",
+      "id": "thesis:1cc29ac1-0d7f-40d0-ae20-f5a792f48353",
+      "kind": "thesis",
+      "label": "Rust is a systems programming language emphasizing safety and performance, with adoption growing in areas like web assembly and embedded systems. Its unique ownership model prevents common bugs. Synthesis will compare features and adoption metrics from official and Wikipedia sources."
+    },
+    {
+      "community": "research-gather",
+      "id": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:0",
+      "kind": "sub_query",
+      "label": "Extract Rust's key features from https://www.rust-lang.org/learn",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:1",
+      "kind": "source",
+      "label": "https://rust-lang.org/learn/"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:1",
+      "kind": "sub_query",
+      "label": "Extract Rust's adoption statistics from Wikipedia",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:2",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Extract+Rust%27s+adoption+statistics+from+Wikipedia&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:2",
+      "kind": "sub_query",
+      "label": "Compare Rust to C++ in safety features",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:3",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Compare+Rust+to+C%2B%2B+in+safety+features&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:3",
+      "kind": "sub_query",
+      "label": "Extract Rust's design goals from Wikipedia",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:4",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Extract+Rust%27s+design+goals+from+Wikipedia&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:1cc29ac1-0d7f-40d0-ae20-f5a792f48353:4",
+      "kind": "sub_query",
+      "label": "Find Rust's community metrics from both sources",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:5",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Find+Rust%27s+community+metrics+from+both+sources&limit=5&namespace=0&format=json"
+    }
+  ],
+  "query": "Use only these URLs and produce a short synthesis with graph snapshot evidence: https://www.rust-lang.org/learn https://en.wikipedia.org/wiki/Rust_(programming_language)"
+}

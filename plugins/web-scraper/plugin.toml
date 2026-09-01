@@ -1,0 +1,82 @@
+[plugin]
+id = "web-scraper"
+name = "Web Scraper"
+version = "0.1.0"
+description = "Advanced webpage scraping via a supervised sidecar. Designed for JavaScript-rendered pages and selector-driven extraction while preserving execlaw trust gating and tool-level policy controls."
+author = "execlaw"
+license = "Apache-2.0"
+
+# One sidecar container exposes a tiny HTTP API used by the Rhai tool
+# implementations below. The sidecar owns browser/session state and all
+# scraping dependencies; the host/plugin keep policy + trust boundaries.
+[[services]]
+name = "scraper"
+image = "execlaw/web-scraper:0.1.0"
+ports = []
+
+[[services.mounts]]
+source = "state://cache"
+target = "/var/lib/web-scraper/cache"
+read_only = false
+
+[services.sidecar]
+rpc_port = 8080
+rpc_health_path = "/healthz"
+
+# ------------------------------------------------------------
+# Agent-callable tools
+# ------------------------------------------------------------
+
+[[tools]]
+name = "scraper.fetch_page"
+description = "Fetch a single URL and return normalized page text + metadata. Supports static or dynamic rendering modes, with strict policy controls (size, timeout, domain guardrails)."
+schema = "schemas/fetch_page.json"
+trust_floor = "Controller"
+latency = "medium"
+
+[[tools]]
+name = "scraper.extract"
+description = "Extract structured fields from a page using CSS/XPath selectors. Returns per-field values plus optional main-text extraction and links."
+schema = "schemas/extract.json"
+trust_floor = "Controller"
+latency = "high"
+
+[[tools]]
+name = "scraper.follow_links"
+description = "Run a bounded crawl from a seed URL using include/exclude patterns and strict per-call limits."
+schema = "schemas/follow_links.json"
+trust_floor = "Controller"
+latency = "high"
+
+[[tools]]
+name = "scraper.session_close"
+description = "Close a scraping session and discard its sidecar-held browser/session state."
+schema = "schemas/session_close.json"
+trust_floor = "Controller"
+latency = "low"
+
+[[admin_routes]]
+method = "GET"
+path = "/config"
+handler = "admin_get_config"
+description = "Return default domain policy and per-tool limit settings."
+
+[[admin_routes]]
+method = "POST"
+path = "/config"
+handler = "admin_set_config"
+description = "Persist domain policy and per-tool limit settings."
+
+[[admin_routes]]
+method = "POST"
+path = "/test"
+handler = "admin_test"
+description = "Run a sidecar connectivity and policy dry-run test."
+
+[[ui_panels]]
+mount = "admin/plugins/web-scraper"
+entry = "ui/panel.js"
+
+[runtime]
+tier = "script"
+source = "main.rhai"

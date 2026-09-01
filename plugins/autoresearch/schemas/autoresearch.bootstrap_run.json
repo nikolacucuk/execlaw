@@ -1,0 +1,31 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "autoresearch.bootstrap_run args",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "objective": {
+      "type": "string",
+      "minLength": 5,
+      "description": "Primary optimization objective (for example: lower val_bpb, lower latency, lower VRAM)."
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["h100", "consumer_nvidia", "windows_rtx", "macos_mlx", "amd", "unknown"],
+      "default": "unknown",
+      "description": "Hardware profile used to tune suggestions."
+    },
+    "run_tag": {
+      "type": "string",
+      "description": "Optional run identifier (for example: jun01-night)."
+    },
+    "time_budget_minutes": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120,
+      "default": 5,
+      "description": "Target wall-clock budget per experiment."
+    }
+  },
+  "required": ["objective"]
+}

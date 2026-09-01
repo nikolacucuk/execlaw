@@ -1364,6 +1364,7 @@ trust_hint_default = "Contact"
             latency: ToolLatency::Low,
             capabilities: vec![],
             default_allowed_classes: vec!["Controller".into()],
+            sensitive: false,
         }
     }
 

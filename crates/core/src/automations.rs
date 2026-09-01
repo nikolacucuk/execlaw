@@ -111,6 +111,7 @@ impl NodeKind {
                 | NodeKind::AskAgent
                 | NodeKind::Notify
                 | NodeKind::CallPlugin
+                | NodeKind::HttpFetch
         )
     }
 }
@@ -729,8 +730,8 @@ mod tests {
     #[test]
     fn validate_rejects_unimplemented_kinds() {
         let mut def = linear_def();
-        // HttpFetch + Notify are still reserved in M3a.
-        def.nodes[0].kind = NodeKind::HttpFetch;
+        // AppendToChat is still reserved (not yet implemented).
+        def.nodes[0].kind = NodeKind::AppendToChat;
         let err = validate(&def).unwrap_err();
         assert!(format!("{err}").contains("not yet implemented"));
     }

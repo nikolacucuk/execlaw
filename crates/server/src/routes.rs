@@ -13,7 +13,7 @@
 use crate::auth::{AuthError, JwtSigner, RefreshStore};
 use crate::state::{AppState, ServerConfig};
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -28,6 +28,46 @@ use utoipa::ToSchema;
 /// Constant vault key under which the admin-password hash lives.
 const ADMIN_PWD_KEY: &str = "admin_password_hash";
 const CONTROLLER_PRINCIPAL_KEY: &str = "controller_principal_id";
+
+/// Name of the httpOnly access-token cookie.
+const ACCESS_COOKIE_NAME: &str = "execlaw_access";
+
+// -----------------------------------------------------------------------
+// Cookie helpers (§10 httpOnly / SameSite security enhancement)
+// -----------------------------------------------------------------------
+
+/// Build a `Set-Cookie` header value that stores the access JWT as an
+/// httpOnly, SameSite=Strict cookie.
+///
+/// Complement to the JSON body: the JSON body continues to be returned
+/// so existing SPA / API clients that store the token in memory are
+/// unaffected. The cookie provides a belt-and-suspenders bearer for
+/// browser clients that can take advantage of automatic cookie handling.
+///
+/// `max_age_secs = 0` produces an *expiry* cookie (browser deletes it).
+fn build_access_cookie(token: &str, max_age_secs: i64) -> HeaderValue {
+    // SameSite=Strict prevents CSRF. HttpOnly prevents XSS exfiltration.
+    // Secure is included so the browser only transmits the cookie over
+    // TLS in production; modern browsers allow localhost without TLS.
+    let cookie = format!(
+        "{name}={token}; HttpOnly; SameSite=Strict; Secure; Path=/api; Max-Age={max_age_secs}",
+        name = ACCESS_COOKIE_NAME,
+    );
+    // SAFETY: token is base64url which is always valid ASCII.
+    HeaderValue::from_str(&cookie).unwrap_or_else(|_| {
+        // Fallback: clear the cookie if we somehow can't build the value
+        // (e.g. the token contains unusual bytes). Not expected in normal
+        // operation but we must not panic here.
+        HeaderValue::from_static(
+            "execlaw_access=; HttpOnly; SameSite=Strict; Secure; Path=/api; Max-Age=0",
+        )
+    })
+}
+
+/// Build a `Set-Cookie` header that clears the access cookie.
+fn clear_access_cookie() -> HeaderValue {
+    build_access_cookie("", 0)
+}
 
 // -----------------------------------------------------------------------
 // Request / response payloads
@@ -537,9 +577,31 @@ pub async fn setup(
 )]
 pub async fn login(
     State(state): State<AppState>,
+    // PeerIp is a custom extractor that reads the remote IP from
+    // ConnectInfo when available (production) and falls back to a
+    // stable sentinel in tests (where ConnectInfo is not wired).
+    crate::auth_rate_limit::PeerIp(ip): crate::auth_rate_limit::PeerIp,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<LoginOutcome>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     use execlaw_core::users::{UserStore, normalize_username};
+
+    // --- Per-IP brute-force gate (2026-06-02) ---
+    // Check BEFORE any DB work so a rate-limited caller doesn't cause
+    // Argon2id to run (removes timing oracle). In tests (no ConnectInfo
+    // layer) we use a stable sentinel that never fills in production.
+    if let Err(retry_after) = state.login_limiter.check_and_record(&ip) {
+        tracing::warn!(
+            target: "routes::login",
+            ip = %ip,
+            retry_after_secs = retry_after,
+            "login rate-limit hit"
+        );
+        return Err(ApiError {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            code: "login_rate_limited",
+            message: format!("too many failed login attempts; retry after {retry_after} seconds"),
+        });
+    }
 
     let users = UserStore::new(&state.db);
 
@@ -578,6 +640,9 @@ pub async fn login(
             message: "incorrect username or password".into(),
         });
     }
+    // Successful credential check — clear the rate-limit bucket so
+    // the operator is not locked out after a string of typos.
+    state.login_limiter.reset(&ip);
 
     // Phase 7e branch: if the user has any registered webauthn
     // credentials, demand a successful assertion before issuing
@@ -593,7 +658,8 @@ pub async fn login(
             webauthn_required: true,
             ceremony_id: challenge.ceremony_id,
             options: challenge.options,
-        }));
+        })
+        .into_response());
     }
 
     // No webauthn registered — issue tokens directly (legacy path).
@@ -610,11 +676,20 @@ pub async fn login(
         &session_id,
         state.config.refresh_token_ttl_secs,
     )?;
-    Ok(Json(LoginOutcome::Tokens {
-        webauthn_required: false,
-        access_token: access,
-        refresh_token: refresh,
-    }))
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        build_access_cookie(&access, state.config.access_token_ttl_secs),
+    );
+    Ok((
+        headers,
+        Json(LoginOutcome::Tokens {
+            webauthn_required: false,
+            access_token: access,
+            refresh_token: refresh,
+        }),
+    )
+        .into_response())
 }
 
 #[utoipa::path(
@@ -630,7 +705,7 @@ pub async fn login(
 pub async fn refresh(
     State(state): State<AppState>,
     Json(req): Json<RefreshRequest>,
-) -> Result<Json<RefreshResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let record = state
         .refresh_store
         .consume(&req.refresh_token)?
@@ -650,10 +725,19 @@ pub async fn refresh(
         &record.session_id,
         state.config.refresh_token_ttl_secs,
     )?;
-    Ok(Json(RefreshResponse {
-        access_token: access,
-        refresh_token: refresh,
-    }))
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        build_access_cookie(&access, state.config.access_token_ttl_secs),
+    );
+    Ok((
+        headers,
+        Json(RefreshResponse {
+            access_token: access,
+            refresh_token: refresh,
+        }),
+    )
+        .into_response())
 }
 
 #[utoipa::path(
@@ -666,13 +750,15 @@ pub async fn refresh(
 pub async fn logout(
     State(state): State<AppState>,
     Json(req): Json<LogoutRequest>,
-) -> Result<Json<GenericOk>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     if let Some(tok) = &req.refresh_token {
         if let Some(record) = state.refresh_store.consume(tok)? {
             state.refresh_store.revoke_session(&record.session_id)?;
         }
     }
-    Ok(Json(GenericOk { ok: true }))
+    let mut headers = HeaderMap::new();
+    headers.insert(header::SET_COOKIE, clear_access_cookie());
+    Ok((headers, Json(GenericOk { ok: true })).into_response())
 }
 
 /// "Sign out everywhere" — revoke every refresh token bound to the
@@ -695,6 +781,61 @@ pub async fn logout_all(
     Ok(Json(LogoutAllResponse {
         revoked_session_count: removed,
     }))
+}
+
+// -----------------------------------------------------------------------
+// Security headers middleware
+// -----------------------------------------------------------------------
+
+/// Inject standard HTTP security headers on every response (2026-06-02).
+///
+/// Applied as a tower layer wrapping the entire router so no route can
+/// accidentally omit them. Values chosen for a same-origin SPA served
+/// from the same host as the API — adjust CSP when CDN assets are added.
+///
+/// Headers are only injected when NOT already set by the handler. This
+/// lets specific routes (e.g. attachment download) override the default
+/// with a stricter value (e.g. `no-referrer` instead of `strict-origin`)
+/// without fighting the middleware.
+async fn security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> impl axum::response::IntoResponse {
+    use axum::http::HeaderValue;
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    // Prevent click-jacking: forbid framing entirely.
+    headers
+        .entry("x-frame-options")
+        .or_insert(HeaderValue::from_static("DENY"));
+    // Prevent MIME-type sniffing on script/style responses.
+    headers
+        .entry("x-content-type-options")
+        .or_insert(HeaderValue::from_static("nosniff"));
+    // Don't leak the full URL to third-party origins via Referer.
+    // Handlers that need a stricter policy (e.g. `no-referrer` for
+    // signed download URLs) set the header before returning; the
+    // `or_insert` here is a no-op in that case.
+    headers
+        .entry("referrer-policy")
+        .or_insert(HeaderValue::from_static("strict-origin"));
+    // CSP: restrict sources to same-origin; allow inline styles for
+    // Bootstrap/React; allow data: and blob: for chart images.
+    // 'unsafe-eval' is intentionally omitted — the bundled React
+    // build does NOT require it.
+    headers
+        .entry("content-security-policy")
+        .or_insert(HeaderValue::from_static(
+            "default-src 'self'; \
+             script-src 'self'; \
+             style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data: blob:; \
+             font-src 'self'; \
+             connect-src 'self'; \
+             frame-ancestors 'none'; \
+             object-src 'none'",
+        ));
+    response
 }
 
 // -----------------------------------------------------------------------
@@ -786,6 +927,8 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::users::users_router())
         .merge(crate::webauthn::webauthn_router())
         .merge(crate::tools_admin::tools_admin_router())
+        .merge(crate::graphify_api::graphify_api_router())
+        .merge(crate::graphiti_admin::graphiti_admin_router())
         .merge(crate::skills_admin::skills_admin_router())
         .merge(crate::mcp_admin::mcp_admin_router())
         .merge(crate::settings_general::settings_router())
@@ -852,6 +995,12 @@ pub fn build_router(state: AppState) -> Router {
                     tower_http::trace::DefaultOnResponse::new().level(tracing::Level::DEBUG),
                 ),
         )
+        // 2026-06-02 security hardening: inject HTTP security headers on
+        // every response. Adds X-Frame-Options, X-Content-Type-Options,
+        // Referrer-Policy, and a Content-Security-Policy. The CSP allows
+        // 'unsafe-inline' for styles (Bootstrap/React) but locks down
+        // scripts, frames, and object embeds.
+        .layer(axum::middleware::from_fn(security_headers))
 }
 
 /// Build a fresh `AppState` for a unit test (in-memory DB, freshly
@@ -928,6 +1077,8 @@ pub fn test_app_state() -> AppState {
         skill_capture: execlaw_skills::AutoCaptureSink::noop(),
         // Phase D.3 — same noop pattern for the reuse-update sink.
         reuse_update: execlaw_skills::ReuseUpdateSink::noop(),
+        // new-2 — optimizer worker not wired in tests.
+        optimizer_worker: None,
         // Tests don't run the bundled-plugins mirror; point at a
         // unique tempdir-style path so the endpoints can still
         // resolve `<data_dir>/bundled-plugins/...` deterministically
@@ -951,6 +1102,10 @@ pub fn test_app_state() -> AppState {
         // page can pre-populate this via `state.inference_metrics
         // .observe(...)` and snapshot.
         inference_metrics: crate::inference_metrics::InferenceMetrics::new(),
+        // Test fixtures start with an empty limiter (no prior
+        // attempts). Tests that exercise the rate-limit path call
+        // `check_and_record` directly on the limiter.
+        login_limiter: crate::auth_rate_limit::LoginRateLimiter::new(),
     }
 }
 

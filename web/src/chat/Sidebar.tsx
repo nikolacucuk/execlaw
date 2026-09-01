@@ -443,6 +443,7 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
                                 key={t.conversation_id}
                                 conversationId={t.conversation_id}
                                 label={label}
+                                lastActivityAt={t.last_activity_at}
                                 fallbackLabel={fallback}
                                 isActive={t.conversation_id === activeId}
                                 isProcessing={t.is_processing}
@@ -726,6 +727,7 @@ function SidebarNavLink({ to, icon, label, testId, badge }: SidebarNavLinkProps)
 interface ThreadRowProps {
     conversationId: string;
     label: string;
+    lastActivityAt?: number;
     fallbackLabel: string;
     isActive: boolean;
     isProcessing: boolean;
@@ -752,6 +754,7 @@ interface ThreadRowProps {
 function ThreadRow({
     conversationId,
     label,
+    lastActivityAt,
     isActive,
     isProcessing,
     hasUnread,
@@ -787,6 +790,8 @@ function ThreadRow({
             });
         }
     }, [isRenaming, label]);
+
+    const activityLabel = formatThreadActivity(lastActivityAt);
 
     return (
         <div
@@ -834,6 +839,15 @@ function ThreadRow({
             ) : (
                 <span className="execlaw-thread-item__name">{label}</span>
             )}
+            {activityLabel && (
+                <span
+                    className="execlaw-thread-item__time"
+                    title={`Last activity: ${activityLabel}`}
+                    aria-label={`Last activity ${activityLabel}`}
+                >
+                    {activityLabel}
+                </span>
+            )}
             {transportChannel && (
                 // 2026-05-12 — ChannelIcon owns the brand-vs-bi-*
                 // resolution chain (signal → official SignalLogo
@@ -875,6 +889,33 @@ function ThreadRow({
             />
         </div>
     );
+}
+
+function formatThreadActivity(epochSeconds?: number): string | null {
+    if (!epochSeconds || !Number.isFinite(epochSeconds)) {
+        return null;
+    }
+    const timestamp = new Date(epochSeconds * 1000);
+    if (Number.isNaN(timestamp.getTime())) {
+        return null;
+    }
+    const now = new Date();
+    const sameDay =
+        timestamp.getFullYear() === now.getFullYear() &&
+        timestamp.getMonth() === now.getMonth() &&
+        timestamp.getDate() === now.getDate();
+    if (sameDay) {
+        return new Intl.DateTimeFormat(undefined, {
+            hour: "2-digit",
+            minute: "2-digit",
+        }).format(timestamp);
+    }
+    const sameYear = timestamp.getFullYear() === now.getFullYear();
+    return new Intl.DateTimeFormat(undefined, {
+        month: "short",
+        day: "numeric",
+        ...(sameYear ? {} : { year: "numeric" }),
+    }).format(timestamp);
 }
 
 interface IconProps {

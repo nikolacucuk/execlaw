@@ -203,6 +203,8 @@ function KindForm({
             return <NotifyForm node={node} onChange={onChange} />;
         case "CallPlugin":
             return <CallPluginForm node={node} onChange={onChange} />;
+        case "HttpFetch":
+            return <HttpFetchForm node={node} onChange={onChange} />;
         default:
             return (
                 <div className="small text-danger">
@@ -613,6 +615,91 @@ function CallPluginForm({
                 <div className="small text-muted mt-1">
                     String leaves support <code>{`{{event.payload.x}}`}</code>{" "}
                     templating at run time.
+                </div>
+            </Form.Group>
+        </>
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HttpFetchForm
+// ---------------------------------------------------------------------------
+
+function HttpFetchForm({
+    node,
+    onChange,
+}: {
+    node: NodeDef;
+    onChange: (n: NodeDef) => void;
+}) {
+    const cfg = (node.config ?? {}) as Record<string, unknown>;
+    const url = (cfg.url as string | undefined) ?? "";
+    const method = (cfg.method as string | undefined) ?? "GET";
+    const body = (cfg.body as string | null | undefined) ?? "";
+    const rateLimit = (cfg.rate_limit_per_minute as number | undefined) ?? 60;
+
+    function patch(update: Record<string, unknown>) {
+        onChange({ ...node, config: { ...cfg, ...update } });
+    }
+
+    return (
+        <>
+            <Form.Group className="mb-2">
+                <Form.Label className="small fw-semibold">URL</Form.Label>
+                <Form.Control
+                    size="sm"
+                    type="url"
+                    value={url}
+                    onChange={(e) => patch({ url: e.target.value })}
+                    placeholder="https://example.com/api"
+                    data-testid="node-panel-httpfetch-url"
+                />
+                <div className="small text-muted mt-1">
+                    Supports <code>{`{{event.payload.x}}`}</code> templating.
+                </div>
+            </Form.Group>
+            <Form.Group className="mb-2">
+                <Form.Label className="small fw-semibold">Method</Form.Label>
+                <Form.Select
+                    size="sm"
+                    value={method}
+                    onChange={(e) => patch({ method: e.target.value })}
+                    data-testid="node-panel-httpfetch-method"
+                >
+                    {["GET", "POST", "PUT", "PATCH", "DELETE"].map((m) => (
+                        <option key={m} value={m}>{m}</option>
+                    ))}
+                </Form.Select>
+            </Form.Group>
+            <Form.Group className="mb-2">
+                <Form.Label className="small fw-semibold">Body (optional)</Form.Label>
+                <Form.Control
+                    as="textarea"
+                    size="sm"
+                    rows={3}
+                    value={body}
+                    onChange={(e) => patch({ body: e.target.value || null })}
+                    placeholder='{"key": "value"}'
+                    spellCheck={false}
+                    className="font-monospace small"
+                    data-testid="node-panel-httpfetch-body"
+                />
+            </Form.Group>
+            <Form.Group className="mb-2">
+                <Form.Label className="small fw-semibold">Rate limit (calls / minute)</Form.Label>
+                <Form.Control
+                    size="sm"
+                    type="number"
+                    min={0}
+                    value={rateLimit}
+                    onChange={(e) => {
+                        const n = parseInt(e.target.value, 10);
+                        patch({ rate_limit_per_minute: isNaN(n) ? 60 : n });
+                    }}
+                    data-testid="node-panel-httpfetch-rate-limit"
+                />
+                <div className="small text-muted mt-1">
+                    0 = unlimited. Overrides the server-wide 60 req/min default.
                 </div>
             </Form.Group>
         </>

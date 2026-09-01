@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Import chat transcript snippets into .obsidian lesson notes.
+
+The importer keeps notes lightweight and local:
+- extracts likely lessons from JSON/JSONL transcripts
+- classifies into Patterns / Mistakes / Decisions / Context
+- uses stable lesson_hash dedupe
+- regenerates .obsidian/Lessons-Index.md
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import pathlib
+import re
+from typing import Iterable
+
+CATEGORY_DIRS = {
+    "Pattern": "Patterns",
+    "Mistake": "Mistakes",
+    "Decision": "Decisions",
+    "Context": "Context",
+}
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser()
+    p.add_argument("--vault-dir", default=".obsidian")
+    p.add_argument("--transcript", required=True, help="Path to JSON or JSONL transcript")
+    p.add_argument("--source-label", default="copilot-session")
+    p.add_argument("--min-words", type=int, default=8)
+    return p.parse_args()
+
+
+def iter_json_objects(path: pathlib.Path) -> Iterable[dict]:
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    if path.suffix.lower() == ".jsonl":
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(obj, dict):
+                yield obj
+        return
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError:
+        return
+    if isinstance(obj, dict):
+        yield obj
+    elif isinstance(obj, list):
+        for item in obj:
+            if isinstance(item, dict):
+                yield item
+
+
+def extract_strings(value) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from extract_strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from extract_strings(v)
+
+
+def normalize_space(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def split_candidates(blob: str) -> Iterable[str]:
+    # Sentence-like split that keeps practical snippets for notes.
+    for piece in re.split(r"[\n\r]+|(?<=[.!?])\s+", blob):
+        piece = normalize_space(piece)
+        if piece:
+            yield piece
+
+
+def quality_filter(s: str, min_words: int) -> bool:
+    if len(s) < 24:
+        return False
+    words = s.split()
+    if len(words) < min_words or len(words) > 80:
+        return False
+    low = s.lower()
+    if low.startswith(("ok", "thanks", "sure", "done")):
+        return False
+    if "http://" in low or "https://" in low:
+        return False
+    return True
+
+
+def classify_lesson(s: str) -> str:
+    low = s.lower()
+    if any(k in low for k in ["mistake", "bug", "regression", "failed", "error", "wrong"]):
+        return "Mistake"
+    if any(k in low for k in ["decision", "chose", "tradeoff", "agreed", "policy"]):
+        return "Decision"
+    if any(k in low for k in ["pattern", "always", "prefer", "best practice", "rule"]):
+        return "Pattern"
+    return "Context"
+
+
+def lesson_hash(category: str, text: str) -> str:
+    raw = f"{category}|{normalize_space(text).lower()}".encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()[:16]
+
+
+def slugify(s: str) -> str:
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-")
+    return s[:64] or "lesson"
+
+
+def existing_hashes(vault: pathlib.Path) -> set[str]:
+    found: set[str] = set()
+    for md in vault.rglob("*.md"):
+        text = md.read_text(encoding="utf-8", errors="ignore")
+        m = re.search(r"^lesson_hash:\s*([a-f0-9]{16})\s*$", text, flags=re.MULTILINE)
+        if m:
+            found.add(m.group(1))
+    return found
+
+
+def write_lesson(vault: pathlib.Path, category: str, text: str, source_label: str) -> pathlib.Path:
+    now = dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    h = lesson_hash(category, text)
+    d = vault / CATEGORY_DIRS[category]
+    d.mkdir(parents=True, exist_ok=True)
+    title = text[:72]
+    path = d / f"{slugify(title)}-{h}.md"
+    body = (
+        "---\n"
+        f"title: {title}\n"
+        f"category: {category}\n"
+        f"lesson_hash: {h}\n"
+        f"source: {source_label}\n"
+        f"created: {now}\n"
+        f"updated: {now}\n"
+        "status: active\n"
+        "---\n\n"
+        f"# {title}\n\n"
+        "## Lesson\n\n"
+        f"{text}\n"
+    )
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def rebuild_index(vault: pathlib.Path) -> None:
+    entries = []
+    for category, folder in CATEGORY_DIRS.items():
+        for p in sorted((vault / folder).glob("*.md")):
+            title = p.stem
+            entries.append((category, p, title))
+
+    lines = [
+        "# Lessons Index",
+        "",
+        "Auto-generated by scripts/copilot_to_obsidian.py.",
+        "",
+        "## Entries",
+        "",
+    ]
+    if not entries:
+        lines.append("_No entries yet._")
+    else:
+        for category, p, title in entries:
+            rel = p.relative_to(vault.parent).as_posix()
+            lines.append(f"- [{category}] [{title}]({rel})")
+    (vault / "Lessons-Index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def main() -> int:
+    args = parse_args()
+    vault = pathlib.Path(args.vault_dir)
+    transcript = pathlib.Path(args.transcript)
+    if not transcript.exists():
+        print(f"transcript not found: {transcript}")
+        return 2
+
+    for folder in CATEGORY_DIRS.values():
+        (vault / folder).mkdir(parents=True, exist_ok=True)
+
+    known = existing_hashes(vault)
+    created = 0
+
+    for obj in iter_json_objects(transcript):
+        for s in extract_strings(obj):
+            for piece in split_candidates(s):
+                if not quality_filter(piece, args.min_words):
+                    continue
+                category = classify_lesson(piece)
+                h = lesson_hash(category, piece)
+                if h in known:
+                    continue
+                write_lesson(vault, category, piece, args.source_label)
+                known.add(h)
+                created += 1
+
+    rebuild_index(vault)
+    print(f"lessons_created={created}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

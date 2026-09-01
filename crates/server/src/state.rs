@@ -81,7 +81,9 @@ impl Default for ServerConfig {
                 "6. If you've called the same tool twice with similar arguments, stop calling tools and summarise what you've learned.\n",
                 "7. If a tool keeps returning errors, stop calling it and explain the failure to the operator instead of retrying blindly.\n",
                 "8. Never call a tool just to fill space. If there's genuinely nothing useful to do, finish the turn.\n",
-                "9. When you're done answering, stop. Do not ask follow-up questions unless they are required to act.",
+                "9. When you're done answering, stop. Do not ask follow-up questions unless they are required to act.\n",
+                "10. Whenever the operator requests a new repository task, start with graph-first lookup: call the graphify tool with query/path/explain before broad code scans.\n",
+                "11. For every new task, retrieve project memory first with skills.search then skills.view on obsidian/* skills before asking the operator to repeat details.",
             ).to_owned(),
             // 2026-05 — bumped 3 → 8 alongside the agent-prompting
             // audit's #5. The old cap was set when plugin tool
@@ -213,6 +215,11 @@ pub struct AppState {
     /// Same noop default + production-spawn pattern as
     /// `skill_capture`.
     pub reuse_update: execlaw_skills::ReuseUpdateSink,
+    /// Phase D (§11/new-2) — offline skill optimizer worker. Fires
+    /// `maybe_optimize` at turn-end for each closed invocation.
+    /// `None` when skills are disabled or in tests without the full
+    /// inference stack wired.
+    pub optimizer_worker: Option<std::sync::Arc<execlaw_skills::optimizer::OptimizerWorker>>,
     /// Operator data directory (`~/.execlaw/` on a default macOS
     /// install). Required by the bundled-plugins endpoints so they
     /// can resolve `<data_dir>/bundled-plugins/<file>` without
@@ -243,6 +250,11 @@ pub struct AppState {
     /// continue to call the inference client directly without
     /// observation — adding them is the M5 incremental rollout.
     pub inference_metrics: InferenceMetrics,
+    /// Per-IP login rate limiter. Limits failed `POST /api/login`
+    /// attempts to 5 per 10-minute window to defend against
+    /// brute-force attacks. Always present (cheap DashMap);
+    /// successful logins call `reset(ip)` to clear the counter.
+    pub login_limiter: crate::auth_rate_limit::LoginRateLimiter,
 }
 
 impl std::fmt::Debug for AppState {

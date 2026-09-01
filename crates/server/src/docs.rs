@@ -32,6 +32,10 @@ use crate::backends::{
     BackendListEntry, BackendListResponse, BackendLogsResponse, BackendStatusResponse, BackendView,
     UpsertBackendRequest,
 };
+use crate::graphify_api::GraphPageResponse;
+use crate::graphiti_admin::{
+    GraphitiHealthResponse, GraphitiTestCallRequest, GraphitiTestCallResponse,
+};
 use crate::inference_metrics::{ConsumerSnapshot, InferenceConsumer, MetricsSnapshot};
 use crate::mcp_admin::{McpServerListResponse, McpServerView, McpServerWriteRequest};
 use crate::my_identities::{
@@ -47,8 +51,8 @@ use crate::plugins::{
 };
 use crate::research_admin::{
     ResearchActiveCountResponse, ResearchAdvanceResponse, ResearchCancelRequest,
-    ResearchCancelResponse, ResearchJobReportResponse, ResearchJobSummaryView,
-    ResearchJobsResponse,
+    ResearchCancelResponse, ResearchGraphSnapshotResponse, ResearchJobReportResponse,
+    ResearchJobSummaryView, ResearchJobsResponse,
 };
 use crate::routes::{
     GenericOk, HealthResponse, LoginRequest, LoginResponse, LogoutAllResponse, LogoutRequest,
@@ -165,6 +169,11 @@ impl Modify for SecurityAddon {
         // tools (Phase 8a per-tool trust-class allowlist)
         crate::tools_admin::list_handler,
         crate::tools_admin::update_handler,
+        // graphify graph browser API (paged + filtered)
+        crate::graphify_api::graph_page_handler,
+        // graphiti admin connectivity helpers
+        crate::graphiti_admin::health_handler,
+        crate::graphiti_admin::test_call_handler,
         // mcp (Phase 8c MCP server CRUD)
         crate::mcp_admin::list_handler,
         crate::mcp_admin::create_handler,
@@ -208,6 +217,7 @@ impl Modify for SecurityAddon {
         crate::research_admin::list_jobs_handler,
         crate::research_admin::get_job_handler,
         crate::research_admin::get_report_handler,
+        crate::research_admin::get_graph_snapshot_handler,
         crate::research_admin::active_count_handler,
         crate::research_admin::cancel_job_handler,
         crate::research_admin::advance_job_handler,
@@ -274,6 +284,10 @@ impl Modify for SecurityAddon {
         ChangePasswordRequest,
         ResetPasswordRequest,
         ToolView,
+        GraphPageResponse,
+        GraphitiHealthResponse,
+        GraphitiTestCallRequest,
+        GraphitiTestCallResponse,
         ToolListResponse,
         UpdateToolPolicyRequest,
         McpServerView,
@@ -307,6 +321,7 @@ impl Modify for SecurityAddon {
         ResearchJobsResponse,
         ResearchJobSummaryView,
         ResearchJobReportResponse,
+        ResearchGraphSnapshotResponse,
         ResearchActiveCountResponse,
         ResearchAdvanceResponse,
         ResearchCancelResponse,

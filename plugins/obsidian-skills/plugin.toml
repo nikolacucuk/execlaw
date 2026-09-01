@@ -1,0 +1,18 @@
+[plugin]
+id = "obsidian-skills"
+name = "Obsidian Skills"
+version = "0.1.0"
+
+[runtime]
+tier = "script"
+source = "main.rhai"
+
+[[skills]]
+name = "vault-workflow"
+entry = "skills/vault-workflow.md"
+description = "Draft notes and updates that fit an Obsidian vault workflow."
+
+[[skills]]
+name = "atomic-notes"
+entry = "skills/atomic-notes.md"
+description = "Split ideas into small, linked notes with clear titles and tags."

@@ -226,8 +226,7 @@ mod tests {
                 is_pinned,
                 is_ephemeral,
                 ephemeral_expires_at: None,
-                last_activity_at,
-            })
+                last_activity_at,                context_window_policy: None,            })
             .unwrap();
         cid
     }

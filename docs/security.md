@@ -309,7 +309,42 @@ files as confidential.
 
 ---
 
-## 6. Hardening checklist (operator)
+## 6. Dangerous actions and approval semantics
+
+The policy gate treats dangerous actions as combinations of risk
+dimensions, not as a static list of tool names. A turn is evaluated
+on whether it:
+
+- ingests untrusted content,
+- touches sensitive state, and/or
+- produces external effects.
+
+If a requested action crosses the Rule of Two threshold (or lands in a
+trust class that cannot self-authorize), the host creates an approval
+record and blocks execution until a Controller verdict is recorded.
+
+Operator model:
+
+1. Approve only the minimum scope needed for this one action.
+2. Prefer proposal-only flows (`dry_run`) for new automations/tools.
+3. Treat "external effect" as high risk even when content appears benign.
+4. Use sideband confirmations for ambiguous requests.
+
+Protocol guarantees:
+
+- Approval responses require a signed approval token; approval id alone
+  is not sufficient.
+- Turn replay preserves the block/allow decision path in the event log.
+- Tool pairing invariant (`tool_use` + `tool_result`) still applies when
+  a turn is interrupted by approval waits.
+
+For plugin authors, this means effectful tools should be designed to
+halt cleanly before side effects when the host indicates approval is
+required, then resume with explicit approval context.
+
+---
+
+## 7. Hardening checklist (operator)
 
 If you're deploying execlaw on a machine that's network-reachable:
 

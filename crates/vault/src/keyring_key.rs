@@ -132,6 +132,7 @@ pub fn load_or_create_master_key_with_fallback(
                     "could not mirror keyring key to file; key drift remains possible",
                 );
             }
+            warn_if_key_file_too_permissive(fallback_path);
             Ok(k_ring)
         }
         (None, Some(k_file)) => {
@@ -139,6 +140,7 @@ pub fn load_or_create_master_key_with_fallback(
             // Re-populate the keyring opportunistically — it's a
             // cache, so a failure here is non-fatal.
             let _ = try_persist_to_keyring(&k_file);
+            warn_if_key_file_too_permissive(fallback_path);
             Ok(k_file)
         }
         (None, None) => {
@@ -189,7 +191,113 @@ fn persist_to_file(path: &Path, key: &[u8; 32]) -> Result<(), KeyringLoadError> 
             let _ = std::fs::set_permissions(path, perms);
         }
     }
+    // Windows: restrict the key file to the current user via DACL.
+    // Skipped in cfg(test) — the icacls /inheritance:r step can lock
+    // the file against the test-runner's security token (VS Code spawns
+    // cargo-test under a slightly different session context from the
+    // user's interactive shell), producing spurious PermissionDenied
+    // failures on subsequent reads inside the same test. The security
+    // hardening is only meaningful for production key files, not for
+    // ephemeral temp-dir paths used in tests.
+    #[cfg(all(windows, not(test)))]
+    {
+        if let Err(e) = restrict_file_to_current_user_windows(path) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "master.key Windows DACL restriction failed; file may be readable by other users",
+            );
+        }
+    }
     Ok(())
+}
+
+/// Validate that the passphrase file is not accessible to other users.
+/// Emits a WARN log when the mode is too permissive; does not return an
+/// error (startup must not be blocked by a permissions warning).
+///
+/// Called by `load_or_create_master_key_with_fallback` after a
+/// successful key load so existing files created before the 0600
+/// enforcement was added are caught on the next boot.
+pub fn warn_if_key_file_too_permissive(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path) {
+            let mode = meta.permissions().mode() & 0o777;
+            // Group- or world-readable/writable bits should not be set.
+            if mode & 0o077 != 0 {
+                tracing::warn!(
+                    path = %path.display(),
+                    mode = format!("{:04o}", mode),
+                    "master.key permissions are too permissive (expected 0600); \
+                     run `chmod 0600 {}` to fix",
+                    path.display(),
+                );
+            }
+        }
+    }
+    // On Windows we log a reminder if the DACL check is skipped (e.g.
+    // FAT32/exFAT volumes that don't support ACLs).
+    #[cfg(windows)]
+    {
+        // Best-effort: if we can open the file for write we assume the
+        // DACL was set. No further check without taking a full DACL
+        // read dependency.
+        let _ = path;
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = path;
+    }
+}
+
+/// Restrict a file to the current user (Windows implementation).
+///
+/// Grants FULL_CONTROL to the current user's account first, then removes
+/// inherited ACEs. Doing it in this order ensures we can never lock
+/// ourselves out: if the grant step fails (e.g., domain account format
+/// issues), we bail before touching inheritance, leaving the DACL intact.
+#[cfg(windows)]
+fn restrict_file_to_current_user_windows(path: &Path) -> Result<(), String> {
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| "path contains non-UTF-8 bytes".to_string())?;
+
+    let username = std::env::var("USERNAME").unwrap_or_default();
+    if username.is_empty() {
+        return Err("USERNAME env var is empty; skipping DACL restriction".to_string());
+    }
+
+    // Step 1: grant current user explicit FULL_CONTROL.
+    // This must succeed before we touch inheritance so we can never
+    // accidentally produce a file with an empty DACL.
+    let grant = std::process::Command::new("icacls")
+        .args([path_str, "/grant:r", &format!("{username}:(F)")])
+        .output()
+        .map_err(|e| format!("icacls grant spawn failed: {e}"))?;
+    if !grant.status.success() {
+        return Err(format!(
+            "icacls grant exited with {}: {}",
+            grant.status,
+            String::from_utf8_lossy(&grant.stderr)
+        ));
+    }
+
+    // Step 2: remove inherited ACEs now that the explicit ACE is in place.
+    let inherit = std::process::Command::new("icacls")
+        .args([path_str, "/inheritance:r"])
+        .output()
+        .map_err(|e| format!("icacls inheritance removal spawn failed: {e}"))?;
+    if inherit.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "icacls inheritance removal exited with {}: {}",
+            inherit.status,
+            String::from_utf8_lossy(&inherit.stderr)
+        ))
+    }
 }
 
 fn parse_hex_key(s: &str) -> Result<[u8; 32], KeyringLoadError> {
@@ -338,5 +446,50 @@ mod tests {
             "default path '{s}' should be under .execlaw"
         );
         assert!(s.ends_with("master.key"));
+    }
+
+    /// On first-run the written file must be 0600 (Unix only).
+    #[cfg(unix)]
+    #[test]
+    fn new_file_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("master.key");
+        load_or_create_master_key_with_fallback(&path).expect("first-run should succeed");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "master.key must be 0600, got {:04o}",
+            mode
+        );
+    }
+
+    /// `warn_if_key_file_too_permissive` is a no-op for a 0600 file
+    /// (does not panic or log an error that would fail the test).
+    #[cfg(unix)]
+    #[test]
+    fn permissive_warning_silent_on_strict_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("master.key");
+        load_or_create_master_key_with_fallback(&path).expect("first-run should succeed");
+        // Must not panic.
+        warn_if_key_file_too_permissive(&path);
+    }
+
+    /// A file with 0644 permissions should still be readable (we only
+    /// warn, never abort). Calling `warn_if_key_file_too_permissive`
+    /// on it must not panic.
+    #[cfg(unix)]
+    #[test]
+    fn permissive_warning_does_not_panic_on_wide_perms() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("master.key");
+        // Write a valid key file, then loosen the permissions.
+        std::fs::write(&path, hex::encode([0xABu8; 32])).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        // Should warn (captured by tracing) but not panic.
+        warn_if_key_file_too_permissive(&path);
     }
 }

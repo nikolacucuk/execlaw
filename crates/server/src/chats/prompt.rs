@@ -24,6 +24,7 @@
 
 use execlaw_core::conversation::ConversationStore;
 use execlaw_core::ids::ConversationId;
+use execlaw_core::memory::MemoryStore;
 
 use crate::state::AppState;
 
@@ -542,6 +543,7 @@ pub(crate) fn assemble_system_prompt(
     let p = personality_chunk.trim();
     let b = static_base.trim();
     let r = routing_prose.trim();
+    let hot = build_hot_memory_snapshot_block(db, conversation_id);
     let c = turn_context.trim();
     let mut out = String::new();
     let sep = |s: &mut String| {
@@ -560,6 +562,10 @@ pub(crate) fn assemble_system_prompt(
         sep(&mut out);
         out.push_str(r);
     }
+    if let Some(h) = hot {
+        sep(&mut out);
+        out.push_str(&h);
+    }
     // Turn context is LAST so the most-recent runtime facts are
     // closest to the user message in the request order — recency
     // bias generally helps the model pick them up.
@@ -568,6 +574,85 @@ pub(crate) fn assemble_system_prompt(
         out.push_str(c);
     }
     out
+}
+
+const TRUST_CLASSES_HIGH_TO_LOW: &[&str] = &[
+    "Controller",
+    "Delegated",
+    "KnownTrusted",
+    "KnownLimited",
+    "UnknownPending",
+    "Blocked",
+];
+
+fn trust_rank(class: &str) -> Option<u8> {
+    TRUST_CLASSES_HIGH_TO_LOW
+        .iter()
+        .position(|&c| c == class)
+        .map(|i| (TRUST_CLASSES_HIGH_TO_LOW.len() - 1 - i) as u8)
+}
+
+fn readable_classes(caller: &str) -> Vec<&'static str> {
+    let Some(caller_rank) = trust_rank(caller) else {
+        return Vec::new();
+    };
+    TRUST_CLASSES_HIGH_TO_LOW
+        .iter()
+        .copied()
+        .filter(|c| trust_rank(c).is_some_and(|r| caller_rank >= r))
+        .collect()
+}
+
+fn build_hot_memory_snapshot_block(
+    db: &execlaw_core::Database,
+    conversation_id: Option<&str>,
+) -> Option<String> {
+    let cid = conversation_id?;
+    let conv = ConversationStore::new(db)
+        .get(&ConversationId::from(cid))
+        .ok()??;
+    let readable = readable_classes(&conv.trust_class);
+    if readable.is_empty() {
+        return None;
+    }
+    let store = MemoryStore::new(db);
+    let hot_rows = store
+        .list_hot("global", &readable, 16)
+        .ok()
+        .unwrap_or_default();
+    if hot_rows.is_empty() {
+        return None;
+    }
+
+    // Keep the always-loaded block bounded so it doesn't crowd out
+    // turn context on long-running conversations.
+    const HOT_SLOT_BUDGET_CHARS: usize = 2048;
+    let mut lines: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for row in hot_rows {
+        let value = String::from_utf8_lossy(&row.value_blob)
+            .replace('\n', " ")
+            .trim()
+            .to_owned();
+        if value.is_empty() {
+            continue;
+        }
+        let line = format!("- {}: {}", row.key, value);
+        let projected = used + line.chars().count() + 1;
+        if projected > HOT_SLOT_BUDGET_CHARS {
+            break;
+        }
+        used = projected;
+        lines.push(line);
+    }
+    if lines.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "HOT MEMORY SNAPSHOT (auto-loaded working set; read-only context)\n{}",
+        lines.join("\n")
+    ))
 }
 
 /// Build the per-turn tool-routing block from the live tool

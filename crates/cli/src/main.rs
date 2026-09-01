@@ -1344,8 +1344,32 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
 
     // Phase 12.E — bootstrap is the boot-time global URL; per-turn
     // resolution may override it via config_backends rows.
-    let bootstrap_inference = inference_base_url
-        .map(|url| std::sync::Arc::new(execlaw_inference_api::InferenceClient::new(url)));
+    let bootstrap_inference = inference_base_url.map(|url| {
+        // Allow operators to provide a bearer token for bootstrapped
+        // inference endpoints via env var. Support both
+        // `EXECLAW_INFERENCE_API_KEY` (preferred) and the legacy
+        // `EXECLAW_INFERENCE_KEY` name if present.
+        let mut client = execlaw_inference_api::InferenceClient::new(url);
+        let api_key = std::env::var("EXECLAW_INFERENCE_API_KEY")
+            .or_else(|_| std::env::var("EXECLAW_INFERENCE_KEY"))
+            .ok();
+        if let Some(k) = api_key {
+            if !k.trim().is_empty() {
+                client = client.with_api_key(k);
+            }
+        }
+
+        // Optional engine override: set `EXECLAW_INFERENCE_ENGINE=ollama`
+        // to force the bootstrap client to use Ollama's native `/api/chat`
+        // path instead of the OpenAI-compat `/v1/chat/completions`.
+        if let Ok(e) = std::env::var("EXECLAW_INFERENCE_ENGINE") {
+            if e.eq_ignore_ascii_case("ollama") {
+                client = client.with_engine(execlaw_inference_api::InferenceEngine::Ollama);
+            }
+        }
+
+        std::sync::Arc::new(client)
+    });
     let inference = std::sync::Arc::new(
         execlaw_server::inference_resolver::InferenceResolver::new(bootstrap_inference),
     );
@@ -1434,6 +1458,113 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
     // composes after `hydrate()` without disturbing already-loaded
     // subprocesses or script plugins.
     plugin_host.attach_skill_store(skill_store.clone());
+
+    // 2026-06-01 — Graphify built-in tool. Gives the model a
+    // first-class local entrypoint for graph generation/query so it
+    // doesn't hallucinate a missing "graphify" toolkit command.
+    // Registered before tool_access sync so Settings -> Tools gets a
+    // seeded policy row on boot.
+    {
+        let now = chrono::Utc::now().timestamp();
+        let tools = execlaw_server::graphify_tool::graphify_tools();
+        match execlaw_plugin_host::register_builtins(plugin_host.registry(), &db, now, tools) {
+            Ok(landed) => tracing::info!(count = landed.len(), "graphify tool registered"),
+            Err(e) => return Err(anyhow::anyhow!("register graphify tool failed: {e}")),
+        }
+        // Keep existing deployments in sync with the widened graphify
+        // default visibility. `register_builtins` preserves operator
+        // policy by design, but graphify shipped initially as
+        // Controller-only and would otherwise stay invisible to some
+        // model trust classes forever.
+        {
+            let store = execlaw_core::tool_access::ToolAccessStore::new(&db);
+            let allowed = vec![
+                "Controller".to_owned(),
+                "Delegated".to_owned(),
+                "KnownTrusted".to_owned(),
+                "KnownLimited".to_owned(),
+                "UnknownPending".to_owned(),
+            ];
+            match store.set_policy("graphify", true, &allowed) {
+                Ok(true) => tracing::info!("graphify tool policy ensured"),
+                Ok(false) => {
+                    tracing::warn!("graphify tool policy update skipped; tool row missing")
+                }
+                Err(e) => tracing::warn!(error = %e, "graphify tool policy update failed"),
+            }
+        }
+    }
+
+    // 2026-06-01 — Graphiti built-in tool bridge. Keeps temporal-memory
+    // integration on the same tool-access/policy rails as every other
+    // executable surface.
+    {
+        let now = chrono::Utc::now().timestamp();
+        let tools = execlaw_server::graphiti_tool::graphiti_tools();
+        match execlaw_plugin_host::register_builtins(plugin_host.registry(), &db, now, tools) {
+            Ok(landed) => tracing::info!(count = landed.len(), "graphiti tool registered"),
+            Err(e) => return Err(anyhow::anyhow!("register graphiti tool failed: {e}")),
+        }
+        {
+            let store = execlaw_core::tool_access::ToolAccessStore::new(&db);
+            let allowed = vec![
+                "Controller".to_owned(),
+                "Delegated".to_owned(),
+                "KnownTrusted".to_owned(),
+                "KnownLimited".to_owned(),
+            ];
+            match store.set_policy("graphiti", true, &allowed) {
+                Ok(true) => tracing::info!("graphiti tool policy ensured"),
+                Ok(false) => {
+                    tracing::warn!("graphiti tool policy update skipped; tool row missing")
+                }
+                Err(e) => tracing::warn!(error = %e, "graphiti tool policy update failed"),
+            }
+        }
+    }
+
+    // 2026-06-02 — Wiki lifecycle built-in tool (Phase 1). Provides
+    // ingest/compile/query/lifecycle operations for
+    // `.obsidian/wiki/topics` without requiring plugin-specific
+    // runtime wiring.
+    {
+        let now = chrono::Utc::now().timestamp();
+        let tools = execlaw_server::wiki_lifecycle_tool::wiki_lifecycle_tools();
+        match execlaw_plugin_host::register_builtins(plugin_host.registry(), &db, now, tools) {
+            Ok(landed) => tracing::info!(count = landed.len(), "wiki_lifecycle tool registered"),
+            Err(e) => return Err(anyhow::anyhow!("register wiki_lifecycle tool failed: {e}")),
+        }
+        {
+            let store = execlaw_core::tool_access::ToolAccessStore::new(&db);
+            let allowed = vec![
+                "Controller".to_owned(),
+                "Delegated".to_owned(),
+                "KnownTrusted".to_owned(),
+                "KnownLimited".to_owned(),
+            ];
+            match store.set_policy("wiki_lifecycle", true, &allowed) {
+                Ok(true) => tracing::info!("wiki_lifecycle tool policy ensured"),
+                Ok(false) => {
+                    tracing::warn!("wiki_lifecycle tool policy update skipped; tool row missing")
+                }
+                Err(e) => tracing::warn!(error = %e, "wiki_lifecycle tool policy update failed"),
+            }
+        }
+    }
+
+    // 2026-06-02 — tool-chain phase 2 runtime (persisted plans/runs
+    // + approval halt/resume). The plugin manifest declares
+    // `host_implemented = true` for these names; dispatch lands on
+    // these builtins while plugin enable/disable remains the
+    // coarse ON/OFF switch in Settings -> Plugins.
+    {
+        let now = chrono::Utc::now().timestamp();
+        let tools = execlaw_server::tool_chain_tool::tool_chain_tools(db.clone());
+        match execlaw_plugin_host::register_builtins(plugin_host.registry(), &db, now, tools) {
+            Ok(landed) => tracing::info!(count = landed.len(), "tool-chain tools registered"),
+            Err(e) => return Err(anyhow::anyhow!("register tool-chain tools failed: {e}")),
+        }
+    }
 
     // Phase 8a: reflect every built-in + persisted plugin tool into
     // `config_tool_access` so the per-tool trust-class allowlist gate
@@ -1843,6 +1974,16 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
             skill_store.clone(),
             inference.clone(),
         );
+    // new-2 — offline skill optimizer. Built (not spawned) here;
+    // `chats.rs` calls `maybe_optimize` in a background task at
+    // turn-end for each closed skill invocation.
+    let optimizer_worker = Some(
+        execlaw_server::skill_capture_runtime::build_optimizer_worker(
+            db.clone(),
+            skill_store.clone(),
+            inference.clone(),
+        ),
+    );
 
     // M1/M2/M3 of Automations — spawn the durable event bus before
     // constructing AppState so the dispatcher + poller are live
@@ -1910,12 +2051,16 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
         research_supervisor: Some(research_supervisor.clone()),
         skill_capture: skill_capture_sink,
         reuse_update: reuse_update_sink,
+        optimizer_worker,
         data_dir: data_dir.clone(),
         automation_bus,
         automation_agent_pool,
         // M5 — same handle as the automations invoker holds, so the
         // `/admin/inference` snapshot endpoint sees AskAgent calls.
         inference_metrics,
+        // Login brute-force gate. Constructed fresh each boot;
+        // state is not durable (an operator restart resets counters).
+        login_limiter: execlaw_server::auth_rate_limit::LoginRateLimiter::new(),
     };
     // We don't await `automation_bus_tasks` — letting the spawned
     // dispatcher + poller run for the process lifetime. The `stop`
@@ -2320,7 +2465,14 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
     let app = execlaw_server::routes::build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!(addr = %config.bind_addr, "execlaw server listening");
-    axum::serve(listener, app).await?;
+    // 2026-06-02: use into_make_service_with_connect_info so the
+    // login handler can extract the peer SocketAddr for per-IP
+    // rate limiting via axum::extract::ConnectInfo.
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     sweep_stop.notify_waiters();
     Ok(())
 }

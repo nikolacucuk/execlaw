@@ -49,6 +49,7 @@ fn make_descriptor(
         latency,
         capabilities: caps,
         default_allowed_classes: controller_only(),
+        sensitive: false,
     }
 }
 

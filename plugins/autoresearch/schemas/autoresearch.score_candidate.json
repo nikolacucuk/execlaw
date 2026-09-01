@@ -1,0 +1,43 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "autoresearch.score_candidate args",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "baseline_val_bpb": {
+      "type": "number"
+    },
+    "candidate_val_bpb": {
+      "type": "number"
+    },
+    "baseline_memory_gb": {
+      "type": "number",
+      "minimum": 0
+    },
+    "candidate_memory_gb": {
+      "type": "number",
+      "minimum": 0
+    },
+    "complexity": {
+      "type": "string",
+      "enum": ["lower", "same", "higher"],
+      "default": "same",
+      "description": "Relative implementation complexity compared to baseline."
+    },
+    "crashed": {
+      "type": "boolean",
+      "default": false
+    },
+    "min_gain_for_higher_complexity": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0.001
+    },
+    "max_memory_growth_pct": {
+      "type": "number",
+      "minimum": 0,
+      "default": 25
+    }
+  },
+  "required": ["baseline_val_bpb", "candidate_val_bpb"]
+}

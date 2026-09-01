@@ -300,6 +300,25 @@ export function MessageStream({ conversationId, showToolResults = true }: Props)
     );
 }
 
+/// Render unix-seconds as a compact local date+time stamp for chat
+/// metadata lines. Returns an empty string for invalid inputs.
+export function formatMessageTimestamp(unixSeconds: number): string {
+    if (!Number.isFinite(unixSeconds) || unixSeconds <= 0) {
+        return "";
+    }
+    const d = new Date(unixSeconds * 1000);
+    if (Number.isNaN(d.getTime())) {
+        return "";
+    }
+    return new Intl.DateTimeFormat(undefined, {
+        year: "numeric",
+        month: "short",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+    }).format(d);
+}
+
 function MessageBubble({ message }: { message: MessageView }) {
     // 2026-05-15 — read AuthContext directly (not via the `useAuth()`
     // wrapper that throws when there's no provider). MessageStream
@@ -363,7 +382,15 @@ function MessageBubble({ message }: { message: MessageView }) {
             ? ` · ${message.actor}`
             : "";
     const isUserMessage = message.kind === "user_msg";
-    const showMeta = !isUserMessage || channelOrigin !== "web";
+    const timestamp = formatMessageTimestamp(message.committed_at);
+
+    let metaText = role + actorSuffix;
+    if (isUserMessage && channelOrigin === "web") {
+        metaText = "you";
+    }
+    if (timestamp) {
+        metaText = `${metaText} · ${timestamp}`;
+    }
 
     // 2026-05-15 — image attachments. The server emits these on
     // user_msg events the operator submitted through the composer's
@@ -380,15 +407,12 @@ function MessageBubble({ message }: { message: MessageView }) {
         <div
             className={"execlaw-msg" + (isUserMessage ? " is-user" : "")}
         >
-            {showMeta && (
-                <div className="execlaw-msg__meta">
-                    {showOriginIcon && (
-                        <ChannelOriginIcon origin={channelOrigin} />
-                    )}
-                    {role}
-                    {actorSuffix}
-                </div>
-            )}
+            <div className="execlaw-msg__meta">
+                {showOriginIcon && (
+                    <ChannelOriginIcon origin={channelOrigin} />
+                )}
+                {metaText}
+            </div>
             <div
                 className={
                     "execlaw-msg__bubble" +

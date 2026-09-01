@@ -24,12 +24,18 @@ fn is_invisible_bidi(c: char) -> bool {
     )
 }
 
-/// Minimal homoglyph folder — Cyrillic `а/е/о/р/с/у/х` → Latin equivalents.
-/// Not a full normalization; a sharper pass lands with the Phase 2 port.
+/// Homoglyph folder — Cyrillic, Greek, and Armenian look-alike characters
+/// folded to their ASCII equivalents.
+///
+/// Covers the most common injection vectors seen in adversarial prompts.
+/// Not a full Unicode normalization; this is a deterministic allow-list
+/// of the chars that have been observed in the wild posing as ASCII.
+/// Extended 2026-06-02 to add Greek and Armenian capitals.
 pub fn fold_common_homoglyphs(input: &str) -> String {
     input
         .chars()
         .map(|c| match c {
+            // Cyrillic lowercase
             'а' => 'a',
             'е' => 'e',
             'о' => 'o',
@@ -37,6 +43,7 @@ pub fn fold_common_homoglyphs(input: &str) -> String {
             'с' => 'c',
             'у' => 'y',
             'х' => 'x',
+            // Cyrillic uppercase
             'А' => 'A',
             'Е' => 'E',
             'О' => 'O',
@@ -44,6 +51,32 @@ pub fn fold_common_homoglyphs(input: &str) -> String {
             'С' => 'C',
             'У' => 'Y',
             'Х' => 'X',
+            // Greek lowercase lookalikes
+            'α' => 'a', // GREEK SMALL LETTER ALPHA
+            'ε' => 'e', // GREEK SMALL LETTER EPSILON
+            'ο' => 'o', // GREEK SMALL LETTER OMICRON
+            'ρ' => 'p', // GREEK SMALL LETTER RHO → p (visually similar)
+            'τ' => 't', // GREEK SMALL LETTER TAU
+            'υ' => 'u', // GREEK SMALL LETTER UPSILON
+            'ν' => 'v', // GREEK SMALL LETTER NU
+            // Greek uppercase lookalikes
+            'Α' => 'A', // GREEK CAPITAL LETTER ALPHA
+            'Β' => 'B', // GREEK CAPITAL LETTER BETA
+            'Ε' => 'E', // GREEK CAPITAL LETTER EPSILON
+            'Ζ' => 'Z', // GREEK CAPITAL LETTER ZETA
+            'Η' => 'H', // GREEK CAPITAL LETTER ETA
+            'Ι' => 'I', // GREEK CAPITAL LETTER IOTA
+            'Κ' => 'K', // GREEK CAPITAL LETTER KAPPA
+            'Μ' => 'M', // GREEK CAPITAL LETTER MU
+            'Ν' => 'N', // GREEK CAPITAL LETTER NU
+            'Ο' => 'O', // GREEK CAPITAL LETTER OMICRON
+            'Ρ' => 'P', // GREEK CAPITAL LETTER RHO
+            'Τ' => 'T', // GREEK CAPITAL LETTER TAU
+            'Υ' => 'Y', // GREEK CAPITAL LETTER UPSILON
+            'Χ' => 'X', // GREEK CAPITAL LETTER CHI
+            // Armenian lookalikes
+            'հ' => 'h', // ARMENIAN SMALL LETTER HO
+            'ո' => 'n', // ARMENIAN SMALL LETTER VO → visually n-like
             _ => c,
         })
         .collect()
@@ -116,5 +149,27 @@ mod tests {
         let dirty = "р\u{200B}аypal";
         let cleaned = fold_common_homoglyphs(&strip_invisible(dirty));
         assert_eq!(cleaned, "paypal");
+    }
+
+    // -----------------------------------------------------------------------
+    // 2026-06-02: Greek homoglyph coverage
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn folds_greek_lowercase_lookalikes() {
+        // "αррle" uses Greek α, Cyrillic р twice.
+        assert_eq!(fold_common_homoglyphs("αррle"), "apple");
+    }
+
+    #[test]
+    fn folds_greek_uppercase_lookalikes() {
+        // "ΑΜΑΖΟΝ" is all Greek capitals resembling "AMAZON".
+        assert_eq!(fold_common_homoglyphs("ΑΜΑΖΟΝ"), "AMAZON");
+    }
+
+    #[test]
+    fn folds_greek_rho_to_p() {
+        // Greek ρ is visually identical to Latin p in most fonts.
+        assert_eq!(fold_common_homoglyphs("ρayρal"), "paypal");
     }
 }

@@ -1364,6 +1364,64 @@ impl SkillStore {
         );
         Ok(id)
     }
+
+    /// Count the number of successfully-closed invocations for a
+    /// skill identified by `skill_id`. Used by the optimizer (§11)
+    /// to decide when to trigger an improvement proposal.
+    pub fn count_successful_invocations(&self, skill_id: SkillId) -> Result<u32, SkillError> {
+        let count: i64 = self.db.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM state_skill_invocations
+                 WHERE skill_id = ?1 AND outcome = 'success'",
+                params![skill_id.0],
+                |r| r.get(0),
+            )?)
+        })?;
+        Ok(count.max(0) as u32)
+    }
+
+    /// Retrieve a skill by its numeric id. Returns the same type as
+    /// [`SkillStore::get`] but looks up by primary key rather than
+    /// name. Used by the optimizer to load the current body before
+    /// building the improvement prompt.
+    pub fn get_by_id(&self, skill_id: SkillId) -> Result<Option<Skill>, SkillError> {
+        let name: Option<String> = self.db.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT name FROM state_skills WHERE id = ?1",
+                params![skill_id.0],
+                |r| r.get(0),
+            )
+            .optional()?)
+        })?;
+        match name {
+            Some(n) => self.get(&n),
+            None => Ok(None),
+        }
+    }
+
+    /// Return up to `limit` conversation IDs that successfully closed
+    /// an invocation of `skill_id`, ordered newest-first. Used by the
+    /// optimizer to sample recent successful trajectories.
+    pub fn recent_successful_conversations(
+        &self,
+        skill_id: SkillId,
+        limit: u32,
+    ) -> Result<Vec<String>, SkillError> {
+        let rows: Vec<String> = self.db.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT DISTINCT conversation_id
+                 FROM state_skill_invocations
+                 WHERE skill_id = ?1 AND outcome = 'success'
+                 ORDER BY outcome_at DESC
+                 LIMIT ?2",
+            )?;
+            let rows = stmt
+                .query_map(params![skill_id.0, limit as i64], |r| r.get(0))?
+                .collect::<Result<Vec<String>, _>>()?;
+            Ok(rows)
+        })?;
+        Ok(rows)
+    }
 }
 
 // -----------------------------------------------------------------

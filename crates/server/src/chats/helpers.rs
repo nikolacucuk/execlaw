@@ -196,10 +196,59 @@ pub(crate) fn sanitize_generated_title(raw: &str) -> String {
     }
     // Trailing period/comma/semicolon — strip.
     s = s.trim_end_matches(['.', ',', ';', ':']).to_owned();
+    // Keep a short, stable sidebar label: prefer 3-4 words.
+    let words: Vec<&str> = s.split_whitespace().filter(|w| !w.is_empty()).collect();
+    if words.len() > 4 {
+        s = words[..4].join(" ");
+    }
     if s.chars().count() > 60 {
         s = s.chars().take(60).collect::<String>().trim().to_owned();
     }
     s
+}
+
+/// Derive a short sidebar-friendly title directly from the first user
+/// message when model-side title generation is unavailable.
+pub(crate) fn fallback_title_from_user_text(raw_user_text: &str) -> String {
+    let base = leading_sentences(raw_user_text, 1);
+    let mut words: Vec<&str> = base
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty())
+        .collect();
+    if words.len() > 4 {
+        words.truncate(4);
+    }
+    if words.is_empty() {
+        return String::new();
+    }
+    let candidate = words.join(" ");
+    sanitize_generated_title(&candidate)
+}
+
+/// Extract up to the first `max_sentences` sentences from free-form
+/// user text. Used by chat-title generation so the model sees the
+/// leading goal context without the full prompt body.
+pub(crate) fn leading_sentences(text: &str, max_sentences: usize) -> String {
+    if max_sentences == 0 {
+        return String::new();
+    }
+    let mut out = String::new();
+    let mut count = 0usize;
+    for ch in text.trim().chars() {
+        out.push(ch);
+        if matches!(ch, '.' | '!' | '?') {
+            count += 1;
+            if count >= max_sentences {
+                break;
+            }
+        }
+    }
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    trimmed.to_owned()
 }
 
 pub(crate) fn strip_think_blocks(s: &str) -> String {
@@ -267,6 +316,22 @@ pub(crate) fn rewrite_url_with_alias(url: &str, alias: &str) -> String {
     url.to_owned()
 }
 
+/// Runner-side inference clients use OpenAI-compatible routes,
+/// so the base URL must end in `/v1`.
+///
+/// Operator-entered backend URLs for Ollama are commonly the daemon
+/// root (`http://host:11434`) which works for server-side native
+/// Ollama calls, but the runner then forms `/chat/completions` and
+/// receives 404. Normalise to `/v1` for runner traffic while keeping
+/// already-correct `/v1` endpoints untouched.
+pub(crate) fn ensure_openai_base_v1(url: &str) -> String {
+    let trimmed = url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        return trimmed.to_owned();
+    }
+    format!("{trimmed}/v1")
+}
+
 pub(crate) fn ensure_conversation(store: &ConversationStore<'_>, cid: &ConversationId) {
     if matches!(store.get(cid), Ok(Some(_))) {
         return;
@@ -294,6 +359,7 @@ pub(crate) fn ensure_conversation(store: &ConversationStore<'_>, cid: &Conversat
         // completes; the first send overwrites this with whatever
         // wall-clock the turn finishes at.
         last_activity_at: chrono::Utc::now().timestamp(),
+        context_window_policy: None,
     };
     let _ = store.upsert(&row);
 }
@@ -391,4 +457,29 @@ pub(crate) fn resolve_skill_prepend(
         ));
     }
     Ok(blocks)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn leading_sentences_limits_to_three_sentences() {
+        let input = "First sentence. Second sentence! Third sentence? Fourth sentence.";
+        let out = leading_sentences(input, 3);
+        assert_eq!(out, "First sentence. Second sentence! Third sentence?");
+    }
+
+    #[test]
+    fn leading_sentences_returns_whole_text_when_short() {
+        let input = "Single sentence request without punctuation";
+        let out = leading_sentences(input, 3);
+        assert_eq!(out, input);
+    }
+
+    #[test]
+    fn sanitize_generated_title_keeps_short_word_count() {
+        let out = sanitize_generated_title("Title: This is a very long title output");
+        assert_eq!(out, "This is a very");
+    }
 }

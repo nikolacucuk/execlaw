@@ -20,19 +20,46 @@ hardware.
 | [`docs/architecture.md`](docs/architecture.md) | System topology, design principles, FSM, data model, recovery, observability — the **what**. |
 | [`docs/agent-model.md`](docs/agent-model.md) | TurnExecutor, memory layers, reflection loop, planner/executor split — the **how** of one turn. |
 | [`docs/plugins.md`](docs/plugins.md) | Plugin manifest schema, runtime tiers, sidecar model, Rhai primitives, and a step-by-step guide for writing a custom plugin. |
+| [`docs/operator-decision-rubric.md`](docs/operator-decision-rubric.md) | Structured rubric for placing features in plugins vs MCP vs host core, plus tool-chaining and learning-loop guidance. |
+| [`docs/hermes-porting-todo.md`](docs/hermes-porting-todo.md) | Implementation checklist for Hermes-originated capabilities ported into execlaw. |
 | [`docs/setup-walkthroughs.md`](docs/setup-walkthroughs.md) | Operator-facing pairing flows for Signal QR, WhatsApp wuzapi, Slack OAuth, Google OAuth + API-key. |
 | [`docs/desktop-installations.md`](docs/desktop-installations.md) | Cross-OS reference for the three desktop bundles — `.app`/`.dmg`, NSIS `.exe`, `.deb`. Tray architecture, service-manager mapping, install + uninstall flows, build scripts. |
 | [`docs/ollama.md`](docs/ollama.md) | Pre-installed Ollama support across macOS / Linux / Windows. How discovery works, when to pick Ollama over Docker, the wizard's serving dropdown. |
+| [`docs/copilot-graphify-obsidian-workspace-setup.md`](docs/copilot-graphify-obsidian-workspace-setup.md) | Step-by-step guide to reproduce Graphify + Obsidian memory workflow in other repositories using GitHub Copilot. |
 | [`docs/setup-mac.md`](docs/setup-mac.md) | Apple Silicon first-run notes — native Ollama subprocess, model sizing, brand indicator. |
+| [`docs/truenas-docker.md`](docs/truenas-docker.md) | TrueNAS SCALE Docker deployment with persistent ZFS storage and external Ollama. |
 | [`desktop-macos/README.md`](desktop-macos/README.md) | macOS `.app` bundle internals — Tauri 2, SMAppService, build script. |
 | [`desktop-windows/README.md`](desktop-windows/README.md) | Windows NSIS `.exe` bundle internals — Tauri 2, SCM service, build script. |
 | [`desktop-linux/README.md`](desktop-linux/README.md) | Linux `.deb` bundle internals — Tauri 2, systemd `--user` unit, build script. |
 | [`docs/security.md`](docs/security.md) | Disclosure path, threat model, cryptography, trust assumptions, known limitations, hardening checklist. |
+| [`docs/security-hardening-2026-06.md`](docs/security-hardening-2026-06.md) | 2026-06 hardening pass: HTTP security headers, login rate limiting, expanded homoglyph coverage, webhook auth enforcement. |
 | [`docs/sidecar-supervisor-design.md`](docs/sidecar-supervisor-design.md) | Supervised-container layer plugins compose against. |
 | [`docs/runner-design.md`](docs/runner-design.md) | Per-conversation runner container model. |
 | [`docs/voice-followups.md`](docs/voice-followups.md) | Voice modality design notes. |
 | [`CONTRIBUTING.md`](CONTRIBUTING.md) | Workflow, code conventions, AGPL→Apache-2.0 licensing notes. |
 | [`AGENTS.md`](AGENTS.md) | Onboarding for AI coding agents working on this repo. |
+
+## Developer tooling note (Graphify CLI)
+
+On the DjEnKa workspace, Graphify CLI is installed at:
+
+```
+C:\Users\DjEnKa\.local\bin\graphify.exe
+```
+
+If PowerShell reports `graphify` as not recognized, add that directory
+to PATH in the current shell:
+
+```powershell
+$env:Path += ";C:\Users\DjEnKa\.local\bin"
+graphify --help
+```
+
+Persist for future shells:
+
+```powershell
+setx PATH "$env:PATH;C:\Users\DjEnKa\.local\bin"
+```
 
 ## What ships today
 
@@ -360,6 +387,37 @@ tag → GitHub Release flow.
 | `execlaw doctor` | Preflight checks (DB, vault, optional Docker) |
 | `execlaw serve` | Run in the foreground (dev / debug) |
 
+**Windows Service Notes**
+
+- **SPA required:** Build the SPA before packaging or reinstalling the server. If `web/dist` is missing the root will return "execlaw SPA bundle not found." Run:
+
+```powershell
+npm --prefix web ci
+npm --prefix web run build
+```
+
+- **Avoid port conflicts:** Ensure no foreground server (or other process) binds `127.0.0.1:3031` before starting the installed service; otherwise the service will fail with an OS error (only one usage of each socket address — os error 10048).
+
+- **Elevated install & file-locks:** Service install and `cargo install --path crates/cli` require elevation. If `cargo install` fails with "Access is denied (os error 5)", stop the service and any running `execlaw` processes before reinstalling:
+
+```powershell
+# Run as Administrator
+Stop-Service -Name execlaw -Force
+Get-Process -Name execlaw -ErrorAction SilentlyContinue | Stop-Process -Force
+cargo install --path crates/cli
+Start-Service -Name execlaw
+```
+
+- **Helper script:** A convenience elevated helper was added at `scripts/install-elevated.ps1` to stop the service, remove the old binary, run `cargo install`, and restart the service. Use an elevated PowerShell to run it.
+
+- **Debugging:** To diagnose service start failures, run the service command interactively to capture stdout/stderr:
+
+```powershell
+powershell -NoProfile -Command "& 'C:\Users\<you>\\.cargo\\bin\\execlaw.exe' service run --db 'C:\Users\<you>\\.execlaw\\execlaw.db'"
+Get-WinEvent -FilterHashtable @{LogName='System'; StartTime=(Get-Date).AddHours(-1)} | Where-Object { $_.Message -match 'execlaw' }
+```
+
+
 `cargo bootstrap`, `cargo start`, `cargo stop`, `cargo restart`,
 `cargo svc-status`, and `cargo doctor` are convenience aliases that
 forward to the equivalent `execlaw …` invocations
@@ -475,6 +533,168 @@ handled by the
 The Rust workspace's `target/` directory grows quickly (40+ GB on a
 warm dev box). If `cargo-watch` rebuilds start failing with
 `No space left on device`, run `cargo clean` to reclaim.
+
+## Graphify integration
+
+execlaw now supports a local Graphify knowledge-graph preview in the
+chat welcome screen (above the mascot / New chat animation). The preview
+is interactive (mouse-reactive, moving nodes) and is derived from
+`graphify-out/graph.json`.
+
+### Install Graphify (Windows)
+
+```powershell
+c:/python314/python.exe -m pip install --user graphifyy openai
+
+# repo-level assistant guidance for OpenClaw-style agents
+C:/Users/<you>/AppData/Roaming/Python/Python314/Scripts/graphify.exe claw install
+```
+
+If Graphify is not on your `PATH`, call the full executable path as
+shown above.
+
+### Build the graph and wiki
+
+PowerShell note: use `graphify .` (no leading slash).
+
+```powershell
+# full semantic extraction + wiki (requires backend)
+$env:OLLAMA_API_KEY = "local"
+$env:OLLAMA_MODEL = "qwen3.5:9b"
+C:/Users/<you>/AppData/Roaming/Python/Python314/Scripts/graphify.exe . --wiki --backend ollama
+
+# local AST-only fallback (no API keys)
+C:/Users/<you>/AppData/Roaming/Python/Python314/Scripts/graphify.exe update . --force
+C:/Users/<you>/AppData/Roaming/Python/Python314/Scripts/graphify.exe cluster-only . --no-label
+```
+
+### Sync UI preview artifacts
+
+After regenerating `graphify-out/graph.json`, run:
+
+```bash
+node scripts/graphify_sync_preview.mjs
+```
+
+This writes:
+
+- `web/src/generated/graphifyPreview.json` (lightweight graph slice used by the SPA)
+- `graphify-out/wiki/index.md` (local wiki scaffold)
+
+### Toggle in settings
+
+Operators can enable/disable the welcome-screen graph at:
+
+- `Settings -> General -> Show Graphify preview on New chat`
+
+The toggle is stored per browser in `localStorage`
+(`execlaw.chat.graphify_welcome_visible`).
+
+### Built-in Graphify tool (for local models)
+
+execlaw now exposes a built-in model tool named `graphify`.
+
+- Visible at `Settings -> Tools` as `graphify`
+- Registered at server boot and synced into tool-access policy
+- Controller-only by default
+
+This means local Ollama-backed models can call Graphify directly during
+tool-use turns (instead of replying that no graphify tool exists).
+
+Example tool args:
+
+```json
+{"action":"build","target_path":".","wiki":true,"backend":"ollama","model":"qwen3.5:9b"}
+```
+
+```json
+{"action":"query","question":"How does inbound transport reach TurnExecutor?"}
+```
+
+```json
+{"action":"path","from":"crates/server/src/chats.rs","to":"crates/runner-local/src/turn.rs"}
+```
+
+Optional override for executable location:
+
+- env: `EXECLAW_GRAPHIFY_BIN` (defaults to `graphify`)
+
+### Built-in Graphiti tool + admin API
+
+execlaw now exposes a built-in model tool named `graphiti` for temporal-memory
+query/ingest via a Graphiti-compatible HTTP service.
+
+- Visible at `Settings -> Tools` as `graphiti`
+- Registered at server boot and synced into tool-access policy
+- Default allowed trust classes: Controller, Delegated, KnownTrusted, KnownLimited
+
+Config env vars:
+
+- `EXECLAW_GRAPHITI_BASE_URL` (default `http://127.0.0.1:8000`)
+- `EXECLAW_GRAPHITI_API_KEY` (optional bearer token)
+
+Admin validation endpoints (auth required):
+
+- `GET /api/admin/graphiti/health`
+- `POST /api/admin/graphiti/test-call` with body `{ "args": { ...tool args... } }`
+
+Example test-call body:
+
+```json
+{
+   "args": {
+      "action": "search",
+      "group_id": "demo",
+      "query": "find policy",
+      "top_k": 5
+   }
+}
+```
+
+### Obsidian lessons pipeline
+
+The workspace now includes a local `.obsidian/` lessons pipeline for persistent,
+deduped memory notes (Patterns, Mistakes, Decisions, Context) plus a review-only
+weekly maintenance report.
+
+Scaffold + validation:
+
+```powershell
+pwsh -File scripts/verify_copilot_obsidian_pipeline.ps1 -VaultDir .obsidian
+```
+
+Import lessons from a transcript and regenerate index/report:
+
+```powershell
+pwsh -File scripts/sync_copilot_obsidian.ps1 -VaultDir .obsidian -TranscriptPath <path-to-transcript.jsonl>
+```
+
+One-command maintenance task (repo root):
+
+```bash
+npm run graph-memory:maintain
+```
+
+That command runs:
+
+- `graphify update .` (if Graphify CLI is installed)
+- `node scripts/graphify_sync_preview.mjs`
+- `python scripts/weekly_lessons_maintenance_report.py --vault-dir .obsidian --stale-days 30`
+
+### Optional auto-start hook (post-commit)
+
+Install a git post-commit hook that runs only when structural files changed.
+When triggered, it runs the same maintenance script above.
+
+Install it once:
+
+```powershell
+pwsh -File scripts/install_graphify_memory_hook.ps1
+```
+
+Hook runner script:
+
+- `scripts/post_commit_graphify_memory.ps1`
 
 ---
 

@@ -1,0 +1,12 @@
+[package]
+name = "execlaw-context-window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+execlaw-inference-api = { path = "../inference-api" }
+tracing = { workspace = true }
+
+[dev-dependencies]

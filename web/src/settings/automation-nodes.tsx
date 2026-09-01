@@ -35,6 +35,7 @@ const STYLES: Record<string, KindStyle> = {
     AskAgent: { bg: "#ffedd5", border: "#ea580c", icon: "bi-robot" },
     Notify: { bg: "#fee2e2", border: "#dc2626", icon: "bi-bell-fill" },
     CallPlugin: { bg: "#dbeafe", border: "#2563eb", icon: "bi-puzzle" },
+    HttpFetch: { bg: "#d1fae5", border: "#059669", icon: "bi-cloud-arrow-down" },
 };
 
 function nodeShellStyle(
@@ -176,6 +177,18 @@ export function CallPluginNode(props: NodeProps) {
     );
 }
 
+export function HttpFetchNode(props: NodeProps) {
+    const data = props.data as unknown as CanvasNodeData;
+    return (
+        <div style={nodeShellStyle("HttpFetch", !!data.selected)} data-testid={`node-${props.id}`}>
+            <Handle type="target" position={Position.Top} />
+            <NodeHeader kind="HttpFetch" label={data.label} />
+            <NodeDetail detail={data.detail} />
+            <Handle type="source" position={Position.Bottom} />
+        </div>
+    );
+}
+
 /** Map ReactFlow `type` string → React component for `nodeTypes`. */
 export const NODE_TYPES = {
     Trigger: TriggerNode,
@@ -186,6 +199,7 @@ export const NODE_TYPES = {
     AskAgent: AskAgentNode,
     Notify: NotifyNode,
     CallPlugin: CallPluginNode,
+    HttpFetch: HttpFetchNode,
 } as const;
 
 export const KIND_ICONS: Record<string, string> = {
@@ -196,6 +210,7 @@ export const KIND_ICONS: Record<string, string> = {
     AskAgent: STYLES.AskAgent.icon,
     Notify: STYLES.Notify.icon,
     CallPlugin: STYLES.CallPlugin.icon,
+    HttpFetch: STYLES.HttpFetch.icon,
 };
 
 export const KIND_COLORS: Record<string, string> = {
@@ -206,4 +221,5 @@ export const KIND_COLORS: Record<string, string> = {
     AskAgent: STYLES.AskAgent.border,
     Notify: STYLES.Notify.border,
     CallPlugin: STYLES.CallPlugin.border,
+    HttpFetch: STYLES.HttpFetch.border,
 };

@@ -37,6 +37,7 @@
 pub mod capture;
 pub mod import;
 pub mod model;
+pub mod optimizer;
 pub mod reuse_update;
 pub mod sanitizer;
 pub mod scanner;

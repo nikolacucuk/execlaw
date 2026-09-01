@@ -13,12 +13,11 @@
 //! }
 //! ```
 //!
-//! Docker availability is determined by shelling out to `docker info`
-//! — that connects to the daemon, so success means dockerd is up and
-//! reachable, not just that the CLI is installed. The version comes
-//! from `--format '{{.ServerVersion}}'`. Missing → `available: false,
-//! version: null` and the SPA shows the Docker-Desktop install
-//! prompt.
+//! Docker availability is determined by shelling out to `docker info` or,
+//! when the CLI is intentionally absent from a container image, by querying
+//! the mounted daemon socket. Either path confirms dockerd is reachable, not
+//! merely that a CLI is installed. Missing → `available: false, version: null`
+//! and the SPA shows the Docker install prompt.
 //!
 //! GPUs come from the same `hardware-query`-backed `detect()` the
 //! Backend wizard uses (Phase 14 follow-up).
@@ -341,8 +340,10 @@ fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
 /// though the daemon is up and the sidecar supervisor (which uses
 /// the Unix socket via Bollard) can talk to it just fine. We try
 /// `docker` on PATH first for the dev-shell case, then fall back
-/// to absolute paths at the well-known install locations. The
-/// first one that exits 0 wins.
+/// to absolute paths at the well-known install locations. If no
+/// CLI is present, a final Bollard request covers deliberately
+/// minimal control-plane containers with `/var/run/docker.sock`
+/// mounted.
 fn detect_docker() -> DockerStatus {
     // PATH probe first — covers `cargo run` from a dev shell and
     // operators who put docker somewhere non-standard but in PATH.
@@ -363,6 +364,9 @@ fn detect_docker() -> DockerStatus {
         if let Some(s) = try_docker_at(path) {
             return s;
         }
+    }
+    if let Some(s) = try_docker_socket() {
+        return s;
     }
     DockerStatus {
         available: false,
@@ -437,6 +441,36 @@ fn try_docker_at(binary: &str) -> Option<DockerStatus> {
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
             Err(_) => return None,
+        }
+    }
+}
+
+/// Query Docker directly for containerized deployments. The caller runs this
+/// from `spawn_blocking`, so use a small current-thread runtime rather than
+/// blocking the server's async executor.
+fn try_docker_socket() -> Option<DockerStatus> {
+    let docker = bollard::Docker::connect_with_local_defaults().ok()?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let version = runtime
+        .block_on(async { tokio::time::timeout(DOCKER_PROBE_TIMEOUT, docker.version()).await });
+    match version {
+        Ok(Ok(response)) => Some(DockerStatus {
+            available: true,
+            version: response.version,
+        }),
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "Docker socket probe failed");
+            None
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_ms = DOCKER_PROBE_TIMEOUT.as_millis() as u64,
+                "Docker socket probe exceeded timeout — treating as unavailable"
+            );
+            None
         }
     }
 }

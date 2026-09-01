@@ -608,6 +608,18 @@ mod tests {
             .unwrap();
     }
 
+    fn disable_capture(db: &Database) {
+        SkillsConfigStore::new(db)
+            .update(
+                &SkillsConfigUpdate {
+                    auto_capture_enabled: Some(false),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+    }
+
     fn append_user(log: &EventLog, cid: &ConversationId, seq: i64, text: &str) {
         log.append(
             &EventRecord::new(
@@ -689,6 +701,9 @@ mod tests {
     #[tokio::test]
     async fn disabled_when_config_off() {
         let (db, store) = fresh();
+        // Migration 0011 enables auto-capture by default; explicitly disable
+        // it here so we can verify the Disabled short-circuit.
+        disable_capture(&db);
         let cid = ConversationId::from("c1");
         let summ = Arc::new(MockSummarizer::new(SummarizerOutput::Skip {
             reason: "n/a".into(),

@@ -249,6 +249,12 @@ pub struct ToolDescriptor {
     /// `config_tool_access` row is first inserted. Operator overrides
     /// via Settings persist; the seed only fires on first sight.
     pub default_allowed_classes: Vec<String>,
+    /// When `true`, the Rule-of-Two policy gate treats any turn that
+    /// calls this tool as `accesses_sensitive_data = true`. Mark tools
+    /// that read from the vault, look up personal identity data, or
+    /// return secrets. Defaults to `false`.
+    #[serde(default)]
+    pub sensitive: bool,
 }
 
 /// Outcome of a `ToolImpl::invoke` call. `Denied` is distinct from
@@ -1427,6 +1433,7 @@ mod tests {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: vec!["Controller".into()],
+                sensitive: false,
             },
         });
         assert_eq!(tool.descriptor().name, "echo");

@@ -1,0 +1,37 @@
+[plugin]
+id = "tool-chain"
+name = "Tool Chain Orchestrator"
+version = "0.1.0"
+description = "Programmatic tool-chaining scaffold for planning and gated execution of multi-step tool flows."
+author = "execlaw"
+license = "Apache-2.0"
+
+[runtime]
+tier = "script"
+source = "main.rhai"
+
+[[tools]]
+name = "chain.plan"
+description = "Build a deterministic step plan for a multi-tool task. Planning only; no external effects."
+latency = "low"
+trust_floor = "KnownLimited"
+host_implemented = true
+schema = "schemas/chain.plan.json"
+
+[[tools]]
+name = "chain.execute"
+description = "Execute an approved chain plan with explicit step budget and audit labels."
+latency = "high"
+trust_floor = "Controller"
+host_implemented = true
+required_capabilities = ["tools.sensitive"]
+schema = "schemas/chain.execute.json"
+
+[[tools]]
+name = "chain.resume"
+description = "Resolve an approval decision and resume (or deny) an effectful chain run."
+latency = "medium"
+trust_floor = "Controller"
+host_implemented = true
+required_capabilities = ["tools.sensitive"]
+schema = "schemas/chain.resume.json"

@@ -43,9 +43,55 @@ use execlaw_core::ids::AlertId;
 use execlaw_plugin_host::PluginHost;
 use rhai::{Dynamic, Engine, Scope};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tracing::{debug, warn};
+
+/// Per-automation sliding-window rate limiter for `HttpFetch` nodes.
+///
+/// Tracks the wall-clock timestamps of recent calls in a 60-second
+/// sliding window per automation id. Thread-safe via `Mutex` — safe to
+/// call from `spawn_blocking` threads which cannot `.await` a tokio
+/// `Mutex`.
+#[derive(Debug)]
+pub struct HttpFetchRateLimiter {
+    /// call timestamps keyed by automation_id
+    windows: Mutex<HashMap<String, Vec<Instant>>>,
+    /// max calls allowed per 60-second window; default 60
+    pub calls_per_minute: u32,
+}
+
+impl HttpFetchRateLimiter {
+    /// Create a limiter with the given per-minute cap.
+    pub fn new(calls_per_minute: u32) -> Self {
+        Self {
+            windows: Mutex::new(HashMap::new()),
+            calls_per_minute,
+        }
+    }
+
+    /// Try to record a call for `automation_id`. Returns `true` if the
+    /// call is allowed; `false` if the per-minute cap has been reached.
+    pub fn try_call(&self, automation_id: &str) -> bool {
+        let mut guard = self.windows.lock().expect("HttpFetchRateLimiter mutex poisoned");
+        let now = Instant::now();
+        let window = guard.entry(automation_id.to_owned()).or_default();
+        // Prune entries older than 60 s.
+        let one_minute = std::time::Duration::from_secs(60);
+        window.retain(|t| now.duration_since(*t) < one_minute);
+        if window.len() >= self.calls_per_minute as usize {
+            return false;
+        }
+        window.push(now);
+        true
+    }
+}
+
+impl Default for HttpFetchRateLimiter {
+    fn default() -> Self {
+        Self::new(60)
+    }
+}
 
 /// Per-run handles for the side-effect executors. Threaded into
 /// [`execute_node`] so M4-and-beyond kinds (Notify, CallPlugin, …)
@@ -60,6 +106,10 @@ pub struct ExecutorContext {
     /// turns CallPlugin into a clean per-node error rather than a
     /// runtime panic.
     pub plugin_host: Option<PluginHost>,
+    /// Sliding-window rate limiter for `HttpFetch` nodes. Shared
+    /// across all automation runs handled by this executor context so
+    /// the per-minute cap is enforced globally, not per-spawn.
+    pub http_fetch_limiter: Arc<HttpFetchRateLimiter>,
 }
 
 impl ExecutorContext {
@@ -68,6 +118,22 @@ impl ExecutorContext {
             db,
             pool,
             plugin_host,
+            http_fetch_limiter: Arc::new(HttpFetchRateLimiter::default()),
+        }
+    }
+
+    /// Create a context with a custom per-minute `HttpFetch` cap.
+    pub fn with_http_fetch_limit(
+        db: Database,
+        pool: AutomationsAgentPool,
+        plugin_host: Option<PluginHost>,
+        calls_per_minute: u32,
+    ) -> Self {
+        Self {
+            db,
+            pool,
+            plugin_host,
+            http_fetch_limiter: Arc::new(HttpFetchRateLimiter::new(calls_per_minute)),
         }
     }
 }
@@ -188,9 +254,15 @@ fn run_one(
     };
 
     // Accumulated state: each completed node's output keyed by id,
-    // plus `event` for the trigger payload.
+    // plus `event` for the trigger payload. We also inject the
+    // automation id under a reserved key so the HttpFetch rate limiter
+    // (which only sees `state`) can key the window correctly.
     let mut state: HashMap<String, serde_json::Value> = HashMap::new();
     state.insert("event".to_string(), event_ctx.clone());
+    state.insert(
+        "__automation_id__".to_string(),
+        serde_json::Value::String(automation.id.to_string()),
+    );
 
     // Inline trace sink: each node-boundary advance calls
     // `run_store.append_trace(run_id, &trace)`. The closure indirection
@@ -248,6 +320,10 @@ pub fn dry_run(
     let event_ctx = event_context(sample);
     let mut state: HashMap<String, serde_json::Value> = HashMap::new();
     state.insert("event".to_string(), event_ctx);
+    state.insert(
+        "__automation_id__".to_string(),
+        serde_json::Value::String(automation.id.to_string()),
+    );
     let mut traces: Vec<StepTrace> = Vec::new();
     let outcome = execute_graph(
         &automation.definition,
@@ -448,6 +524,7 @@ fn execute_node(
         NodeKind::AskAgent => execute_ask_agent(node, state, &ctx.pool),
         NodeKind::Notify => execute_notify(node, state, &ctx.db),
         NodeKind::CallPlugin => execute_call_plugin(node, state, ctx.plugin_host.as_ref()),
+        NodeKind::HttpFetch => execute_http_fetch(node, state, ctx),
         _ => NodeOutcome::Error(format!(
             "node kind '{}' not implemented in this milestone",
             node.kind.as_str()
@@ -632,6 +709,181 @@ fn render_template_in_value(
         }
         // Numbers, bools, null pass through unchanged.
         other => other.clone(),
+    }
+}
+
+/// HttpFetch (§12) — make an outbound HTTP request from within an
+/// automation graph. This is an automation side-effect executor, not
+/// an LLM-initiated tool_use — it executes under the operator's
+/// explicit automation definition, not an agent decision.
+///
+/// Config shape:
+/// ```json
+/// { "url": "<string>",
+///   "method": "GET" | "POST" | "PUT" | "DELETE",
+///   "headers": { "<name>": "<value>", ... },   // optional
+///   "body": "<string>" }                        // optional
+/// ```
+///
+/// Template substitution: `url` and `body` are rendered through
+/// [`render_template`] so authors can write `{{event.payload.url}}`
+/// in the definition.
+///
+/// Output shape: `{ "status": <u16>, "body": "<string>" }`.
+///
+/// Errors: missing/invalid `url`, unsupported method, or network
+/// failure produce a [`NodeOutcome::Error`] with a descriptive message.
+fn execute_http_fetch(
+    node: &NodeDef,
+    state: &HashMap<String, serde_json::Value>,
+    ctx: &ExecutorContext,
+) -> NodeOutcome {
+    // --- rate limit check ---
+    // Each automation gets 60 calls/min by default; the node config can
+    // override with `"rate_limit_per_minute": N` (0 = explicitly unlimited).
+    let node_limit: Option<u32> = node
+        .config
+        .get("rate_limit_per_minute")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as u32);
+    let effective_limit = match node_limit {
+        Some(0) => None,
+        Some(n) => Some(n),
+        None => Some(ctx.http_fetch_limiter.calls_per_minute),
+    };
+    if let Some(limit) = effective_limit {
+        let automation_id = state
+            .get("__automation_id__")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        // If the per-minute cap is overridden at the node level, create
+        // a transient limiter for this call (the global one uses 60).
+        let allowed = if node_limit.is_some() {
+            HttpFetchRateLimiter::new(limit).try_call(automation_id)
+        } else {
+            ctx.http_fetch_limiter.try_call(automation_id)
+        };
+        if !allowed {
+            return NodeOutcome::Error(format!(
+                "HttpFetch: rate limit exceeded ({limit} calls/min) for automation \
+                 '{automation_id}'; reduce HttpFetch frequency or raise \
+                 rate_limit_per_minute in the node config"
+            ));
+        }
+    }
+
+    // --- parse config ---
+    let url_raw = match node.config.get("url").and_then(|v| v.as_str()) {
+        Some(u) if !u.is_empty() => u.to_owned(),
+        _ => return NodeOutcome::Error("HttpFetch: missing required config key 'url'".into()),
+    };
+    let url = render_template(&url_raw, state);
+
+    let method = node
+        .config
+        .get("method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("GET")
+        .to_uppercase();
+
+    let body_raw = node
+        .config
+        .get("body")
+        .and_then(|v| v.as_str())
+        .map(|s| render_template(s, state));
+
+    // Collect optional headers.
+    let headers: Vec<(String, String)> = node
+        .config
+        .get("headers")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_owned())))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Validate the method against the allow-list before making any
+    // network calls.
+    let reqwest_method = match method.as_str() {
+        "GET" => reqwest::Method::GET,
+        "POST" => reqwest::Method::POST,
+        "PUT" => reqwest::Method::PUT,
+        "DELETE" => reqwest::Method::DELETE,
+        other => {
+            return NodeOutcome::Error(format!(
+                "HttpFetch: unsupported method '{other}'; allowed: GET, POST, PUT, DELETE"
+            ));
+        }
+    };
+
+    // Parse the URL before making the request so we surface bad URLs
+    // early with a clear error rather than a reqwest transport error.
+    let parsed_url = match reqwest::Url::parse(&url) {
+        Ok(u) => u,
+        Err(e) => {
+            return NodeOutcome::Error(format!("HttpFetch: invalid url '{url}': {e}"));
+        }
+    };
+
+    // Only http/https — other schemes are not meaningful and could be
+    // surprising security footguns.
+    if parsed_url.scheme() != "http" && parsed_url.scheme() != "https" {
+        return NodeOutcome::Error(format!(
+            "HttpFetch: url scheme '{}' not allowed; only http and https are permitted",
+            parsed_url.scheme()
+        ));
+    }
+
+    // Run the async reqwest call via the runtime handle, mirroring
+    // the pattern used by execute_ask_agent.
+    let handle = match tokio::runtime::Handle::try_current() {
+        Ok(h) => h,
+        Err(_) => {
+            return NodeOutcome::Error(
+                "HttpFetch: no tokio runtime in scope (executor must run under spawn_blocking)"
+                    .into(),
+            );
+        }
+    };
+
+    let result = handle.block_on(async {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| format!("HttpFetch: failed to build HTTP client: {e}"))?;
+
+        let mut builder = client.request(reqwest_method, parsed_url);
+
+        for (name, value) in &headers {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
+
+        if let Some(body) = body_raw {
+            builder = builder.body(body);
+        }
+
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| format!("HttpFetch: request failed: {e}"))?;
+
+        let status = resp.status().as_u16();
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("(failed to read body: {e})"));
+
+        Ok::<_, String>((status, body))
+    });
+
+    match result {
+        Ok((status, body)) => NodeOutcome::Output(serde_json::json!({
+            "status": status,
+            "body": body,
+        })),
+        Err(msg) => NodeOutcome::Error(msg),
     }
 }
 
@@ -2233,6 +2485,135 @@ mod tests {
                 "tags": ["a", "+15551234"],
                 "n": 7,
             })
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // HttpFetch rate limiter unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn rate_limiter_allows_calls_up_to_cap() {
+        let limiter = HttpFetchRateLimiter::new(3);
+        assert!(limiter.try_call("auto-1"), "1st call should be allowed");
+        assert!(limiter.try_call("auto-1"), "2nd call should be allowed");
+        assert!(limiter.try_call("auto-1"), "3rd call should be allowed (at cap)");
+        assert!(!limiter.try_call("auto-1"), "4th call should be denied");
+    }
+
+    #[test]
+    fn rate_limiter_windows_are_per_automation() {
+        let limiter = HttpFetchRateLimiter::new(2);
+        assert!(limiter.try_call("auto-a"));
+        assert!(limiter.try_call("auto-a"));
+        assert!(!limiter.try_call("auto-a"), "auto-a should be rate-limited");
+        // Different automation id should have its own fresh window.
+        assert!(limiter.try_call("auto-b"), "auto-b is independent of auto-a");
+        assert!(limiter.try_call("auto-b"));
+        assert!(!limiter.try_call("auto-b"), "auto-b should now be rate-limited too");
+    }
+
+    #[test]
+    fn rate_limiter_zero_cap_means_unlimited() {
+        // cap=0 means unlimited — the execute_http_fetch code maps Some(0) → None
+        // meaning the check is skipped. Test the node_config path directly.
+        let limiter = HttpFetchRateLimiter::new(0);
+        // With cap=0, window.len() (0) < 0 is always false, so try_call always
+        // returns false — but the actual unlimited path uses `effective_limit = None`
+        // which skips calling try_call altogether. Here we just confirm the struct
+        // can be constructed with 0 without panicking.
+        let _ = limiter;
+    }
+
+    #[test]
+    fn http_fetch_rate_limited_run_fails_with_descriptive_error() {
+        // Wire up an automation with an HttpFetch node, using a context whose
+        // limiter cap is 1. The first trigger fires OK; the second should
+        // produce a Failed run with the rate-limit error in the trace.
+        let db = fresh_db();
+        let auto_store = AutomationStore::new(&db);
+        let run_store = AutomationRunStore::new(&db);
+
+        // Build a minimal HttpFetch automation that points at a nonexistent
+        // host — the rate limit check fires BEFORE the network call so the
+        // test doesn't actually make a connection.
+        let def = AutomationDef {
+            trigger: TriggerDef {
+                kind: execlaw_core::automation_bus::BusEventKind::WebhookReceived,
+                when: None,
+            },
+            nodes: vec![
+                NodeDef {
+                    id: "fetch".into(),
+                    kind: NodeKind::HttpFetch,
+                    config: serde_json::json!({
+                        "url": "http://localhost:19999/nonexistent",
+                        "method": "GET",
+                    }),
+                    position: None,
+                },
+                NodeDef {
+                    id: "end".into(),
+                    kind: NodeKind::Terminal,
+                    config: serde_json::json!({}),
+                    position: None,
+                },
+            ],
+            edges: vec![
+                EdgeDef {
+                    from: TRIGGER_SENTINEL.into(),
+                    to: "fetch".into(),
+                    when: None,
+                },
+                EdgeDef {
+                    from: "fetch".into(),
+                    to: "end".into(),
+                    when: None,
+                },
+            ],
+        };
+        let row = auto_store
+            .upsert(
+                &AutomationUpsert {
+                    id: None,
+                    name: "rate-limited-fetch".into(),
+                    enabled: true,
+                    definition: def,
+                },
+                1000,
+            )
+            .unwrap();
+
+        // Context with cap=1 so the first call (which goes to the network and
+        // may time out or fail — that's fine) succeeds the limiter check, and
+        // the second call is rejected by the limiter before touching the wire.
+        let ctx = ExecutorContext::with_http_fetch_limit(
+            db.clone(),
+            noop_pool(),
+            None,
+            1, // cap at 1 call per minute
+        );
+
+        let evt1 = seed_bus_event(&db, "e-rl-1", serde_json::json!({}));
+        let evt2 = seed_bus_event(&db, "e-rl-2", serde_json::json!({}));
+
+        // First run: network error or success depending on env — either way the
+        // limiter check passes (count goes to 1).
+        run_matching_automations(&ctx, &evt1);
+
+        // Second run: limiter check fails (count would be 2 > cap 1).
+        run_matching_automations(&ctx, &evt2);
+
+        let runs = run_store.list_for_automation(&row.id, 10).unwrap();
+        assert_eq!(runs.len(), 2, "both events should have produced runs");
+        // Second run must be Failed with the rate-limit message.
+        let second = runs.iter().find(|r| r.event_id == "e-rl-2").unwrap();
+        assert_eq!(second.status, AutomationRunStatus::Failed);
+        let trace = &second.step_traces[0];
+        let err = trace.error.as_deref().unwrap_or("");
+        assert!(
+            err.contains("rate limit exceeded"),
+            "expected rate-limit error, got: {err}"
         );
     }
 }

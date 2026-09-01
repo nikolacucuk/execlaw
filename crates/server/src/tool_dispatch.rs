@@ -1049,6 +1049,7 @@ mod tests {
                 is_ephemeral: false,
                 ephemeral_expires_at: None,
                 last_activity_at: 0,
+                context_window_policy: None,
             })
             .unwrap();
         cid
@@ -1159,6 +1160,7 @@ mod tests {
                 // populate `ctx.memory` even though we'd need it.
                 capabilities: vec![],
                 default_allowed_classes: vec!["Controller".into()],
+                sensitive: false,
             },
         });
         let host = test_host();
@@ -1285,6 +1287,7 @@ mod tests {
                     latency: ToolLatency::Low,
                     capabilities: vec![Capability::MemoryWrite],
                     default_allowed_classes: vec!["Controller".into(), "KnownTrusted".into()],
+                    sensitive: false,
                 },
             }))
             .unwrap();
@@ -1343,6 +1346,7 @@ mod tests {
                     latency: ToolLatency::Low,
                     capabilities: vec![Capability::MemoryWrite],
                     default_allowed_classes: vec!["Controller".into(), "KnownTrusted".into()],
+                    sensitive: false,
                 },
             }))
             .unwrap();
@@ -1400,6 +1404,7 @@ mod tests {
                     latency: ToolLatency::Low,
                     capabilities: vec![Capability::McpAdmin],
                     default_allowed_classes: vec!["Controller".into()],
+                    sensitive: false,
                 },
             }))
             .unwrap();

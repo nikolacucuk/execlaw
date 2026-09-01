@@ -19,6 +19,7 @@
 //! integration) land incrementally on top of this shape.
 
 use async_trait::async_trait;
+use execlaw_context_window;
 use execlaw_core::conversation::{ConversationStore, Phase};
 use execlaw_core::db::Database;
 use execlaw_core::events::{
@@ -162,6 +163,24 @@ pub struct TurnConfig {
     /// The event log retains the unwrapped text so audit + replay are
     /// unchanged.
     pub spotlight_delim: Option<String>,
+    /// Context-window policy string (§9). Parsed by
+    /// `execlaw_context_window::parse_policy`. Accepted values:
+    /// `"full_replay"` (default), `"sliding:N"`, or
+    /// `"token_budget:MAX:RESERVE"`. An empty string or unrecognised
+    /// value falls back to `FullReplay`.
+    pub context_window_policy: String,
+    /// Optional Small-backend client used by the history summarizer
+    /// (§14/§7). When `Some`, messages trimmed by the context-window
+    /// policy are compressed into a single bullet-point summary that
+    /// is inserted at position 1 so the model retains a digest of
+    /// dropped context. When `None`, trimmed messages are silently
+    /// discarded (legacy behaviour).
+    pub summarizer_client: Option<(InferenceClient, ModelId)>,
+    /// Optional `Session` FSM handle (§new-3). When `Some`,
+    /// `run_turn` drives the FSM: `TurnStarted` at entry,
+    /// `ApprovalRequired` on policy-gate wait, `TurnCompleted`
+    /// on success, error paths leave the FSM at `Active`.
+    pub session: Option<std::sync::Arc<tokio::sync::Mutex<execlaw_session::Session>>>,
 }
 
 impl std::fmt::Debug for TurnConfig {
@@ -295,10 +314,86 @@ impl TurnExecutor {
         )?;
         log.append(&user_event)?;
 
+        // § new-3: drive Session FSM → Active.
+        if let Some(sess) = cfg.session.as_ref() {
+            let mut guard = sess.lock().await;
+            let _ = guard.transition(execlaw_session::SessionEvent::TurnStarted);
+        }
+
         // 2. Assemble the chat messages from the event log.
         let history = log.replay_since(conversation_id, EventSeq(0))?;
         let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&cfg.system_prompt)];
         messages.extend(hydrate_messages(&history, cfg.spotlight_delim.as_deref()));
+
+        // Context-window management (§9 + §14). Apply the configured policy
+        // to trim the message list to fit within the model's context
+        // budget before the first inference call. The system prompt is
+        // always preserved by the policy implementation.
+        //
+        // If a summarizer client is configured and the policy actually
+        // drops messages, summarize the dropped segment and inject a
+        // compact digest at position 1 (after the system prompt) so the
+        // model retains awareness of discarded context.
+        let cw_policy = execlaw_context_window::parse_policy(
+            &cfg.context_window_policy,
+        );
+        if cfg.summarizer_client.is_some() {
+            // Clone before trim so we can diff what was removed.
+            let before_trim = messages.clone();
+            execlaw_context_window::apply(&cw_policy, &mut messages);
+            // Determine the dropped prefix (everything that was removed
+            // from the non-system portion of `before_trim`).
+            let conv_start = before_trim
+                .iter()
+                .position(|m| m.role != Role::System)
+                .unwrap_or(before_trim.len());
+            let kept_count = messages.len();
+            let before_count = before_trim.len();
+            if kept_count < before_count {
+                let dropped_count = before_count - kept_count;
+                let dropped = &before_trim[conv_start..conv_start + dropped_count];
+                if !dropped.is_empty() {
+                    let (client, model_id) = cfg
+                        .summarizer_client
+                        .as_ref()
+                        .expect("checked Some above");
+                    match crate::history_summarizer::summarize_segment(
+                        dropped,
+                        client,
+                        model_id,
+                    )
+                    .await
+                    {
+                        Ok(summary_msg) => {
+                            // Insert after the system prompt (position 1).
+                            let insert_pos = if messages
+                                .first()
+                                .is_some_and(|m| m.role == Role::System)
+                            {
+                                1
+                            } else {
+                                0
+                            };
+                            messages.insert(insert_pos, summary_msg);
+                            tracing::debug!(
+                                dropped = dropped_count,
+                                "context-window: injected history summary",
+                            );
+                        }
+                        Err(e) => {
+                            // Non-fatal: proceed without summary rather
+                            // than aborting the turn.
+                            tracing::warn!(
+                                error = %e,
+                                "history summarizer failed; proceeding without summary",
+                            );
+                        }
+                    }
+                }
+            }
+        } else {
+            execlaw_context_window::apply(&cw_policy, &mut messages);
+        }
 
         // 2026-05-15 — when the caller supplied image data URLs for
         // THIS turn, replace the trailing text-only user ChatMessage
@@ -609,6 +704,11 @@ impl TurnExecutor {
             assistant_text_chars = last_text.chars().count(),
             "turn complete (in-process executor)"
         );
+        // § new-3: drive Session FSM → Completing.
+        if let Some(sess) = cfg.session.as_ref() {
+            let mut guard = sess.lock().await;
+            let _ = guard.transition(execlaw_session::SessionEvent::TurnCompleted);
+        }
         Ok(TurnSummary {
             events_written: written,
             assistant_text: last_text,
@@ -806,6 +906,9 @@ mod tests {
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
+            context_window_policy: String::new(),
+            summarizer_client: None,
+            session: None,
         };
 
         let summary = exec
@@ -900,6 +1003,9 @@ mod tests {
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
+            context_window_policy: String::new(),
+            summarizer_client: None,
+            session: None,
         };
 
         let summary = exec
@@ -1045,6 +1151,9 @@ mod tests {
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
+            context_window_policy: String::new(),
+            summarizer_client: None,
+            session: None,
         };
         let _ = exec
             .run_turn(&db, &cid, "try it", None, &cfg)
@@ -1121,6 +1230,9 @@ mod tests {
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
+            context_window_policy: String::new(),
+            summarizer_client: None,
+            session: None,
         };
         let err = exec
             .run_turn(&db, &cid, "go", None, &cfg)

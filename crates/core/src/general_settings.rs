@@ -34,6 +34,11 @@ pub struct GeneralSettings {
     /// 60 / 90 / 120 (see `crate::retention::ALLOWED_RETENTION_DAYS`).
     /// Sweepers consume via [`crate::retention::RetentionPolicy::load`].
     pub history_retention_days: u32,
+    /// Default TTL in seconds for operator-minted signed download URLs
+    /// (migration 0014). Defaults to 300 (5 min). Operator editable
+    /// via PATCH /api/admin/settings/general. Capped to
+    /// `download_urls::MAX_TTL_SECS` at call time.
+    pub download_url_ttl_secs: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -79,7 +84,8 @@ impl<'a> GeneralSettingsStore<'a> {
             .with_conn(|c| {
                 let mut stmt = c.prepare(
                     "SELECT start_on_boot, bind_address, updated_at, \
-                        setup_wizard_dismissed_at, history_retention_days \
+                        setup_wizard_dismissed_at, history_retention_days, \
+                        COALESCE(download_url_ttl_secs, 300) \
                  FROM config_general WHERE id = 1",
                 )?;
                 let row = stmt
@@ -91,6 +97,7 @@ impl<'a> GeneralSettingsStore<'a> {
                             updated_at: r.get(2)?,
                             setup_wizard_dismissed_at: r.get(3)?,
                             history_retention_days: raw_retention.max(0) as u32,
+                            download_url_ttl_secs: r.get::<_, i64>(5).unwrap_or(300),
                         })
                     })
                     .ok();
@@ -279,6 +286,7 @@ impl<'a> GeneralSettingsStore<'a> {
                 updated_at: now,
                 setup_wizard_dismissed_at: new_dismissed,
                 history_retention_days: new_retention.max(0) as u32,
+                download_url_ttl_secs: 300, // preserve current, reads on GET
             })
         })?;
         Ok(saved)

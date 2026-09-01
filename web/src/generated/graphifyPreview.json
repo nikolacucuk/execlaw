@@ -1,0 +1,2707 @@
+{
+  "source_path": "graphify-out/graph.json",
+  "generated_at": "2026-06-02T00:37:25.597Z",
+  "nodes": [
+    {
+      "label": "icon.json",
+      "file_type": "code",
+      "source_file": "assets/execlaw-apple-icon.icon/icon.json",
+      "source_location": "L1",
+      "id": "execlaw_apple_icon_icon_icon",
+      "community": 473,
+      "norm_label": "icon.json"
+    },
+    {
+      "label": "fill",
+      "file_type": "code",
+      "source_file": "assets/execlaw-apple-icon.icon/icon.json",
+      "source_location": "L2",
+      "id": "execlaw_apple_icon_icon_icon_fill",
+      "community": 473,
+      "norm_label": "fill"
+    },
+    {
+      "label": "automatic-gradient",
+      "file_type": "code",
+      "source_file": "assets/execlaw-apple-icon.icon/icon.json",
+      "source_location": "L3",
+      "id": "execlaw_apple_icon_icon_icon_fill_automatic_gradient",
+      "community": 473,
+      "norm_label": "automatic-gradient"
+    },
+    {
+      "label": "groups",
+      "file_type": "code",
+      "source_file": "assets/execlaw-apple-icon.icon/icon.json",
+      "source_location": "L5",
+      "id": "execlaw_apple_icon_icon_icon_groups",
+      "community": 473,
+      "norm_label": "groups"
+    },
+    {
+      "label": "supported-platforms",
+      "file_type": "code",
+      "source_file": "assets/execlaw-apple-icon.icon/icon.json",
+      "source_location": "L35",
+      "id": "execlaw_apple_icon_icon_icon_supported_platforms",
+      "community": 473,
+      "norm_label": "supported-platforms"
+    },
+    {
+      "label": "circles",
+      "file_type": "code",
+      "source_file": "assets/execlaw-apple-icon.icon/icon.json",
+      "source_location": "L36",
+      "id": "execlaw_apple_icon_icon_icon_supported_platforms_circles",
+      "community": 473,
+      "norm_label": "circles"
+    },
+    {
+      "label": "squares",
+      "file_type": "code",
+      "source_file": "assets/execlaw-apple-icon.icon/icon.json",
+      "source_location": "L39",
+      "id": "execlaw_apple_icon_icon_icon_supported_platforms_squares",
+      "community": 473,
+      "norm_label": "squares"
+    },
+    {
+      "label": "render.rs",
+      "file_type": "code",
+      "source_file": "crates/charting/benches/render.rs",
+      "source_location": "L1",
+      "id": "benches_render",
+      "community": 87,
+      "norm_label": "render.rs"
+    },
+    {
+      "label": "week_hourly()",
+      "file_type": "code",
+      "source_file": "crates/charting/benches/render.rs",
+      "source_location": "L16",
+      "id": "benches_render_week_hourly",
+      "community": 87,
+      "norm_label": "week_hourly()"
+    },
+    {
+      "label": "ChartSpec",
+      "file_type": "code",
+      "source_file": "crates/charting/benches/render.rs",
+      "source_location": "L16",
+      "id": "chartspec",
+      "community": 87,
+      "norm_label": "chartspec"
+    },
+    {
+      "label": "bench_svg()",
+      "file_type": "code",
+      "source_file": "crates/charting/benches/render.rs",
+      "source_location": "L41",
+      "id": "benches_render_bench_svg",
+      "community": 87,
+      "norm_label": "bench_svg()"
+    },
+    {
+      "label": "Criterion",
+      "file_type": "code",
+      "source_file": "crates/charting/benches/render.rs",
+      "source_location": "L41",
+      "id": "crates_charting_benches_render_rs_criterion",
+      "community": 87,
+      "norm_label": "criterion"
+    },
+    {
+      "label": "bench_png()",
+      "file_type": "code",
+      "source_file": "crates/charting/benches/render.rs",
+      "source_location": "L52",
+      "id": "benches_render_bench_png",
+      "community": 87,
+      "norm_label": "bench_png()"
+    },
+    {
+      "label": "lib.rs",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L1",
+      "id": "crates_charting_src_lib_rs_src_lib",
+      "community": 87,
+      "norm_label": "lib.rs"
+    },
+    {
+      "label": "Point",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L47",
+      "id": "src_lib_point",
+      "community": 87,
+      "norm_label": "point"
+    },
+    {
+      "label": "Series",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L56",
+      "id": "src_lib_series",
+      "community": 87,
+      "norm_label": "series"
+    },
+    {
+      "label": "String",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L57",
+      "id": "crates_charting_src_lib_rs_string",
+      "community": 87,
+      "norm_label": "string"
+    },
+    {
+      "label": "Vec",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L58",
+      "id": "crates_charting_src_lib_rs_vec",
+      "community": 87,
+      "norm_label": "vec"
+    },
+    {
+      "label": "Option",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L60",
+      "id": "crates_charting_src_lib_rs_option",
+      "community": 87,
+      "norm_label": "option"
+    },
+    {
+      "label": "Band",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L67",
+      "id": "src_lib_band",
+      "community": 87,
+      "norm_label": "band"
+    },
+    {
+      "label": "ChartKind",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L76",
+      "id": "src_lib_chartkind",
+      "community": 87,
+      "norm_label": "chartkind"
+    },
+    {
+      "label": "Default",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L83",
+      "id": "crates_charting_src_lib_rs_default",
+      "community": 87,
+      "norm_label": "default"
+    },
+    {
+      "label": ".default()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L84",
+      "id": "src_lib_chartkind_default",
+      "community": 87,
+      "norm_label": ".default()"
+    },
+    {
+      "label": "Self",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L84",
+      "id": "crates_charting_src_lib_rs_self",
+      "community": 87,
+      "norm_label": "self"
+    },
+    {
+      "label": "ChartSpec",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L92",
+      "id": "src_lib_chartspec",
+      "community": 87,
+      "norm_label": "chartspec"
+    },
+    {
+      "label": "ChartError",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L116",
+      "id": "src_lib_charterror",
+      "community": 87,
+      "norm_label": "charterror"
+    },
+    {
+      "label": "render_to_svg()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L134",
+      "id": "src_lib_render_to_svg",
+      "community": 87,
+      "norm_label": "render_to_svg()"
+    },
+    {
+      "label": "Result",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L134",
+      "id": "crates_charting_src_lib_rs_result",
+      "community": 87,
+      "norm_label": "result"
+    },
+    {
+      "label": "render_to_png()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L147",
+      "id": "src_lib_render_to_png",
+      "community": 87,
+      "norm_label": "render_to_png()"
+    },
+    {
+      "label": "encode_rgb_to_png()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L162",
+      "id": "src_lib_encode_rgb_to_png",
+      "community": 87,
+      "norm_label": "encode_rgb_to_png()"
+    },
+    {
+      "label": "validate()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L181",
+      "id": "src_lib_validate",
+      "community": 87,
+      "norm_label": "validate()"
+    },
+    {
+      "label": "series_color()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L225",
+      "id": "src_lib_series_color",
+      "community": 87,
+      "norm_label": "series_color()"
+    },
+    {
+      "label": "RGBColor",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L225",
+      "id": "rgbcolor",
+      "community": 87,
+      "norm_label": "rgbcolor"
+    },
+    {
+      "label": "draw()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L232",
+      "id": "src_lib_draw",
+      "community": 87,
+      "norm_label": "draw()"
+    },
+    {
+      "label": "DrawingArea",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L232",
+      "id": "drawingarea",
+      "community": 87,
+      "norm_label": "drawingarea"
+    },
+    {
+      "label": "DB",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L232",
+      "id": "db",
+      "community": 327,
+      "norm_label": "db"
+    },
+    {
+      "label": "Shift",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L232",
+      "id": "shift",
+      "community": 87,
+      "norm_label": "shift"
+    },
+    {
+      "label": "compute_bounds()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L378",
+      "id": "src_lib_compute_bounds",
+      "community": 87,
+      "norm_label": "compute_bounds()"
+    },
+    {
+      "label": "format_y()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L425",
+      "id": "src_lib_format_y",
+      "community": 87,
+      "norm_label": "format_y()"
+    },
+    {
+      "label": "format_time_x()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L437",
+      "id": "src_lib_format_time_x",
+      "community": 87,
+      "norm_label": "format_time_x()"
+    },
+    {
+      "label": "bar_width()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L446",
+      "id": "src_lib_bar_width",
+      "community": 87,
+      "norm_label": "bar_width()"
+    },
+    {
+      "label": "temp_chart()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L471",
+      "id": "src_lib_temp_chart",
+      "community": 87,
+      "norm_label": "temp_chart()"
+    },
+    {
+      "label": "renders_svg_with_root_element()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L494",
+      "id": "src_lib_renders_svg_with_root_element",
+      "community": 87,
+      "norm_label": "renders_svg_with_root_element()"
+    },
+    {
+      "label": "renders_png_with_magic_header()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L505",
+      "id": "src_lib_renders_png_with_magic_header",
+      "community": 87,
+      "norm_label": "renders_png_with_magic_header()"
+    },
+    {
+      "label": "empty_series_still_renders_axes()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L512",
+      "id": "src_lib_empty_series_still_renders_axes",
+      "community": 87,
+      "norm_label": "empty_series_still_renders_axes()"
+    },
+    {
+      "label": "rejects_nan_points()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L532",
+      "id": "src_lib_rejects_nan_points",
+      "community": 87,
+      "norm_label": "rejects_nan_points()"
+    },
+    {
+      "label": "rejects_mismatched_band_lengths()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L555",
+      "id": "src_lib_rejects_mismatched_band_lengths",
+      "community": 87,
+      "norm_label": "rejects_mismatched_band_lengths()"
+    },
+    {
+      "label": "json_round_trip_preserves_spec()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L579",
+      "id": "src_lib_json_round_trip_preserves_spec",
+      "community": 87,
+      "norm_label": "json_round_trip_preserves_spec()"
+    },
+    {
+      "label": "bar_chart_renders_to_svg()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L610",
+      "id": "src_lib_bar_chart_renders_to_svg",
+      "community": 87,
+      "norm_label": "bar_chart_renders_to_svg()"
+    },
+    {
+      "label": "ensemble_band_overlay_renders()",
+      "file_type": "code",
+      "source_file": "crates/charting/src/lib.rs",
+      "source_location": "L635",
+      "id": "src_lib_ensemble_band_overlay_renders",
+      "community": 87,
+      "norm_label": "ensemble_band_overlay_renders()"
+    },
+    {
+      "label": "main.rs",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1",
+      "id": "crates_cli_src_main_rs_src_main",
+      "community": 62,
+      "norm_label": "main.rs"
+    },
+    {
+      "label": "Cli",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L42",
+      "id": "crates_cli_src_main_rs_src_main_cli",
+      "community": 254,
+      "norm_label": "cli"
+    },
+    {
+      "label": "Command",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L44",
+      "id": "command",
+      "community": 254,
+      "norm_label": "command"
+    },
+    {
+      "label": "Command",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L48",
+      "id": "src_main_command",
+      "community": 62,
+      "norm_label": "command"
+    },
+    {
+      "label": "ServiceOp",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L187",
+      "id": "src_main_serviceop",
+      "community": 62,
+      "norm_label": "serviceop"
+    },
+    {
+      "label": "DbOp",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L241",
+      "id": "src_main_dbop",
+      "community": 62,
+      "norm_label": "dbop"
+    },
+    {
+      "label": "HwOp",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L274",
+      "id": "src_main_hwop",
+      "community": 62,
+      "norm_label": "hwop"
+    },
+    {
+      "label": "EvalOp",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L280",
+      "id": "src_main_evalop",
+      "community": 62,
+      "norm_label": "evalop"
+    },
+    {
+      "label": "install_panic_hook()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L330",
+      "id": "crates_cli_src_main_rs_src_main_install_panic_hook",
+      "community": 62,
+      "norm_label": "install_panic_hook()"
+    },
+    {
+      "label": "init_tracing()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L354",
+      "id": "crates_cli_src_main_rs_src_main_init_tracing",
+      "community": 62,
+      "norm_label": "init_tracing()"
+    },
+    {
+      "label": "Option",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L354",
+      "id": "crates_cli_src_main_rs_option",
+      "community": 62,
+      "norm_label": "option"
+    },
+    {
+      "label": "WorkerGuard",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L354",
+      "id": "workerguard",
+      "community": 62,
+      "norm_label": "workerguard"
+    },
+    {
+      "label": "resolve_log_dir()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L427",
+      "id": "src_main_resolve_log_dir",
+      "community": 62,
+      "norm_label": "resolve_log_dir()"
+    },
+    {
+      "label": "PathBuf",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L427",
+      "id": "crates_cli_src_main_rs_pathbuf",
+      "community": 62,
+      "norm_label": "pathbuf"
+    },
+    {
+      "label": "default_data_dir()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L440",
+      "id": "src_main_default_data_dir",
+      "community": 62,
+      "norm_label": "default_data_dir()"
+    },
+    {
+      "label": "dirs_home()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L451",
+      "id": "src_main_dirs_home",
+      "community": 62,
+      "norm_label": "dirs_home()"
+    },
+    {
+      "label": "default_db_path()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L455",
+      "id": "src_main_default_db_path",
+      "community": 62,
+      "norm_label": "default_db_path()"
+    },
+    {
+      "label": "open_db()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L459",
+      "id": "src_main_open_db",
+      "community": 62,
+      "norm_label": "open_db()"
+    },
+    {
+      "label": "Path",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L459",
+      "id": "crates_cli_src_main_rs_path",
+      "community": 62,
+      "norm_label": "path"
+    },
+    {
+      "label": "Result",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L459",
+      "id": "crates_cli_src_main_rs_result",
+      "community": 62,
+      "norm_label": "result"
+    },
+    {
+      "label": "Database",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L459",
+      "id": "crates_cli_src_main_rs_database",
+      "community": 62,
+      "norm_label": "database"
+    },
+    {
+      "label": "open_db_with_config()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L470",
+      "id": "src_main_open_db_with_config",
+      "community": 62,
+      "norm_label": "open_db_with_config()"
+    },
+    {
+      "label": "DbConfig",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L470",
+      "id": "crates_cli_src_main_rs_dbconfig",
+      "community": 62,
+      "norm_label": "dbconfig"
+    },
+    {
+      "label": "ensure_runner_image_fresh()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L502",
+      "id": "src_main_ensure_runner_image_fresh",
+      "community": 62,
+      "norm_label": "ensure_runner_image_fresh()"
+    },
+    {
+      "label": "find_workspace_with_dockerfile()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L628",
+      "id": "src_main_find_workspace_with_dockerfile",
+      "community": 62,
+      "norm_label": "find_workspace_with_dockerfile()"
+    },
+    {
+      "label": "cmd_install()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L639",
+      "id": "src_main_cmd_install",
+      "community": 62,
+      "norm_label": "cmd_install()"
+    },
+    {
+      "label": "String",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L639",
+      "id": "crates_cli_src_main_rs_string",
+      "community": 62,
+      "norm_label": "string"
+    },
+    {
+      "label": "cmd_doctor()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L686",
+      "id": "src_main_cmd_doctor",
+      "community": 62,
+      "norm_label": "cmd_doctor()"
+    },
+    {
+      "label": "cmd_db_migrate()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L792",
+      "id": "src_main_cmd_db_migrate",
+      "community": 62,
+      "norm_label": "cmd_db_migrate()"
+    },
+    {
+      "label": "cmd_db_status()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L803",
+      "id": "src_main_cmd_db_status",
+      "community": 62,
+      "norm_label": "cmd_db_status()"
+    },
+    {
+      "label": "cmd_db_repair_checksum()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L810",
+      "id": "src_main_cmd_db_repair_checksum",
+      "community": 62,
+      "norm_label": "cmd_db_repair_checksum()"
+    },
+    {
+      "label": "cmd_hw_rescan()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L828",
+      "id": "src_main_cmd_hw_rescan",
+      "community": 62,
+      "norm_label": "cmd_hw_rescan()"
+    },
+    {
+      "label": "cmd_replay()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L837",
+      "id": "src_main_cmd_replay",
+      "community": 62,
+      "norm_label": "cmd_replay()"
+    },
+    {
+      "label": "cmd_eval_flag()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L956",
+      "id": "src_main_cmd_eval_flag",
+      "community": 62,
+      "norm_label": "cmd_eval_flag()"
+    },
+    {
+      "label": "cmd_eval_list()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L993",
+      "id": "src_main_cmd_eval_list",
+      "community": 62,
+      "norm_label": "cmd_eval_list()"
+    },
+    {
+      "label": "cmd_backfill_events()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1028",
+      "id": "src_main_cmd_backfill_events",
+      "community": 62,
+      "norm_label": "cmd_backfill_events()"
+    },
+    {
+      "label": "cmd_resign_events()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1054",
+      "id": "src_main_cmd_resign_events",
+      "community": 62,
+      "norm_label": "cmd_resign_events()"
+    },
+    {
+      "label": "cmd_backup()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1075",
+      "id": "src_main_cmd_backup",
+      "community": 62,
+      "norm_label": "cmd_backup()"
+    },
+    {
+      "label": "cmd_restore()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1126",
+      "id": "src_main_cmd_restore",
+      "community": 62,
+      "norm_label": "cmd_restore()"
+    },
+    {
+      "label": "build_webauthn_from_env()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1212",
+      "id": "src_main_build_webauthn_from_env",
+      "community": 62,
+      "norm_label": "build_webauthn_from_env()"
+    },
+    {
+      "label": "SocketAddr",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1212",
+      "id": "crates_cli_src_main_rs_socketaddr",
+      "community": 62,
+      "norm_label": "socketaddr"
+    },
+    {
+      "label": "WebauthnSvc",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1212",
+      "id": "webauthnsvc",
+      "community": 62,
+      "norm_label": "webauthnsvc"
+    },
+    {
+      "label": "parse_range()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1233",
+      "id": "src_main_parse_range",
+      "community": 62,
+      "norm_label": "parse_range()"
+    },
+    {
+      "label": "resolve_bind()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1260",
+      "id": "src_main_resolve_bind",
+      "community": 62,
+      "norm_label": "resolve_bind()"
+    },
+    {
+      "label": "cmd_serve()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L1270",
+      "id": "src_main_cmd_serve",
+      "community": 62,
+      "norm_label": "cmd_serve()"
+    },
+    {
+      "label": "main()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L2412",
+      "id": "crates_cli_src_main_rs_src_main_main",
+      "community": 62,
+      "norm_label": "main()"
+    },
+    {
+      "label": "ExitCode",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L2412",
+      "id": "exitcode",
+      "community": 62,
+      "norm_label": "exitcode"
+    },
+    {
+      "label": "resolve_bind_prefers_cli_over_db()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L2576",
+      "id": "src_main_resolve_bind_prefers_cli_over_db",
+      "community": 62,
+      "norm_label": "resolve_bind_prefers_cli_over_db()"
+    },
+    {
+      "label": "resolve_bind_falls_back_to_db_when_no_cli()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L2583",
+      "id": "src_main_resolve_bind_falls_back_to_db_when_no_cli",
+      "community": 62,
+      "norm_label": "resolve_bind_falls_back_to_db_when_no_cli()"
+    },
+    {
+      "label": "resolve_bind_falls_back_to_default_when_neither_provided()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L2590",
+      "id": "src_main_resolve_bind_falls_back_to_default_when_neither_provided",
+      "community": 62,
+      "norm_label": "resolve_bind_falls_back_to_default_when_neither_provided()"
+    },
+    {
+      "label": "resolve_bind_treats_blank_db_value_as_missing()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/main.rs",
+      "source_location": "L2597",
+      "id": "src_main_resolve_bind_treats_blank_db_value_as_missing",
+      "community": 62,
+      "norm_label": "resolve_bind_treats_blank_db_value_as_missing()"
+    },
+    {
+      "label": "service.rs",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L1",
+      "id": "crates_cli_src_service_rs_src_service",
+      "community": 14,
+      "norm_label": "service.rs"
+    },
+    {
+      "label": "label()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L52",
+      "id": "src_service_label",
+      "community": 14,
+      "norm_label": "label()"
+    },
+    {
+      "label": "ServiceLabel",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L52",
+      "id": "servicelabel",
+      "community": 14,
+      "norm_label": "servicelabel"
+    },
+    {
+      "label": "manager()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L58",
+      "id": "src_service_manager",
+      "community": 14,
+      "norm_label": "manager()"
+    },
+    {
+      "label": "Result",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L58",
+      "id": "crates_cli_src_service_rs_result",
+      "community": 14,
+      "norm_label": "result"
+    },
+    {
+      "label": "Box",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L58",
+      "id": "crates_cli_src_service_rs_box",
+      "community": 14,
+      "norm_label": "box"
+    },
+    {
+      "label": "ServiceManager",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L58",
+      "id": "crates_cli_src_service_rs_servicemanager",
+      "community": 14,
+      "norm_label": "servicemanager"
+    },
+    {
+      "label": "current_binary()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L90",
+      "id": "src_service_current_binary",
+      "community": 14,
+      "norm_label": "current_binary()"
+    },
+    {
+      "label": "PathBuf",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L90",
+      "id": "crates_cli_src_service_rs_pathbuf",
+      "community": 14,
+      "norm_label": "pathbuf"
+    },
+    {
+      "label": "service_run_args()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L102",
+      "id": "src_service_service_run_args",
+      "community": 14,
+      "norm_label": "service_run_args()"
+    },
+    {
+      "label": "Vec",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L102",
+      "id": "crates_cli_src_service_rs_vec",
+      "community": 14,
+      "norm_label": "vec"
+    },
+    {
+      "label": "OsString",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L102",
+      "id": "osstring",
+      "community": 14,
+      "norm_label": "osstring"
+    },
+    {
+      "label": "install()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L123",
+      "id": "src_service_install",
+      "community": 14,
+      "norm_label": "install()"
+    },
+    {
+      "label": "Option",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L123",
+      "id": "crates_cli_src_service_rs_option",
+      "community": 14,
+      "norm_label": "option"
+    },
+    {
+      "label": "String",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L123",
+      "id": "crates_cli_src_service_rs_string",
+      "community": 14,
+      "norm_label": "string"
+    },
+    {
+      "label": "write_bind_to_db()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L203",
+      "id": "src_service_write_bind_to_db",
+      "community": 14,
+      "norm_label": "write_bind_to_db()"
+    },
+    {
+      "label": "start()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L223",
+      "id": "src_service_start",
+      "community": 14,
+      "norm_label": "start()"
+    },
+    {
+      "label": "stop()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L232",
+      "id": "src_service_stop",
+      "community": 14,
+      "norm_label": "stop()"
+    },
+    {
+      "label": "restart()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L241",
+      "id": "src_service_restart",
+      "community": 14,
+      "norm_label": "restart()"
+    },
+    {
+      "label": "uninstall()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L264",
+      "id": "src_service_uninstall",
+      "community": 14,
+      "norm_label": "uninstall()"
+    },
+    {
+      "label": "status()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L282",
+      "id": "src_service_status",
+      "community": 14,
+      "norm_label": "status()"
+    },
+    {
+      "label": "decorate_permission_error()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L316",
+      "id": "src_service_decorate_permission_error",
+      "community": 14,
+      "norm_label": "decorate_permission_error()"
+    },
+    {
+      "label": "Error",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L316",
+      "id": "crates_cli_src_service_rs_error",
+      "community": 14,
+      "norm_label": "error"
+    },
+    {
+      "label": "is_access_denied()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L352",
+      "id": "src_service_is_access_denied",
+      "community": 14,
+      "norm_label": "is_access_denied()"
+    },
+    {
+      "label": "windows_runtime_run()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L387",
+      "id": "src_service_windows_runtime_run",
+      "community": 14,
+      "norm_label": "windows_runtime_run()"
+    },
+    {
+      "label": "ServiceArgs",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L420",
+      "id": "src_service_serviceargs",
+      "community": 14,
+      "norm_label": "serviceargs"
+    },
+    {
+      "label": "service_main()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L430",
+      "id": "src_service_service_main",
+      "community": 14,
+      "norm_label": "service_main()"
+    },
+    {
+      "label": "run_service_event_loop()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L436",
+      "id": "src_service_run_service_event_loop",
+      "community": 14,
+      "norm_label": "run_service_event_loop()"
+    },
+    {
+      "label": "run()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L502",
+      "id": "src_service_run",
+      "community": 14,
+      "norm_label": "run()"
+    },
+    {
+      "label": "decorate_passes_through_non_permission_errors()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L542",
+      "id": "src_service_decorate_passes_through_non_permission_errors",
+      "community": 14,
+      "norm_label": "decorate_passes_through_non_permission_errors()"
+    },
+    {
+      "label": "is_access_denied_matches_kind_and_raw_os_error()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L556",
+      "id": "src_service_is_access_denied_matches_kind_and_raw_os_error",
+      "community": 14,
+      "norm_label": "is_access_denied_matches_kind_and_raw_os_error()"
+    },
+    {
+      "label": "decorate_recognizes_sc_exe_access_denied_substring()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L579",
+      "id": "src_service_decorate_recognizes_sc_exe_access_denied_substring",
+      "community": 14,
+      "norm_label": "decorate_recognizes_sc_exe_access_denied_substring()"
+    },
+    {
+      "label": "decorate_permission_denied_includes_admin_hint_on_windows()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L608",
+      "id": "src_service_decorate_permission_denied_includes_admin_hint_on_windows",
+      "community": 14,
+      "norm_label": "decorate_permission_denied_includes_admin_hint_on_windows()"
+    },
+    {
+      "label": "decorate_permission_denied_with_system_includes_sudo_hint()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L621",
+      "id": "src_service_decorate_permission_denied_with_system_includes_sudo_hint",
+      "community": 14,
+      "norm_label": "decorate_permission_denied_with_system_includes_sudo_hint()"
+    },
+    {
+      "label": "decorate_permission_denied_user_level_includes_dir_hint()",
+      "file_type": "code",
+      "source_file": "crates/cli/src/service.rs",
+      "source_location": "L630",
+      "id": "src_service_decorate_permission_denied_user_level_includes_dir_hint",
+      "community": 14,
+      "norm_label": "decorate_permission_denied_user_level_includes_dir_hint()"
+    },
+    {
+      "label": "gpu_memory.rs",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/gpu_memory.rs",
+      "source_location": "L1",
+      "id": "src_gpu_memory",
+      "community": 463,
+      "norm_label": "gpu_memory.rs"
+    },
+    {
+      "label": "nvidia_memory_mb_via_nvml()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/gpu_memory.rs",
+      "source_location": "L37",
+      "id": "src_gpu_memory_nvidia_memory_mb_via_nvml",
+      "community": 463,
+      "norm_label": "nvidia_memory_mb_via_nvml()"
+    },
+    {
+      "label": "Vec",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/gpu_memory.rs",
+      "source_location": "L37",
+      "id": "crates_container_manager_src_gpu_memory_rs_vec",
+      "community": 463,
+      "norm_label": "vec"
+    },
+    {
+      "label": "intel_memory_mb_via_registry()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/gpu_memory.rs",
+      "source_location": "L73",
+      "id": "src_gpu_memory_intel_memory_mb_via_registry",
+      "community": 463,
+      "norm_label": "intel_memory_mb_via_registry()"
+    },
+    {
+      "label": "String",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/gpu_memory.rs",
+      "source_location": "L73",
+      "id": "crates_container_manager_src_gpu_memory_rs_string",
+      "community": 463,
+      "norm_label": "string"
+    },
+    {
+      "label": "nvml_probe_returns_empty_or_some_vec()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/gpu_memory.rs",
+      "source_location": "L128",
+      "id": "src_gpu_memory_nvml_probe_returns_empty_or_some_vec",
+      "community": 463,
+      "norm_label": "nvml_probe_returns_empty_or_some_vec()"
+    },
+    {
+      "label": "intel_registry_probe_returns_well_formed_pairs()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/gpu_memory.rs",
+      "source_location": "L137",
+      "id": "src_gpu_memory_intel_registry_probe_returns_well_formed_pairs",
+      "community": 463,
+      "norm_label": "intel_registry_probe_returns_well_formed_pairs()"
+    },
+    {
+      "label": "hardware.rs",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L1",
+      "id": "src_hardware",
+      "community": 57,
+      "norm_label": "hardware.rs"
+    },
+    {
+      "label": "GpuId",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L21",
+      "id": "src_hardware_gpuid",
+      "community": 57,
+      "norm_label": "gpuid"
+    },
+    {
+      "label": "GpuVendor",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L24",
+      "id": "src_hardware_gpuvendor",
+      "community": 57,
+      "norm_label": "gpuvendor"
+    },
+    {
+      "label": ".from_pci_vendor()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L41",
+      "id": "src_hardware_gpuvendor_from_pci_vendor",
+      "community": 57,
+      "norm_label": ".from_pci_vendor()"
+    },
+    {
+      "label": "Self",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L41",
+      "id": "crates_container_manager_src_hardware_rs_self",
+      "community": 57,
+      "norm_label": "self"
+    },
+    {
+      "label": "GpuDevice",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L57",
+      "id": "src_hardware_gpudevice",
+      "community": 57,
+      "norm_label": "gpudevice"
+    },
+    {
+      "label": "String",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L60",
+      "id": "crates_container_manager_src_hardware_rs_string",
+      "community": 57,
+      "norm_label": "string"
+    },
+    {
+      "label": "Vec",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L62",
+      "id": "crates_container_manager_src_hardware_rs_vec",
+      "community": 57,
+      "norm_label": "vec"
+    },
+    {
+      "label": "PathBuf",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L62",
+      "id": "crates_container_manager_src_hardware_rs_pathbuf",
+      "community": 57,
+      "norm_label": "pathbuf"
+    },
+    {
+      "label": "Option",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L70",
+      "id": "crates_container_manager_src_hardware_rs_option",
+      "community": 57,
+      "norm_label": "option"
+    },
+    {
+      "label": "SysfsSource",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L82",
+      "id": "src_hardware_sysfssource",
+      "community": 57,
+      "norm_label": "sysfssource"
+    },
+    {
+      "label": "HardwareProfile",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L92",
+      "id": "src_hardware_hardwareprofile",
+      "community": 57,
+      "norm_label": "hardwareprofile"
+    },
+    {
+      "label": "detect()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L115",
+      "id": "src_hardware_detect",
+      "community": 57,
+      "norm_label": "detect()"
+    },
+    {
+      "label": "detect_macos()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L158",
+      "id": "src_hardware_detect_macos",
+      "community": 57,
+      "norm_label": "detect_macos()"
+    },
+    {
+      "label": "SystemProfilerOutput",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L197",
+      "id": "src_hardware_systemprofileroutput",
+      "community": 57,
+      "norm_label": "systemprofileroutput"
+    },
+    {
+      "label": "SystemProfilerDisplay",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L199",
+      "id": "systemprofilerdisplay",
+      "community": 57,
+      "norm_label": "systemprofilerdisplay"
+    },
+    {
+      "label": "SystemProfilerDisplay",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L203",
+      "id": "src_hardware_systemprofilerdisplay",
+      "community": 57,
+      "norm_label": "systemprofilerdisplay"
+    },
+    {
+      "label": "parse_macos_system_profiler()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L239",
+      "id": "src_hardware_parse_macos_system_profiler",
+      "community": 57,
+      "norm_label": "parse_macos_system_profiler()"
+    },
+    {
+      "label": "apply_vram_corrections()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L295",
+      "id": "src_hardware_apply_vram_corrections",
+      "community": 57,
+      "norm_label": "apply_vram_corrections()"
+    },
+    {
+      "label": ".from_query()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L354",
+      "id": "src_hardware_gpudevice_from_query",
+      "community": 57,
+      "norm_label": ".from_query()"
+    },
+    {
+      "label": "GPUInfo",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L354",
+      "id": "crates_container_manager_src_hardware_rs_gpuinfo",
+      "community": 57,
+      "norm_label": "gpuinfo"
+    },
+    {
+      "label": "extract_clean_device_hex()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L427",
+      "id": "src_hardware_extract_clean_device_hex",
+      "community": 57,
+      "norm_label": "extract_clean_device_hex()"
+    },
+    {
+      "label": "detect_sysfs()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L453",
+      "id": "src_hardware_detect_sysfs",
+      "community": 57,
+      "norm_label": "detect_sysfs()"
+    },
+    {
+      "label": "Path",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L453",
+      "id": "crates_container_manager_src_hardware_rs_path",
+      "community": 57,
+      "norm_label": "path"
+    },
+    {
+      "label": "mk_mock_sysfs()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L537",
+      "id": "src_hardware_mk_mock_sysfs",
+      "community": 57,
+      "norm_label": "mk_mock_sysfs()"
+    },
+    {
+      "label": "TempDir",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L537",
+      "id": "crates_container_manager_src_hardware_rs_tempdir",
+      "community": 57,
+      "norm_label": "tempdir"
+    },
+    {
+      "label": "detects_nvidia_and_intel_from_mock_sysfs()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L560",
+      "id": "src_hardware_detects_nvidia_and_intel_from_mock_sysfs",
+      "community": 57,
+      "norm_label": "detects_nvidia_and_intel_from_mock_sysfs()"
+    },
+    {
+      "label": "returns_empty_profile_when_no_drm_dir()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L578",
+      "id": "src_hardware_returns_empty_profile_when_no_drm_dir",
+      "community": 57,
+      "norm_label": "returns_empty_profile_when_no_drm_dir()"
+    },
+    {
+      "label": "from_pci_vendor_maps_correctly()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L585",
+      "id": "src_hardware_from_pci_vendor_maps_correctly",
+      "community": 57,
+      "norm_label": "from_pci_vendor_maps_correctly()"
+    },
+    {
+      "label": "mk_query_gpu()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L599",
+      "id": "src_hardware_mk_query_gpu",
+      "community": 57,
+      "norm_label": "mk_query_gpu()"
+    },
+    {
+      "label": "from_query_maps_nvidia_to_local_enum()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L646",
+      "id": "src_hardware_from_query_maps_nvidia_to_local_enum",
+      "community": 57,
+      "norm_label": "from_query_maps_nvidia_to_local_enum()"
+    },
+    {
+      "label": "from_query_maps_intel_to_local_enum()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L655",
+      "id": "src_hardware_from_query_maps_intel_to_local_enum",
+      "community": 57,
+      "norm_label": "from_query_maps_intel_to_local_enum()"
+    },
+    {
+      "label": "from_query_maps_amd_to_local_enum()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L663",
+      "id": "src_hardware_from_query_maps_amd_to_local_enum",
+      "community": 57,
+      "norm_label": "from_query_maps_amd_to_local_enum()"
+    },
+    {
+      "label": "from_query_maps_apple_to_apple()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L674",
+      "id": "src_hardware_from_query_maps_apple_to_apple",
+      "community": 57,
+      "norm_label": "from_query_maps_apple_to_apple()"
+    },
+    {
+      "label": "from_pci_vendor_maps_apple()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L687",
+      "id": "src_hardware_from_pci_vendor_maps_apple",
+      "community": 57,
+      "norm_label": "from_pci_vendor_maps_apple()"
+    },
+    {
+      "label": "from_query_uses_model_name_when_device_id_missing()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L697",
+      "id": "src_hardware_from_query_uses_model_name_when_device_id_missing",
+      "community": 57,
+      "norm_label": "from_query_uses_model_name_when_device_id_missing()"
+    },
+    {
+      "label": "from_query_unknown_vendor_string_maps_to_unknown_local()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L711",
+      "id": "src_hardware_from_query_unknown_vendor_string_maps_to_unknown_local",
+      "community": 57,
+      "norm_label": "from_query_unknown_vendor_string_maps_to_unknown_local()"
+    },
+    {
+      "label": "from_query_pulls_model_name_and_memory_mb()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L725",
+      "id": "src_hardware_from_query_pulls_model_name_and_memory_mb",
+      "community": 57,
+      "norm_label": "from_query_pulls_model_name_and_memory_mb()"
+    },
+    {
+      "label": "from_query_zero_memory_falls_through_to_none()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L735",
+      "id": "src_hardware_from_query_zero_memory_falls_through_to_none",
+      "community": 57,
+      "norm_label": "from_query_zero_memory_falls_through_to_none()"
+    },
+    {
+      "label": "extract_clean_device_hex_handles_linux_sysfs()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L745",
+      "id": "src_hardware_extract_clean_device_hex_handles_linux_sysfs",
+      "community": 57,
+      "norm_label": "extract_clean_device_hex_handles_linux_sysfs()"
+    },
+    {
+      "label": "extract_clean_device_hex_parses_windows_pnp()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L751",
+      "id": "src_hardware_extract_clean_device_hex_parses_windows_pnp",
+      "community": 57,
+      "norm_label": "extract_clean_device_hex_parses_windows_pnp()"
+    },
+    {
+      "label": "extract_clean_device_hex_truncates_garbage()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L763",
+      "id": "src_hardware_extract_clean_device_hex_truncates_garbage",
+      "community": 57,
+      "norm_label": "extract_clean_device_hex_truncates_garbage()"
+    },
+    {
+      "label": "detect_doesnt_panic_on_any_host()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L770",
+      "id": "src_hardware_detect_doesnt_panic_on_any_host",
+      "community": 57,
+      "norm_label": "detect_doesnt_panic_on_any_host()"
+    },
+    {
+      "label": "parse_macos_system_profiler_reads_m3_pro()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L800",
+      "id": "src_hardware_parse_macos_system_profiler_reads_m3_pro",
+      "community": 57,
+      "norm_label": "parse_macos_system_profiler_reads_m3_pro()"
+    },
+    {
+      "label": "parse_macos_system_profiler_skips_non_apple_vendors()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L824",
+      "id": "src_hardware_parse_macos_system_profiler_skips_non_apple_vendors",
+      "community": 57,
+      "norm_label": "parse_macos_system_profiler_skips_non_apple_vendors()"
+    },
+    {
+      "label": "parse_macos_system_profiler_handles_legacy_vendor_field()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L844",
+      "id": "src_hardware_parse_macos_system_profiler_handles_legacy_vendor_field",
+      "community": 57,
+      "norm_label": "parse_macos_system_profiler_handles_legacy_vendor_field()"
+    },
+    {
+      "label": "parse_macos_system_profiler_zero_memsize_yields_none_memory()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L863",
+      "id": "src_hardware_parse_macos_system_profiler_zero_memsize_yields_none_memory",
+      "community": 57,
+      "norm_label": "parse_macos_system_profiler_zero_memsize_yields_none_memory()"
+    },
+    {
+      "label": "parse_macos_system_profiler_tolerates_garbage_json()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L871",
+      "id": "src_hardware_parse_macos_system_profiler_tolerates_garbage_json",
+      "community": 57,
+      "norm_label": "parse_macos_system_profiler_tolerates_garbage_json()"
+    },
+    {
+      "label": "parse_macos_system_profiler_handles_multi_entry_with_mixed_vendors()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L889",
+      "id": "src_hardware_parse_macos_system_profiler_handles_multi_entry_with_mixed_vendors",
+      "community": 57,
+      "norm_label": "parse_macos_system_profiler_handles_multi_entry_with_mixed_vendors()"
+    },
+    {
+      "label": "parse_macos_system_profiler_assigns_distinct_ids_for_two_apple_entries()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hardware.rs",
+      "source_location": "L907",
+      "id": "src_hardware_parse_macos_system_profiler_assigns_distinct_ids_for_two_apple_entries",
+      "community": 57,
+      "norm_label": "parse_macos_system_profiler_assigns_distinct_ids_for_two_apple_entries()"
+    },
+    {
+      "label": "hf_downloader.rs",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L1",
+      "id": "src_hf_downloader",
+      "community": 65,
+      "norm_label": "hf_downloader.rs"
+    },
+    {
+      "label": "HfError",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L58",
+      "id": "src_hf_downloader_hferror",
+      "community": 65,
+      "norm_label": "hferror"
+    },
+    {
+      "label": "From",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L71",
+      "id": "crates_container_manager_src_hf_downloader_rs_from",
+      "community": 65,
+      "norm_label": "from"
+    },
+    {
+      "label": "Error",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L71",
+      "id": "crates_container_manager_src_hf_downloader_rs_error",
+      "community": 65,
+      "norm_label": "error"
+    },
+    {
+      "label": ".from()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L72",
+      "id": "src_hf_downloader_hferror_from",
+      "community": 65,
+      "norm_label": ".from()"
+    },
+    {
+      "label": "Self",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L72",
+      "id": "crates_container_manager_src_hf_downloader_rs_self",
+      "community": 65,
+      "norm_label": "self"
+    },
+    {
+      "label": "DownloadEvent",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L85",
+      "id": "src_hf_downloader_downloadevent",
+      "community": 65,
+      "norm_label": "downloadevent"
+    },
+    {
+      "label": "ResolvedModel",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L134",
+      "id": "src_hf_downloader_resolvedmodel",
+      "community": 65,
+      "norm_label": "resolvedmodel"
+    },
+    {
+      "label": "String",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L135",
+      "id": "crates_container_manager_src_hf_downloader_rs_string",
+      "community": 65,
+      "norm_label": "string"
+    },
+    {
+      "label": "PathBuf",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L139",
+      "id": "crates_container_manager_src_hf_downloader_rs_pathbuf",
+      "community": 65,
+      "norm_label": "pathbuf"
+    },
+    {
+      "label": "HfDownloader",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L146",
+      "id": "src_hf_downloader_hfdownloader",
+      "community": 65,
+      "norm_label": "hfdownloader"
+    },
+    {
+      "label": "Arc",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L147",
+      "id": "crates_container_manager_src_hf_downloader_rs_arc",
+      "community": 65,
+      "norm_label": "arc"
+    },
+    {
+      "label": "HfDownloaderInner",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L147",
+      "id": "hfdownloaderinner",
+      "community": 65,
+      "norm_label": "hfdownloaderinner"
+    },
+    {
+      "label": "HfDownloaderInner",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L150",
+      "id": "src_hf_downloader_hfdownloaderinner",
+      "community": 65,
+      "norm_label": "hfdownloaderinner"
+    },
+    {
+      "label": "Vec",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L152",
+      "id": "crates_container_manager_src_hf_downloader_rs_vec",
+      "community": 65,
+      "norm_label": "vec"
+    },
+    {
+      "label": "Option",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L153",
+      "id": "crates_container_manager_src_hf_downloader_rs_option",
+      "community": 65,
+      "norm_label": "option"
+    },
+    {
+      "label": "Client",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L154",
+      "id": "crates_container_manager_src_hf_downloader_rs_client",
+      "community": 65,
+      "norm_label": "client"
+    },
+    {
+      "label": ".new()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L165",
+      "id": "src_hf_downloader_hfdownloader_new",
+      "community": 65,
+      "norm_label": ".new()"
+    },
+    {
+      "label": ".is_cached()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L200",
+      "id": "src_hf_downloader_hfdownloader_is_cached",
+      "community": 65,
+      "norm_label": ".is_cached()"
+    },
+    {
+      "label": ".snapshot_dir_local()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L218",
+      "id": "src_hf_downloader_hfdownloader_snapshot_dir_local",
+      "community": 65,
+      "norm_label": ".snapshot_dir_local()"
+    },
+    {
+      "label": ".snapshot_dir()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L230",
+      "id": "src_hf_downloader_hfdownloader_snapshot_dir",
+      "community": 65,
+      "norm_label": ".snapshot_dir()"
+    },
+    {
+      "label": "Result",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L230",
+      "id": "crates_container_manager_src_hf_downloader_rs_result",
+      "community": 65,
+      "norm_label": "result"
+    },
+    {
+      "label": ".ensure_model()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L246",
+      "id": "src_hf_downloader_hfdownloader_ensure_model",
+      "community": 65,
+      "norm_label": ".ensure_model()"
+    },
+    {
+      "label": "DownloadStream",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L246",
+      "id": "downloadstream",
+      "community": 65,
+      "norm_label": "downloadstream"
+    },
+    {
+      "label": ".run_download()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L273",
+      "id": "src_hf_downloader_hfdownloader_run_download",
+      "community": 65,
+      "norm_label": ".run_download()"
+    },
+    {
+      "label": "Sender",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L273",
+      "id": "crates_container_manager_src_hf_downloader_rs_sender",
+      "community": 65,
+      "norm_label": "sender"
+    },
+    {
+      "label": "Instant",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L273",
+      "id": "crates_container_manager_src_hf_downloader_rs_instant",
+      "community": 65,
+      "norm_label": "instant"
+    },
+    {
+      "label": ".resolve_revision()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L411",
+      "id": "src_hf_downloader_hfdownloader_resolve_revision",
+      "community": 65,
+      "norm_label": ".resolve_revision()"
+    },
+    {
+      "label": ".fetch_manifest()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L431",
+      "id": "src_hf_downloader_hfdownloader_fetch_manifest",
+      "community": 65,
+      "norm_label": ".fetch_manifest()"
+    },
+    {
+      "label": "ManifestFile",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L431",
+      "id": "manifestfile",
+      "community": 65,
+      "norm_label": "manifestfile"
+    },
+    {
+      "label": ".find_in_secondary()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L476",
+      "id": "src_hf_downloader_hfdownloader_find_in_secondary",
+      "community": 65,
+      "norm_label": ".find_in_secondary()"
+    },
+    {
+      "label": ".download_file()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L511",
+      "id": "src_hf_downloader_hfdownloader_download_file",
+      "community": 65,
+      "norm_label": ".download_file()"
+    },
+    {
+      "label": "Path",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L511",
+      "id": "crates_container_manager_src_hf_downloader_rs_path",
+      "community": 65,
+      "norm_label": "path"
+    },
+    {
+      "label": "DownloadStream",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L581",
+      "id": "src_hf_downloader_downloadstream",
+      "community": 65,
+      "norm_label": "downloadstream"
+    },
+    {
+      "label": "Receiver",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L582",
+      "id": "crates_container_manager_src_hf_downloader_rs_receiver",
+      "community": 65,
+      "norm_label": "receiver"
+    },
+    {
+      "label": "JoinHandle",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L586",
+      "id": "crates_container_manager_src_hf_downloader_rs_joinhandle",
+      "community": 65,
+      "norm_label": "joinhandle"
+    },
+    {
+      "label": ".next()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L590",
+      "id": "src_hf_downloader_downloadstream_next",
+      "community": 65,
+      "norm_label": ".next()"
+    },
+    {
+      "label": "ManifestFile",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L596",
+      "id": "src_hf_downloader_manifestfile",
+      "community": 65,
+      "norm_label": "manifestfile"
+    },
+    {
+      "label": "repo_dir_name()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L603",
+      "id": "src_hf_downloader_repo_dir_name",
+      "community": 65,
+      "norm_label": "repo_dir_name()"
+    },
+    {
+      "label": "is_valid_model_id()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L614",
+      "id": "src_hf_downloader_is_valid_model_id",
+      "community": 65,
+      "norm_label": "is_valid_model_id()"
+    },
+    {
+      "label": "file_already_satisfied()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L629",
+      "id": "src_hf_downloader_file_already_satisfied",
+      "community": 65,
+      "norm_label": "file_already_satisfied()"
+    },
+    {
+      "label": "materialise_from_secondary()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L647",
+      "id": "src_hf_downloader_materialise_from_secondary",
+      "community": 65,
+      "norm_label": "materialise_from_secondary()"
+    },
+    {
+      "label": "repo_dir_name_handles_owner_and_unowned()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L682",
+      "id": "src_hf_downloader_repo_dir_name_handles_owner_and_unowned",
+      "community": 65,
+      "norm_label": "repo_dir_name_handles_owner_and_unowned()"
+    },
+    {
+      "label": "is_valid_model_id_accepts_real_repos()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L694",
+      "id": "src_hf_downloader_is_valid_model_id_accepts_real_repos",
+      "community": 65,
+      "norm_label": "is_valid_model_id_accepts_real_repos()"
+    },
+    {
+      "label": "is_valid_model_id_rejects_path_traversal_and_garbage()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L701",
+      "id": "src_hf_downloader_is_valid_model_id_rejects_path_traversal_and_garbage",
+      "community": 65,
+      "norm_label": "is_valid_model_id_rejects_path_traversal_and_garbage()"
+    },
+    {
+      "label": "file_already_satisfied_size_match()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L711",
+      "id": "src_hf_downloader_file_already_satisfied_size_match",
+      "community": 65,
+      "norm_label": "file_already_satisfied_size_match()"
+    },
+    {
+      "label": "materialise_from_secondary_falls_through_to_copy_when_hardlink_fails()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/hf_downloader.rs",
+      "source_location": "L721",
+      "id": "src_hf_downloader_materialise_from_secondary_falls_through_to_copy_when_hardlink_fails",
+      "community": 65,
+      "norm_label": "materialise_from_secondary_falls_through_to_copy_when_hardlink_fails()"
+    },
+    {
+      "label": "lib.rs",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/lib.rs",
+      "source_location": "L1",
+      "id": "crates_container_manager_src_lib_rs_src_lib",
+      "community": 138,
+      "norm_label": "lib.rs"
+    },
+    {
+      "label": "service.rs",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1",
+      "id": "crates_container_manager_src_service_rs_src_service",
+      "community": 2,
+      "norm_label": "service.rs"
+    },
+    {
+      "label": "ServiceRuntime",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L39",
+      "id": "src_service_serviceruntime",
+      "community": 2,
+      "norm_label": "serviceruntime"
+    },
+    {
+      "label": "ServiceSpec",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L52",
+      "id": "src_service_servicespec",
+      "community": 2,
+      "norm_label": "servicespec"
+    },
+    {
+      "label": "String",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L56",
+      "id": "crates_container_manager_src_service_rs_string",
+      "community": 2,
+      "norm_label": "string"
+    },
+    {
+      "label": "Vec",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L62",
+      "id": "crates_container_manager_src_service_rs_vec",
+      "community": 2,
+      "norm_label": "vec"
+    },
+    {
+      "label": "Option",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L68",
+      "id": "crates_container_manager_src_service_rs_option",
+      "community": 2,
+      "norm_label": "option"
+    },
+    {
+      "label": "GpuVendor",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L92",
+      "id": "crates_container_manager_src_service_rs_gpuvendor",
+      "community": 2,
+      "norm_label": "gpuvendor"
+    },
+    {
+      "label": "HostMount",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L100",
+      "id": "crates_container_manager_src_service_rs_hostmount",
+      "community": 2,
+      "norm_label": "hostmount"
+    },
+    {
+      "label": "Default",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L119",
+      "id": "crates_container_manager_src_service_rs_default",
+      "community": 2,
+      "norm_label": "default"
+    },
+    {
+      "label": ".default()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L123",
+      "id": "src_service_servicespec_default",
+      "community": 2,
+      "norm_label": ".default()"
+    },
+    {
+      "label": "Self",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L123",
+      "id": "crates_container_manager_src_service_rs_self",
+      "community": 2,
+      "norm_label": "self"
+    },
+    {
+      "label": "HostMount",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L148",
+      "id": "src_service_hostmount",
+      "community": 2,
+      "norm_label": "hostmount"
+    },
+    {
+      "label": "ServiceHandle",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L162",
+      "id": "src_service_servicehandle",
+      "community": 2,
+      "norm_label": "servicehandle"
+    },
+    {
+      "label": ".endpoint_url()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L176",
+      "id": "src_service_servicehandle_endpoint_url",
+      "community": 2,
+      "norm_label": ".endpoint_url()"
+    },
+    {
+      "label": "ServiceStatus",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L184",
+      "id": "src_service_servicestatus",
+      "community": 2,
+      "norm_label": "servicestatus"
+    },
+    {
+      "label": "ServiceError",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L205",
+      "id": "src_service_serviceerror",
+      "community": 2,
+      "norm_label": "serviceerror"
+    },
+    {
+      "label": "ServiceController",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L220",
+      "id": "src_service_servicecontroller",
+      "community": 2,
+      "norm_label": "servicecontroller"
+    },
+    {
+      "label": "Send",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L220",
+      "id": "crates_container_manager_src_service_rs_send",
+      "community": 2,
+      "norm_label": "send"
+    },
+    {
+      "label": "Sync",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L220",
+      "id": "crates_container_manager_src_service_rs_sync",
+      "community": 2,
+      "norm_label": "sync"
+    },
+    {
+      "label": "BollardServiceController",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L278",
+      "id": "src_service_bollardservicecontroller",
+      "community": 2,
+      "norm_label": "bollardservicecontroller"
+    },
+    {
+      "label": "Docker",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L279",
+      "id": "crates_container_manager_src_service_rs_docker",
+      "community": 2,
+      "norm_label": "docker"
+    },
+    {
+      "label": "Duration",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L280",
+      "id": "crates_container_manager_src_service_rs_duration",
+      "community": 2,
+      "norm_label": "duration"
+    },
+    {
+      "label": "Client",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L285",
+      "id": "crates_container_manager_src_service_rs_client",
+      "community": 2,
+      "norm_label": "client"
+    },
+    {
+      "label": ".connect()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L292",
+      "id": "src_service_bollardservicecontroller_connect",
+      "community": 2,
+      "norm_label": ".connect()"
+    },
+    {
+      "label": "Result",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L292",
+      "id": "crates_container_manager_src_service_rs_result",
+      "community": 2,
+      "norm_label": "result"
+    },
+    {
+      "label": ".with_docker()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L298",
+      "id": "src_service_bollardservicecontroller_with_docker",
+      "community": 2,
+      "norm_label": ".with_docker()"
+    },
+    {
+      "label": ".pull_image()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L325",
+      "id": "src_service_bollardservicecontroller_pull_image",
+      "community": 2,
+      "norm_label": ".pull_image()"
+    },
+    {
+      "label": ".spawn()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L389",
+      "id": "src_service_bollardservicecontroller_spawn",
+      "community": 2,
+      "norm_label": ".spawn()"
+    },
+    {
+      "label": ".stop()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L624",
+      "id": "src_service_bollardservicecontroller_stop",
+      "community": 2,
+      "norm_label": ".stop()"
+    },
+    {
+      "label": ".inspect()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L646",
+      "id": "src_service_bollardservicecontroller_inspect",
+      "community": 2,
+      "norm_label": ".inspect()"
+    },
+    {
+      "label": ".health_check()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L680",
+      "id": "src_service_bollardservicecontroller_health_check",
+      "community": 2,
+      "norm_label": ".health_check()"
+    },
+    {
+      "label": ".try_adopt()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L691",
+      "id": "src_service_bollardservicecontroller_try_adopt",
+      "community": 2,
+      "norm_label": ".try_adopt()"
+    },
+    {
+      "label": ".tail_logs()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L729",
+      "id": "src_service_bollardservicecontroller_tail_logs",
+      "community": 2,
+      "norm_label": ".tail_logs()"
+    },
+    {
+      "label": "NativeServiceController",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L796",
+      "id": "src_service_nativeservicecontroller",
+      "community": 2,
+      "norm_label": "nativeservicecontroller"
+    },
+    {
+      "label": "Arc",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L800",
+      "id": "crates_container_manager_src_service_rs_arc",
+      "community": 2,
+      "norm_label": "arc"
+    },
+    {
+      "label": "Mutex",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L800",
+      "id": "crates_container_manager_src_service_rs_mutex",
+      "community": 2,
+      "norm_label": "mutex"
+    },
+    {
+      "label": "HashMap",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L800",
+      "id": "crates_container_manager_src_service_rs_hashmap",
+      "community": 2,
+      "norm_label": "hashmap"
+    },
+    {
+      "label": "NativeChild",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L800",
+      "id": "nativechild",
+      "community": 2,
+      "norm_label": "nativechild"
+    },
+    {
+      "label": "NativeChild",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L805",
+      "id": "src_service_nativechild",
+      "community": 2,
+      "norm_label": "nativechild"
+    },
+    {
+      "label": "Child",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L809",
+      "id": "crates_container_manager_src_service_rs_child",
+      "community": 2,
+      "norm_label": "child"
+    },
+    {
+      "label": "VecDeque",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L815",
+      "id": "crates_container_manager_src_service_rs_vecdeque",
+      "community": 2,
+      "norm_label": "vecdeque"
+    },
+    {
+      "label": ".default()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L821",
+      "id": "src_service_nativeservicecontroller_default",
+      "community": 2,
+      "norm_label": ".default()"
+    },
+    {
+      "label": ".new()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L827",
+      "id": "src_service_nativeservicecontroller_new",
+      "community": 2,
+      "norm_label": ".new()"
+    },
+    {
+      "label": ".discover_ollama()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L852",
+      "id": "src_service_nativeservicecontroller_discover_ollama",
+      "community": 2,
+      "norm_label": ".discover_ollama()"
+    },
+    {
+      "label": "PathBuf",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L852",
+      "id": "crates_container_manager_src_service_rs_pathbuf",
+      "community": 2,
+      "norm_label": "pathbuf"
+    },
+    {
+      "label": ".discover_ollama_with()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L863",
+      "id": "src_service_nativeservicecontroller_discover_ollama_with",
+      "community": 2,
+      "norm_label": ".discover_ollama_with()"
+    },
+    {
+      "label": "Fn",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L863",
+      "id": "crates_container_manager_src_service_rs_fn",
+      "community": 2,
+      "norm_label": "fn"
+    },
+    {
+      "label": ".discover_for_hint()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L932",
+      "id": "src_service_nativeservicecontroller_discover_for_hint",
+      "community": 2,
+      "norm_label": ".discover_for_hint()"
+    },
+    {
+      "label": "find_on_path()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L949",
+      "id": "src_service_find_on_path",
+      "community": 2,
+      "norm_label": "find_on_path()"
+    },
+    {
+      "label": ".spawn()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L964",
+      "id": "src_service_nativeservicecontroller_spawn",
+      "community": 2,
+      "norm_label": ".spawn()"
+    },
+    {
+      "label": ".stop()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1064",
+      "id": "src_service_nativeservicecontroller_stop",
+      "community": 2,
+      "norm_label": ".stop()"
+    },
+    {
+      "label": ".inspect()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1084",
+      "id": "src_service_nativeservicecontroller_inspect",
+      "community": 2,
+      "norm_label": ".inspect()"
+    },
+    {
+      "label": ".health_check()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1109",
+      "id": "src_service_nativeservicecontroller_health_check",
+      "community": 2,
+      "norm_label": ".health_check()"
+    },
+    {
+      "label": ".tail_logs()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1129",
+      "id": "src_service_nativeservicecontroller_tail_logs",
+      "community": 2,
+      "norm_label": ".tail_logs()"
+    },
+    {
+      "label": ".try_adopt()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1149",
+      "id": "src_service_nativeservicecontroller_try_adopt",
+      "community": 2,
+      "norm_label": ".try_adopt()"
+    },
+    {
+      "label": "spawn_log_reaper()",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1163",
+      "id": "src_service_spawn_log_reaper",
+      "community": 2,
+      "norm_label": "spawn_log_reaper()"
+    },
+    {
+      "label": "AsyncRead",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1163",
+      "id": "asyncread",
+      "community": 2,
+      "norm_label": "asyncread"
+    },
+    {
+      "label": "Unpin",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1163",
+      "id": "unpin",
+      "community": 2,
+      "norm_label": "unpin"
+    },
+    {
+      "label": "MultiplexedServiceController",
+      "file_type": "code",
+      "source_file": "crates/container-manager/src/service.rs",
+      "source_location": "L1222",
+      "id": "src_service_multiplexedservicecontroller",
+      "community": 2,
+      "norm_label": "multiplexedservicecontroller"
+    }
+  ],
+  "edges": []
+}

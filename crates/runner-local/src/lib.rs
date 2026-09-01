@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod history_summarizer;
 pub mod turn;
 
 use execlaw_inference_api::InferenceClient;

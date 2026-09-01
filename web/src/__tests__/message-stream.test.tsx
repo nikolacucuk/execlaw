@@ -6,7 +6,11 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
-import { MessageStream, stripSkillPrependBlock } from "../chat/MessageStream";
+import {
+    MessageStream,
+    formatMessageTimestamp,
+    stripSkillPrependBlock,
+} from "../chat/MessageStream";
 import {
     __resetChatStore,
     appendMessage,
@@ -116,21 +120,15 @@ describe("MessageStream", () => {
         expect(stream.textContent).not.toContain("agent · agent");
     });
 
-    /// 2026-04-28 — web-origin user messages render their bubble
-    /// alone, no meta line. The right-aligned pill is the only
-    /// affordance needed.
-    it("hides the meta line entirely for web-origin user messages", () => {
-        setMessages("conv-4", [baseMsg(1, "hello there")]);
-        const view = render(<MessageStream conversationId="conv-4" />);
-        // Meta div is `.execlaw-msg__meta`; it should not exist for a
-        // plain web user message.
+    it("shows timestamp metadata for web-origin user messages", () => {
+        setMessages("conv-4", [{ ...baseMsg(1, "hello there"), committed_at: 1_700_000_000 }]);
+        render(<MessageStream conversationId="conv-4" />);
+        const meta = document.querySelector(".execlaw-msg__meta");
+        expect(meta).toBeTruthy();
+        expect(meta?.textContent).toContain("you");
+        expect(meta?.textContent).toMatch(/\d{4}|\d{2}:\d{2}/);
         expect(
-            view.container.querySelector(".execlaw-msg__meta"),
-        ).toBeNull();
-        // The bubble itself is still rendered (with the user's
-        // text + the is-user modifier).
-        expect(
-            view.container.querySelector(".execlaw-msg__bubble.is-user"),
+            document.querySelector(".execlaw-msg__bubble.is-user"),
         ).toBeTruthy();
     });
 
@@ -453,5 +451,17 @@ describe("stripSkillPrependBlock", () => {
         const t = 'plain text\n\n<skill name="ns/x">should stay</skill>';
         // No leading block → nothing stripped.
         expect(stripSkillPrependBlock(t)).toBe(t);
+    });
+});
+
+describe("formatMessageTimestamp", () => {
+    it("returns empty string for invalid timestamps", () => {
+        expect(formatMessageTimestamp(0)).toBe("");
+        expect(formatMessageTimestamp(Number.NaN)).toBe("");
+    });
+
+    it("formats valid unix-seconds as local date/time", () => {
+        const s = formatMessageTimestamp(1_700_000_000);
+        expect(s.length).toBeGreaterThan(0);
     });
 });

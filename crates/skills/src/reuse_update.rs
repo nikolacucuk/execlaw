@@ -521,6 +521,18 @@ mod tests {
             .unwrap();
     }
 
+    fn disable_reuse_update(db: &Database) {
+        SkillsConfigStore::new(db)
+            .update(
+                &SkillsConfigUpdate {
+                    reuse_update_enabled: Some(false),
+                    ..Default::default()
+                },
+                1,
+            )
+            .unwrap();
+    }
+
     fn append(
         log: &EventLog,
         cid: &ConversationId,
@@ -558,6 +570,9 @@ mod tests {
     #[tokio::test]
     async fn disabled_when_config_off() {
         let (db, store) = fresh();
+        // Migration 0011 enables reuse_update by default; explicitly disable
+        // it here so we can verify the Disabled short-circuit.
+        disable_reuse_update(&db);
         let summ = Arc::new(MockSummarizer::new(SummarizerOutput::Skip {
             reason: "n/a".into(),
         }));

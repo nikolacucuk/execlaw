@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "autoresearch.analyze_results_tsv args",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "tsv": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Full results.tsv text including header."
+    },
+    "top_n": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 25,
+      "default": 5,
+      "description": "Maximum number of top kept deltas to return."
+    }
+  },
+  "required": ["tsv"]
+}

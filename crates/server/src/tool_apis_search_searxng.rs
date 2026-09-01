@@ -65,7 +65,7 @@ impl SearxNGSearchApi {
     /// fallible plumbing.
     pub fn new(base_url: impl Into<String>) -> Self {
         let raw = base_url.into();
-        let base_url = raw.trim_end_matches('/').to_owned();
+        let base_url = normalize_base_url(&raw);
         // Same realistic browser UA as the DDG client. SearxNG itself
         // doesn't bot-detect, but the engines IT proxies (Google,
         // Bing) sometimes do — and SearxNG forwards the UA through
@@ -83,9 +83,20 @@ impl SearxNGSearchApi {
         let raw = base_url.into();
         Self {
             client,
-            base_url: raw.trim_end_matches('/').to_owned(),
+            base_url: normalize_base_url(&raw),
         }
     }
+}
+
+fn normalize_base_url(raw: &str) -> String {
+    let mut base = raw.trim().trim_end_matches('/').to_owned();
+    // Operators sometimes paste a full `/search` URL. Normalize
+    // that to the root form so the adapter's internal `/search`
+    // append does not produce `/search/search`.
+    if let Some(stripped) = base.strip_suffix("/search") {
+        base = stripped.to_owned();
+    }
+    base
 }
 
 #[async_trait]
@@ -189,6 +200,14 @@ mod tests {
         let api = SearxNGSearchApi::new("https://searx.example.com/");
         assert_eq!(api.base_url, "https://searx.example.com");
         let api2 = SearxNGSearchApi::new("https://searx.example.com");
+        assert_eq!(api2.base_url, "https://searx.example.com");
+    }
+
+    #[test]
+    fn constructor_normalizes_search_path_suffix() {
+        let api = SearxNGSearchApi::new("https://searx.example.com/search");
+        assert_eq!(api.base_url, "https://searx.example.com");
+        let api2 = SearxNGSearchApi::new("https://searx.example.com/search/");
         assert_eq!(api2.base_url, "https://searx.example.com");
     }
 

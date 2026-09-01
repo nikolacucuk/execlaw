@@ -53,4 +53,16 @@ describe("WelcomeView", () => {
         fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
         expect(onSend).toHaveBeenCalledWith("hi from welcome", [], []);
     });
+
+    it("hides graph preview by default", () => {
+        localStorage.removeItem("execlaw.chat.graphify_welcome_visible");
+        renderWelcome({ onSend: () => {} });
+        expect(screen.queryByTestId("graphify-preview")).toBeNull();
+    });
+
+    it("shows graph preview when preference is enabled", () => {
+        localStorage.setItem("execlaw.chat.graphify_welcome_visible", "1");
+        renderWelcome({ onSend: () => {} });
+        expect(screen.getByTestId("graphify-preview")).toBeInTheDocument();
+    });
 });

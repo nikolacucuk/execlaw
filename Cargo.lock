@@ -1377,6 +1377,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "execlaw-context-window"
+version = "0.1.0"
+dependencies = [
+ "execlaw-inference-api",
+ "tracing",
+]
+
+[[package]]
 name = "execlaw-core"
 version = "0.1.0"
 dependencies = [
@@ -1586,8 +1594,10 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "execlaw-context-window",
  "execlaw-core",
  "execlaw-inference-api",
+ "execlaw-session",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

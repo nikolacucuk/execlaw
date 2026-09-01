@@ -26,6 +26,7 @@ members = [
     "crates/eval-harness",
     "crates/skills",
     "crates/model-adapter",
+    "crates/context-window",
 ]
 # Tauri desktop wrappers (macOS .app + Windows .exe-installer +
 # Linux .deb) are built with their own Rust toolchain via

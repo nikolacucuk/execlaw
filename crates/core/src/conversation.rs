@@ -219,6 +219,10 @@ pub struct ConversationRow {
     /// `set_last_activity_at`. Migration 0025 adds the column +
     /// backfills from MAX(committed_at) of state_events.
     pub last_activity_at: i64,
+    /// Per-conversation context-window policy override (migration 0013).
+    /// `None` means fall back to the global default. Serialised as
+    /// the same string format accepted by `parse_policy`.
+    pub context_window_policy: Option<String>,
 }
 
 /// Trimmed projection of a `state_conversations` row used by the SPA
@@ -271,8 +275,8 @@ impl<'db> ConversationStore<'db> {
                  (conversation_id, kind, last_seq, phase, controller_id, trust_class, \
                   snapshot_blob, snapshot_seq, lease_owner, lease_expires, modality, \
                   display_name, display_name_source, is_pinned, is_ephemeral, \
-                  ephemeral_expires_at, last_activity_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
+                  ephemeral_expires_at, last_activity_at, context_window_policy) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18) \
                  ON CONFLICT(conversation_id) DO UPDATE SET \
                     kind = excluded.kind, \
                     last_seq = excluded.last_seq, \
@@ -302,6 +306,7 @@ impl<'db> ConversationStore<'db> {
                     row.is_ephemeral as i64,
                     row.ephemeral_expires_at,
                     row.last_activity_at,
+                    row.context_window_policy,
                 ],
             )?;
             Ok(())
@@ -387,6 +392,24 @@ impl<'db> ConversationStore<'db> {
                  SET last_activity_at = ?1 \
                  WHERE conversation_id = ?2",
                 params![ts_unix_seconds, conversation_id.as_str()],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Set or clear the per-conversation context-window policy override
+    /// (migration 0013). Pass `None` to revert to the global default.
+    pub fn set_context_window_policy(
+        &self,
+        conversation_id: &ConversationId,
+        policy: Option<&str>,
+    ) -> Result<(), DbError> {
+        self.db.with_conn(|c| {
+            c.execute(
+                "UPDATE state_conversations \
+                 SET context_window_policy = ?1 \
+                 WHERE conversation_id = ?2",
+                params![policy, conversation_id.as_str()],
             )?;
             Ok(())
         })
@@ -526,7 +549,7 @@ impl<'db> ConversationStore<'db> {
                     "SELECT kind, last_seq, phase, controller_id, trust_class, \
                             snapshot_blob, snapshot_seq, lease_owner, lease_expires, modality, \
                             display_name, display_name_source, is_pinned, is_ephemeral, \
-                            ephemeral_expires_at, last_activity_at \
+                            ephemeral_expires_at, last_activity_at, context_window_policy \
                      FROM state_conversations WHERE conversation_id = ?1",
                     params![conversation_id.as_str()],
                     row_to_conversation,
@@ -557,6 +580,7 @@ fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
     let is_ephemeral: i64 = row.get(13)?;
     let ephemeral_expires_at: Option<i64> = row.get(14)?;
     let last_activity_at: i64 = row.get(15)?;
+    let context_window_policy: Option<String> = row.get(16)?;
     Ok(ConversationRow {
         // Filled in by the caller — we don't have the typed id here.
         conversation_id: ConversationId::from(""),
@@ -576,6 +600,7 @@ fn row_to_conversation(row: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
         is_ephemeral: is_ephemeral != 0,
         ephemeral_expires_at,
         last_activity_at,
+        context_window_policy,
     })
 }
 
@@ -651,6 +676,7 @@ mod tests {
             is_ephemeral: false,
             ephemeral_expires_at: None,
             last_activity_at: 0,
+            context_window_policy: None,
         }
     }
 

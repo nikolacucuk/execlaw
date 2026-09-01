@@ -481,8 +481,7 @@ fn fresh_conv_row(id: &str) -> ConversationRow {
         is_pinned: false,
         is_ephemeral: false,
         ephemeral_expires_at: None,
-        last_activity_at: 0,
-    }
+
 }
 
 fn bench_conversation_resolver(c: &mut Criterion) {
@@ -911,6 +910,7 @@ fn bench_tool_access_store(c: &mut Criterion) {
                     description: None,
                     input_schema: None,
                     default_allowed_classes: vec!["Controller".into(), "KnownTrusted".into()],
+                    sensitive: false,
                 },
                 100,
             )
@@ -944,6 +944,7 @@ fn bench_tool_access_store(c: &mut Criterion) {
                             description: None,
                             input_schema: None,
                             default_allowed_classes: vec!["Controller".into()],
+                            sensitive: false,
                         },
                         100,
                     )

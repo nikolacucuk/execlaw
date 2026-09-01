@@ -11,6 +11,8 @@ description = "In-tree runner. Talks to any OpenAI-compatible local LLM backend.
 [dependencies]
 execlaw-core = { path = "../core" }
 execlaw-inference-api = { path = "../inference-api" }
+execlaw-context-window = { path = "../context-window" }
+execlaw-session = { path = "../session" }
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

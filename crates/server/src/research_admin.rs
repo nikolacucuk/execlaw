@@ -98,6 +98,13 @@ pub struct ResearchJobReportResponse {
 }
 
 #[derive(Debug, Serialize, ToSchema)]
+pub struct ResearchGraphSnapshotResponse {
+    pub job_id: String,
+    #[schema(value_type = Option<serde_json::Value>)]
+    pub snapshot: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
 pub struct ResearchActiveCountResponse {
     pub active_count: i64,
     /// `Some` iff the request scoped to a specific conversation; the
@@ -212,6 +219,52 @@ pub async fn get_report_handler(
         job_id,
         report_markdown: body,
     }))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/research/jobs/{job_id}/graph-snapshot",
+    responses(
+        (status = 200, description = "Research graph snapshot JSON", body = ResearchGraphSnapshotResponse),
+        (status = 404, description = "No job with that id"),
+        (status = 403, description = "Caller is not a Controller"),
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "research"
+)]
+pub async fn get_graph_snapshot_handler(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(job_id): Path<String>,
+) -> Result<Json<ResearchGraphSnapshotResponse>, ApiError> {
+    require_controller(&state, &user)?;
+    let id = ResearchJobId::from(job_id.as_str());
+    let _row = ResearchJobStore::new(&state.db)
+        .get(&id)?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "research_not_found",
+            message: format!("no research job '{job_id}'"),
+        })?;
+
+    let snapshot_path = std::path::PathBuf::from(".obsidian")
+        .join("graphify")
+        .join("research-snapshots")
+        .join(format!("{}.json", id.as_str()));
+
+    let snapshot = match std::fs::read_to_string(&snapshot_path) {
+        Ok(s) => serde_json::from_str::<serde_json::Value>(&s).ok(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "research_snapshot_io",
+                message: format!("reading graph snapshot: {e}"),
+            });
+        }
+    };
+
+    Ok(Json(ResearchGraphSnapshotResponse { job_id, snapshot }))
 }
 
 #[utoipa::path(
@@ -577,6 +630,10 @@ pub fn research_admin_router() -> Router<AppState> {
             "/api/admin/research/jobs/{job_id}/report",
             get(get_report_handler),
         )
+        .route(
+            "/api/admin/research/jobs/{job_id}/graph-snapshot",
+            get(get_graph_snapshot_handler),
+        )
         // axum 0.8 needs `{name}` capture syntax (not `:name`).
         .route(
             "/api/admin/research/active_count",
@@ -644,6 +701,7 @@ mod tests {
                 is_ephemeral: false,
                 ephemeral_expires_at: None,
                 last_activity_at: 0,
+                context_window_policy: None,
             })
             .unwrap();
         cid

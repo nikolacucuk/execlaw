@@ -158,12 +158,14 @@ fn verify_webhook_auth(
     body: &[u8],
 ) -> Result<(), ApiError> {
     let Some(auth) = auth else {
-        // Legacy path. Loud per-request warning so an operator grep'ing
-        // for `webhook_route_auth_unset` finds every hit, not just
-        // every plugin enable.
-        tracing::warn!(
+        // Legacy path — plugin manifest has no [[webhook_routes]] auth
+        // field. Elevated to error level (2026-06-02) so every hit is
+        // clearly visible in the operator's log viewer and SIEM tooling
+        // can alert on it. Operators should add `auth = "none"` (opt-in
+        // explicit open) or a real auth method to suppress this log.
+        tracing::error!(
             target: "plugin_webhook_routes",
-            plugin_id, "webhook_route_auth_unset: relying on handler-side validation"
+            plugin_id, "webhook_route_auth_unset: no auth configured; relying on handler-side validation only"
         );
         return Ok(());
     };

@@ -27,6 +27,7 @@ import {
     type GeneralSettings,
 } from "../api/endpoints";
 import { useAuth } from "../auth/AuthContext";
+import { useGraphifyWelcomeVisible } from "../chat/useGraphifyWelcomeVisible";
 import { ErrorBanner } from "../components/ErrorBanner";
 import {
     LANGUAGE_OPTIONS,
@@ -164,6 +165,7 @@ export function GeneralPage() {
             )}
 
             <LanguagePicker />
+            <ChatAppearanceCard />
 
             <ErrorBanner message={error} onDismiss={() => setError(null)} className="mb-3" />
 
@@ -327,6 +329,38 @@ export function GeneralPage() {
             )}
 
             {canMutate && <DangerZone />}
+        </div>
+    );
+}
+
+function ChatAppearanceCard() {
+    const t = useT();
+    const [showGraphifyPreview, setShowGraphifyPreview] =
+        useGraphifyWelcomeVisible();
+
+    return (
+        <div className="execlaw-card mb-3" data-testid="general-chat-appearance-card">
+            <Form.Group>
+                <Form.Check
+                    type="switch"
+                    id="general-graphify-preview"
+                    label={t(
+                        "general.graphifyPreview",
+                        "Show Graphify preview on New chat",
+                    )}
+                    checked={showGraphifyPreview}
+                    onChange={(e) => {
+                        setShowGraphifyPreview(e.target.checked);
+                    }}
+                    data-testid="general-graphify-preview-toggle"
+                />
+                <Form.Text className="execlaw-muted">
+                    {t(
+                        "general.graphifyPreviewHelp",
+                        "Displays an interactive knowledge-graph preview above the welcome mascot in the New chat view. Stored per browser in localStorage.",
+                    )}
+                </Form.Text>
+            </Form.Group>
         </div>
     );
 }

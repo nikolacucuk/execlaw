@@ -1,0 +1,42 @@
+{
+    "type": "object",
+    "properties": {
+        "url": {
+            "type": "string",
+            "format": "uri",
+            "description": "Absolute http(s) URL to fetch."
+        },
+        "mode": {
+            "type": "string",
+            "enum": ["static", "dynamic", "stealthy"],
+            "description": "Rendering strategy. static = plain HTTP; dynamic = browser render; stealthy = anti-bot oriented browser mode."
+        },
+        "session_id": {
+            "type": "string",
+            "description": "Optional session identifier to reuse cookies/browser state across calls."
+        },
+        "wait_for": {
+            "type": "string",
+            "description": "Optional readiness hint for dynamic mode, e.g. network_idle or a CSS selector."
+        },
+        "timeout_ms": {
+            "type": "integer",
+            "minimum": 1000,
+            "maximum": 120000,
+            "description": "Per-call timeout in milliseconds."
+        },
+        "max_chars": {
+            "type": "integer",
+            "minimum": 512,
+            "maximum": 50000,
+            "description": "Max characters to return to the agent."
+        },
+        "allowed_domains": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional per-call domain allowlist (host or registrable domain)."
+        }
+    },
+    "required": ["url"],
+    "additionalProperties": false
+}

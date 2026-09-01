@@ -222,6 +222,16 @@ interface Props {
      */
     getSkills?: () => Promise<SkillListEntry[]>;
     /**
+     * Optional localStorage key used to persist default selected
+     * skills for this operator.
+     */
+    skillDefaultsStorageKey?: string;
+    /**
+     * Optional bootstrap defaults used when no persisted defaults
+     * exist for `skillDefaultsStorageKey`.
+     */
+    defaultSkillNames?: string[];
+    /**
      * 2026-05-15 — target long-edge dimension for client-side
      * downscale before base64 encode. 0 / undefined ships the bytes
      * as-is. Sourced from the same backend-capability probe as
@@ -284,8 +294,12 @@ export function Composer({
     multimodal,
     recommendedImageEdge,
     getSkills,
+    skillDefaultsStorageKey,
+    defaultSkillNames,
 }: Props) {
     const t = useT();
+    const managePersistentDefaults =
+        !!skillDefaultsStorageKey || (defaultSkillNames?.length ?? 0) > 0;
     // Bridged-channel short-circuit. Render a flat, non-interactive
     // notice in place of the composer chip. Mirrors the chip's
     // outer dimensions (max-width, padding, border-radius via the
@@ -340,6 +354,20 @@ export function Composer({
     const [skillsLoading, setSkillsLoading] = useState(false);
     const [skillsError, setSkillsError] = useState<string | null>(null);
     const [selectedSkills, setSelectedSkills] = useState<SkillListEntry[]>([]);
+    const [defaultSelectedSkillNames, setDefaultSelectedSkillNames] = useState<string[]>(() => {
+        if (!managePersistentDefaults) return [];
+        if (!skillDefaultsStorageKey) return defaultSkillNames ?? [];
+        try {
+            const raw = localStorage.getItem(skillDefaultsStorageKey);
+            if (!raw) return defaultSkillNames ?? [];
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) return defaultSkillNames ?? [];
+            return parsed.filter((v): v is string => typeof v === "string");
+        } catch {
+            return defaultSkillNames ?? [];
+        }
+    });
+    const [skillDefaultsHydrated, setSkillDefaultsHydrated] = useState(false);
     /// 2026-05-18 — drag-drop state. `isDragOver` toggles the
     /// composer-shell drop-zone highlight; `dropError` carries
     /// the most recent "unsupported file" message for the
@@ -432,20 +460,82 @@ export function Composer({
             .finally(() => setSkillsLoading(false));
     };
 
+    // Preload available skills once so defaults can be applied even
+    // before the operator opens the skill menu.
+    useEffect(() => {
+        if (!managePersistentDefaults) return;
+        if (defaultSelectedSkillNames.length === 0) return;
+        if (!getSkills) return;
+        if (availableSkills !== null || skillsLoading || skillDefaultsHydrated) return;
+        setSkillsLoading(true);
+        setSkillsError(null);
+        getSkills()
+            .then((list) => {
+                setAvailableSkills(list);
+            })
+            .catch((e: unknown) => {
+                setSkillsError(
+                    e instanceof Error ? e.message : "failed to load skills",
+                );
+            })
+            .finally(() => setSkillsLoading(false));
+    }, [
+        availableSkills,
+        defaultSelectedSkillNames.length,
+        getSkills,
+        managePersistentDefaults,
+        skillDefaultsHydrated,
+        skillsLoading,
+    ]);
+
+    useEffect(() => {
+        if (!managePersistentDefaults) return;
+        if (skillDefaultsHydrated) return;
+        if (availableSkills === null) return;
+        const byName = new Map(availableSkills.map((s) => [s.name, s]));
+        const defaults = defaultSelectedSkillNames
+            .map((name) => byName.get(name))
+            .filter((s): s is SkillListEntry => !!s);
+        setSelectedSkills(defaults);
+        setSkillDefaultsHydrated(true);
+    }, [
+        availableSkills,
+        defaultSelectedSkillNames,
+        managePersistentDefaults,
+        skillDefaultsHydrated,
+    ]);
+
+    const persistDefaultSkills = (names: string[]) => {
+        if (!managePersistentDefaults) return;
+        setDefaultSelectedSkillNames(names);
+        if (!skillDefaultsStorageKey) return;
+        try {
+            localStorage.setItem(skillDefaultsStorageKey, JSON.stringify(names));
+        } catch {
+            // Ignore persistence failures (private mode/quota).
+        }
+    };
+
     /// Add or remove a skill from the staged set. Toggle by name
     /// since the list might re-fetch and produce new object
     /// identities for the same skill.
     const toggleSkill = (skill: SkillListEntry) => {
         setSelectedSkills((prev) => {
             const has = prev.some((s) => s.name === skill.name);
-            return has
+            const next = has
                 ? prev.filter((s) => s.name !== skill.name)
                 : [...prev, skill];
+            persistDefaultSkills(next.map((s) => s.name));
+            return next;
         });
     };
 
     const removeSelectedSkill = (name: string) => {
-        setSelectedSkills((prev) => prev.filter((s) => s.name !== name));
+        setSelectedSkills((prev) => {
+            const next = prev.filter((s) => s.name !== name);
+            persistDefaultSkills(next.map((s) => s.name));
+            return next;
+        });
     };
 
     /// Per-file image processor. Reads the bytes, downscales when
@@ -618,10 +708,20 @@ export function Composer({
         const skillNames = selectedSkills.map((s) => s.name);
         setText("");
         setAttachments([]);
-        // Per-turn semantics: the picker clears after each send so
-        // the operator's next message doesn't accidentally re-apply
-        // the same skill. They can re-select if they want sticky.
-        setSelectedSkills([]);
+        // Reset to the persisted defaults after each send.
+        if (
+            managePersistentDefaults &&
+            defaultSelectedSkillNames.length > 0 &&
+            availableSkills !== null
+        ) {
+            const byName = new Map(availableSkills.map((s) => [s.name, s]));
+            const defaults = defaultSelectedSkillNames
+                .map((name) => byName.get(name))
+                .filter((s): s is SkillListEntry => !!s);
+            setSelectedSkills(defaults);
+        } else {
+            setSelectedSkills([]);
+        }
         try {
             await onSend(trimmed, wire, skillNames);
         } finally {

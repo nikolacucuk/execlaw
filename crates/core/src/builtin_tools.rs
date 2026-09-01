@@ -118,6 +118,10 @@ impl ReadMemoryTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::MemoryRead],
                 default_allowed_classes: default_allowed_for_memory(),
+                // Memory tools expose personal operator data — flag them so
+                // the Rule-of-Two gate treats turns that use them as
+                // accesses_sensitive_data = true.
+                sensitive: true,
             },
         }
     }
@@ -190,6 +194,7 @@ impl WriteMemoryTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::MemoryWrite],
                 default_allowed_classes: default_allowed_for_memory(),
+                sensitive: true,
             },
         }
     }
@@ -261,6 +266,7 @@ impl ListMemoryTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::MemoryRead],
                 default_allowed_classes: default_allowed_for_memory(),
+                sensitive: true,
             },
         }
     }
@@ -338,6 +344,7 @@ impl SetThreadNameTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ConversationWrite],
                 default_allowed_classes: default_allowed_for_conversation_write(),
+                sensitive: false,
             },
         }
     }
@@ -429,6 +436,8 @@ impl ReadChatHistoryTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ConversationRead],
                 default_allowed_classes: default_allowed_for_conversation_read(),
+                // Chat history contains personal operator data.
+                sensitive: true,
             },
         }
     }
@@ -500,6 +509,7 @@ impl ListChatsTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ConversationRead],
                 default_allowed_classes: default_allowed_for_conversation_read(),
+                sensitive: false,
             },
         }
     }
@@ -565,6 +575,7 @@ impl GetThreadTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ConversationRead],
                 default_allowed_classes: default_allowed_for_conversation_read(),
+                sensitive: false,
             },
         }
     }
@@ -667,6 +678,7 @@ impl NotifyControllerTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::Notify],
                 default_allowed_classes: default_allowed_for_notify(),
+                sensitive: false,
             },
         }
     }
@@ -812,6 +824,7 @@ impl CreateRoutineTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ScheduleWrite],
                 default_allowed_classes: default_allowed_for_schedule_write(),
+                sensitive: false,
             },
         }
     }
@@ -876,6 +889,7 @@ impl ListRoutinesTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ScheduleRead],
                 default_allowed_classes: default_allowed_for_schedule_read(),
+                sensitive: false,
             },
         }
     }
@@ -937,6 +951,7 @@ impl GetRoutineTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ScheduleRead],
                 default_allowed_classes: default_allowed_for_schedule_read(),
+                sensitive: false,
             },
         }
     }
@@ -996,6 +1011,7 @@ impl DeleteRoutineTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ScheduleWrite],
                 default_allowed_classes: default_allowed_for_schedule_write(),
+                sensitive: false,
             },
         }
     }
@@ -1050,6 +1066,7 @@ impl PauseRoutineTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ScheduleWrite],
                 default_allowed_classes: default_allowed_for_schedule_write(),
+                sensitive: false,
             },
         }
     }
@@ -1102,6 +1119,7 @@ impl ResumeRoutineTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ScheduleWrite],
                 default_allowed_classes: default_allowed_for_schedule_write(),
+                sensitive: false,
             },
         }
     }
@@ -1178,6 +1196,7 @@ impl UpdateRoutineTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ScheduleWrite],
                 default_allowed_classes: default_allowed_for_schedule_write(),
+                sensitive: false,
             },
         }
     }
@@ -1300,6 +1319,7 @@ impl WebFetchTool {
                 latency: ToolLatency::Medium,
                 capabilities: vec![Capability::WebFetch],
                 default_allowed_classes: default_allowed_for_web_fetch(),
+                sensitive: false,
             },
         }
     }
@@ -1423,6 +1443,7 @@ impl WebSearchTool {
                 latency: ToolLatency::Medium,
                 capabilities: vec![Capability::Search],
                 default_allowed_classes: default_allowed_for_search(),
+                sensitive: false,
             },
         }
     }
@@ -1530,6 +1551,7 @@ impl DelegateTaskTool {
                 latency: ToolLatency::High,
                 capabilities: vec![Capability::SubagentSpawn],
                 default_allowed_classes: default_allowed_for_subagent_spawn(),
+                sensitive: false,
             },
         }
     }
@@ -1693,6 +1715,7 @@ impl ResearchStartTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ResearchSpawn],
                 default_allowed_classes: default_allowed_for_research_spawn(),
+                sensitive: false,
             },
         }
     }
@@ -1778,6 +1801,7 @@ impl ResearchStatusTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ResearchRead],
                 default_allowed_classes: default_allowed_for_research_read(),
+                sensitive: false,
             },
         }
     }
@@ -1884,6 +1908,7 @@ impl SendAttachmentTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::AttachmentSend],
                 default_allowed_classes: default_allowed_for_attachment_send(),
+                sensitive: false,
             },
         }
     }
@@ -2206,6 +2231,7 @@ impl RenderChartTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::AttachmentSend],
                 default_allowed_classes: default_allowed_for_attachment_send(),
+                sensitive: false,
             },
         }
     }
@@ -2418,6 +2444,7 @@ impl ResearchClarifyTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ResearchSpawn],
                 default_allowed_classes: default_allowed_for_research_spawn(),
+                sensitive: false,
             },
         }
     }
@@ -2476,6 +2503,7 @@ impl ResearchListTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ResearchRead],
                 default_allowed_classes: default_allowed_for_research_read(),
+                sensitive: false,
             },
         }
     }
@@ -2547,6 +2575,7 @@ impl ResearchGetReportTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::ResearchRead],
                 default_allowed_classes: default_allowed_for_research_read(),
+                sensitive: false,
             },
         }
     }
@@ -2638,6 +2667,7 @@ impl McpListServersTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::McpAdmin],
                 default_allowed_classes: default_allowed_for_mcp_admin(),
+                sensitive: false,
             },
         }
     }
@@ -2734,6 +2764,7 @@ impl McpAddServerTool {
                 latency: ToolLatency::Medium,
                 capabilities: vec![Capability::McpAdmin],
                 default_allowed_classes: default_allowed_for_mcp_admin(),
+                sensitive: false,
             },
         }
     }
@@ -2819,6 +2850,7 @@ impl McpRemoveServerTool {
                 latency: ToolLatency::Low,
                 capabilities: vec![Capability::McpAdmin],
                 default_allowed_classes: default_allowed_for_mcp_admin(),
+                sensitive: false,
             },
         }
     }
@@ -2929,6 +2961,7 @@ mod tests {
                 is_ephemeral: false,
                 ephemeral_expires_at: None,
                 last_activity_at: 0,
+                context_window_policy: None,
             })
             .unwrap();
         cid

@@ -111,6 +111,23 @@ If the question is too VAGUE to plan well — missing scope, ambiguous terms, mu
 
 Aim for 3-8 sub-queries when planning. Default to planning if the query is workable; only ask for clarification when the spread between plausible interpretations is wide. No prose before or after the JSON. No markdown fences.";
 
+/// Retry system prompt for planner recovery. Used when the first
+/// planner output is unparseable.
+const PLANNER_RETRY_SYSTEM_PROMPT: &str =
+    "You are retrying a deep-research planning response that previously failed JSON parsing.
+
+Return EXACTLY one valid JSON object with no preamble and no markdown fences.
+Allowed shapes only:
+1) {\"thesis\":\"...\",\"steps\":[{\"query\":\"...\",\"rationale\":\"...\"}, ...]}
+2) {\"clarification\":\"...\"}
+
+If you can plan, prefer shape #1 with 3-8 steps.
+If the query is genuinely too ambiguous, use shape #2.
+Do not emit any other keys.";
+
+/// Maximum planner attempts before surfacing a hard failure.
+const MAX_PLANNER_ATTEMPTS: usize = 3;
+
 /// Raw JSON the planner emits. The two valid shapes are:
 ///   * a plan: `thesis` + `steps` populated, `clarification` absent
 ///   * a clarification request: `clarification` populated, others absent
@@ -747,6 +764,15 @@ pub async fn run_synthesize_phase(
     // carries `attachment_id` for back-compat and the
     // /research/<job_id> page can pull the markdown from the
     // workspace for operators who want to read inline.
+    let mut close_details = serde_json::json!({
+        "job_id": job_id.as_str(),
+        "phase": "Complete",
+        "report_url": format!("/research/{}", job_id.as_str()),
+        "attachment_id": outcome.attachment_id.as_str(),
+    });
+    if let Some(snapshot) = outcome.snapshot_path.as_deref() {
+        close_details["graph_snapshot_path"] = serde_json::Value::String(snapshot.to_owned());
+    }
     close_card_and_broadcast(
         db,
         events,
@@ -764,12 +790,7 @@ pub async fn run_synthesize_phase(
             // cases; details.attachment_id always travels with
             // the card's serialized JSON because the projection
             // re-serializes details verbatim.
-            details: Some(serde_json::json!({
-                "job_id": job_id.as_str(),
-                "phase": "Complete",
-                "report_url": format!("/research/{}", job_id.as_str()),
-                "attachment_id": outcome.attachment_id.as_str(),
-            })),
+            details: Some(close_details),
             attachment_id: Some(outcome.attachment_id.as_str().to_owned()),
             error: None,
         },
@@ -902,6 +923,7 @@ async fn call_planner(
     model: &str,
     query: &str,
 ) -> Result<PlanOutcome, ResearchRunnerError> {
+    // Attempt 1: normal planner prompt.
     let req = ChatRequest {
         model: ModelId(model.to_owned()),
         messages: vec![
@@ -928,7 +950,64 @@ async fn call_planner(
         )
         .await
         .map_err(|e| ResearchRunnerError::Inference(e.to_string()))?;
-    parse_plan(&adapted.content)
+    if let Ok(outcome) = parse_plan(&adapted.content) {
+        return Ok(outcome);
+    }
+
+    let mut last_err = parse_plan(&adapted.content)
+        .err()
+        .unwrap_or_else(|| ResearchRunnerError::PlannerJson("unknown planner parse error".into()));
+    let mut previous_output = adapted.content;
+
+    for attempt in 2..=MAX_PLANNER_ATTEMPTS {
+        tracing::warn!(
+            model = %model,
+            attempt,
+            max_attempts = MAX_PLANNER_ATTEMPTS,
+            error = %last_err,
+            "planner output unparseable; retrying with strict-json recovery prompt",
+        );
+        let retry_req = ChatRequest {
+            model: ModelId(model.to_owned()),
+            messages: vec![
+                ChatMessage::system(PLANNER_RETRY_SYSTEM_PROMPT),
+                ChatMessage::user(format!(
+                    "Original research query:\n{query}\n\nPrevious invalid planner output (repair this into one valid JSON object):\n{previous_output}"
+                )),
+            ],
+            max_tokens: Some(1024),
+            temperature: Some(0.0),
+            stream: false,
+            tools: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            guided_decoding_backend: None,
+        };
+        let retry = adapter
+            .chat(
+                client,
+                retry_req,
+                execlaw_model_adapter::OutputHint::StructuredJson,
+            )
+            .await
+            .map_err(|e| ResearchRunnerError::Inference(e.to_string()))?;
+        match parse_plan(&retry.content) {
+            Ok(outcome) => {
+                tracing::info!(
+                    model = %model,
+                    attempt,
+                    "planner recovery succeeded after retry",
+                );
+                return Ok(outcome);
+            }
+            Err(e) => {
+                last_err = e;
+                previous_output = retry.content;
+            }
+        }
+    }
+
+    Err(last_err)
 }
 
 /// Best-effort parser. The planner is told to reply with strict JSON,
@@ -1542,6 +1621,7 @@ mod tests {
                 is_ephemeral: false,
                 ephemeral_expires_at: None,
                 last_activity_at: 0,
+                context_window_policy: None,
             })
             .unwrap();
         let id = ResearchJobId::new();
@@ -1692,6 +1772,7 @@ mod tests {
                 is_ephemeral: false,
                 ephemeral_expires_at: None,
                 last_activity_at: 0,
+                context_window_policy: None,
             })
             .unwrap();
         let id = ResearchJobId::new();
@@ -1829,6 +1910,7 @@ mod tests {
                 is_ephemeral: false,
                 ephemeral_expires_at: None,
                 last_activity_at: 0,
+                context_window_policy: None,
             })
             .unwrap();
         let id = ResearchJobId::new();
@@ -1932,6 +2014,7 @@ mod tests {
                 is_ephemeral: false,
                 ephemeral_expires_at: None,
                 last_activity_at: 0,
+                context_window_policy: None,
             })
             .unwrap();
         let id = ResearchJobId::new();

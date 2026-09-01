@@ -21,9 +21,10 @@
 //! legitimate for.
 
 use crate::auth_extract::AuthedUser;
-use crate::download_urls::{DEFAULT_TTL_SECS, build_signed_url};
+use crate::download_urls::build_signed_url;
 use crate::routes::ApiError;
 use crate::state::AppState;
+use execlaw_core::general_settings::GeneralSettingsStore;
 use axum::Router;
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -90,7 +91,13 @@ pub async fn sign_handler(
             ),
         });
     }
-    let ttl = req.ttl_secs.unwrap_or(DEFAULT_TTL_SECS);
+    let default_ttl = GeneralSettingsStore::new(&state.db)
+        .get()
+        .ok()
+        .flatten()
+        .map(|s| s.download_url_ttl_secs)
+        .unwrap_or(300);
+    let ttl = req.ttl_secs.unwrap_or(default_ttl);
     let (url, expires_at) = build_signed_url(
         &req.path,
         &user.user_id,

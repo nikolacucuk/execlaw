@@ -52,6 +52,17 @@ fn daemon_root(base_url: &str) -> String {
     trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_owned()
 }
 
+/// Build an OpenAI-compat `/v1/chat/completions` URL from whatever
+/// backend base URL the operator configured.
+fn openai_chat_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/v1") {
+        format!("{trimmed}/chat/completions")
+    } else {
+        format!("{trimmed}/v1/chat/completions")
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Wire types — Ollama's request / response shapes.
 // ---------------------------------------------------------------------------
@@ -89,10 +100,9 @@ struct OllamaOptions {
     /// drops the tool schemas while keeping recent tool_result
     /// payloads — the model knows the tool name from chat-template
     /// scaffolding but no longer has the schema or earlier results
-    /// in view, so it re-queries indefinitely. 16384 covers every
-    /// realistic agent turn for the Apple-Silicon Qwen2.5 family
-    /// (3B/14B/32B all support ≥32K natively) at a few hundred MB
-    /// of extra KV-cache memory.
+    /// in view, so it re-queries indefinitely. Execlaw pins this to
+    /// 100000 so long tool schemas + replayed history + memory
+    /// retrieval context stay available during complex agent turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     num_ctx: Option<u32>,
 }
@@ -103,13 +113,12 @@ impl OllamaOptions {
     }
 }
 
-/// Conservative context-window size for the Apple-Silicon Ollama
-/// path. Big enough to fit the agent's system prompt + full tool
-/// catalog + several rounds of tool results; small enough that the
-/// KV cache stays in a few hundred MB. Qwen2.5 supports up to 32K
-/// natively, but most agent turns finish well under 12K — 16K is
-/// the sweet spot.
-const DEFAULT_NUM_CTX: u32 = 16384;
+/// Pinned context-window size for every Ollama request.
+///
+/// Requirement: keep this at 100000 so new-task routing can carry
+/// graph lookups, tool schemas, and Obsidian-memory retrieval without
+/// mid-prompt truncation.
+const DEFAULT_NUM_CTX: u32 = 100000;
 
 /// Ollama's message shape on the wire — close enough to OpenAI's
 /// that we serialize a borrowed view rather than cloning. `name`
@@ -365,6 +374,14 @@ pub(crate) async fn chat_completions(
 ) -> Result<ChatResponse, InferenceError> {
     let url = format!("{}/api/chat", daemon_root(base_url));
     let body = build_request(req, false);
+    // Log outgoing request for debugging: URL and body size.
+    if let Ok(text) = serde_json::to_string(&body) {
+        let preview: String = text.chars().take(800).collect();
+        tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), body_chars = text.chars().count(), body_preview = %preview, "ollama non-streaming request");
+        tracing::debug!(target: "inference_outgoing", request_body = %text, "ollama non-streaming request body");
+    } else {
+        tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), "ollama non-streaming request (body serialization failed)");
+    }
     let mut r = http.post(&url).json(&body);
     if let Some(key) = api_key {
         r = r.bearer_auth(key);
@@ -373,6 +390,40 @@ pub(crate) async fn chat_completions(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        // Some remote Ollama deployments expose only the OpenAI-compat
+        // surface (`/v1/*`) and return 404 on native `/api/chat`.
+        // Retry once through `/v1/chat/completions` to keep the chat
+        // path working without requiring endpoint rewrites.
+        if status.as_u16() == 404 {
+            let compat_url = openai_chat_url(base_url);
+            let mut compat_req = req.clone();
+            compat_req.stream = false;
+            tracing::warn!(
+                target: "inference_outgoing",
+                native_url = %url,
+                fallback_url = %compat_url,
+                "ollama native endpoint returned 404; retrying via openai-compat"
+            );
+            let mut rr = http.post(&compat_url).json(&compat_req);
+            if let Some(key) = api_key {
+                rr = rr.bearer_auth(key);
+            }
+            let compat_resp = rr.send().await?;
+            let compat_status = compat_resp.status();
+            if !compat_status.is_success() {
+                let compat_body = compat_resp.text().await.unwrap_or_default();
+                return Err(InferenceError::BadStatus {
+                    status: compat_status.as_u16(),
+                    body: compat_body,
+                });
+            }
+            let compat_text = compat_resp.text().await?;
+            return serde_json::from_str::<ChatResponse>(&compat_text).map_err(|e| {
+                InferenceError::Decode(format!(
+                    "bad /v1/chat/completions fallback response: {e} — body: {compat_text}"
+                ))
+            });
+        }
         return Err(InferenceError::BadStatus {
             status: status.as_u16(),
             body,
@@ -400,6 +451,14 @@ pub(crate) async fn chat_completions_stream(
 > {
     let url = format!("{}/api/chat", daemon_root(base_url));
     let body = build_request(req, true);
+    // Log outgoing streaming request for debugging: URL and body size.
+    if let Ok(text) = serde_json::to_string(&body) {
+        let preview: String = text.chars().take(800).collect();
+        tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), body_chars = text.chars().count(), body_preview = %preview, "ollama streaming request");
+        tracing::debug!(target: "inference_outgoing", request_body = %text, "ollama streaming request body");
+    } else {
+        tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), "ollama streaming request (body serialization failed)");
+    }
     let mut r = http.post(&url).json(&body);
     if let Some(key) = api_key {
         r = r.bearer_auth(key);
@@ -408,6 +467,83 @@ pub(crate) async fn chat_completions_stream(
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
+        // Streaming fallback: if native `/api/chat` is absent,
+        // request a non-streaming OpenAI-compat completion and emit
+        // one synthetic chunk so callers still receive assistant text.
+        if status.as_u16() == 404 {
+            let compat_url = openai_chat_url(base_url);
+            let mut compat_req = req.clone();
+            compat_req.stream = false;
+            tracing::warn!(
+                target: "inference_outgoing",
+                native_url = %url,
+                fallback_url = %compat_url,
+                "ollama native stream endpoint returned 404; retrying via openai-compat"
+            );
+            let mut rr = http.post(&compat_url).json(&compat_req);
+            if let Some(key) = api_key {
+                rr = rr.bearer_auth(key);
+            }
+            let compat_resp = rr.send().await?;
+            let compat_status = compat_resp.status();
+            if !compat_status.is_success() {
+                let compat_body = compat_resp.text().await.unwrap_or_default();
+                return Err(InferenceError::BadStatus {
+                    status: compat_status.as_u16(),
+                    body: compat_body,
+                });
+            }
+            let compat_text = compat_resp.text().await?;
+            let full = serde_json::from_str::<ChatResponse>(&compat_text).map_err(|e| {
+                InferenceError::Decode(format!(
+                    "bad /v1/chat/completions fallback response: {e} — body: {compat_text}"
+                ))
+            })?;
+
+            let choice = full.choices.into_iter().next().unwrap_or(Choice {
+                index: 0,
+                message: ChatMessage::assistant(""),
+                finish_reason: Some("stop".to_owned()),
+            });
+            let content = choice
+                .message
+                .content
+                .as_ref()
+                .map(content_to_plain)
+                .filter(|s| !s.is_empty());
+            let tool_calls = choice
+                .message
+                .tool_calls
+                .into_iter()
+                .enumerate()
+                .map(|(idx, tc)| ToolCallDelta {
+                    index: idx as u32,
+                    id: Some(tc.id),
+                    kind: Some(tc.kind),
+                    function: Some(ToolCallFunctionDelta {
+                        name: Some(tc.function.name),
+                        arguments: Some(tc.function.arguments),
+                    }),
+                })
+                .collect::<Vec<_>>();
+
+            let chunk = ChatStreamChunk {
+                id: full.id,
+                model: full.model,
+                choices: vec![ChatStreamChoice {
+                    index: choice.index,
+                    delta: ChatStreamDelta {
+                        role: Some("assistant".to_owned()),
+                        content,
+                        tool_calls,
+                    },
+                    finish_reason: choice.finish_reason,
+                }],
+            };
+
+            let stream = futures::stream::once(async move { Ok(chunk) });
+            return Ok(Box::pin(stream));
+        }
         return Err(InferenceError::BadStatus {
             status: status.as_u16(),
             body,

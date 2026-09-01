@@ -1,0 +1,58 @@
+{
+  "edges": [
+    {
+      "id": "e1",
+      "kind": "has_thesis",
+      "source": "job:a3131ad8-613d-40c8-a60f-8d9ab397e9d2",
+      "target": "thesis:a3131ad8-613d-40c8-a60f-8d9ab397e9d2"
+    },
+    {
+      "id": "e2",
+      "kind": "has_step",
+      "source": "job:a3131ad8-613d-40c8-a60f-8d9ab397e9d2",
+      "target": "step:a3131ad8-613d-40c8-a60f-8d9ab397e9d2:0"
+    },
+    {
+      "id": "e3",
+      "kind": "cites",
+      "source": "step:a3131ad8-613d-40c8-a60f-8d9ab397e9d2:0",
+      "target": "source:1"
+    }
+  ],
+  "generated_at": 1780440130,
+  "job_id": "a3131ad8-613d-40c8-a60f-8d9ab397e9d2",
+  "meta": {
+    "notes": 1,
+    "plan_steps": 1,
+    "report_preview": "# Report\n\nFindings…"
+  },
+  "nodes": [
+    {
+      "community": "research-job",
+      "id": "job:a3131ad8-613d-40c8-a60f-8d9ab397e9d2",
+      "kind": "job",
+      "label": "what?"
+    },
+    {
+      "community": "research-plan",
+      "id": "thesis:a3131ad8-613d-40c8-a60f-8d9ab397e9d2",
+      "kind": "thesis",
+      "label": "t"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:a3131ad8-613d-40c8-a60f-8d9ab397e9d2:0",
+      "kind": "sub_query",
+      "label": "q",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:1",
+      "kind": "source",
+      "label": "https://example.com/q"
+    }
+  ],
+  "query": "what?"
+}

@@ -1,0 +1,77 @@
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.runner
+#1 transferring dockerfile: 3.10kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for docker.io/library/alpine:3.20
+#2 DONE 0.2s
+
+#3 [internal] load metadata for docker.io/library/rust:1.90-alpine
+#3 DONE 0.9s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 2B done
+#4 DONE 0.0s
+
+#5 [builder 1/8] FROM docker.io/library/rust:1.90-alpine@sha256:b4b54b176a74db7e5c68fdfe6029be39a02ccbcfe72b6e5a3e18e2c61b57ae26
+#5 resolve docker.io/library/rust:1.90-alpine@sha256:b4b54b176a74db7e5c68fdfe6029be39a02ccbcfe72b6e5a3e18e2c61b57ae26 0.0s done
+#5 DONE 0.0s
+
+#6 [stage-1 1/6] FROM docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+#6 resolve docker.io/library/alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc 0.0s done
+#6 DONE 0.0s
+
+#7 [internal] load build context
+#7 transferring context: 1.58MB 0.1s done
+#7 DONE 0.1s
+
+#8 [builder 2/8] WORKDIR /build
+#8 CACHED
+
+#9 [builder 3/8] RUN apk add --no-cache musl-dev
+#9 CACHED
+
+#10 [builder 4/8] COPY Cargo.toml Cargo.lock ./
+#10 CACHED
+
+#11 [builder 5/8] COPY crates ./crates
+#11 DONE 0.0s
+
+#12 [builder 6/8] COPY plugins ./plugins
+#12 DONE 0.0s
+
+#13 [builder 7/8] COPY vendor ./vendor
+#13 DONE 0.0s
+
+#14 [builder 8/8] RUN --mount=type=cache,target=/usr/local/cargo/registry     --mount=type=cache,target=/build/target     cargo build --release --bin execlaw-runner --no-default-features     && cp target/release/execlaw-runner /tmp/execlaw-runner
+#14 0.430    Compiling execlaw-inference-api v0.1.0 (/build/crates/inference-api)
+#14 1.990    Compiling execlaw-runner-protocol v0.1.0 (/build/crates/runner-protocol)
+#14 2.580    Compiling execlaw-runner v0.1.0 (/build/crates/runner-binary)
+#14 32.87     Finished `release` profile [optimized] target(s) in 32.67s
+#14 DONE 32.9s
+
+#15 [stage-1 2/6] RUN apk add --no-cache ca-certificates
+#15 CACHED
+
+#16 [stage-1 3/6] RUN mkdir -p /workspace
+#16 CACHED
+
+#17 [stage-1 4/6] WORKDIR /workspace
+#17 CACHED
+
+#18 [stage-1 5/6] COPY --from=builder /tmp/execlaw-runner /usr/local/bin/execlaw-runner
+#18 DONE 0.0s
+
+#19 [stage-1 6/6] RUN adduser -D -u 1000 -h /home/runner -s /sbin/nologin runner     && chown -R runner:runner /workspace
+#19 DONE 0.3s
+
+#20 exporting to image
+#20 exporting layers 0.1s done
+#20 exporting manifest sha256:51080316f864ad7db29f2a0e302fc62f8125fa910c5679436c102d363cb0d808 done
+#20 exporting config sha256:f4b177a72f6619c5c10e51bad5ad3987006d137cd7fdc86c76588231d0ffc694 done
+#20 exporting attestation manifest sha256:2c757cbbd2ff8fcb182b1a58493830f52e592b242493779f3aa25aa393693679 done
+#20 exporting manifest list sha256:ab203baa9cae03280ee0309693653f1737e4bbb8a66c1275c0385d2c45637c19 done
+#20 naming to docker.io/execlaw/runner:dev done
+#20 unpacking to docker.io/execlaw/runner:dev 0.0s done
+#20 DONE 0.2s

@@ -258,85 +258,169 @@ async fn gather_one(
         return Err(GatherError::Cancelled);
     }
 
-    // Search.
+    // If the step already contains explicit URLs, skip search
+    // entirely and fetch those directly. This avoids burning time
+    // (and provider quotas) on DDG/Searx for URL-driven plans.
     let max_results = config.max_urls_per_subquery;
-    let results = match deps.search.search(&step.query, max_results).await {
-        Ok(r) => r,
-        Err(e) => {
-            return Ok(failed_note(
-                index,
-                &step.query,
-                &format!("search failed: {}", api_err_msg(&e)),
-            ));
-        }
-    };
-
     let mut sources: Vec<ResearchSource> = Vec::new();
     let mut bodies: Vec<String> = Vec::new();
-    for hit in results.into_iter().take(max_results as usize) {
-        if cancel.is_cancelled() {
-            return Err(GatherError::Cancelled);
-        }
-        // Workspace-wide page cap.
-        let consumed = pages_consumed.fetch_add(1, Ordering::Relaxed);
-        if consumed >= config.max_pages_total {
-            // Roll back the speculative increment so other workers'
-            // counters stay accurate.
-            pages_consumed.fetch_sub(1, Ordering::Relaxed);
-            sources.push(ResearchSource {
-                url: hit.url.clone(),
-                title: Some(hit.title.clone()),
-                fetched_ok: false,
-                error: Some("max_pages_total cap reached".into()),
-            });
-            break;
-        }
-        match deps.fetch.get(&hit.url).await {
-            Ok(resp) => {
-                // 2026-05-03 (rev 5): run the fetched body through
-                // dom_smoothie's Readability port to strip nav /
-                // sidebar / ads / footer chrome BEFORE we hand the
-                // text to the subagent. Previously we just truncated
-                // raw HTML to 4 KB, which meant the subagent often
-                // got 60% chrome and 40% content — the extraction
-                // quality was the actual bottleneck on report
-                // quality. Readability is CPU-bound (~10-50 ms per
-                // page), so it runs on a blocking thread to keep
-                // the async runtime responsive.
-                //
-                // Falls back to the raw-truncate path if Readability
-                // can't find an article (some pages are SPA shells,
-                // wikis-with-no-main-content, redirect pages).
-                let url_for_readability = resp.final_url.clone();
-                let body_for_readability = resp.body.clone();
-                let extracted = tokio::task::spawn_blocking(move || {
-                    extract_readable_text(
-                        &body_for_readability,
-                        Some(&url_for_readability),
-                        BODY_TRUNCATE_PER_URL,
-                    )
-                })
-                .await
-                .unwrap_or(ExtractionOutcome::Fallback {
-                    text: truncate_body(&resp.body, BODY_TRUNCATE_PER_URL),
-                    reason: "extraction task panicked".into(),
-                });
-                bodies.push(extracted.into_text());
-                sources.push(ResearchSource {
-                    url: resp.final_url,
-                    title: Some(hit.title.clone()),
-                    fetched_ok: true,
-                    error: None,
-                });
+    let mut search_err: Option<String> = None;
+    let inline_urls = extract_inline_urls(&step.query);
+    if !inline_urls.is_empty() {
+        tracing::info!(
+            query = %step.query,
+            inline_url_count = inline_urls.len(),
+            "gather step includes inline URLs; bypassing search providers and using direct web_fetch",
+        );
+        for url in inline_urls.into_iter().take(max_results as usize) {
+            if cancel.is_cancelled() {
+                return Err(GatherError::Cancelled);
             }
-            Err(e) => {
+            let consumed = pages_consumed.fetch_add(1, Ordering::Relaxed);
+            if consumed >= config.max_pages_total {
                 pages_consumed.fetch_sub(1, Ordering::Relaxed);
                 sources.push(ResearchSource {
-                    url: hit.url.clone(),
-                    title: Some(hit.title.clone()),
+                    url,
+                    title: Some("inline URL fetch".into()),
                     fetched_ok: false,
-                    error: Some(api_err_msg(&e)),
+                    error: Some("max_pages_total cap reached".into()),
                 });
+                break;
+            }
+            match deps.fetch.get(&url).await {
+                Ok(resp) => {
+                    let body_for_readability = resp.body.clone();
+                    bodies.push(truncate_body(&body_for_readability, BODY_TRUNCATE_PER_URL));
+                    sources.push(ResearchSource {
+                        url: resp.final_url,
+                        title: Some("inline URL fetch".into()),
+                        fetched_ok: true,
+                        error: None,
+                    });
+                }
+                Err(e) => {
+                    pages_consumed.fetch_sub(1, Ordering::Relaxed);
+                    sources.push(ResearchSource {
+                        url,
+                        title: Some("inline URL fetch".into()),
+                        fetched_ok: false,
+                        error: Some(api_err_msg(&e)),
+                    });
+                }
+            }
+        }
+    } else {
+        // Search first, then fall back to direct web_fetch when every
+        // configured search provider is unavailable.
+        let search_hits = match deps.search.search(&step.query, max_results).await {
+            Ok(r) => r,
+            Err(e) => {
+                search_err = Some(api_err_msg(&e));
+                Vec::new()
+            }
+        };
+
+        if !search_hits.is_empty() {
+            for hit in search_hits.into_iter().take(max_results as usize) {
+                if cancel.is_cancelled() {
+                    return Err(GatherError::Cancelled);
+                }
+                // Workspace-wide page cap.
+                let consumed = pages_consumed.fetch_add(1, Ordering::Relaxed);
+                if consumed >= config.max_pages_total {
+                    // Roll back the speculative increment so other workers'
+                    // counters stay accurate.
+                    pages_consumed.fetch_sub(1, Ordering::Relaxed);
+                    sources.push(ResearchSource {
+                        url: hit.url.clone(),
+                        title: Some(hit.title.clone()),
+                        fetched_ok: false,
+                        error: Some("max_pages_total cap reached".into()),
+                    });
+                    break;
+                }
+                match deps.fetch.get(&hit.url).await {
+                    Ok(resp) => {
+                        let url_for_readability = resp.final_url.clone();
+                        let body_for_readability = resp.body.clone();
+                        let extracted = tokio::task::spawn_blocking(move || {
+                            extract_readable_text(
+                                &body_for_readability,
+                                Some(&url_for_readability),
+                                BODY_TRUNCATE_PER_URL,
+                            )
+                        })
+                        .await
+                        .unwrap_or(ExtractionOutcome::Fallback {
+                            text: truncate_body(&resp.body, BODY_TRUNCATE_PER_URL),
+                            reason: "extraction task panicked".into(),
+                        });
+                        bodies.push(extracted.into_text());
+                        sources.push(ResearchSource {
+                            url: resp.final_url,
+                            title: Some(hit.title.clone()),
+                            fetched_ok: true,
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        pages_consumed.fetch_sub(1, Ordering::Relaxed);
+                        sources.push(ResearchSource {
+                            url: hit.url.clone(),
+                            title: Some(hit.title.clone()),
+                            fetched_ok: false,
+                            error: Some(api_err_msg(&e)),
+                        });
+                    }
+                }
+            }
+        } else if search_err.is_some() {
+            let mut fallback_urls = extract_inline_urls(&step.query);
+            if fallback_urls.is_empty() {
+                fallback_urls.push(wikipedia_opensearch_url(&step.query));
+            }
+            tracing::warn!(
+                query = %step.query,
+                search_error = %search_err.clone().unwrap_or_else(|| "none".into()),
+                fallback_url_count = fallback_urls.len(),
+                "gather search failed; falling back to direct web_fetch-only mode"
+            );
+            for url in fallback_urls.into_iter().take(max_results as usize) {
+                if cancel.is_cancelled() {
+                    return Err(GatherError::Cancelled);
+                }
+                let consumed = pages_consumed.fetch_add(1, Ordering::Relaxed);
+                if consumed >= config.max_pages_total {
+                    pages_consumed.fetch_sub(1, Ordering::Relaxed);
+                    sources.push(ResearchSource {
+                        url,
+                        title: Some("fallback fetch".into()),
+                        fetched_ok: false,
+                        error: Some("max_pages_total cap reached".into()),
+                    });
+                    break;
+                }
+                match deps.fetch.get(&url).await {
+                    Ok(resp) => {
+                        let body_for_readability = resp.body.clone();
+                        bodies.push(truncate_body(&body_for_readability, BODY_TRUNCATE_PER_URL));
+                        sources.push(ResearchSource {
+                            url: resp.final_url,
+                            title: Some("fallback fetch".into()),
+                            fetched_ok: true,
+                            error: None,
+                        });
+                    }
+                    Err(e) => {
+                        pages_consumed.fetch_sub(1, Ordering::Relaxed);
+                        sources.push(ResearchSource {
+                            url,
+                            title: Some("fallback fetch".into()),
+                            fetched_ok: false,
+                            error: Some(api_err_msg(&e)),
+                        });
+                    }
+                }
             }
         }
     }
@@ -367,7 +451,10 @@ async fn gather_one(
         // sees WHY (HTTP 403, content-type rejected, network
         // timeout, etc.) — currently the most useful triage signal.
         let fetch_summary = if no_sources {
-            "no search results".to_owned()
+            match search_err {
+                Some(e) => format!("search failed and fallback produced no sources: {e}"),
+                None => "no search results".to_owned(),
+            }
         } else {
             let reasons: Vec<&str> = sources
                 .iter()
@@ -453,6 +540,28 @@ async fn gather_one(
             &format!("subagent failed: {}", api_err_msg(&e)),
         )),
     }
+}
+
+fn extract_inline_urls(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter_map(|token| {
+            let trimmed = token.trim_matches(|c: char| {
+                c == '(' || c == ')' || c == '[' || c == ']' || c == ',' || c == '.'
+            });
+            if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                Some(trimmed.to_owned())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn wikipedia_opensearch_url(query: &str) -> String {
+    let encoded = url::form_urlencoded::byte_serialize(query.as_bytes()).collect::<String>();
+    format!(
+        "https://en.wikipedia.org/w/api.php?action=opensearch&search={encoded}&limit=5&namespace=0&format=json"
+    )
 }
 
 const BODY_TRUNCATE_PER_URL: usize = 4_000;
@@ -655,6 +764,7 @@ mod tests {
                 is_ephemeral: false,
                 ephemeral_expires_at: None,
                 last_activity_at: 0,
+                context_window_policy: None,
             })
             .unwrap();
         cid
@@ -680,6 +790,21 @@ mod tests {
         }
         fn provider_id(&self) -> &str {
             "stub"
+        }
+    }
+
+    struct StubSearchFail;
+    #[async_trait]
+    impl WebSearchApi for StubSearchFail {
+        async fn search(
+            &self,
+            _query: &str,
+            _max_results: u32,
+        ) -> Result<Vec<SearchResult>, ApiError> {
+            Err(ApiError::Storage("simulated search outage".into()))
+        }
+        fn provider_id(&self) -> &str {
+            "stub-fail"
         }
     }
 
@@ -917,6 +1042,30 @@ mod tests {
             cap_failures >= 1,
             "expected at least one Failed note citing max_total_tokens; got: {notes:#?}",
         );
+    }
+
+    #[tokio::test]
+    async fn run_gather_falls_back_to_inline_url_when_search_fails() {
+        let db = fresh_db();
+        let plan = ResearchPlan {
+            thesis: "fallback".into(),
+            steps: vec![PlanStep {
+                query: "Use this URL https://example.com/rust for facts".into(),
+                rationale: None,
+            }],
+        };
+        let deps = GatherDeps {
+            search: Arc::new(StubSearchFail),
+            fetch: Arc::new(StubFetch::new()),
+            subagent: None,
+        };
+        let ctx = make_ctx(&db, plan, config_with(1, 10, 10_000), deps);
+        let notes = run_gather(ctx).await.unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].state, SubQueryState::Done);
+        assert_eq!(notes[0].sources.len(), 1);
+        assert!(notes[0].sources[0].fetched_ok);
+        assert_eq!(notes[0].sources[0].url, "https://example.com/rust");
     }
 
     #[tokio::test]

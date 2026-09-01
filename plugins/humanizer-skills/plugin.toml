@@ -1,0 +1,13 @@
+[plugin]
+id = "humanizer-skills"
+name = "Humanizer Skills"
+version = "0.1.0"
+
+[runtime]
+tier = "script"
+source = "main.rhai"
+
+[[skills]]
+name = "humanizer"
+entry = "skills/humanizer.md"
+description = "Make replies sound natural, clear, and human while preserving facts."

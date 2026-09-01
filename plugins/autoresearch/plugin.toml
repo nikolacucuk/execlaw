@@ -1,0 +1,60 @@
+[plugin]
+id = "autoresearch"
+name = "AutoResearch"
+version = "0.1.0"
+description = "Autonomous experiment-loop helper inspired by karpathy/autoresearch. Adds tools for setup planning, keep/discard scoring, and results.tsv analytics so agents can run faster research cycles with clearer decisions."
+author = "execlaw"
+license = "Apache-2.0"
+
+[[tools]]
+name = "autoresearch.bootstrap_run"
+description = "Create an AutoResearch-style run blueprint adapted to this repository and hardware profile. Returns a concrete setup checklist, branch naming suggestion, guardrails, and a prioritized experiment-idea queue."
+schema = "schemas/autoresearch.bootstrap_run.json"
+trust_floor = "KnownTrusted"
+latency = "low"
+
+[[tools]]
+name = "autoresearch.analyze_results_tsv"
+description = "Analyze tab-separated experiment logs (commit, val_bpb, memory_gb, status, description). Computes keep/discard rates, best run, cumulative gain from baseline, and recent trajectory hints."
+schema = "schemas/autoresearch.analyze_results_tsv.json"
+trust_floor = "KnownTrusted"
+latency = "low"
+
+[[tools]]
+name = "autoresearch.score_candidate"
+description = "Score a candidate experiment against baseline using val_bpb, memory growth, and complexity cost. Returns keep/discard/review with explicit rationale tuned to AutoResearch-style simplicity rules."
+schema = "schemas/autoresearch.score_candidate.json"
+trust_floor = "KnownTrusted"
+latency = "low"
+
+[[skills]]
+name = "loop-playbook"
+description = "Use this when running autonomous training experiments in an AutoResearch-style loop."
+entry = "skills/loop-playbook.md"
+tags = ["research", "ml", "experiments", "karpathy", "autoresearch"]
+
+[[admin_routes]]
+method = "GET"
+path = "/config"
+handler = "admin_get_config"
+description = "Return AutoResearch defaults for metric, memory budget and minimum gain threshold."
+
+[[admin_routes]]
+method = "POST"
+path = "/config"
+handler = "admin_set_config"
+description = "Persist AutoResearch defaults used by score_candidate and run planning."
+
+[[admin_routes]]
+method = "POST"
+path = "/test"
+handler = "admin_test"
+description = "Run a local self-test of current defaults and return normalized values."
+
+[[ui_panels]]
+mount = "admin/plugins/autoresearch"
+entry = "ui/panel.js"
+
+[runtime]
+tier = "script"
+source = "main.rhai"

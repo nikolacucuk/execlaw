@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1.7
+
+# execlaw control-plane image for Docker-based deployments (e.g. TrueNAS).
+#
+# Build:
+#   docker build -f Dockerfile.control-plane -t execlaw/control-plane:local .
+#
+# Run (example):
+#   docker run --rm -p 3031:3031 \
+#     -v /var/run/docker.sock:/var/run/docker.sock \
+#     -v /path/to/execlaw-data:/var/lib/execlaw \
+#     execlaw/control-plane:local
+
+FROM rust:1.90-bookworm AS builder
+WORKDIR /build
+
+# Copy workspace sources needed by the execlaw CLI build.
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY plugins ./plugins
+COPY vendor ./vendor
+COPY web ./web
+COPY scripts ./scripts
+COPY spec ./spec
+
+# Build the control-plane CLI binary.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/build/target \
+    cargo build --release -p execlaw \
+    && cp target/release/execlaw /tmp/execlaw
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl libfontconfig1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root runtime user.
+RUN useradd -m -u 1000 -s /usr/sbin/nologin execlaw
+RUN mkdir -p /var/lib/execlaw && chown -R execlaw:execlaw /var/lib/execlaw
+
+# Keep the DB, fallback vault key, plugin staging, and logs below the one
+# bind-mounted data root. Headless containers normally have no OS keyring.
+ENV HOME=/var/lib/execlaw
+
+COPY --from=builder /tmp/execlaw /usr/local/bin/execlaw
+
+USER execlaw
+WORKDIR /var/lib/execlaw
+
+EXPOSE 3031
+
+ENTRYPOINT ["/usr/local/bin/execlaw"]
+CMD ["serve", "--db", "/var/lib/execlaw/execlaw.db", "--bind", "0.0.0.0:3031"]

@@ -9,7 +9,9 @@
 import { useAuth } from "../auth/AuthContext";
 import { useT } from "../i18n";
 import { Composer } from "./Composer";
+import { GraphifyPreview } from "./GraphifyPreview";
 import { MascotGreeting } from "./MascotGreeting";
+import { useGraphifyWelcomeVisible } from "./useGraphifyWelcomeVisible";
 import { useVoiceReadiness } from "./useVoiceReadiness";
 
 interface SuggestionDef {
@@ -99,6 +101,8 @@ interface Props {
      * doesn't render).
      */
     getSkills?: () => Promise<SkillListEntry[]>;
+    skillDefaultsStorageKey?: string;
+    defaultSkillNames?: string[];
 }
 
 export function WelcomeView({
@@ -112,6 +116,8 @@ export function WelcomeView({
     multimodal,
     recommendedImageEdge,
     getSkills,
+    skillDefaultsStorageKey,
+    defaultSkillNames,
 }: Props) {
     const auth = useAuth();
     const t = useT();
@@ -124,6 +130,7 @@ export function WelcomeView({
     // here keeps the contract right at the call site.
     const getToken = auth.getAccessToken;
     const voiceReadiness = useVoiceReadiness(getToken);
+    const [showGraphifyPreview] = useGraphifyWelcomeVisible();
     return (
         <div className="execlaw-welcome" data-testid="welcome-view">
             {/*
@@ -171,6 +178,7 @@ export function WelcomeView({
                     <i className="bi bi-incognito" aria-hidden />
                 </button>
             )}
+            {showGraphifyPreview && <GraphifyPreview getAccessToken={getToken} />}
             <div className="execlaw-welcome__brand">
                 <MascotGreeting
                     size={216}
@@ -196,6 +204,8 @@ export function WelcomeView({
                     multimodal={multimodal}
                     recommendedImageEdge={recommendedImageEdge}
                     getSkills={getSkills}
+                    skillDefaultsStorageKey={skillDefaultsStorageKey}
+                    defaultSkillNames={defaultSkillNames}
                 />
             </div>
 

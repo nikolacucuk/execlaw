@@ -76,6 +76,26 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "suggestion_drafts",
         sql: include_str!("../migrations/0010_suggestion_drafts.sql"),
     },
+    Migration {
+        id: 11,
+        name: "enable_skills_learning_loop_defaults",
+        sql: include_str!("../migrations/0011_enable_skills_learning_loop_defaults.sql"),
+    },
+    Migration {
+        id: 12,
+        name: "chain_plans_runs",
+        sql: include_str!("../migrations/0012_chain_plans_runs.sql"),
+    },
+    Migration {
+        id: 13,
+        name: "conversation_context_policy",
+        sql: include_str!("../migrations/0013_conversation_context_policy.sql"),
+    },
+    Migration {
+        id: 14,
+        name: "download_url_ttl",
+        sql: include_str!("../migrations/0014_download_url_ttl.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -268,7 +288,7 @@ mod tests {
         // discovery surface on the /automations landing page).
         // Update this list whenever a new migration is added to
         // MIGRATIONS.
-        assert_eq!(applied, vec![1, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(applied, vec![1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
 
         // Spot-check: every documented table exists.
         let tables = vec![
@@ -324,6 +344,9 @@ mod tests {
             "state_automation_runs",
             "state_automation_suggestions",
             "state_automation_muted_patterns",
+            "state_chain_plans",
+            "state_chain_runs",
+            "state_chain_run_steps",
         ];
         db.with_conn(|c| {
             for t in &tables {
@@ -347,7 +370,7 @@ mod tests {
         let runner = MigrationRunner::new(&db);
         let first = runner.apply_all().unwrap();
         let second = runner.apply_all().unwrap();
-        assert_eq!(first, vec![1, 5, 6, 7, 8, 9, 10]);
+        assert_eq!(first, vec![1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
         assert!(
             second.is_empty(),
             "rerun must not re-apply already-applied migrations"

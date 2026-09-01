@@ -75,20 +75,41 @@ impl FromRequestParts<AppState> for AuthedUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        // Only path: `Authorization: Bearer <jwt>` header. The
-        // pre-2026-05 `?access_token=…` query fallback was removed —
-        // full-access JWTs in query strings leaked through browser
-        // history, proxy logs, referrers, and copied-link surfaces.
-        // Routes the browser hits directly should switch to
-        // `MediaAuthedUser` (see crate::download_urls), which accepts
-        // a short-lived signed URL instead of a raw JWT.
-        let token_owned: String = parts
+        // Primary path: `Authorization: Bearer <jwt>` header.
+        // Fallback: `execlaw_access` httpOnly cookie (§10 security
+        // enhancement). This lets browser clients rely purely on the
+        // automatic cookie flow without storing the token in JS memory.
+        // The pre-2026-05 `?access_token=…` query fallback was removed
+        // (full-access JWTs in query strings leaked through browser
+        // history, proxy logs, referrers, and copied-link surfaces).
+        let bearer_header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.strip_prefix("Bearer "))
-            .ok_or(AuthRejection("missing Authorization header"))?
-            .to_owned();
+            .map(|s| s.to_owned());
+
+        let cookie_token = if bearer_header.is_none() {
+            parts
+                .headers
+                .get(axum::http::header::COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|cookies| {
+                    // Parse the Cookie header: `name=value; name2=value2; …`
+                    cookies.split(';').find_map(|part| {
+                        let part = part.trim();
+                        part.strip_prefix("execlaw_access=").map(|v| v.to_owned())
+                    })
+                })
+        } else {
+            None
+        };
+
+        let token_owned = bearer_header
+            .or(cookie_token)
+            .ok_or(AuthRejection(
+                "missing Authorization header (no Bearer token or execlaw_access cookie)",
+            ))?;
 
         let claims = match state.signer.verify_access_token(&token_owned) {
             Ok(c) => c,

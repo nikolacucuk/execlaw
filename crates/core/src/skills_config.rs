@@ -17,9 +17,8 @@ use serde::{Deserialize, Serialize};
 /// Operator-editable skill-subsystem settings.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SkillsConfig {
-    /// When `false` (the default), the auto-capture worker is
-    /// dormant — turn completions are observed but no draft skills
-    /// are produced. Operator opts in via the UI.
+    /// When `false`, the auto-capture worker is dormant — turn
+    /// completions are observed but no draft skills are produced.
     pub auto_capture_enabled: bool,
     /// Threshold below which a turn does not qualify for
     /// summarization. Default 5.
@@ -41,10 +40,10 @@ pub struct SkillsConfig {
 impl Default for SkillsConfig {
     fn default() -> Self {
         Self {
-            auto_capture_enabled: false,
+            auto_capture_enabled: true,
             auto_capture_min_tool_calls: 5,
             auto_capture_dry_run: false,
-            reuse_update_enabled: false,
+            reuse_update_enabled: true,
             updated_at: 0,
         }
     }
@@ -68,7 +67,7 @@ impl<'a> SkillsConfigStore<'a> {
     }
 
     /// Read the singleton row. Returns the seeded default
-    /// (`auto_capture_enabled = false`) when the row is missing —
+    /// (`auto_capture_enabled = true`) when the row is missing —
     /// migration 0030 always seeds it, so the fallback is defensive
     /// against migration drift.
     pub fn get(&self) -> Result<SkillsConfig, DbError> {
@@ -170,9 +169,10 @@ mod tests {
     fn default_values_match_locked_design() {
         let db = fresh();
         let s = SkillsConfigStore::new(&db).get().unwrap();
-        assert!(!s.auto_capture_enabled);
+        assert!(s.auto_capture_enabled);
         assert_eq!(s.auto_capture_min_tool_calls, 5);
         assert!(!s.auto_capture_dry_run);
+        assert!(s.reuse_update_enabled);
     }
 
     #[test]
@@ -236,6 +236,8 @@ mod tests {
             .unwrap();
         let s = store.get().unwrap();
         assert!(s.auto_capture_dry_run);
-        assert!(!s.auto_capture_enabled);
+        // auto_capture_enabled was NOT toggled by the dry_run update —
+        // migration 0011 sets it to true by default, so it remains true.
+        assert!(s.auto_capture_enabled);
     }
 }

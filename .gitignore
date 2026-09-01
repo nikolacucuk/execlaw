@@ -48,3 +48,4 @@ web/dist/
 # instead. Tracked here as a safety net so the debris never gets
 # committed.
 crates/server/blobs/
+/graphify-out

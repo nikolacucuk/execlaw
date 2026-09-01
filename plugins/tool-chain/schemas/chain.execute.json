@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chain.execute args",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "plan_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Identifier of a previously approved plan."
+    },
+    "max_runtime_ms": {
+      "type": "integer",
+      "minimum": 1000,
+      "maximum": 600000,
+      "default": 120000
+    },
+    "allow_external_effects": {
+      "type": "boolean",
+      "default": false,
+      "description": "When false, execution must skip effectful steps."
+    }
+  },
+  "required": ["plan_id"]
+}

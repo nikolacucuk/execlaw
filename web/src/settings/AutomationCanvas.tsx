@@ -119,6 +119,8 @@ function bodyFor(n: NodeDef): string | undefined {
         }
         case "CallPlugin":
             return shorten((cfg.tool as string | undefined) ?? "");
+        case "HttpFetch":
+            return shorten((cfg.url as string | undefined) ?? "");
         default:
             return undefined;
     }
@@ -281,6 +283,14 @@ function defaultConfigFor(kind: NodeKind): unknown {
             return {
                 tool: "",
                 args: {},
+            };
+        case "HttpFetch":
+            return {
+                url: "",
+                method: "GET",
+                headers: {},
+                body: null,
+                rate_limit_per_minute: 60,
             };
         default:
             return {};
@@ -459,6 +469,7 @@ const PALETTE_KINDS: NodeKind[] = [
     "AskAgent",
     "Notify",
     "CallPlugin",
+    "HttpFetch",
 ];
 
 function NodePalette() {

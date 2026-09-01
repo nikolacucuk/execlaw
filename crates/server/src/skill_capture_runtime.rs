@@ -116,3 +116,21 @@ pub fn spawn_reuse_update_worker(
     ));
     worker.spawn()
 }
+
+/// Phase D (§11/new-2) — build an `OptimizerWorker` ready to fire
+/// after turn-end. Does NOT spawn a background thread; callers
+/// receive the worker and call `maybe_optimize` inside a
+/// `tokio::spawn` at turn-end so it never adds user-visible latency.
+pub fn build_optimizer_worker(
+    db: Database,
+    skill_store: Arc<SkillStore>,
+    inference: Arc<crate::inference_resolver::InferenceResolver>,
+) -> Arc<execlaw_skills::optimizer::OptimizerWorker> {
+    let summarizer: Arc<dyn SkillSummarizer> =
+        Arc::new(InferenceSummarizer::new(inference, db.clone()));
+    Arc::new(execlaw_skills::optimizer::OptimizerWorker {
+        store: skill_store,
+        db,
+        summarizer,
+    })
+}

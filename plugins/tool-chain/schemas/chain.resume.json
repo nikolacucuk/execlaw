@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "chain.resume args",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "approval_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Pending approval id returned by chain.execute."
+    },
+    "decision": {
+      "type": "string",
+      "enum": ["approve", "deny"],
+      "description": "Controller decision for the paused run."
+    }
+  },
+  "required": ["approval_id", "decision"]
+}

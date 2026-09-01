@@ -221,6 +221,13 @@ pub async fn respond_handler(
         }
     }
 
+    // Chain approvals reuse this endpoint so the existing approvals
+    // UI feed + action path can drive both cold-contact and chain-run
+    // decisions.
+    if find_cold_contact_event(&state, &approval_id).is_none() {
+        return respond_chain_approval(state, approval_id, req).await;
+    }
+
     // Look up the ColdContactArrived event that minted this
     // approval_id. Phase 3 scans state_events for the matching row;
     // a dedicated `state_approvals` index lands as a Phase-5
@@ -446,6 +453,105 @@ pub async fn respond_handler(
             conversation_id: cid.as_str().to_owned(),
             new_trust_class: new_class_tag,
             outcome: outcome.into(),
+        })),
+    )
+        .into_response()
+}
+
+async fn respond_chain_approval(
+    state: AppState,
+    approval_id: String,
+    req: ApprovalRequest,
+) -> axum::response::Response {
+    let exists = state
+        .db
+        .with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT 1 FROM state_chain_runs \
+                 WHERE approval_id = ?1 AND status = 'awaiting_approval' \
+                 LIMIT 1",
+            )?;
+            let mut rows = stmt.query(rusqlite::params![approval_id.as_str()])?;
+            Ok(rows.next()?.is_some())
+        })
+        .unwrap_or(false);
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": {
+                    "code": "approval_not_found",
+                    "message": "no pending approval matches this approval_id",
+                }
+            })),
+        )
+            .into_response();
+    }
+
+    let decision = match req.verb {
+        ApprovalVerb::Approve => crate::tool_chain_tool::ChainApprovalDecision::Approve,
+        ApprovalVerb::Reject => crate::tool_chain_tool::ChainApprovalDecision::Deny,
+        other => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "unsupported_verb",
+                        "message": format!(
+                            "verb {:?} is not supported for chain approvals; use Approve or Reject",
+                            other
+                        ),
+                    }
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let result = crate::tool_chain_tool::resolve_chain_approval_http(
+        &state.db,
+        &approval_id,
+        decision,
+        chrono::Utc::now().timestamp(),
+    );
+    let value = match result {
+        Ok(v) => v,
+        Err(e) if e == "approval_not_found" => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "approval_not_found",
+                        "message": "no pending chain approval matches this approval_id",
+                    }
+                })),
+            )
+                .into_response();
+        }
+        Err(e) => return internal_error(&format!("chain approval resolve: {e}")),
+    };
+
+    let conv_id = value
+        .get("conversation_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    if !conv_id.is_empty() {
+        state.events.publish(UiEvent::ApprovalResolved {
+            approval_id: approval_id.clone(),
+            conversation_id: conv_id.clone(),
+        });
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "approval_id": approval_id,
+            "principal_id": "tool-chain",
+            "conversation_id": conv_id,
+            "new_trust_class": "N/A",
+            "outcome": value.get("status").cloned().unwrap_or(serde_json::Value::String("unknown".to_string())),
+            "chain": value,
         })),
     )
         .into_response()
@@ -1106,6 +1212,37 @@ pub async fn list_pending_approvals_handler(
             });
         }
     }
+
+    // Bridge phase-2 tool-chain approvals into the same feed so the
+    // operator can act from one approvals surface.
+    if let Ok(chain_rows) = state.db.with_conn(|c| {
+        let mut stmt = c.prepare(
+            "SELECT r.approval_id, r.conversation_id, p.objective \
+             FROM state_chain_runs r \
+             JOIN state_chain_plans p ON p.id = r.plan_id \
+             WHERE r.status = 'awaiting_approval' \
+               AND r.approval_id IS NOT NULL",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })?;
+        let out: Result<Vec<(String, String, String)>, _> = rows.collect();
+        Ok(out?)
+    }) {
+        for (approval_id, conversation_id, objective) in chain_rows {
+            approvals.push(PendingApprovalSummary {
+                approval_id,
+                conversation_id,
+                sender_principal_id: "tool-chain".to_string(),
+                original_text: format!("Tool-chain execution awaiting approval: {objective}"),
+            });
+        }
+    }
+
     (
         StatusCode::OK,
         Json(serde_json::json!(PendingApprovalsResponse { approvals })),

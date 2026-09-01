@@ -91,6 +91,28 @@ describe("GeneralPage", () => {
         expect(save.disabled).toBe(false);
     });
 
+    it("persists the Graphify preview toggle in localStorage", async () => {
+        fetchMock.mockImplementation(async (url: string) => {
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/settings/general") return settingsResponse();
+            return new Response("{}", { status: 200 });
+        });
+        localStorage.removeItem("execlaw.chat.graphify_welcome_visible");
+        mountPage();
+        const toggle = (await waitFor(() =>
+            screen.getByTestId("general-graphify-preview-toggle"),
+        )) as HTMLInputElement;
+        expect(toggle.checked).toBe(false);
+        fireEvent.click(toggle);
+        expect(localStorage.getItem("execlaw.chat.graphify_welcome_visible")).toBe(
+            "1",
+        );
+        fireEvent.click(toggle);
+        expect(localStorage.getItem("execlaw.chat.graphify_welcome_visible")).toBe(
+            "0",
+        );
+    });
+
     it("toggling start_on_boot surfaces the service-install hint", async () => {
         fetchMock.mockImplementation(async (url: string) => {
             if (url === "/api/admin/me") return meResponse();

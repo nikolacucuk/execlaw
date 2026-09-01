@@ -62,6 +62,15 @@ describe("Composer", () => {
         expect(send.disabled).toBe(true);
     });
 
+    it("renders stop button while busy and calls onStop", () => {
+        const onStop = vi.fn();
+        render(<Composer onSend={() => {}} busy onStop={onStop} />);
+        const stop = screen.getByTestId("composer-stop") as HTMLButtonElement;
+        expect(stop).toBeTruthy();
+        fireEvent.click(stop);
+        expect(onStop).toHaveBeenCalledTimes(1);
+    });
+
     /// 2026-04-28 regression: hitting Enter used to disable the
     /// textarea via `submitting=true`, which blurred the element
     /// (disabled inputs lose focus). The user lost their place
@@ -314,6 +323,45 @@ describe("Composer", () => {
             "composer-skill-picker-error",
         );
         expect(within(status).getByText(/boom: 500/)).toBeTruthy();
+    });
+
+    it("applies configured default skills and re-applies them after send", async () => {
+        const onSend = vi.fn().mockResolvedValue(undefined);
+        const getSkills = vi
+            .fn<() => Promise<SkillListEntry[]>>()
+            .mockResolvedValue([
+                fakeSkill("test/alpha", "alpha"),
+                fakeSkill("test/beta", "beta"),
+            ]);
+        localStorage.removeItem("test.composer.defaults");
+
+        render(
+            <Composer
+                onSend={onSend}
+                getSkills={getSkills}
+                skillDefaultsStorageKey="test.composer.defaults"
+                defaultSkillNames={["test/alpha"]}
+            />,
+        );
+
+        await waitFor(() => {
+            const chips = screen.getAllByTestId("composer-skill-chip");
+            expect(chips).toHaveLength(1);
+            expect(chips[0].getAttribute("data-skill-name")).toBe("test/alpha");
+        });
+
+        const input = screen.getByTestId("composer-input") as HTMLTextAreaElement;
+        fireEvent.change(input, { target: { value: "hello" } });
+        await act(async () => {
+            fireEvent.submit(input.closest("form")!);
+        });
+        expect(onSend).toHaveBeenCalledWith("hello", [], ["test/alpha"]);
+
+        await waitFor(() => {
+            const chips = screen.getAllByTestId("composer-skill-chip");
+            expect(chips).toHaveLength(1);
+            expect(chips[0].getAttribute("data-skill-name")).toBe("test/alpha");
+        });
     });
 
     it("shows an empty-state when the backend returns zero skills", async () => {

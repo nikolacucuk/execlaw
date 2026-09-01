@@ -1,0 +1,110 @@
+{
+  "edges": [
+    {
+      "id": "e1",
+      "kind": "has_thesis",
+      "source": "job:f838bc49-111d-4375-9d55-6ec3fd6a1d36",
+      "target": "thesis:f838bc49-111d-4375-9d55-6ec3fd6a1d36"
+    },
+    {
+      "id": "e2",
+      "kind": "has_step",
+      "source": "job:f838bc49-111d-4375-9d55-6ec3fd6a1d36",
+      "target": "step:f838bc49-111d-4375-9d55-6ec3fd6a1d36:0"
+    },
+    {
+      "id": "e3",
+      "kind": "cites",
+      "source": "step:f838bc49-111d-4375-9d55-6ec3fd6a1d36:0",
+      "target": "source:1"
+    },
+    {
+      "id": "e4",
+      "kind": "has_step",
+      "source": "job:f838bc49-111d-4375-9d55-6ec3fd6a1d36",
+      "target": "step:f838bc49-111d-4375-9d55-6ec3fd6a1d36:1"
+    },
+    {
+      "id": "e5",
+      "kind": "cites",
+      "source": "step:f838bc49-111d-4375-9d55-6ec3fd6a1d36:1",
+      "target": "source:2"
+    },
+    {
+      "id": "e6",
+      "kind": "has_step",
+      "source": "job:f838bc49-111d-4375-9d55-6ec3fd6a1d36",
+      "target": "step:f838bc49-111d-4375-9d55-6ec3fd6a1d36:2"
+    },
+    {
+      "id": "e7",
+      "kind": "cites",
+      "source": "step:f838bc49-111d-4375-9d55-6ec3fd6a1d36:2",
+      "target": "source:3"
+    }
+  ],
+  "generated_at": 1780383925,
+  "job_id": "f838bc49-111d-4375-9d55-6ec3fd6a1d36",
+  "meta": {
+    "notes": 3,
+    "plan_steps": 3,
+    "report_preview": "# Summary of Key Rust Learning Points\n\nThis report synthesizes key learning points from the official Rust Lang \"learn\" page and the Wikipedia entry for Rust, focusing on core concepts, features, and educational resources. The official Rust site emphasizes Rust's design goals, community-driven development, and practical learning tools, while Wikipedia provides broader context on the language's technical foundations and ecosystem.\n"
+  },
+  "nodes": [
+    {
+      "community": "research-job",
+      "id": "job:f838bc49-111d-4375-9d55-6ec3fd6a1d36",
+      "kind": "job",
+      "label": "Use only these URLs and summarize key Rust learning points: https://www.rust-lang.org/learn https://en.wikipedia.org/wiki/Rust_(programming_language)"
+    },
+    {
+      "community": "research-plan",
+      "id": "thesis:f838bc49-111d-4375-9d55-6ec3fd6a1d36",
+      "kind": "thesis",
+      "label": "To summarize key Rust learning points from the specified URLs, we need to extract core concepts, features, and educational resources from both the official Rust Lang learn page and the Wikipedia entry."
+    },
+    {
+      "community": "research-gather",
+      "id": "step:f838bc49-111d-4375-9d55-6ec3fd6a1d36:0",
+      "kind": "sub_query",
+      "label": "Extract key learning points from the Rust Lang 'learn' page (https://www.rust-lang.org/learn)",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:1",
+      "kind": "source",
+      "label": "https://rust-lang.org/learn/"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:f838bc49-111d-4375-9d55-6ec3fd6a1d36:1",
+      "kind": "sub_query",
+      "label": "Extract key learning points from the Wikipedia Rust page (https://en.wikipedia.org/wiki/Rust_(programming_language))",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:2",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/wiki/Rust_(programming_language"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:f838bc49-111d-4375-9d55-6ec3fd6a1d36:2",
+      "kind": "sub_query",
+      "label": "Compare and synthesize the extracted points from both sources to identify overlapping and unique insights",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:3",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Compare+and+synthesize+the+extracted+points+from+both+sources+to+identify+overlapping+and+unique+insights&limit=5&namespace=0&format=json"
+    }
+  ],
+  "query": "Use only these URLs and summarize key Rust learning points: https://www.rust-lang.org/learn https://en.wikipedia.org/wiki/Rust_(programming_language)"
+}

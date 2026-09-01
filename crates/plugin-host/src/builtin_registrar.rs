@@ -144,6 +144,7 @@ mod tests {
                 latency: ToolLatency::Low,
                 capabilities: vec![],
                 default_allowed_classes: defaults.iter().map(|s| s.to_string()).collect(),
+                sensitive: false,
             },
         })
     }
