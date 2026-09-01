@@ -1,7 +1,187 @@
 {
   "source_path": "graphify-out/graph.json",
-  "generated_at": "2026-06-02T00:37:25.597Z",
+  "generated_at": "2026-09-01T04:48:17.984Z",
   "nodes": [
+    {
+      "label": "1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L1",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353",
+      "community": 641,
+      "norm_label": "1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json"
+    },
+    {
+      "label": "edges",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L2",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353_edges",
+      "community": 641,
+      "norm_label": "edges"
+    },
+    {
+      "label": "generated_at",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L70",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353_generated_at",
+      "community": 641,
+      "norm_label": "generated_at"
+    },
+    {
+      "label": "job_id",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L71",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353_job_id",
+      "community": 641,
+      "norm_label": "job_id"
+    },
+    {
+      "label": "meta",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L72",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353_meta",
+      "community": 641,
+      "norm_label": "meta"
+    },
+    {
+      "label": "notes",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L73",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353_meta_notes",
+      "community": 641,
+      "norm_label": "notes"
+    },
+    {
+      "label": "plan_steps",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L74",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353_meta_plan_steps",
+      "community": 641,
+      "norm_label": "plan_steps"
+    },
+    {
+      "label": "report_preview",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L75",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353_meta_report_preview",
+      "community": 641,
+      "norm_label": "report_preview"
+    },
+    {
+      "label": "nodes",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L77",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353_nodes",
+      "community": 641,
+      "norm_label": "nodes"
+    },
+    {
+      "label": "query",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/1cc29ac1-0d7f-40d0-ae20-f5a792f48353.json",
+      "source_location": "L161",
+      "id": "research_snapshots_1cc29ac1_0d7f_40d0_ae20_f5a792f48353_query",
+      "community": 641,
+      "norm_label": "query"
+    },
+    {
+      "label": "f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L1",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36",
+      "community": 647,
+      "norm_label": "f838bc49-111d-4375-9d55-6ec3fd6a1d36.json"
+    },
+    {
+      "label": "edges",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L2",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36_edges",
+      "community": 647,
+      "norm_label": "edges"
+    },
+    {
+      "label": "generated_at",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L46",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36_generated_at",
+      "community": 647,
+      "norm_label": "generated_at"
+    },
+    {
+      "label": "job_id",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L47",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36_job_id",
+      "community": 647,
+      "norm_label": "job_id"
+    },
+    {
+      "label": "meta",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L48",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36_meta",
+      "community": 647,
+      "norm_label": "meta"
+    },
+    {
+      "label": "notes",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L49",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36_meta_notes",
+      "community": 647,
+      "norm_label": "notes"
+    },
+    {
+      "label": "plan_steps",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L50",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36_meta_plan_steps",
+      "community": 647,
+      "norm_label": "plan_steps"
+    },
+    {
+      "label": "report_preview",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L51",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36_meta_report_preview",
+      "community": 647,
+      "norm_label": "report_preview"
+    },
+    {
+      "label": "nodes",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L53",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36_nodes",
+      "community": 647,
+      "norm_label": "nodes"
+    },
+    {
+      "label": "query",
+      "file_type": "code",
+      "source_file": ".obsidian/graphify/research-snapshots/f838bc49-111d-4375-9d55-6ec3fd6a1d36.json",
+      "source_location": "L109",
+      "id": "research_snapshots_f838bc49_111d_4375_9d55_6ec3fd6a1d36_query",
+      "community": 647,
+      "norm_label": "query"
+    },
     {
       "label": "icon.json",
       "file_type": "code",
@@ -323,7 +503,7 @@
       "source_file": "crates/charting/src/lib.rs",
       "source_location": "L232",
       "id": "db",
-      "community": 327,
+      "community": 291,
       "norm_label": "db"
     },
     {
@@ -467,7 +647,7 @@
       "source_file": "crates/cli/src/main.rs",
       "source_location": "L42",
       "id": "crates_cli_src_main_rs_src_main_cli",
-      "community": 254,
+      "community": 62,
       "norm_label": "cli"
     },
     {
@@ -476,7 +656,7 @@
       "source_file": "crates/cli/src/main.rs",
       "source_location": "L44",
       "id": "command",
-      "community": 254,
+      "community": 145,
       "norm_label": "command"
     },
     {
@@ -861,7 +1041,7 @@
       "label": "main()",
       "file_type": "code",
       "source_file": "crates/cli/src/main.rs",
-      "source_location": "L2412",
+      "source_location": "L2480",
       "id": "crates_cli_src_main_rs_src_main_main",
       "community": 62,
       "norm_label": "main()"
@@ -870,7 +1050,7 @@
       "label": "ExitCode",
       "file_type": "code",
       "source_file": "crates/cli/src/main.rs",
-      "source_location": "L2412",
+      "source_location": "L2480",
       "id": "exitcode",
       "community": 62,
       "norm_label": "exitcode"
@@ -879,7 +1059,7 @@
       "label": "resolve_bind_prefers_cli_over_db()",
       "file_type": "code",
       "source_file": "crates/cli/src/main.rs",
-      "source_location": "L2576",
+      "source_location": "L2644",
       "id": "src_main_resolve_bind_prefers_cli_over_db",
       "community": 62,
       "norm_label": "resolve_bind_prefers_cli_over_db()"
@@ -888,7 +1068,7 @@
       "label": "resolve_bind_falls_back_to_db_when_no_cli()",
       "file_type": "code",
       "source_file": "crates/cli/src/main.rs",
-      "source_location": "L2583",
+      "source_location": "L2651",
       "id": "src_main_resolve_bind_falls_back_to_db_when_no_cli",
       "community": 62,
       "norm_label": "resolve_bind_falls_back_to_db_when_no_cli()"
@@ -897,7 +1077,7 @@
       "label": "resolve_bind_falls_back_to_default_when_neither_provided()",
       "file_type": "code",
       "source_file": "crates/cli/src/main.rs",
-      "source_location": "L2590",
+      "source_location": "L2658",
       "id": "src_main_resolve_bind_falls_back_to_default_when_neither_provided",
       "community": 62,
       "norm_label": "resolve_bind_falls_back_to_default_when_neither_provided()"
@@ -906,7 +1086,7 @@
       "label": "resolve_bind_treats_blank_db_value_as_missing()",
       "file_type": "code",
       "source_file": "crates/cli/src/main.rs",
-      "source_location": "L2597",
+      "source_location": "L2665",
       "id": "src_main_resolve_bind_treats_blank_db_value_as_missing",
       "community": 62,
       "norm_label": "resolve_bind_treats_blank_db_value_as_missing()"
@@ -2168,7 +2348,7 @@
       "source_file": "crates/container-manager/src/lib.rs",
       "source_location": "L1",
       "id": "crates_container_manager_src_lib_rs_src_lib",
-      "community": 138,
+      "community": 651,
       "norm_label": "lib.rs"
     },
     {
@@ -2521,186 +2701,6 @@
       "id": "src_service_nativechild",
       "community": 2,
       "norm_label": "nativechild"
-    },
-    {
-      "label": "Child",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L809",
-      "id": "crates_container_manager_src_service_rs_child",
-      "community": 2,
-      "norm_label": "child"
-    },
-    {
-      "label": "VecDeque",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L815",
-      "id": "crates_container_manager_src_service_rs_vecdeque",
-      "community": 2,
-      "norm_label": "vecdeque"
-    },
-    {
-      "label": ".default()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L821",
-      "id": "src_service_nativeservicecontroller_default",
-      "community": 2,
-      "norm_label": ".default()"
-    },
-    {
-      "label": ".new()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L827",
-      "id": "src_service_nativeservicecontroller_new",
-      "community": 2,
-      "norm_label": ".new()"
-    },
-    {
-      "label": ".discover_ollama()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L852",
-      "id": "src_service_nativeservicecontroller_discover_ollama",
-      "community": 2,
-      "norm_label": ".discover_ollama()"
-    },
-    {
-      "label": "PathBuf",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L852",
-      "id": "crates_container_manager_src_service_rs_pathbuf",
-      "community": 2,
-      "norm_label": "pathbuf"
-    },
-    {
-      "label": ".discover_ollama_with()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L863",
-      "id": "src_service_nativeservicecontroller_discover_ollama_with",
-      "community": 2,
-      "norm_label": ".discover_ollama_with()"
-    },
-    {
-      "label": "Fn",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L863",
-      "id": "crates_container_manager_src_service_rs_fn",
-      "community": 2,
-      "norm_label": "fn"
-    },
-    {
-      "label": ".discover_for_hint()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L932",
-      "id": "src_service_nativeservicecontroller_discover_for_hint",
-      "community": 2,
-      "norm_label": ".discover_for_hint()"
-    },
-    {
-      "label": "find_on_path()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L949",
-      "id": "src_service_find_on_path",
-      "community": 2,
-      "norm_label": "find_on_path()"
-    },
-    {
-      "label": ".spawn()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L964",
-      "id": "src_service_nativeservicecontroller_spawn",
-      "community": 2,
-      "norm_label": ".spawn()"
-    },
-    {
-      "label": ".stop()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L1064",
-      "id": "src_service_nativeservicecontroller_stop",
-      "community": 2,
-      "norm_label": ".stop()"
-    },
-    {
-      "label": ".inspect()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L1084",
-      "id": "src_service_nativeservicecontroller_inspect",
-      "community": 2,
-      "norm_label": ".inspect()"
-    },
-    {
-      "label": ".health_check()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L1109",
-      "id": "src_service_nativeservicecontroller_health_check",
-      "community": 2,
-      "norm_label": ".health_check()"
-    },
-    {
-      "label": ".tail_logs()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L1129",
-      "id": "src_service_nativeservicecontroller_tail_logs",
-      "community": 2,
-      "norm_label": ".tail_logs()"
-    },
-    {
-      "label": ".try_adopt()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L1149",
-      "id": "src_service_nativeservicecontroller_try_adopt",
-      "community": 2,
-      "norm_label": ".try_adopt()"
-    },
-    {
-      "label": "spawn_log_reaper()",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L1163",
-      "id": "src_service_spawn_log_reaper",
-      "community": 2,
-      "norm_label": "spawn_log_reaper()"
-    },
-    {
-      "label": "AsyncRead",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L1163",
-      "id": "asyncread",
-      "community": 2,
-      "norm_label": "asyncread"
-    },
-    {
-      "label": "Unpin",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L1163",
-      "id": "unpin",
-      "community": 2,
-      "norm_label": "unpin"
-    },
-    {
-      "label": "MultiplexedServiceController",
-      "file_type": "code",
-      "source_file": "crates/container-manager/src/service.rs",
-      "source_location": "L1222",
-      "id": "src_service_multiplexedservicecontroller",
-      "community": 2,
-      "norm_label": "multiplexedservicecontroller"
     }
   ],
   "edges": []
