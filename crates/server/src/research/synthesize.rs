@@ -80,7 +80,11 @@ Include a one-paragraph summary at the top, then thematic sections drawing on th
 and a short Sources section at the bottom listing the URLs you cited. No preamble (\"Sure!\", \"As an AI...\"). \
 Reply with markdown only.";
 
-const REPORT_MAX_TOKENS: u32 = 2048;
+const SYNTHESIZE_RETRY_SYSTEM_PROMPT: &str = "Return the final deep-research report as markdown only. Do not \
+reason, explain your process, or leave the response blank. Start directly with a markdown heading and use the \
+research material supplied by the user.";
+
+const REPORT_MAX_TOKENS: u32 = 4096;
 
 /// Run synthesize. Returns the rendered markdown + a
 /// fresh `AttachmentId`. The runner persists the attachment id on
@@ -138,7 +142,7 @@ pub async fn run_synthesize(ctx: SynthesizeCtx) -> Result<SynthesizeOutcome, Syn
         model: ModelId(model.clone()),
         messages: vec![
             ChatMessage::system(SYNTHESIZE_SYSTEM_PROMPT),
-            ChatMessage::user(prompt_user),
+            ChatMessage::user(prompt_user.clone()),
         ],
         max_tokens: Some(REPORT_MAX_TOKENS),
         temperature: Some(0.2),
@@ -159,6 +163,38 @@ pub async fn run_synthesize(ctx: SynthesizeCtx) -> Result<SynthesizeOutcome, Syn
         .await
         .map_err(|e| SynthesizeError::Inference(e.to_string()))?;
     let report_markdown = adapted.content;
+    let report_markdown = if report_markdown.trim().is_empty() {
+        tracing::warn!(
+            job_id = job_id.as_str(),
+            model = %model,
+            "synthesize returned empty content; retrying with recovery prompt",
+        );
+        let retry_req = ChatRequest {
+            model: ModelId(model.clone()),
+            messages: vec![
+                ChatMessage::system(SYNTHESIZE_RETRY_SYSTEM_PROMPT),
+                ChatMessage::user(prompt_user),
+            ],
+            max_tokens: Some(REPORT_MAX_TOKENS),
+            temperature: Some(0.0),
+            stream: false,
+            tools: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            guided_decoding_backend: None,
+        };
+        adapter
+            .chat(
+                &inference,
+                retry_req,
+                execlaw_model_adapter::OutputHint::Markdown,
+            )
+            .await
+            .map_err(|e| SynthesizeError::Inference(e.to_string()))?
+            .content
+    } else {
+        report_markdown
+    };
     if report_markdown.trim().is_empty() {
         return Err(SynthesizeError::Inference(
             "synthesize LLM returned empty markdown".into(),
@@ -658,7 +694,7 @@ mod tests {
             })
             .to_string();
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
             let _ = sock.write_all(resp.as_bytes()).await;
@@ -693,7 +729,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_synthesize_errors_when_llm_returns_empty_text() {
+    async fn run_synthesize_retries_when_llm_returns_empty_text() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -714,10 +750,31 @@ mod tests {
             })
             .to_string();
             let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
                 body.len()
             );
             let _ = sock.write_all(resp.as_bytes()).await;
+            drop(sock);
+
+            let (mut retry_sock, _) = listener.accept().await.unwrap();
+            let _ = retry_sock.read(&mut buf).await;
+            let retry_body = serde_json::json!({
+                "id": "syn-retry",
+                "object": "chat.completion",
+                "created": 1_700_000_000,
+                "model": "test-model",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "# Recovered report\n\nFindings."},
+                    "finish_reason": "stop",
+                }],
+            })
+            .to_string();
+            let retry_response = format!(
+                "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{retry_body}",
+                retry_body.len()
+            );
+            let _ = retry_sock.write_all(retry_response.as_bytes()).await;
         });
         let db = fresh_db();
         let cid = seed_conv(&db, "conv-empty");
@@ -740,7 +797,7 @@ mod tests {
             inference: Arc::new(InferenceClient::new(format!("http://{addr}/v1"))),
             model: "test-model".into(),
         };
-        let err = run_synthesize(ctx).await.unwrap_err();
-        assert!(matches!(err, SynthesizeError::Inference(_)));
+        let outcome = run_synthesize(ctx).await.unwrap();
+        assert!(outcome.report_markdown.starts_with("# Recovered report"));
     }
 }

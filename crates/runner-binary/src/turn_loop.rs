@@ -101,6 +101,7 @@ pub async fn run_turn(
         messages.push(ChatMessage {
             role: Role::User,
             content: Some(execlaw_inference_api::MessageContent::Text(user_text)),
+            reasoning_content: None,
             tool_call_id: None,
             name: None,
             tool_calls: vec![],
@@ -563,6 +564,7 @@ pub async fn run_turn(
                         text_acc.clone(),
                     ))
                 },
+                reasoning_content: None,
                 tool_call_id: None,
                 name: None,
                 tool_calls: sanitized_assistant_calls,

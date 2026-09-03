@@ -182,6 +182,21 @@ The response must be `HTTP/1.1 200 OK`. A successful rebuild also creates the
 `execlaw/runner:truenas` image; the log warning that the runner image is
 missing then disappears on the next control-plane restart.
 
+### Runner build: missing `reasoning_content`
+
+If the runner build fails with `missing field reasoning_content in initializer
+of ChatMessage`, your checkout predates the runner compatibility fix. Update
+`crates/runner-binary/src/turn_loop.rs` from the current repository revision,
+then rebuild both images:
+
+```bash
+cd /mnt/AI_Pool/execlaw-source
+sudo docker compose build --no-cache runner-image
+sudo docker compose up -d --force-recreate execlaw
+```
+
+The fixed runner initializers explicitly set the optional field to `None`.
+
 ### Build failure: Cargo registry cache
 
 If the initial build fails with messages such as `failed to unpack package`,

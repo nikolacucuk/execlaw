@@ -524,6 +524,13 @@ async fn gather_one(
             if let Some(t) = resp.tokens_used {
                 tokens_consumed.fetch_add(t, Ordering::Relaxed);
             }
+            if resp.text.trim().is_empty() {
+                return Ok(failed_note(
+                    index,
+                    &step.query,
+                    "subagent returned an empty extraction",
+                ));
+            }
             Ok(ResearchNote {
                 index,
                 sub_query: step.query.clone(),

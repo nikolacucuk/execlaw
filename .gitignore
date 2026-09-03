@@ -49,3 +49,6 @@ web/dist/
 # committed.
 crates/server/blobs/
 /graphify-out
+/target-verify/release/.fingerprint
+/target-verify/release/build
+/target-verify
