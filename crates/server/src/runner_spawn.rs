@@ -270,12 +270,17 @@ impl RunnerLauncher for BollardRunnerLauncher {
     }
 
     async fn image_present(&self, image: &str) -> bool {
-        // bollard's `inspect_image` returns Err(404) when the
-        // image isn't local. Any other error (daemon down, etc.)
-        // also surfaces as Err — we treat all errors as "not
-        // present" so the supervisor disables itself rather than
-        // crashing the boot path.
-        self.docker.inspect_image(image).await.is_ok()
+        // bollard's `inspect_image` returns Err(404) when the image
+        // isn't local. Other errors (especially Docker-socket
+        // permission denials in a containerized control plane) need
+        // logging; callers still receive false so boot remains safe.
+        match self.docker.inspect_image(image).await {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::warn!(%image, %error, "runner image inspection failed");
+                false
+            }
+        }
     }
 }
 

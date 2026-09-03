@@ -158,6 +158,37 @@ The initial setup wizard detects the mounted Docker socket directly, so it
 should report Docker as available even though the minimal control-plane image
 does not include the Docker CLI.
 
+### Runner image inspection failed
+
+If the control-plane log says `runner image not found locally` immediately
+after a successful `runner-image` build, first verify the image and the socket
+group ID. The number in `.env` must be the number printed by the first command
+on this TrueNAS server; `568` in this guide is only an example.
+
+```bash
+sudo docker image inspect execlaw/runner:truenas --format '{{.RepoTags}}'
+sudo stat -c '%g' /var/run/docker.sock
+grep '^DOCKER_GID=' .env
+```
+
+The final two values must match. If they differ, edit `.env` so it contains
+the socket's actual numeric group ID, then recreate the control plane:
+
+```bash
+sudo docker compose up -d --force-recreate execlaw
+sudo docker compose logs --tail=100 execlaw
+```
+
+To test the socket from the same container user, run:
+
+```bash
+sudo docker compose exec execlaw sh -c 'id; ls -ln /var/run/docker.sock; curl --silent --show-error --fail --unix-socket /var/run/docker.sock http://localhost/images/execlaw/runner:truenas/json >/dev/null && echo runner-image-inspect=ok'
+```
+
+`runner-image-inspect=ok` confirms execlaw can discover and start runners.
+If the command reports a permission error, correct `DOCKER_GID` as above. If
+it reports a missing image, rebuild `runner-image` and rerun the check.
+
 ### SPA bundle not found
 
 If `http://TRUENAS_IP:3031/` displays `execlaw SPA bundle not found`, the
