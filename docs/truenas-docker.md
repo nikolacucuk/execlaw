@@ -194,11 +194,13 @@ it reports a missing image, rebuild `runner-image` and rerun the check.
 If `http://TRUENAS_IP:3031/` displays `execlaw SPA bundle not found`, the
 control-plane image was built from a Dockerfile that compiled Rust before
 building `web/dist/`. Update `Dockerfile.control-plane` from the current
-repository revision, then rebuild both images and recreate the control plane:
+repository revision, then rebuild the **control-plane image** and recreate the
+control plane. `docker compose up --force-recreate` only restarts an existing
+image; it does not rebuild it:
 
 ```bash
 cd /mnt/AI_Pool/execlaw-source
-sudo docker compose build --no-cache execlaw runner-image
+sudo docker compose build --no-cache execlaw
 sudo docker compose up -d --force-recreate execlaw
 sudo docker compose logs -f execlaw
 ```

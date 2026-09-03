@@ -183,6 +183,13 @@ struct OllamaResponseMessage {
     role: String,
     #[serde(default)]
     content: String,
+    /// Recent Ollama reasoning models emit their visible answer in
+    /// `thinking` when thinking mode is enabled and leave `content`
+    /// empty. Preserve it so the model adapter can apply its normal
+    /// reasoning/output fallback instead of turning the response into
+    /// an empty string.
+    #[serde(default)]
+    thinking: String,
     #[serde(default)]
     tool_calls: Vec<OllamaToolCall>,
 }
@@ -308,7 +315,7 @@ fn response_to_openai(raw: OllamaChatResponse, request_model: &ModelId) -> ChatR
         } else {
             Some(crate::MessageContent::Text(raw.message.content))
         },
-        reasoning_content: None,
+        reasoning_content: (!raw.message.thinking.is_empty()).then_some(raw.message.thinking),
         tool_call_id: None,
         name: None,
         tool_calls: raw
@@ -693,8 +700,10 @@ fn frame_to_chunk(
         None
     };
 
-    let content = if frame.message.content.is_empty() {
+    let content = if frame.message.content.is_empty() && frame.message.thinking.is_empty() {
         None
+    } else if frame.message.content.is_empty() {
+        Some(frame.message.thinking)
     } else {
         Some(frame.message.content)
     };
@@ -898,6 +907,24 @@ mod tests {
             Some(crate::MessageContent::Text(t)) => assert_eq!(t, "Hello there"),
             other => panic!("expected text content, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn response_to_openai_preserves_thinking_when_content_is_empty() {
+        let body = r#"{
+            "model":"qwen3.6:35b",
+            "message":{"role":"assistant","content":"","thinking":"The answer is ready."},
+            "done":true,
+            "done_reason":"stop"
+        }"#;
+        let raw: OllamaChatResponse = serde_json::from_str(body).unwrap();
+        let chat = response_to_openai(raw, &ModelId("qwen3.6:35b".into()));
+        let msg = &chat.choices[0].message;
+        assert!(msg.content.is_none());
+        assert_eq!(
+            msg.reasoning_content.as_deref(),
+            Some("The answer is ready.")
+        );
     }
 
     #[tokio::test]

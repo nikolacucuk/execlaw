@@ -72,6 +72,7 @@ setx PATH "$env:PATH;C:\Users\DjEnKa\.local\bin"
 - **Five shipped transports**: Signal (signal-cli sidecar), WhatsApp (wuzapi sidecar), Slack (multi-workspace Socket Mode OAuth), Discord (multi-guild Gateway WebSocket), SMS (Android-gateway WebSocket).
 - **HTTP integrations**: Google Apps (Gmail/Calendar/Contacts/Tasks/Drive in one OAuth), Google Places, Open-Meteo (key-less weather), Yahoo Finance (market data), Pushover.
 - **Research subsystem**: deep-research plan/gather/synthesize pipeline with retention and per-phase event flow.
+- **Always-on child agents**: durable agent definitions, role prompts, mailboxes, bounded supervised runs, checkpoints, backoff, pause/resume, and run history at `/agents` and `/api/admin/agents`.
 - **SPA**: chat-first sidebar, pinned Control thread (every controller-channel message collapses here), token streaming, approval queue, per-plugin admin panels, settings. **i18n out of the box** — 8 languages (EN / ES / FR / DE / IT / NL / PL / PT), browser-locale auto-detection on first run, language switcher in the setup wizard and persisted to `localStorage`. See [Internationalisation (i18n)](#internationalisation-i18n) below.
 - **Native desktop bundles** for all three desktops — `.app`/`.dmg` on macOS (Apple Silicon, SMAppService LaunchAgent), NSIS `.exe` on Windows (SCM service), `.deb` on Linux (systemd `--user` unit). Each ships a tray icon, the bundled control plane, and the same SPA on `127.0.0.1:3031`. See [Desktop installations](#desktop-installations) below and [`docs/desktop-installations.md`](docs/desktop-installations.md) for the full cross-OS reference.
 
@@ -444,6 +445,24 @@ curl -X POST http://127.0.0.1:3031/api/setup \
 
 The SPA at `http://127.0.0.1:3031/` will guide you through the rest
 (backend wizard, plugin install, personality, etc.).
+
+### Always-on child agents
+
+Open `/agents` after setup to create a specialist agent. Each definition
+stores its identity, role prompt, backend/model selection, tool metadata,
+trust policy, cadence, token/runtime budgets, and concurrency limit in
+SQLite. The host service starts the agent supervisor automatically; it
+claims due work, processes durable mailbox messages, persists checkpoints
+and outputs, retries failures with backoff, and resumes scheduling after a
+restart. The page also provides pause/resume, controller-to-agent messages,
+and per-agent run history with failure details.
+
+The controller API exposes the same lifecycle at `/api/admin/agents`:
+`POST` creates a definition, `GET` lists or reads definitions, `PUT` updates,
+`POST /:id/pause|resume` controls execution, `POST /:id/messages` enqueues
+mail, and `GET /:id/runs` reads durable run history. Configure a local
+inference backend first; agents use the configured Standard backend unless
+their definition selects another supported purpose.
 
 ---
 

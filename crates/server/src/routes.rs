@@ -820,14 +820,15 @@ async fn security_headers(
         .entry("referrer-policy")
         .or_insert(HeaderValue::from_static("strict-origin"));
     // CSP: restrict sources to same-origin; allow inline styles for
-    // Bootstrap/React; allow data: and blob: for chart images.
+    // Bootstrap/React; allow blob: for authenticated plugin panels
+    // and chart images.
     // 'unsafe-eval' is intentionally omitted — the bundled React
     // build does NOT require it.
     headers
         .entry("content-security-policy")
         .or_insert(HeaderValue::from_static(
             "default-src 'self'; \
-             script-src 'self'; \
+             script-src 'self' blob:; \
              style-src 'self' 'unsafe-inline'; \
              img-src 'self' data: blob:; \
              font-src 'self'; \
@@ -914,6 +915,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::trust_policy::trust_policy_router())
         .merge(crate::my_identities::my_identities_router())
         .merge(crate::routines::routines_router())
+        .merge(crate::agents_admin::router())
         .merge(crate::automations_admin::router())
         .merge(crate::inference_admin::router())
         .merge(crate::personality::personality_router())

@@ -35,6 +35,7 @@
 //! the rationale behind every shape choice.
 
 pub mod capture;
+pub mod filesystem;
 pub mod import;
 pub mod model;
 pub mod optimizer;
@@ -46,6 +47,7 @@ pub mod summarizer;
 pub mod tools;
 
 pub use capture::{AutoCaptureSink, AutoCaptureWorker, CaptureOutcome, CaptureRequest};
+pub use filesystem::import_filesystem_skills;
 pub use import::{
     ImportFailure, ImportReport, import_plugin_skills, namespaced_name, sanitize_local_name,
 };

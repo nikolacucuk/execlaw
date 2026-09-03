@@ -38,7 +38,7 @@ Headers added to every response:
 | `X-Frame-Options` | `DENY` |
 | `X-Content-Type-Options` | `nosniff` |
 | `Referrer-Policy` | `strict-origin` (default; routes may set `no-referrer`) |
-| `Content-Security-Policy` | `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'` |
+| `Content-Security-Policy` | `default-src 'self'; script-src 'self' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; object-src 'none'` |
 
 **Files changed:**
 - `crates/server/src/routes.rs` — added `security_headers()` function and layer.
@@ -154,8 +154,9 @@ token in `localStorage` under `execlaw.access_token` and
 running on the page can steal them.
 
 **Mitigation in place:** The `Content-Security-Policy` header added in
-Finding 1 disables inline scripts and restricts `script-src` to `'self'`,
-significantly reducing the XSS surface. The server is designed to bind
+Finding 1 disables inline scripts and restricts `script-src` to `'self'` plus
+`blob:` for authenticated plugin panels, significantly reducing the XSS
+surface. The server is designed to bind
 `127.0.0.1` only (not exposed on the public interface).
 
 **Next step (Phase 7):** Migrate to httpOnly sameSite=strict cookies. This is

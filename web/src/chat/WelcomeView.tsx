@@ -58,6 +58,11 @@ interface Props {
     sendVoiceFrame?: (bytes: ArrayBuffer) => boolean;
     /// Phase 13.C — voice control passthrough.
     sendVoiceControl?: (payload: object) => boolean;
+    voiceTranscript?: {
+        session: string;
+        text: string;
+        is_final: boolean;
+    } | null;
     /**
      * 2026-04-28 — stop-turn handler threaded through to the inner
      * Composer. Optional because the welcome view doesn't know the
@@ -107,6 +112,7 @@ export function WelcomeView({
     onSend,
     sendVoiceFrame,
     sendVoiceControl,
+    voiceTranscript,
     onStop,
     busy,
     incognito,
@@ -194,6 +200,7 @@ export function WelcomeView({
                     onSend={onSend}
                     sendVoiceFrame={sendVoiceFrame}
                     sendVoiceControl={sendVoiceControl}
+                    voiceTranscript={voiceTranscript}
                     voiceReadiness={voiceReadiness}
                     onStop={onStop}
                     busy={busy}

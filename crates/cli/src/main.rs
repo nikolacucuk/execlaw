@@ -1442,6 +1442,18 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
     // across all eight tools via Arc; it holds only a Database
     // handle so the clone is cheap.
     let skill_store = std::sync::Arc::new(execlaw_skills::SkillStore::new(db.clone()));
+    // Load operator-managed markdown skills from the portable data
+    // directory. The importer is idempotent, so deploys and restarts
+    // do not create a new DB version for unchanged files.
+    match execlaw_skills::import_filesystem_skills(
+        &skill_store,
+        &data_dir.join("skills"),
+        chrono::Utc::now().timestamp_millis(),
+    ) {
+        Ok(count) if count > 0 => tracing::info!(count, "filesystem skills imported"),
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "filesystem skill import failed"),
+    }
     {
         let now = chrono::Utc::now().timestamp();
         let tools = execlaw_skills::skill_tools(skill_store.clone());
@@ -1669,13 +1681,17 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
 
     let backend_supervisor = backend_ctrl.as_ref().map(|ctrl| {
         // Resolve the host's primary HF cache directory.
-        // Operator can override with EXECLAW_HF_CACHE; default
-        // is `~/.execlaw/hf-cache/`. Created on demand so a
-        // fresh install Just Works without manual setup.
+        // Operator can override with EXECLAW_HF_CACHE; otherwise
+        // keep it beside the configured database. A Windows service
+        // may report the system profile as its home directory, while
+        // the database still lives under the interactive operator's
+        // profile; deriving the cache from the DB keeps Docker mounts
+        // in the same accessible tree.
         let primary_cache: std::path::PathBuf = match std::env::var("EXECLAW_HF_CACHE") {
             Ok(p) => std::path::PathBuf::from(p),
-            Err(_) => directories::ProjectDirs::from("", "", "execlaw")
-                .map(|d| d.data_dir().join("hf-cache"))
+            Err(_) => db_path
+                .parent()
+                .map(|dir| dir.join("hf-cache"))
                 .unwrap_or_else(|| std::path::PathBuf::from("./.execlaw-hf-cache")),
         };
         if let Err(e) = std::fs::create_dir_all(primary_cache.join("hub")) {
@@ -1808,8 +1824,9 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
                     // `spawn_secret_hex` get filled in per-spawn
                     // by `ensure_runner`; everything else is
                     // reused.
-                    let rpc_url_template = std::env::var("EXECLAW_RPC_URL")
-                        .unwrap_or_else(|_| "ws://host.docker.internal:3031".to_owned());
+                    let rpc_url_template = std::env::var("EXECLAW_RPC_URL").unwrap_or_else(|_| {
+                        format!("ws://host.docker.internal:{}", config.bind_addr.port())
+                    });
                     let runner_network = std::env::var("EXECLAW_RUNNER_NETWORK").ok();
                     let spec_template = execlaw_server::runner_spawn::RunnerSpec {
                         group_id: String::new(),
@@ -2037,7 +2054,7 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
         refresh_store,
         events: events.clone(),
         event_log_hmac_key: hmac_key,
-        inference,
+        inference: inference.clone(),
         plugin_host,
         webauthn,
         mcp_host,
@@ -2133,6 +2150,13 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
     // typing the prompt manually. Falls back to stub turn when no
     // inference backend is wired. See MIGRATION_PLAN §5.6.3.
     let _routine_runner = execlaw_server::routine_runner::spawn(state.clone());
+
+    // Always-on child-agent supervisor. Definitions, mailbox messages,
+    // runs, and checkpoints live in SQLite; the process task is only
+    // the wake-up and execution mechanism and can be recreated safely.
+    let agent_supervisor =
+        execlaw_server::agent_supervisor::AgentSupervisor::new(db.clone(), inference.clone());
+    let _agent_supervisor = agent_supervisor.spawn();
 
     // C3 — research subsystem supervisor. Picks up `Pending` rows
     // from `state_research_jobs`, claims them atomically, and spawns

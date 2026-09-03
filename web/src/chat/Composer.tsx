@@ -253,6 +253,11 @@ interface Props {
     /// `voice_stop` on mic-off so the server flushes Whisper. The
     /// VoiceCaptureButton calls this when its session ends.
     sendVoiceControl?: (payload: object) => boolean;
+        voiceTranscript?: {
+            session: string;
+            text: string;
+            is_final: boolean;
+        } | null;
     /**
      * Phase 14.D — voice backend readiness, sourced from
      * `useVoiceReadiness()` in the parent shell (Chat /
@@ -288,6 +293,7 @@ export function Composer({
     onSend,
     sendVoiceFrame,
     sendVoiceControl,
+        voiceTranscript,
     voiceReadiness,
     busy,
     onStop,
@@ -332,6 +338,7 @@ export function Composer({
         );
     }
     const [text, setText] = useState("");
+    const lastVoiceSessionRef = useRef<string | null>(null);
     const [submitting, setSubmitting] = useState(false);
     const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
     const [attachMenuOpen, setAttachMenuOpen] = useState(false);
@@ -354,6 +361,22 @@ export function Composer({
     const [skillsLoading, setSkillsLoading] = useState(false);
     const [skillsError, setSkillsError] = useState<string | null>(null);
     const [selectedSkills, setSelectedSkills] = useState<SkillListEntry[]>([]);
+    useEffect(() => {
+        if (
+            !voiceTranscript?.is_final ||
+            !voiceTranscript.text.trim() ||
+            voiceTranscript.session === lastVoiceSessionRef.current
+        ) {
+            return;
+        }
+        lastVoiceSessionRef.current = voiceTranscript.session;
+        setText((current) =>
+            current.trim()
+                ? `${current.trim()} ${voiceTranscript.text.trim()}`
+                : voiceTranscript.text.trim(),
+        );
+        textareaRef.current?.focus();
+    }, [voiceTranscript]);
     const [defaultSelectedSkillNames, setDefaultSelectedSkillNames] = useState<string[]>(() => {
         if (!managePersistentDefaults) return [];
         if (!skillDefaultsStorageKey) return defaultSkillNames ?? [];

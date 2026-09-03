@@ -4043,6 +4043,36 @@ pub async fn list_cards(
         Ok(c) => c,
         Err(e) => return err_500(&format!("project cards: {e}")),
     };
+    let mut cards = cards;
+    // Legacy research cards predate inline report_markdown in their
+    // CardClosed details. Enrich completed cards from the durable
+    // report file so replay and live cards render identically.
+    for card in &mut cards {
+        if card.kind != execlaw_core::cards::CardKind::Research
+            || card.state != execlaw_core::cards::CardState::Completed
+        {
+            continue;
+        }
+        let Some(job_id) = card.details.get("job_id").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let Some(workspace_path) = execlaw_core::research::ResearchJobStore::new(&state.db)
+            .get(&execlaw_core::ids::ResearchJobId::from(job_id))
+            .ok()
+            .flatten()
+            .and_then(|row| row.workspace_path)
+        else {
+            continue;
+        };
+        let report_path = std::path::PathBuf::from(workspace_path).join("report.md");
+        if let Ok(report) = std::fs::read_to_string(report_path) {
+            if let Some(details) = card.details.as_object_mut() {
+                details
+                    .entry("report_markdown")
+                    .or_insert(serde_json::Value::String(report));
+            }
+        }
+    }
     (
         StatusCode::OK,
         Json(serde_json::json!({

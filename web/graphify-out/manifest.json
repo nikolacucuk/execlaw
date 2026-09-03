@@ -1,0 +1,872 @@
+{
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\package.json": {
+    "mtime": 1780204033.4792333,
+    "ast_hash": "4ed03226d0845c201d7eeb70d5d7d3f5",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\tsconfig.json": {
+    "mtime": 1780204033.5248501,
+    "ast_hash": "acdf4fd18fcff18d9144a1879a7ea298",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\vite.config.ts": {
+    "mtime": 1780204033.5248501,
+    "ast_hash": "d25920cfb2fa25152c4ae188a1023b9d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\vitest.config.ts": {
+    "mtime": 1780204033.5253596,
+    "ast_hash": "4a4f740e585c32b983098efa41baf88a",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\scripts\\bundle-size.mjs": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "6108acd92cc80a7711017d075970d244",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\App.tsx": {
+    "mtime": 1788411620.9564538,
+    "ast_hash": "3fe102c83fcaf913a523670125306b4d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\main.tsx": {
+    "mtime": 1780204033.5083537,
+    "ast_hash": "bdf9705159dd14ba728b7716d99eb857",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\vite-env.d.ts": {
+    "mtime": 1780204033.5248501,
+    "ast_hash": "d8a743f456d571bdb751137d33483119",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\anim\\useChatTransition.ts": {
+    "mtime": 1780204033.492417,
+    "ast_hash": "acfc7b294546982014638f1a55c2290f",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\anim\\useScreenTransition.ts": {
+    "mtime": 1780204033.492417,
+    "ast_hash": "14899af083b95f49e2da83daef48bf8b",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\api\\automations.ts": {
+    "mtime": 1780204033.492417,
+    "ast_hash": "33edadfd54e8381a9879c66076d2b306",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\api\\client.ts": {
+    "mtime": 1780204033.4947512,
+    "ast_hash": "ade0b10876adb663b9fb73d8a7a047cf",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\api\\connection.ts": {
+    "mtime": 1780204033.4947512,
+    "ast_hash": "ba1742982f669bf00c5e362bceba67d6",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\api\\endpoints.ts": {
+    "mtime": 1780343225.617788,
+    "ast_hash": "c1f044ae89a7c3f36101672aa31fd908",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\api\\inference.ts": {
+    "mtime": 1780204033.4947512,
+    "ast_hash": "be13df37d4befdeae24b37a7db8b6217",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\api\\signedDownloadUrl.ts": {
+    "mtime": 1780204033.4947512,
+    "ast_hash": "5639e9f91dee8bed92bf09e9710101a6",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\api\\ws.ts": {
+    "mtime": 1780204033.4947512,
+    "ast_hash": "fff823ebfb81e0841abfa5721d35a4ce",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\approvals\\ApprovalsPage.tsx": {
+    "mtime": 1780204033.4947512,
+    "ast_hash": "f5b6b5381bc663588f72047a3142499c",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\auth\\AuthContext.tsx": {
+    "mtime": 1780204033.496755,
+    "ast_hash": "6ced5bbfe77d72a05a5fd0b9f50b2797",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\auth\\webauthn.ts": {
+    "mtime": 1780204033.496755,
+    "ast_hash": "b09bade3eb170bd9e9113266b9682dce",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\cards\\AttachmentCard.tsx": {
+    "mtime": 1780204033.496755,
+    "ast_hash": "05ee943da124989882dc80f9c75e0df8",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\cards\\CardRenderer.tsx": {
+    "mtime": 1780204033.496755,
+    "ast_hash": "635f5afe6bb6767741ada6e9657edab6",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\cards\\cardStore.ts": {
+    "mtime": 1780204033.4982648,
+    "ast_hash": "71b597fe85abe4dc1544401f9682ed8e",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\cards\\ChartCard.tsx": {
+    "mtime": 1780204033.496755,
+    "ast_hash": "96b449b8aacc3a2e3eaae3ac3248fdaf",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\cards\\projection.ts": {
+    "mtime": 1780204033.4982648,
+    "ast_hash": "e5b2dbab1f6681faef53a95ebb306e3f",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\cards\\ResearchCard.tsx": {
+    "mtime": 1788405637.0630786,
+    "ast_hash": "7e3463fe442aa78693ab92d15d829083",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\cards\\types.ts": {
+    "mtime": 1780204033.4982648,
+    "ast_hash": "e66697ce93204aa27bafbdc403a27a10",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\ApprovalCard.tsx": {
+    "mtime": 1780204033.4982648,
+    "ast_hash": "9cd805fe20b0b2508eca860588afd93d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\chatComponentRegistry.ts": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "e0e47390a9e7ce059159bc8db5220cf7",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\Composer.tsx": {
+    "mtime": 1780420917.7860515,
+    "ast_hash": "a6732ce7a56d46d984c39923c1f9b44d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\MascotGreeting.tsx": {
+    "mtime": 1780204033.4982648,
+    "ast_hash": "ce3b1cdb6239181754dd54d5f56add35",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\mascotPaths.ts": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "f4b32a48758d6d84dfb3aba9489ed9fb",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\MessageStream.tsx": {
+    "mtime": 1780336378.4410732,
+    "ast_hash": "3dda505efbaf87cb37b2371838061c04",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\MiniMascotSpinner.tsx": {
+    "mtime": 1780204033.4982648,
+    "ast_hash": "a143fa8d95e2c78f82f0dd0b0e6e4beb",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\Sidebar.tsx": {
+    "mtime": 1788411393.832344,
+    "ast_hash": "f90f167665bf8c933d86831aebb6236f",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\store.ts": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "ac1237dba10f2471ce4b2cea9b9dfcb9",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\ThreadRowMenu.tsx": {
+    "mtime": 1780204033.4982648,
+    "ast_hash": "0ec9705742adad88349772adb377fce8",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\ToolActivityPill.tsx": {
+    "mtime": 1780204033.4982648,
+    "ast_hash": "98bcade7d9a144a9b300695e236ebe7b",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\useAnyBackendInstalling.ts": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "065aac99aeac528536d420cb350e34c6",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\useBackendCapabilities.ts": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "a553bf2a861b11198f11a644b95e224d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\useToolResultsVisible.ts": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "a8d837f69389d09c7d400769c312d721",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\useVoiceReadiness.ts": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "f1ab38fcf263245679d77af7895a913c",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\VoiceCaptureButton.tsx": {
+    "mtime": 1780204033.5011296,
+    "ast_hash": "b13b0c2431f2dd8ff8fd1fd28d58c640",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\VoicePlayback.ts": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "a8ec16b049231fa695bb7e63ceb824d6",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\VoiceSession.ts": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "4bce2e0995d442b2bd24872e88303359",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\VoiceStatusBar.tsx": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "5b8e53ddedcca89a56589218e8668e1b",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\WelcomeView.tsx": {
+    "mtime": 1788242321.6492026,
+    "ast_hash": "50a459a500780426b91ab00245e17193",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\components\\ChartInlineComponent.tsx": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "a4cedac8a15fdce3172bf9a54cd072f5",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\components\\PythonExecuteComponent.tsx": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "e49d68763e6f3cfc47a9344d85288eff",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\components\\WeatherCurrentComponent.tsx": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "56fa87e0217fc654e325f36104541cc8",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\chat\\components\\WeatherDailyComponent.tsx": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "69fc50ce079bdf5c768e02fb75b1e1f8",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\components\\ChannelIcons.tsx": {
+    "mtime": 1780204033.5016391,
+    "ast_hash": "9b2a6f8d3b9de9266649d4f3e0afe712",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\components\\ErrorBanner.tsx": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "b75df5adb563015d3f83a05166e8e95a",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\components\\MarkdownContent.tsx": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "b7949f85518e2c05276a24cd182dff8d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\components\\SidecarStatusBlock.tsx": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "17c1641010c39a2e5cc4570b2f05a09d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\generated\\graphifyPreview.json": {
+    "mtime": 1788238157.6765506,
+    "ast_hash": "cd040e5a0dd1f6cf8703bad37c7ef043",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\i18n\\index.ts": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "24cfed25d5717b514b3189897fa169ef",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\i18n\\LanguageSwitcher.tsx": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "c4b4bf8727955f4a02e8cd99f7d3b123",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\locales\\de.json": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "7554fe31961d9042ab6337e1bfb6aef7",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\locales\\es.json": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "edac4510f6185a3d703f700df2a403e0",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\locales\\fr.json": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "a76220adf6c8d87da29df2e814d02c16",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\locales\\it.json": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "0757b6705b4b35e45f2bf1e67dc9d14d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\locales\\nl.json": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "0924cf8fe5062acf304850d26f2c7ee3",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\locales\\pl.json": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "989b27170245ebe783e4d819ebb4af34",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\locales\\pt.json": {
+    "mtime": 1780204033.50518,
+    "ast_hash": "a19ddebc375382c59da151c262602d77",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\plugins\\BridgeInstaller.tsx": {
+    "mtime": 1780204033.5083537,
+    "ast_hash": "cb71ba5cde511c6e92ac3ca5fb7cfd31",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\plugins\\host-bridge.ts": {
+    "mtime": 1780204033.5093637,
+    "ast_hash": "dce07fd73adc9e33465f889ed1e76a2c",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\plugins\\types.ts": {
+    "mtime": 1780204033.5093637,
+    "ast_hash": "80c1be0a5690cf7b651205a4bb0f9fe2",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\AlertWatcher.tsx": {
+    "mtime": 1780204033.5093637,
+    "ast_hash": "234140fcf5402f459c73dae00304ff8e",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\AppBoot.tsx": {
+    "mtime": 1780204033.5093637,
+    "ast_hash": "65a7e0971ce4d23635235493893510ff",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\Approvals.tsx": {
+    "mtime": 1780204033.5093637,
+    "ast_hash": "652af7f26e895cf2a549eb80fffd0627",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\ApprovalWatcher.tsx": {
+    "mtime": 1780204033.5093637,
+    "ast_hash": "ba2347369059b11fe28db74c038a816b",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\Automations.tsx": {
+    "mtime": 1780204033.5093637,
+    "ast_hash": "30ec751eaad6b871c47d02b383273121",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\Chat.tsx": {
+    "mtime": 1788242321.6492026,
+    "ast_hash": "52d5f8e55860f4be180782795b2b8d14",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\ConnectionBanner.tsx": {
+    "mtime": 1780204033.5093637,
+    "ast_hash": "b480fd78f604aeee898d21a6f64f3ebb",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\Login.tsx": {
+    "mtime": 1780204033.5093637,
+    "ast_hash": "c0cafc65b6c24ba2585a94b1608b6b2a",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\RequireSetupComplete.tsx": {
+    "mtime": 1780204033.5137048,
+    "ast_hash": "bc08de9e00ece935ffb51edb3853d3e9",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\Research.tsx": {
+    "mtime": 1780204033.5137048,
+    "ast_hash": "61b807a7f41865e37cb2ce3fa59b263a",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\Routines.tsx": {
+    "mtime": 1780204033.5137048,
+    "ast_hash": "13df1a8dfe3b29ce7d48e08fb320569d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\SetupWizard.tsx": {
+    "mtime": 1780204033.5137048,
+    "ast_hash": "c21c93f554d8671e68a224964511d258",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\Skills.tsx": {
+    "mtime": 1780204033.5137048,
+    "ast_hash": "61534296a2049fcd81ff7cc8230485b8",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\AlertsPage.tsx": {
+    "mtime": 1780204033.5137048,
+    "ast_hash": "8e573b4aa273f9574701ff31cf15b836",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\AuditPage.tsx": {
+    "mtime": 1780204033.5137048,
+    "ast_hash": "25c0ebbd9dc64bfe98d138465863c4ae",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\automation-nodes.tsx": {
+    "mtime": 1780466350.642129,
+    "ast_hash": "e113d9ce057b9fe3bfd16b0db743f986",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\AutomationCanvas.tsx": {
+    "mtime": 1780466350.644632,
+    "ast_hash": "52cc15cc24bd2faad00b8a6ba04230da",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\AutomationDetailPage.tsx": {
+    "mtime": 1780204033.5137048,
+    "ast_hash": "881d95fee5c7a4ca04835f24705cf3ef",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\AutomationNodePanel.tsx": {
+    "mtime": 1780466350.644632,
+    "ast_hash": "b49e255c5aaf318a101833b7c08317b3",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\AutomationsPage.tsx": {
+    "mtime": 1780204033.5137048,
+    "ast_hash": "b6bbe4c6cb63454bc891c65a54aebf7e",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\BackendsPage.tsx": {
+    "mtime": 1780204033.5166688,
+    "ast_hash": "7416a118da914ac4223d4026dc1d5f3c",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\ContactsPage.tsx": {
+    "mtime": 1780204033.5166688,
+    "ast_hash": "de876491ebebb3ac6958e402203ff14c",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\DynamicPluginPanel.tsx": {
+    "mtime": 1780204033.5166688,
+    "ast_hash": "8acb63e6ccf81af784bde50ddb8b5e95",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\EvalFlagsPage.tsx": {
+    "mtime": 1780204033.5166688,
+    "ast_hash": "9ca62c2c3ee9fdd1b0a9ffe48e0bce38",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\GeneralPage.tsx": {
+    "mtime": 1788242321.6492026,
+    "ast_hash": "4f1899bbab5602c546712ec25f1f16c8",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\InferencePage.tsx": {
+    "mtime": 1780204033.5166688,
+    "ast_hash": "17dca8c56257f38037812cd694db8a4f",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\LogsPage.tsx": {
+    "mtime": 1780204033.5181794,
+    "ast_hash": "c34e118661d60554c80300303a34dcbb",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\McpServersPage.tsx": {
+    "mtime": 1780204033.5181794,
+    "ast_hash": "80f029712689e223e6275250016c59a0",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\MyIdentitiesPage.tsx": {
+    "mtime": 1780204033.5187032,
+    "ast_hash": "268cc6196826c0fd926763984674dcc2",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\OauthClientConfig.tsx": {
+    "mtime": 1780204033.5187032,
+    "ast_hash": "aec9250be28462b79c0f852142c314e2",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\PersonalityPage.tsx": {
+    "mtime": 1780204033.5187032,
+    "ast_hash": "e69bbb0a2fb8c68154e33dc7defe7061",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\PluginConfigBase.tsx": {
+    "mtime": 1780204033.519218,
+    "ast_hash": "a8bfc5dbf459545a57ecf8a47b994253",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\PluginConfigRouter.tsx": {
+    "mtime": 1780204033.519218,
+    "ast_hash": "42afb58e812271cbfc0059784d58c935",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\PluginsPage.tsx": {
+    "mtime": 1780204033.5197313,
+    "ast_hash": "21e1db850c9287fb7311ebb454dd57e6",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\PrincipalList.tsx": {
+    "mtime": 1780204033.5197313,
+    "ast_hash": "c4fea92477c53b600192d58eed2db310",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\PrincipalsPage.tsx": {
+    "mtime": 1780204033.5202475,
+    "ast_hash": "4600087f4043403b907dad2fbde487a8",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\ResearchPage.tsx": {
+    "mtime": 1780204033.5202475,
+    "ast_hash": "1da30719b7bff66330764070785af148",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\RoutinesPage.tsx": {
+    "mtime": 1780204033.5207598,
+    "ast_hash": "27a80ad402c2e2b0c2fb36af61ebe663",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\RunnersPage.tsx": {
+    "mtime": 1780204033.5207598,
+    "ast_hash": "17176b0fb19a8692467fab65aa74d617",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\SearchPage.tsx": {
+    "mtime": 1780204033.5212698,
+    "ast_hash": "31703d5723879afd3e28f06cc8b73315",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\Settings.tsx": {
+    "mtime": 1780204033.5212698,
+    "ast_hash": "b4d6b2c147284be473e7741802ea1715",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\SidecarsPage.tsx": {
+    "mtime": 1780204033.5217795,
+    "ast_hash": "de98e4dd1d40f67268d9693ff5154f43",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\ToolsPage.tsx": {
+    "mtime": 1780204033.5217795,
+    "ast_hash": "dbc61ae5d3326668ac74bb9b11a70472",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\TrustPolicyPage.tsx": {
+    "mtime": 1780204033.5217795,
+    "ast_hash": "ea1cb81b3a50e348e29abcb5e32b51b6",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\UnifiedBackendForm.tsx": {
+    "mtime": 1780204033.522789,
+    "ast_hash": "1b4fb2da835d91d0420f74659185ad59",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\settings\\UserPage.tsx": {
+    "mtime": 1780204033.522789,
+    "ast_hash": "23870619d23c6c708b9dd2ca60f1cc26",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\skills\\SkillsPage.tsx": {
+    "mtime": 1780204033.5238316,
+    "ast_hash": "d6ad337b20b0be8382abba4cc56ed54d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\admin-pages.test.tsx": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "fcb40fad0074249ce7f003490acd5e57",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\alerts-page.test.tsx": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "d50988926dfefb662511622c56c42621",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\app-boot.test.tsx": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "4c3245b4c56a0e772fae63e9508636bc",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\approval-card.test.tsx": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "f4eec12ad6b1ebb7d1eab7ff16c682aa",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\approvals-page.test.tsx": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "3a740c192b6e18ee14c257bb4ae1fa05",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\attachment-card.test.tsx": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "302f0884da6fe12c9e918db3520c3c62",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\auth-expiry.test.tsx": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "aca4358d4609a413dcc28d73e7c8832b",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\automation-canvas-helpers.test.ts": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "a7ba9d09296ca0b0ad4a41a69aec8430",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\automation-detail-page.test.tsx": {
+    "mtime": 1780204033.480944,
+    "ast_hash": "d1d4a519953b59c668045642706f977b",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\automation-node-panel.test.tsx": {
+    "mtime": 1780204033.4838047,
+    "ast_hash": "485157bcd4e3b472ac55a002490764c2",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\automations-page.test.tsx": {
+    "mtime": 1780204033.4838047,
+    "ast_hash": "a082d9d4e609a8c0935ee88cf27ad8d1",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\backends-page.test.tsx": {
+    "mtime": 1780204033.4838047,
+    "ast_hash": "a3cb84f376da533d517f7389f42e82cc",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\cards.test.tsx": {
+    "mtime": 1780204033.4838047,
+    "ast_hash": "669336388dd5034c753f86cc8569ab32",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\channel-icon.test.tsx": {
+    "mtime": 1780204033.4838047,
+    "ast_hash": "a2cb79a11be9ae778174fa050dc28779",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\chat-component-registry.test.tsx": {
+    "mtime": 1780204033.4838047,
+    "ast_hash": "92f4ba811d0e1021450337e90b015fa8",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\chat-store.test.ts": {
+    "mtime": 1780204033.4838047,
+    "ast_hash": "598011f18ff61edcd3d98653a5a5a5bf",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\chat-transition.test.tsx": {
+    "mtime": 1780204033.4852674,
+    "ast_hash": "092ff30243bdcc9f34738bccd8ae6f05",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\client.test.ts": {
+    "mtime": 1780204033.4852674,
+    "ast_hash": "5896db3b27b143282bf58aabc4f90014",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\composer.test.tsx": {
+    "mtime": 1780420917.7946231,
+    "ast_hash": "210e817fe8635724e57db14106a651c0",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\connection-banner.test.tsx": {
+    "mtime": 1780204033.4852674,
+    "ast_hash": "a4183497235fca0b5f24c6eb6e8c80c2",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\endpoints.test.ts": {
+    "mtime": 1780204033.4852674,
+    "ast_hash": "e6726a86106b233ce84b271ab45239d7",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\error-banner.test.tsx": {
+    "mtime": 1780204033.4852674,
+    "ast_hash": "61e946522672ea84cc80e315489882b3",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\general-page.test.tsx": {
+    "mtime": 1780348039.7328718,
+    "ast_hash": "0cc374963ccd2654d9d8277295f721b3",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\markdown-content.test.tsx": {
+    "mtime": 1780204033.4852674,
+    "ast_hash": "15090bc8e035c9b6f9efcf138df863dd",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\mcp-servers-page.test.tsx": {
+    "mtime": 1780204033.4852674,
+    "ast_hash": "0a7ecb7afffb6897cfc822e119e57198",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\message-stream.test.tsx": {
+    "mtime": 1780336378.4410732,
+    "ast_hash": "ac0a4cb9aab6f1eca997bb01d64a1d4d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\my-identities-page.test.tsx": {
+    "mtime": 1780204033.4870245,
+    "ast_hash": "eee898e31855597de83a34832587b702",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\personality-page.test.tsx": {
+    "mtime": 1780204033.4870245,
+    "ast_hash": "549191cad56b1ea96a1ee2f5c8f7269a",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\plugin-config-shell.test.tsx": {
+    "mtime": 1780204033.488028,
+    "ast_hash": "e44123b6e1242bc17bb7cf8450ebe7c7",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\plugins-page.test.tsx": {
+    "mtime": 1780204033.488028,
+    "ast_hash": "c187095964dca1e2b66f16d03deda821",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\require-setup-complete.test.tsx": {
+    "mtime": 1780204033.488028,
+    "ast_hash": "6f5e8654623ed56aba8e45c0e9e099e3",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\research-card.test.tsx": {
+    "mtime": 1788405046.6204488,
+    "ast_hash": "5aacde578341d5178021bafb86ed0af4",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\routines-page.test.tsx": {
+    "mtime": 1780204033.488028,
+    "ast_hash": "e5fd4289f78b71d93438a1f682db2f16",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\runners-page.test.tsx": {
+    "mtime": 1780204033.4891691,
+    "ast_hash": "db600d7fcbaaadb7f833a5070fb22c73",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\settings-shell.test.tsx": {
+    "mtime": 1780204033.4891691,
+    "ast_hash": "66132c85914f5f0ac1c47c7a16be1f52",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\setup-wizard-flow.test.tsx": {
+    "mtime": 1780204033.4891691,
+    "ast_hash": "6d2d75b82f3aacbdc195c068d02c0462",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\setup-wizard.test.tsx": {
+    "mtime": 1780204033.4891691,
+    "ast_hash": "fccfe04c445cffc38cbfca3bdde68ad5",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\setup.ts": {
+    "mtime": 1780204033.4891691,
+    "ast_hash": "9b1548eba3a2533aeec2391bb22e95a0",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\sidebar.test.tsx": {
+    "mtime": 1780204033.4891691,
+    "ast_hash": "cddb99b548d9d093452d3e5b7dab193e",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\sidecar-status-block.test.tsx": {
+    "mtime": 1780204033.4891691,
+    "ast_hash": "f34134545c9c3a970c23708ef9ba40e1",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\skills-page.test.tsx": {
+    "mtime": 1780204033.4891691,
+    "ast_hash": "1198ac6e2f5b52b79e8fa85f6abdba1a",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\tool-activity-pill.test.tsx": {
+    "mtime": 1780204033.4909132,
+    "ast_hash": "4e18fa85764cc7bd64b89ada5c351104",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\tools-page.test.tsx": {
+    "mtime": 1780204033.4909132,
+    "ast_hash": "c9a6fc55551fe33f4d72e0117e3b5389",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\trust-policy-page.test.tsx": {
+    "mtime": 1780204033.4909132,
+    "ast_hash": "c57f99a56585bac0a5a1571529cea8dc",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\use-any-backend-installing.test.tsx": {
+    "mtime": 1780204033.4909132,
+    "ast_hash": "6224011e3ec652ab85d16f54ba1fa2bd",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\use-screen-transition.test.tsx": {
+    "mtime": 1780204033.4909132,
+    "ast_hash": "3685d4ec6ae10bf41342a7f34f181ea5",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\user-page.test.tsx": {
+    "mtime": 1780204033.4909132,
+    "ast_hash": "81c7f6784d3b7335c896fa6fef696a82",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\voice-capture-button.test.tsx": {
+    "mtime": 1780204033.4909132,
+    "ast_hash": "17716dfefb93abcea1729860b1112b79",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\voice-playback.test.ts": {
+    "mtime": 1780204033.492417,
+    "ast_hash": "ae26bfd5a6914cda890b796866e8030d",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\voice-readiness.test.tsx": {
+    "mtime": 1780204033.492417,
+    "ast_hash": "c4c79fb567b86175caff53ccdbc10932",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\voice-session.test.ts": {
+    "mtime": 1780204033.492417,
+    "ast_hash": "1710b824cb95e2d7f693151916af3aaa",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\voice-status-bar.test.tsx": {
+    "mtime": 1780204033.492417,
+    "ast_hash": "f4966a79f0f7f6d80749403785c6190a",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\webauthn-helpers.test.ts": {
+    "mtime": 1780204033.492417,
+    "ast_hash": "707d3898321f1ca4ec34de6a0f2072ad",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\welcome-view.test.tsx": {
+    "mtime": 1780348039.7328718,
+    "ast_hash": "bfe919fb637c55392ef6df0fc9858520",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\__tests__\\ws.test.ts": {
+    "mtime": 1780204033.492417,
+    "ast_hash": "c986624c96fa3a56d923b18a775ebce8",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\index.html": {
+    "mtime": 1780204033.4792333,
+    "ast_hash": "64efce20cb036c6b9e8b0d69e78c8fa0",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\README.md": {
+    "mtime": 1780204033.4792333,
+    "ast_hash": "97cbc31e64ef7a2c76708dc00d70d547",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\api\\agents.ts": {
+    "mtime": 1788411620.9564538,
+    "ast_hash": "93589f27e93269d1bf3bd27364430be4",
+    "semantic_hash": ""
+  },
+  "C:\\Users\\DjEnKa\\asic\\execlaw\\web\\src\\routes\\Agents.tsx": {
+    "mtime": 1788411620.9564538,
+    "ast_hash": "54612c1b0406711d5eb2e92d38fc496e",
+    "semantic_hash": ""
+  }
+}

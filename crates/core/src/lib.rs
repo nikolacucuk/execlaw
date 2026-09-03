@@ -15,6 +15,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agents;
 pub mod alerts;
 pub mod attachments;
 pub mod audit;

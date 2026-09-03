@@ -79,10 +79,7 @@ impl OptimizerWorker {
     ///
     /// Errors from the inference backend or the store are returned so
     /// the caller can log them; they are non-fatal for the turn.
-    pub async fn maybe_optimize(
-        &self,
-        skill_id: SkillId,
-    ) -> Result<Option<ProposalId>, String> {
+    pub async fn maybe_optimize(&self, skill_id: SkillId) -> Result<Option<ProposalId>, String> {
         // 1. Check whether we've crossed a multiple of the threshold.
         let count = self
             .store
@@ -95,8 +92,7 @@ impl OptimizerWorker {
 
         debug!(
             skill_id = skill_id.0,
-            count,
-            "optimizer: threshold crossed, collecting trajectories"
+            count, "optimizer: threshold crossed, collecting trajectories"
         );
 
         // 2. Load the skill's current body so we can pass it to
@@ -176,7 +172,10 @@ impl OptimizerWorker {
         }
 
         if all_steps.is_empty() {
-            debug!(skill_id = skill_id.0, "optimizer: no sanitizable steps found");
+            debug!(
+                skill_id = skill_id.0,
+                "optimizer: no sanitizable steps found"
+            );
             return Ok(None);
         }
 
@@ -187,14 +186,15 @@ impl OptimizerWorker {
             max_tokens: 1024,
         };
 
-        let (system, user) =
-            build_improvement_prompt(&skill.name, &skill.current_version.body_md, &summarizer_prompt);
+        let (system, user) = build_improvement_prompt(
+            &skill.name,
+            &skill.current_version.body_md,
+            &summarizer_prompt,
+        );
 
         let prompt_for_summarizer = SummarizerPrompt {
             steps: all_steps,
-            user_intent: Some(format!(
-                "__SYSTEM__\n{system}\n__USER__\n{user}"
-            )),
+            user_intent: Some(format!("__SYSTEM__\n{system}\n__USER__\n{user}")),
             max_tokens: 1024,
         };
 
@@ -263,9 +263,9 @@ mod tests {
     use crate::scanner::Strictness;
     use crate::store::SkillStore;
     use crate::summarizer::{SummarizerOutput, SummarizerPrompt};
+    use execlaw_core::Database;
     use execlaw_core::db::DbConfig;
     use execlaw_core::migrations::MigrationRunner;
-    use execlaw_core::Database;
     use std::sync::Arc;
 
     fn fresh_db() -> Database {
@@ -292,14 +292,18 @@ mod tests {
     }
 
     fn create_skill(store: &SkillStore, name: &str) {
-        store.create(sample_skill(name), Strictness::Warn, 1000).unwrap();
+        store
+            .create(sample_skill(name), Strictness::Warn, 1000)
+            .unwrap();
     }
 
     fn record_n_successes(store: &SkillStore, skill_name: &str, n: u32, prefix: &str) {
         for i in 0..n {
             let cid = format!("{prefix}-conv-{i}");
             store.record_invocation(skill_name, &cid, 1000).unwrap();
-            store.close_open_invocations(&cid, "success", 1, 2000).unwrap();
+            store
+                .close_open_invocations(&cid, "success", 1, 2000)
+                .unwrap();
         }
     }
 
@@ -309,7 +313,9 @@ mod tests {
     #[async_trait::async_trait]
     impl SkillSummarizer for SkipSummarizer {
         async fn summarize(&self, _prompt: SummarizerPrompt) -> Result<SummarizerOutput, String> {
-            Ok(SummarizerOutput::Skip { reason: "test skip".into() })
+            Ok(SummarizerOutput::Skip {
+                reason: "test skip".into(),
+            })
         }
     }
 
@@ -359,8 +365,12 @@ mod tests {
 
         // 2 successes + 1 failure.
         record_n_successes(&store, "test-ns/count-skill", 2, "cs");
-        store.record_invocation("test-ns/count-skill", "conv-fail", 1000).unwrap();
-        store.close_open_invocations("conv-fail", "failure", 1, 2000).unwrap();
+        store
+            .record_invocation("test-ns/count-skill", "conv-fail", 1000)
+            .unwrap();
+        store
+            .close_open_invocations("conv-fail", "failure", 1, 2000)
+            .unwrap();
 
         let skill_id = store.get("test-ns/count-skill").unwrap().unwrap().id;
         let count = store.count_successful_invocations(skill_id).unwrap();
@@ -383,6 +393,9 @@ mod tests {
 
         let skill_id = store.get("test-ns/off-threshold").unwrap().unwrap().id;
         let result = worker.maybe_optimize(skill_id).await.unwrap();
-        assert!(result.is_none(), "7 uses (not a multiple of 5) should not fire");
+        assert!(
+            result.is_none(),
+            "7 uses (not a multiple of 5) should not fire"
+        );
     }
 }

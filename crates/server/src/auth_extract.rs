@@ -105,11 +105,9 @@ impl FromRequestParts<AppState> for AuthedUser {
             None
         };
 
-        let token_owned = bearer_header
-            .or(cookie_token)
-            .ok_or(AuthRejection(
-                "missing Authorization header (no Bearer token or execlaw_access cookie)",
-            ))?;
+        let token_owned = bearer_header.or(cookie_token).ok_or(AuthRejection(
+            "missing Authorization header (no Bearer token or execlaw_access cookie)",
+        ))?;
 
         let claims = match state.signer.verify_access_token(&token_owned) {
             Ok(c) => c,

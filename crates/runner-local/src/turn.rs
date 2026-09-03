@@ -334,9 +334,7 @@ impl TurnExecutor {
         // drops messages, summarize the dropped segment and inject a
         // compact digest at position 1 (after the system prompt) so the
         // model retains awareness of discarded context.
-        let cw_policy = execlaw_context_window::parse_policy(
-            &cfg.context_window_policy,
-        );
+        let cw_policy = execlaw_context_window::parse_policy(&cfg.context_window_policy);
         if cfg.summarizer_client.is_some() {
             // Clone before trim so we can diff what was removed.
             let before_trim = messages.clone();
@@ -353,27 +351,19 @@ impl TurnExecutor {
                 let dropped_count = before_count - kept_count;
                 let dropped = &before_trim[conv_start..conv_start + dropped_count];
                 if !dropped.is_empty() {
-                    let (client, model_id) = cfg
-                        .summarizer_client
-                        .as_ref()
-                        .expect("checked Some above");
-                    match crate::history_summarizer::summarize_segment(
-                        dropped,
-                        client,
-                        model_id,
-                    )
-                    .await
+                    let (client, model_id) =
+                        cfg.summarizer_client.as_ref().expect("checked Some above");
+                    match crate::history_summarizer::summarize_segment(dropped, client, model_id)
+                        .await
                     {
                         Ok(summary_msg) => {
                             // Insert after the system prompt (position 1).
-                            let insert_pos = if messages
-                                .first()
-                                .is_some_and(|m| m.role == Role::System)
-                            {
-                                1
-                            } else {
-                                0
-                            };
+                            let insert_pos =
+                                if messages.first().is_some_and(|m| m.role == Role::System) {
+                                    1
+                                } else {
+                                    0
+                                };
                             messages.insert(insert_pos, summary_msg);
                             tracing::debug!(
                                 dropped = dropped_count,

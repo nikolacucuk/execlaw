@@ -457,11 +457,7 @@ mod tests {
         let path = dir.path().join("master.key");
         load_or_create_master_key_with_fallback(&path).expect("first-run should succeed");
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            mode, 0o600,
-            "master.key must be 0600, got {:04o}",
-            mode
-        );
+        assert_eq!(mode, 0o600, "master.key must be 0600, got {:04o}", mode);
     }
 
     /// `warn_if_key_file_too_permissive` is a no-op for a 0600 file

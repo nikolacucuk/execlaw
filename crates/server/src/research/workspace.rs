@@ -370,7 +370,7 @@ fn derive_report_filename_stem(markdown: &str, title: &str) -> String {
 
     // Tokenize: lowercase, alphanumerics-only, words separated by
     // any non-alnum run.
-    let lowered = raw.to_lowercase();
+    let lowered = normalise_for_winansi(&raw).to_lowercase();
     let mut words: Vec<String> = lowered
         .split(|c: char| !c.is_ascii_alphanumeric())
         .filter(|w| !w.is_empty())
@@ -557,7 +557,20 @@ pub fn normalise_for_winansi(s: &str) -> String {
             '\u{00AE}' => out.push_str("(R)"),
             '\u{2122}' => out.push_str("(TM)"),
 
-            // Currency (most are in WinAnsi — pass through)
+            // Latin letters missing from the built-in WinAnsi font.
+            // Transliterate them instead of emitting UTF-8 bytes as
+            // mojibake in the PDF text stream.
+            '\u{0106}' => out.push('C'),
+            '\u{0107}' => out.push('c'),
+            '\u{010C}' => out.push('C'),
+            '\u{010D}' => out.push('c'),
+            '\u{0160}' => out.push('S'),
+            '\u{0161}' => out.push('s'),
+            '\u{017D}' => out.push('Z'),
+            '\u{017E}' => out.push('z'),
+            '\u{0110}' => out.push('D'),
+            '\u{0111}' => out.push('d'),
+            // Other currency and Latin-1 characters pass through.
             // Default: passthrough. Latin-1 supplement chars
             // (é, ñ, ü, etc.) are valid in WinAnsi as single
             // bytes; printpdf handles them correctly. Multi-byte
@@ -778,6 +791,11 @@ mod tests {
         // PDF magic: %PDF-
         assert!(bytes.len() > 200, "rendered pdf should be non-trivial");
         assert_eq!(&bytes[0..5], b"%PDF-", "must have PDF magic header");
+    }
+
+    #[test]
+    fn normalise_for_winansi_transliterates_pastrovic_name() {
+        assert_eq!(normalise_for_winansi("Pastrović clan"), "Pastrovic clan");
     }
 
     #[test]

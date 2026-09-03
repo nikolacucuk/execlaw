@@ -1,25 +1,20 @@
 // Phase 13.A — voice mic button + MediaRecorder capture.
 //
-// Click → request mic permission → start recording → stream chunks
-// upstream as binary WebSocket frames. Click again → stop the
-// recorder and release the mic.
+// Click → request mic permission → capture PCM16 frames → stream
+// them upstream as binary WebSocket frames. Click again → stop the
+// capture graph and release the mic.
 //
 // Scope of 13.A: just the audio-capture-and-send wire. Server-side
 // processing (VAD, STT, LLM, TTS) lands in 13.B–13.E. We send chunks
 // every ~250ms so a future end-of-utterance heuristic on the server
 // has fine-enough granularity to detect short pauses.
 //
-// Browser-compat note: MediaRecorder is on every modern desktop +
-// Android browser; iOS Safari needs `audio/mp4` instead of the
-// default `audio/webm`. We pick the first supported MIME type so a
-// single component covers both.
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import Button from "react-bootstrap/Button";
 import OverlayTrigger from "react-bootstrap/OverlayTrigger";
 import Tooltip from "react-bootstrap/Tooltip";
 import { ErrorBanner } from "../components/ErrorBanner";
-import { codecFromMime, VoiceSession } from "./VoiceSession";
+import { VoiceSession } from "./VoiceSession";
 
 interface Props {
     /**
@@ -63,21 +58,6 @@ interface Props {
 
 const DEFAULT_TIMESLICE_MS = 250;
 
-const PREFERRED_MIME_TYPES = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/ogg;codecs=opus",
-    "audio/mp4",
-] as const;
-
-function pickSupportedMimeType(): string | undefined {
-    if (typeof MediaRecorder === "undefined") return undefined;
-    for (const t of PREFERRED_MIME_TYPES) {
-        if (MediaRecorder.isTypeSupported(t)) return t;
-    }
-    return undefined;
-}
-
 export function VoiceCaptureButton({
     sendBinary,
     sendControl,
@@ -85,9 +65,12 @@ export function VoiceCaptureButton({
     readiness,
     timesliceMs = DEFAULT_TIMESLICE_MS,
 }: Props) {
+    void timesliceMs;
     const [recording, setRecording] = useState(false);
     const [error, setError] = useState<string | null>(null);
-    const recorderRef = useRef<MediaRecorder | null>(null);
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const processorRef = useRef<ScriptProcessorNode | null>(null);
+    const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
     const streamRef = useRef<MediaStream | null>(null);
     /// Phase 13.A closure — voice-session lifecycle. A fresh
     /// session id + seq counter is minted on every recording start;
@@ -100,13 +83,12 @@ export function VoiceCaptureButton({
     // browser indicator persisting after the component is gone.
     useEffect(() => {
         return () => {
-            if (recorderRef.current && recorderRef.current.state !== "inactive") {
-                try {
-                    recorderRef.current.stop();
-                } catch {
-                    /* ignore */
-                }
-            }
+            processorRef.current?.disconnect();
+            sourceRef.current?.disconnect();
+            void audioContextRef.current?.close();
+            processorRef.current = null;
+            sourceRef.current = null;
+            audioContextRef.current = null;
             if (streamRef.current) {
                 for (const track of streamRef.current.getTracks()) {
                     track.stop();
@@ -117,15 +99,12 @@ export function VoiceCaptureButton({
     }, []);
 
     const stopRecording = useCallback(() => {
-        const r = recorderRef.current;
-        if (r && r.state !== "inactive") {
-            try {
-                r.stop();
-            } catch {
-                /* ignore */
-            }
-        }
-        recorderRef.current = null;
+        processorRef.current?.disconnect();
+        sourceRef.current?.disconnect();
+        void audioContextRef.current?.close();
+        processorRef.current = null;
+        sourceRef.current = null;
+        audioContextRef.current = null;
         if (streamRef.current) {
             for (const track of streamRef.current.getTracks()) {
                 track.stop();
@@ -147,10 +126,6 @@ export function VoiceCaptureButton({
         setError(null);
         if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
             setError("This browser doesn't support microphone capture.");
-            return;
-        }
-        if (typeof MediaRecorder === "undefined") {
-            setError("This browser doesn't support MediaRecorder.");
             return;
         }
         let stream: MediaStream;
@@ -180,12 +155,9 @@ export function VoiceCaptureButton({
             return;
         }
         streamRef.current = stream;
-        const mimeType = pickSupportedMimeType();
-        let recorder: MediaRecorder;
+        let audioContext: AudioContext;
         try {
-            recorder = mimeType
-                ? new MediaRecorder(stream, { mimeType })
-                : new MediaRecorder(stream);
+            audioContext = new AudioContext();
         } catch (e) {
             // Tear down the freshly-acquired mic on construction
             // failure so the indicator dot vanishes.
@@ -193,70 +165,49 @@ export function VoiceCaptureButton({
             streamRef.current = null;
             setError(
                 e instanceof Error
-                    ? `Couldn't start recorder: ${e.message}`
-                    : "Couldn't start recorder.",
+                    ? `Couldn't start audio capture: ${e.message}`
+                    : "Couldn't start audio capture.",
             );
             return;
         }
-        recorderRef.current = recorder;
-        // Phase 13.A closure — mint the voice session before the
-        // recorder fires its first chunk. Sample rate comes from
-        // the AudioContext default since MediaRecorder doesn't
-        // expose its capture rate directly; browsers ship 48000.
-        // The server-side decoder relies on this header field to
-        // resample for Whisper.
-        const sampleRate =
-            (typeof AudioContext !== "undefined"
-                ? new AudioContext().sampleRate
-                : undefined) ?? 48000;
+        audioContextRef.current = audioContext;
+        const source = audioContext.createMediaStreamSource(stream);
+        const processor = audioContext.createScriptProcessor(4096, 1, 1);
+        sourceRef.current = source;
+        processorRef.current = processor;
+        // The server accepts PCM16 only. MediaRecorder's Opus/WebM
+        // output cannot be decoded by the current voice pipeline.
         const session = new VoiceSession({
-            codec: codecFromMime(mimeType),
-            sampleRate,
+            codec: "pcm16",
+            sampleRate: audioContext.sampleRate,
         });
         sessionRef.current = session;
-        recorder.ondataavailable = (ev) => {
-            if (ev.data.size === 0) return;
-            void ev.data.arrayBuffer().then((buf) => {
-                // Wrap the opus payload in the wire framing so
-                // the server can parse session id + seq + codec
-                // metadata without out-of-band setup. Drops the
-                // chunk silently if the WebSocket isn't open —
-                // VAD tolerates short gaps; buffering across
-                // reconnects produces stale audio.
-                const sess = sessionRef.current;
-                if (!sess) return;
-                // sendBinary is null when the WebSocket isn't
-                // connected; the muted-mic gate above prevents
-                // recording from starting in that state, but be
-                // defensive — drop the chunk if we somehow ended
-                // up here without a sender.
-                if (sendBinary !== null) {
-                    sendBinary(sess.framePayload(buf));
-                }
-            });
-        };
-        recorder.onstop = () => {
-            recorderRef.current = null;
-            if (streamRef.current) {
-                for (const track of streamRef.current.getTracks()) {
-                    track.stop();
-                }
-                streamRef.current = null;
+        processor.onaudioprocess = (event) => {
+            const input = event.inputBuffer.getChannelData(0);
+            const pcm = new ArrayBuffer(input.length * 2);
+            const view = new DataView(pcm);
+            for (let i = 0; i < input.length; i += 1) {
+                const sample = Math.max(-1, Math.min(1, input[i]));
+                view.setInt16(i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
             }
-            sessionRef.current = null;
-            setRecording(false);
+            const sess = sessionRef.current;
+            if (sess && sendBinary !== null) sendBinary(sess.framePayload(pcm));
         };
         try {
-            recorder.start(timesliceMs);
+            const silentOutput = audioContext.createGain();
+            silentOutput.gain.value = 0;
+            source.connect(processor);
+            processor.connect(silentOutput);
+            silentOutput.connect(audioContext.destination);
             setRecording(true);
         } catch (e) {
             setError(
                 e instanceof Error
-                    ? `Couldn't start: ${e.message}`
-                    : "Couldn't start.",
+                    ? `Couldn't start audio capture: ${e.message}`
+                    : "Couldn't start audio capture.",
             );
         }
-    }, [sendBinary, timesliceMs]);
+    }, [sendBinary]);
 
     const onClick = useCallback(() => {
         if (recording) {

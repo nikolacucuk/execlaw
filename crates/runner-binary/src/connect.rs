@@ -28,7 +28,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use execlaw_runner_protocol::{PROTOCOL_VERSION, RegistrationAck, RunnerToServer, ServerToRunner};
 use futures_util::{SinkExt, StreamExt, stream::SplitSink};
 use std::env;
-use tokio::net::TcpStream;
+use std::net::SocketAddr;
+use tokio::net::{TcpStream, lookup_host};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -143,9 +144,32 @@ impl ConnectionDriver {
                 .context("encoding spawn secret as Authorization header")?,
         );
 
-        let (mut socket, response) = tokio_tungstenite::connect_async(req)
-            .await
-            .context("WS connect / upgrade failed")?;
+        let (mut socket, response) = if url.starts_with("ws://host.docker.internal:") {
+            let endpoint = url::Url::parse(&url).context("parsing runner registration URL")?;
+            let port = endpoint
+                .port_or_known_default()
+                .context("registration URL has no port")?;
+            let addresses: Vec<SocketAddr> = lookup_host(("host.docker.internal", port))
+                .await
+                .context("resolving host.docker.internal")?
+                .collect();
+            let address = addresses
+                .iter()
+                .find(|address| address.is_ipv4())
+                .or_else(|| addresses.first())
+                .copied()
+                .context("host.docker.internal resolved to no addresses")?;
+            let stream = TcpStream::connect(address)
+                .await
+                .context("connecting to Docker host over IPv4")?;
+            tokio_tungstenite::client_async(req, MaybeTlsStream::Plain(stream))
+                .await
+                .context("WS connect / upgrade failed")?
+        } else {
+            tokio_tungstenite::connect_async(req)
+                .await
+                .context("WS connect / upgrade failed")?
+        };
         tracing::debug!(
             status = %response.status(),
             "WS upgrade accepted by control plane"

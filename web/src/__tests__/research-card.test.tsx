@@ -275,13 +275,7 @@ describe("ResearchCard renderer", () => {
         expect(screen.queryByTestId("card-research-download")).toBeNull();
     });
 
-    it("does NOT render the report markdown inline (delivery is via send_attachment)", () => {
-        // 2026-05-03 (rev 3): the inline `<pre>{report_markdown}</pre>`
-        // block was removed. Reports were 1000+ lines and bloated the
-        // chat pane. The PDF flows through `send_attachment` →
-        // AttachmentCard chip instead. Even when stale data carries
-        // a `report_markdown` field, the ResearchCard must NOT
-        // render it.
+    it("renders the completed report markdown inline", () => {
         const card = makeResearchCard({
             state: "Completed",
             progress: 1,
@@ -306,8 +300,9 @@ describe("ResearchCard renderer", () => {
             } as Record<string, unknown>,
         });
         render(<ResearchCard card={card} />);
-        expect(screen.queryByTestId("card-research-report")).toBeNull();
-        expect(screen.queryByTestId("card-research-report-body")).toBeNull();
+        expect(screen.getByTestId("card-research-report").textContent).toContain(
+            "Final report",
+        );
     });
 
     it("never includes a progress bar when state is Completed", () => {

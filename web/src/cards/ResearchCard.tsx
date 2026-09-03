@@ -20,7 +20,9 @@
 
 import { useContext, useEffect, useState } from "react";
 import { AuthContext } from "../auth/AuthContext";
+import { apiFetch } from "../api/client";
 import { signDownloadUrl } from "../api/signedDownloadUrl";
+import { MarkdownContent } from "../components/MarkdownContent";
 import { registerCardRenderer, type CardRendererProps } from "./CardRenderer";
 import type { Card } from "./types";
 
@@ -66,6 +68,7 @@ interface ResearchDetails {
     /// PDF via `send_attachment` (see AttachmentCard) and that chip
     /// lands as a sibling card immediately after this one.
     report_url?: string;
+    report_markdown?: string;
 }
 
 function readDetails(raw: unknown): ResearchDetails | null {
@@ -75,6 +78,34 @@ function readDetails(raw: unknown): ResearchDetails | null {
 
 export function ResearchCard({ card, onAction }: CardRendererProps) {
     const details = readDetails(card.details);
+    const auth = useContext(AuthContext);
+    const [loadedReport, setLoadedReport] = useState<string | null>(null);
+    useEffect(() => {
+        const jobId = details?.job_id;
+        if (
+            card.state !== "Completed" ||
+            details?.report_markdown ||
+            !jobId ||
+            !auth?.getAccessToken
+        ) {
+            return;
+        }
+        let cancelled = false;
+        apiFetch<{ report_markdown: string | null }>(
+            `/api/admin/research/jobs/${jobId}/report`,
+            undefined,
+            auth.getAccessToken,
+        )
+            .then((report) => {
+                if (!cancelled) setLoadedReport(report.report_markdown);
+            })
+            .catch(() => {
+                if (!cancelled) setLoadedReport(null);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [auth?.getAccessToken, card.state, details?.job_id, details?.report_markdown]);
     const pct =
         card.progress !== null ? Math.round(card.progress * 100) : null;
     const showProgress = pct !== null && card.state !== "Completed";
@@ -223,6 +254,18 @@ export function ResearchCard({ card, onAction }: CardRendererProps) {
               * live and replayed render through the same code path
               * because attachment_id is part of the card row itself.
               */}
+            {card.state === "Completed" &&
+                (details?.report_markdown ?? loadedReport) && (
+                <div
+                    className="execlaw-card-research__report execlaw-md"
+                    data-testid="card-research-report"
+                >
+                    <MarkdownContent
+                        text={details?.report_markdown ?? loadedReport ?? ""}
+                    />
+                </div>
+            )}
+
             <DownloadButton card={card} />
 
 
@@ -435,6 +478,30 @@ function DownloadButton({ card }: { card: Card }) {
             cancelled = true;
         };
     }, [basePath, getToken]);
+    async function downloadReport(
+        event: React.MouseEvent<HTMLAnchorElement>,
+    ) {
+        if (!url) return;
+        event.preventDefault();
+        try {
+            const response = await fetch(url);
+            if (!response.ok) {
+                throw new Error(`download failed: ${response.status}`);
+            }
+            const blobUrl = URL.createObjectURL(await response.blob());
+            const link = document.createElement("a");
+            link.href = blobUrl;
+            link.download = "report.pdf";
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(blobUrl);
+        } catch {
+            // Keep the signed link available as a fallback if the
+            // authenticated fetch is interrupted or rejected.
+            window.location.assign(url);
+        }
+    }
     if (!completed) return null;
     if (!attachmentId) return null;
     if (!url) {
@@ -466,7 +533,8 @@ function DownloadButton({ card }: { card: Card }) {
             <a
                 className="btn btn-sm btn-primary"
                 href={url}
-                download
+                download="report.pdf"
+                onClick={downloadReport}
                 data-testid="card-research-download-link"
             >
                 <i className="bi bi-download me-1" aria-hidden />

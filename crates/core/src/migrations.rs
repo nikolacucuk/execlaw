@@ -96,6 +96,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "download_url_ttl",
         sql: include_str!("../migrations/0014_download_url_ttl.sql"),
     },
+    Migration {
+        id: 15,
+        name: "agents",
+        sql: include_str!("../migrations/0015_agents.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

@@ -574,6 +574,33 @@ fn parse_gpu_vendor(s: &str) -> Option<GpuVendor> {
     }
 }
 
+fn downgrade_voice_cuda_spec(
+    purpose: BackendPurpose,
+    spec: &mut ServiceSpec,
+    error: &ServiceError,
+) -> bool {
+    let error_text = error.to_string().to_ascii_lowercase();
+    if !matches!(purpose, BackendPurpose::VoiceStt | BackendPurpose::VoiceTts)
+        || !error_text.contains("cuda>=")
+    {
+        return false;
+    }
+
+    let cpu_image = match purpose {
+        BackendPurpose::VoiceStt if spec.image == "execlaw/service-whisper-cuda:v1" => {
+            "execlaw/service-whisper-cpu:v1"
+        }
+        BackendPurpose::VoiceTts if spec.image == "execlaw/service-kokoro-cuda:v1" => {
+            "execlaw/service-piper:v1"
+        }
+        _ => return false,
+    };
+    spec.image = cpu_image.to_owned();
+    spec.gpu_id = None;
+    spec.gpu_vendor = None;
+    true
+}
+
 /// Long-running supervisor task.
 #[derive(Clone)]
 pub struct BackendSupervisor {
@@ -964,6 +991,35 @@ impl BackendSupervisor {
                         slot.restart_attempts = 0;
                     }
                     Err(e) => {
+                        if downgrade_voice_cuda_spec(row.purpose, &mut spec, &e) {
+                            warn!(
+                                purpose = %key,
+                                image = %spec.image,
+                                "CUDA requirement is unavailable; retrying voice backend on CPU"
+                            );
+                            match self.controller.spawn(&spec).await {
+                                Ok(handle) => {
+                                    info!(
+                                        purpose = %key,
+                                        container = %handle.container_id,
+                                        "voice backend spawned with CPU fallback"
+                                    );
+                                    slot.handle = Some(handle);
+                                    slot.status = ServiceStatus::Starting;
+                                    slot.stage = LifecycleStage::ContainerStarting;
+                                    slot.spawn_started_at = Some(chrono::Utc::now().timestamp());
+                                    slot.last_log_line = None;
+                                    slot.last_log_tail = None;
+                                    slot.download_progress = None;
+                                    slot.download_task = None;
+                                    slot.restart_attempts = 0;
+                                    continue;
+                                }
+                                Err(cpu_error) => {
+                                    warn!(purpose = %key, "CPU fallback spawn failed: {cpu_error}");
+                                }
+                            }
+                        }
                         warn!(purpose = %key, "spawn failed: {e}");
                         slot.status = ServiceStatus::CrashLooping {
                             restart_count: slot.restart_attempts + 1,
@@ -1390,6 +1446,14 @@ fn spec_image_for_alert(row: &BackendRow) -> String {
 /// the supervisor then falls back to letting the container handle
 /// its own download.
 pub(crate) fn extract_model_id(row: &BackendRow) -> Option<String> {
+    // Voice images interpret `--model` as a local model size or
+    // engine-specific identifier (for example `small`), not an HF
+    // repository id. Let those containers manage their own model
+    // assets; the host downloader is for vLLM-style HF repositories.
+    let image = row.model_spec_json.get("image").and_then(|v| v.as_str())?;
+    if image.contains("whisper-") || image.contains("kokoro-") || image.contains("piper-") {
+        return None;
+    }
     let args = row.model_spec_json.get("args")?.as_array()?;
     let mut iter = args.iter().peekable();
     while let Some(a) = iter.next() {
@@ -1994,6 +2058,48 @@ mod tests {
             updated_at: 0,
         };
         assert!(spec_from_row(&row).is_err());
+    }
+
+    #[test]
+    fn cuda_voice_spec_downgrades_to_matching_cpu_backend() {
+        let mut spec = ServiceSpec {
+            image: "execlaw/service-whisper-cuda:v1".into(),
+            gpu_id: Some("0".into()),
+            gpu_vendor: Some(GpuVendor::Nvidia),
+            ..Default::default()
+        };
+        let error = ServiceError::Runtime(
+            "start: nvidia-container-cli: requirement error: unsatisfied condition: cuda>=13.0"
+                .into(),
+        );
+
+        assert!(downgrade_voice_cuda_spec(
+            BackendPurpose::VoiceStt,
+            &mut spec,
+            &error
+        ));
+        assert_eq!(spec.image, "execlaw/service-whisper-cpu:v1");
+        assert_eq!(spec.gpu_id, None);
+        assert_eq!(spec.gpu_vendor, None);
+    }
+
+    #[test]
+    fn cuda_fallback_does_not_change_unrelated_backend_specs() {
+        let mut spec = ServiceSpec {
+            image: "execlaw/service-whisper-cuda:v1".into(),
+            gpu_id: Some("0".into()),
+            gpu_vendor: Some(GpuVendor::Nvidia),
+            ..Default::default()
+        };
+        let error = ServiceError::Runtime("image not found".into());
+
+        assert!(!downgrade_voice_cuda_spec(
+            BackendPurpose::VoiceStt,
+            &mut spec,
+            &error
+        ));
+        assert_eq!(spec.image, "execlaw/service-whisper-cuda:v1");
+        assert_eq!(spec.gpu_id.as_deref(), Some("0"));
     }
 
     #[tokio::test]

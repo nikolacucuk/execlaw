@@ -1055,6 +1055,7 @@ function ChatPane({
                     onSend={onSendWithFlipCapture}
                     sendVoiceFrame={sendVoiceFrame}
                     sendVoiceControl={sendVoiceControl}
+                    voiceTranscript={voiceTranscript}
                     onStop={onStop}
                     busy={isSendingActive}
                     incognito={incognito}
@@ -1079,6 +1080,7 @@ function ChatPane({
                 onSend={onSend}
                 sendVoiceFrame={sendVoiceFrame}
                 sendVoiceControl={sendVoiceControl}
+                voiceTranscript={voiceTranscript}
                 multimodal={caps.multimodal}
                 recommendedImageEdge={caps.recommendedImageEdge}
                 getSkills={getSkills}
@@ -1094,6 +1096,7 @@ function ActiveThreadPane({
     onSend,
     sendVoiceFrame,
     sendVoiceControl,
+    voiceTranscript,
     multimodal,
     recommendedImageEdge,
     getSkills,
@@ -1108,6 +1111,11 @@ function ActiveThreadPane({
     ) => Promise<void> | void;
     sendVoiceFrame: (bytes: ArrayBuffer) => boolean;
     sendVoiceControl: (payload: object) => boolean;
+    voiceTranscript: {
+        session: string;
+        text: string;
+        is_final: boolean;
+    } | null;
     multimodal?: boolean;
     recommendedImageEdge?: number;
     getSkills?: () => Promise<SkillListEntry[]>;
@@ -1387,6 +1395,7 @@ function ActiveThreadPane({
                     bridgedChannel={thread?.transport_channel ?? null}
                     sendVoiceFrame={sendVoiceFrame}
                     sendVoiceControl={sendVoiceControl}
+                    voiceTranscript={voiceTranscript}
                     voiceReadiness={voiceReadiness}
                     busy={isSending || (thread?.is_processing ?? false)}
                     multimodal={multimodal}

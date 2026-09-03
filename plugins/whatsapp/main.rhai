@@ -931,12 +931,22 @@ fn admin_status(req) {
         };
     }
 
-    // No user provisioned yet → not actually unhealthy. on_enable
-    // either hasn't fired (cold-boot race) or its provisioning
-    // step failed (admin token mismatch, wuzapi rejecting create).
-    // Either way the SPA's pairing card is the right thing to
-    // render — it'll keep polling until a token shows up.
+    // Retry provisioning here as well as from on_enable. The sidecar
+    // can accept its health probe before its admin API is ready, so
+    // the first on_enable attempt may hit Unexpected EOF.
     let token = vault_get("user_token");
+    if token == () || token == "" {
+        try {
+            ensure_user_token(base);
+            token = vault_get("user_token");
+            if token != () && token != "" {
+                ensure_session_connected(base);
+                ensure_webhook_registered(base);
+            }
+        } catch (e) {
+            log_warn("whatsapp: provisioning retry from status failed: " + e);
+        }
+    }
     if token == () || token == "" {
         return #{
             "sidecar_status": "awaiting_pairing",

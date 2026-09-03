@@ -257,6 +257,15 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
                     label={tr("sidebar.automations", "Automations")}
                     testId="sidebar-automations"
                 />
+                    <NavLink
+                        to="/agents"
+                        className={({ isActive }) =>
+                            `execlaw-sidebar__nav-link${isActive ? " is-active" : ""}`
+                        }
+                    >
+                        <i className="bi bi-people me-2" aria-hidden />
+                        Agents
+                    </NavLink>
                 <SidebarNavLink
                     to="/research"
                     icon="bi-binoculars"
@@ -268,6 +277,18 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
                     icon="bi-stars"
                     label={tr("sidebar.skills", "Skills")}
                     testId="sidebar-skills"
+                />
+                <SidebarNavLink
+                    to="/settings/plugins"
+                    icon="bi-plug"
+                    label={tr("sidebar.plugins", "Plugins")}
+                    testId="sidebar-plugins"
+                />
+                <SidebarNavLink
+                    to="/settings/tools"
+                    icon="bi-wrench-adjustable"
+                    label={tr("sidebar.tools", "Tools")}
+                    testId="sidebar-tools"
                 />
                 {pendingApprovalCount > 0 && (
                     <SidebarNavLink

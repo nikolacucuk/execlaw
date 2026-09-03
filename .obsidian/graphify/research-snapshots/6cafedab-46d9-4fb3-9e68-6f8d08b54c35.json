@@ -1,0 +1,227 @@
+{
+  "edges": [
+    {
+      "id": "e1",
+      "kind": "has_thesis",
+      "source": "job:6cafedab-46d9-4fb3-9e68-6f8d08b54c35",
+      "target": "thesis:6cafedab-46d9-4fb3-9e68-6f8d08b54c35"
+    },
+    {
+      "id": "e2",
+      "kind": "has_step",
+      "source": "job:6cafedab-46d9-4fb3-9e68-6f8d08b54c35",
+      "target": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:0"
+    },
+    {
+      "id": "e3",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:0",
+      "target": "source:1"
+    },
+    {
+      "id": "e4",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:0",
+      "target": "source:2"
+    },
+    {
+      "id": "e5",
+      "kind": "has_step",
+      "source": "job:6cafedab-46d9-4fb3-9e68-6f8d08b54c35",
+      "target": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:1"
+    },
+    {
+      "id": "e6",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:1",
+      "target": "source:3"
+    },
+    {
+      "id": "e7",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:1",
+      "target": "source:4"
+    },
+    {
+      "id": "e8",
+      "kind": "has_step",
+      "source": "job:6cafedab-46d9-4fb3-9e68-6f8d08b54c35",
+      "target": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:2"
+    },
+    {
+      "id": "e9",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:2",
+      "target": "source:5"
+    },
+    {
+      "id": "e10",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:2",
+      "target": "source:6"
+    },
+    {
+      "id": "e11",
+      "kind": "has_step",
+      "source": "job:6cafedab-46d9-4fb3-9e68-6f8d08b54c35",
+      "target": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:3"
+    },
+    {
+      "id": "e12",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:3",
+      "target": "source:7"
+    },
+    {
+      "id": "e13",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:3",
+      "target": "source:8"
+    },
+    {
+      "id": "e14",
+      "kind": "has_step",
+      "source": "job:6cafedab-46d9-4fb3-9e68-6f8d08b54c35",
+      "target": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:4"
+    },
+    {
+      "id": "e15",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:4",
+      "target": "source:9"
+    },
+    {
+      "id": "e16",
+      "kind": "cites",
+      "source": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:4",
+      "target": "source:10"
+    }
+  ],
+  "generated_at": 1788404531,
+  "job_id": "6cafedab-46d9-4fb3-9e68-6f8d08b54c35",
+  "meta": {
+    "notes": 5,
+    "plan_steps": 5,
+    "report_preview": "# Summary\nThe Pastrovići clan (also known as Petrovčići) represents a pivotal noble lineage in Montenegrin history, deeply intertwined with the defense, governance, and cultural development of Budva and the Bay of Kotor region. Emerging from medieval Slavic settlement patterns, the clan migrated to the coastal area during the 15th–16th centuries, establishing themselves as key actors in Venetian-administered politics and later Montenegrin tribal leadership. Their legacy is defined by strategic fortifications, influential voivodes who shaped regional defense and administration, and a socio-political role that bridged coastal nobility with inland Orthodox leadership. Today, their enduring presence is preserved through historical landmarks, genealogical traditions, and active cultural heritage efforts that continue to shape Montenegrin identity.\n\n## Origins and Early Migration History"
+  },
+  "nodes": [
+    {
+      "community": "research-job",
+      "id": "job:6cafedab-46d9-4fb3-9e68-6f8d08b54c35",
+      "kind": "job",
+      "label": "Pastorović clan (Pastrovići) in Budva, Montenegro - history, origins, role in Montenegrin society, notable figures, castles and fortifications, cultural significance, and modern legacy"
+    },
+    {
+      "community": "research-plan",
+      "id": "thesis:6cafedab-46d9-4fb3-9e68-6f8d08b54c35",
+      "kind": "thesis",
+      "label": "The Pastrovići clan represents a pivotal noble lineage in Montenegrin history, deeply intertwined with the defense, governance, and cultural development of Budva. This research will trace their origins and migration, architectural contributions through fortifications, prominent leadership figures, socio-political influence within the tribal framework, and their enduring legacy in contemporary Montenegro."
+    },
+    {
+      "community": "research-gather",
+      "id": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:0",
+      "kind": "sub_query",
+      "label": "Origins and early migration history of the Pastrovići clan to Budva",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:1",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Origins+and+early+migration+history+of+the+Pastrovi%C4%87i+clan+to+Budva&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:2",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Origins&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:1",
+      "kind": "sub_query",
+      "label": "Castles and fortifications built by the Pastrovići clan in Budva",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:3",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Castles+and+fortifications+built+by+the+Pastrovi%C4%87i+clan+in+Budva&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:4",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Castles&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:2",
+      "kind": "sub_query",
+      "label": "Notable historical figures from the Pastrovići noble family",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:5",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Notable+historical+figures+from+the+Pastrovi%C4%87i+noble+family&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:6",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Notable&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:3",
+      "kind": "sub_query",
+      "label": "Political influence and social status of the Pastrovići clan in historical Montenegro",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:7",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Political+influence+and+social+status+of+the+Pastrovi%C4%87i+clan+in+historical+Montenegro&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:8",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Political&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-gather",
+      "id": "step:6cafedab-46d9-4fb3-9e68-6f8d08b54c35:4",
+      "kind": "sub_query",
+      "label": "Modern legacy and cultural significance of the Pastrovići clan today",
+      "state": "Done"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:9",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Modern+legacy+and+cultural+significance+of+the+Pastrovi%C4%87i+clan+today&limit=5&namespace=0&format=json"
+    },
+    {
+      "community": "research-source",
+      "fetched_ok": true,
+      "id": "source:10",
+      "kind": "source",
+      "label": "https://en.wikipedia.org/w/api.php?action=opensearch&search=Modern&limit=5&namespace=0&format=json"
+    }
+  ],
+  "query": "Pastorović clan (Pastrovići) in Budva, Montenegro - history, origins, role in Montenegrin society, notable figures, castles and fortifications, cultural significance, and modern legacy"
+}

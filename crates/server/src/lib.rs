@@ -1,4 +1,5 @@
 //! execlaw-server
+
 //!
 //! Axum HTTP + WebSocket server. Exposes:
 //!
@@ -15,6 +16,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_supervisor;
+pub mod agents_admin;
 pub mod alerts;
 pub mod approvals;
 pub mod attachment_api;

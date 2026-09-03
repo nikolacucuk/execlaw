@@ -34,6 +34,24 @@ describe("Composer", () => {
         expect(send.disabled).toBe(true);
     });
 
+    it("inserts a final voice transcript into the draft", async () => {
+        render(
+            <Composer
+                onSend={() => {}}
+                voiceTranscript={{
+                    session: "voice-1",
+                    text: "hello from the microphone",
+                    is_final: true,
+                }}
+            />,
+        );
+        await waitFor(() => {
+            expect(screen.getByTestId("composer-input")).toHaveValue(
+                "hello from the microphone",
+            );
+        });
+    });
+
     it("calls onSend with the trimmed text on submit", async () => {
         const onSend = vi.fn().mockResolvedValue(undefined);
         render(<Composer onSend={onSend} />);

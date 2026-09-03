@@ -3,7 +3,7 @@
 //! Buffers PCM16 chunks across `push` calls; on `flush` POSTs the
 //! accumulated buffer to faster-whisper's OpenAI-compat endpoint
 //! (`POST /v1/audio/transcriptions` with multipart form field
-//! `file=` containing a WAV blob and `model=whisper-1`). Returns
+//! `file=` containing a WAV blob and a concrete faster-whisper model). Returns
 //! the transcript via `SttEvent::Final`.
 //!
 //! Partial transcripts are not surfaced by the OpenAI-compat
@@ -29,8 +29,8 @@ pub struct WhisperClient {
     /// (voice_runtime) endpoint-detects via VAD and flushes well
     /// under the ~30s practical cap.
     buffer: Vec<i16>,
-    /// Optional model name to pass — defaults to "whisper-1" which
-    /// the OpenAI-compat shim accepts as a wildcard.
+    /// Optional model name to pass. Speaches needs a concrete model
+    /// id and downloads it on first use.
     model: String,
     request_timeout: Duration,
 }
@@ -46,11 +46,13 @@ impl WhisperClient {
     /// `reqwest::Client` (e.g. with custom redirect policy or
     /// connect_timeout).
     pub fn with_client(base_url: impl Into<String>, client: reqwest::Client) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_owned();
+        let base_url = base_url.strip_suffix("/v1").unwrap_or(&base_url).to_owned();
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            base_url,
             client,
             buffer: Vec::new(),
-            model: "whisper-1".to_owned(),
+            model: "Systran/faster-distil-whisper-small.en".to_owned(),
             // Whisper inference is bounded by audio length; 30s
             // upload + decode is plenty for the VAD-segmented chunks
             // the pipeline produces (typically <10s).
@@ -362,6 +364,12 @@ mod tests {
             SttEvent::Final { text } => assert_eq!(text, "hello"),
             other => panic!("expected Final, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn base_url_strips_openai_v1_suffix() {
+        let client = WhisperClient::new("http://127.0.0.1:8103/v1/");
+        assert_eq!(client.base_url, "http://127.0.0.1:8103");
     }
 
     /// Audit closure: the previous fixtures only exercised the HTTP

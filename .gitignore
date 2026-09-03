@@ -52,3 +52,9 @@ crates/server/blobs/
 /target-verify/release/.fingerprint
 /target-verify/release/build
 /target-verify
+/target-verify-2
+/target-verify-3
+/target-verify-4
+/web/target-verify-3
+/web/target-verify-4
+/target-verify-7

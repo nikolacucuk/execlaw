@@ -12,6 +12,7 @@ import { RequireSetupComplete } from "./routes/RequireSetupComplete";
 import { Research } from "./routes/Research";
 import { Routines } from "./routes/Routines";
 import { Automations } from "./routes/Automations";
+import { Agents } from "./routes/Agents";
 import { SetupWizard } from "./routes/SetupWizard";
 import { Skills } from "./routes/Skills";
 import { Settings } from "./settings/Settings";
@@ -112,6 +113,14 @@ export function App() {
                             </RequireSetupComplete>
                         }
                     />
+                        <Route
+                            path="/agents"
+                            element={
+                                <RequireSetupComplete>
+                                    <Agents />
+                                </RequireSetupComplete>
+                            }
+                        />
                     <Route
                         path="/automations/:id"
                         element={

@@ -769,6 +769,7 @@ pub async fn run_synthesize_phase(
         "phase": "Complete",
         "report_url": format!("/research/{}", job_id.as_str()),
         "attachment_id": outcome.attachment_id.as_str(),
+        "report_markdown": outcome.report_markdown,
     });
     if let Some(snapshot) = outcome.snapshot_path.as_deref() {
         close_details["graph_snapshot_path"] = serde_json::Value::String(snapshot.to_owned());

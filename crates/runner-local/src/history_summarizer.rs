@@ -198,7 +198,11 @@ mod tests {
 
         let result = summarize_segment(&turns, &client, &model).await.unwrap();
 
-        assert_eq!(result.role, Role::System, "summary must be a system message");
+        assert_eq!(
+            result.role,
+            Role::System,
+            "summary must be a system message"
+        );
         let text = result.content.as_ref().unwrap().as_text();
         assert!(
             text.contains("Conversation summary"),
@@ -223,9 +227,14 @@ mod tests {
         let client = InferenceClient::new(base_url);
         let model = ModelId("small-model".to_owned());
 
-        let turns: Vec<ChatMessage> = (0..4).map(|i| ChatMessage::user(format!("msg {i}"))).collect();
+        let turns: Vec<ChatMessage> = (0..4)
+            .map(|i| ChatMessage::user(format!("msg {i}")))
+            .collect();
         let result = summarize_segment(&turns, &client, &model).await.unwrap();
         let text = result.content.as_ref().unwrap().as_text();
-        assert!(text.contains("4 messages"), "message count in prefix: {text}");
+        assert!(
+            text.contains("4 messages"),
+            "message count in prefix: {text}"
+        );
     }
 }

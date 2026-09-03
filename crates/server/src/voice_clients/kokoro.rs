@@ -49,8 +49,10 @@ impl KokoroClient {
         voice_id: impl Into<String>,
         client: reqwest::Client,
     ) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_owned();
+        let base_url = base_url.strip_suffix("/v1").unwrap_or(&base_url).to_owned();
         Self {
-            base_url: base_url.into().trim_end_matches('/').to_owned(),
+            base_url,
             client,
             voice_id: voice_id.into(),
             request_timeout: Duration::from_secs(20),
@@ -395,6 +397,12 @@ mod tests {
     fn base_url_strips_trailing_slash() {
         let client = KokoroClient::new("http://127.0.0.1:1234/", "bf_emma");
         assert_eq!(client.base_url, "http://127.0.0.1:1234");
+    }
+
+    #[test]
+    fn base_url_strips_openai_v1_suffix() {
+        let client = KokoroClient::new("http://127.0.0.1:8104/v1/", "bf_emma");
+        assert_eq!(client.base_url, "http://127.0.0.1:8104");
     }
 
     /// Audit closure: assert the request carries the OpenAI-compat

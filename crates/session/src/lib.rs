@@ -112,7 +112,7 @@ impl Session {
                 return Err(SessionError {
                     state: self.state,
                     event,
-                })
+                });
             }
         };
 

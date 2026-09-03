@@ -1,7 +1,7 @@
 // Phase 13.A — VoiceCaptureButton tests.
 //
 // jsdom doesn't ship `navigator.mediaDevices.getUserMedia` or
-// `MediaRecorder` — both have to be stubbed before the component
+// `AudioContext` — both have to be stubbed before the component
 // mounts. Tests focus on the wiring contract:
 //   * Click → request mic → start recorder → stream chunks via the
 //     `sendBinary` prop.
@@ -24,48 +24,34 @@ interface MockTrack {
     stop: () => void;
 }
 
-class MockMediaRecorder {
-    static isTypeSupported = vi.fn().mockReturnValue(true);
-    public state: "inactive" | "recording" = "inactive";
-    public ondataavailable: ((ev: BlobEvent) => void) | null = null;
-    public onstop: (() => void) | null = null;
-    private timer: ReturnType<typeof setInterval> | null = null;
-
-    constructor(public stream: unknown, public _opts?: unknown) {}
-
-    start(timesliceMs: number) {
-        this.state = "recording";
-        // Simulate a single dataavailable event after timeslice.
-        // jsdom's Blob doesn't ship `arrayBuffer()` reliably across
-        // versions, so synthesize a Blob-shaped object the
-        // VoiceCaptureButton can consume directly.
-        this.timer = setTimeout(() => {
-            const buf = new TextEncoder().encode("frame-bytes").buffer;
-            const fakeBlob = {
-                size: 11,
-                arrayBuffer: () => Promise.resolve(buf),
-            };
-            this.ondataavailable?.({
-                data: fakeBlob,
-            } as unknown as BlobEvent);
-        }, timesliceMs / 5); // shorter so tests don't drag
-    }
-
-    stop() {
-        this.state = "inactive";
-        if (this.timer) {
-            clearTimeout(this.timer);
-            this.timer = null;
-        }
-        this.onstop?.();
-    }
+class MockAudioContext {
+    sampleRate = 48000;
+    createMediaStreamSource = vi.fn().mockReturnValue({
+        connect: vi.fn(),
+        disconnect: vi.fn(),
+    });
+    createScriptProcessor = vi.fn().mockImplementation(() => ({
+        onaudioprocess: null as ((event: unknown) => void) | null,
+        connect: vi.fn().mockImplementation(function (this: { onaudioprocess: ((event: unknown) => void) | null }) {
+            setTimeout(() => this.onaudioprocess?.({
+                inputBuffer: { getChannelData: () => new Float32Array([0.25, -0.25]) },
+            }), 0);
+        }),
+        disconnect: vi.fn(),
+    }));
+    createGain = vi.fn().mockReturnValue({
+        gain: { value: 0 },
+        connect: vi.fn(),
+    });
+    destination = {};
+    close = vi.fn().mockResolvedValue(undefined);
 }
 
 let mockTracks: MockTrack[];
 
 function installMocks(opts: {
     permissionGranted: boolean;
-    recorderConstructorThrows?: boolean;
+    audioContextConstructorThrows?: boolean;
 }) {
     mockTracks = [{ stop: vi.fn() }];
     const stream = {
@@ -78,20 +64,14 @@ function installMocks(opts: {
         configurable: true,
         value: { getUserMedia },
     });
-    if (opts.recorderConstructorThrows) {
+    if (opts.audioContextConstructorThrows) {
         // @ts-expect-error swap with a constructor that throws
-        globalThis.MediaRecorder = function () {
-            throw new Error("recorder construction failed");
+        globalThis.AudioContext = function () {
+            throw new Error("audio context construction failed");
         };
-        // The TS lib types narrow `globalThis.MediaRecorder` away
-        // when reassigned to a non-class function above; cast for
-        // the static-method assignment.
-        (globalThis.MediaRecorder as unknown as {
-            isTypeSupported: (s: string) => boolean;
-        }).isTypeSupported = vi.fn().mockReturnValue(true);
     } else {
         // @ts-expect-error replace global with our stub class
-        globalThis.MediaRecorder = MockMediaRecorder;
+        globalThis.AudioContext = MockAudioContext;
     }
 }
 
@@ -102,7 +82,7 @@ beforeEach(() => {
 afterEach(() => {
     vi.useRealTimers();
     // @ts-expect-error reset
-    delete globalThis.MediaRecorder;
+    delete globalThis.AudioContext;
     Object.defineProperty(navigator, "mediaDevices", {
         configurable: true,
         value: undefined,
@@ -134,7 +114,7 @@ describe("VoiceCaptureButton", () => {
                 "true",
             );
         });
-        // Wait for the simulated dataavailable to fire.
+        // Wait for the simulated audio callback to fire.
         await waitFor(
             () => {
                 expect(sendBinary).toHaveBeenCalled();
@@ -143,7 +123,7 @@ describe("VoiceCaptureButton", () => {
         );
         // Phase 13.A closure — every chunk is now wrapped in the
         // [u32 header_len][JSON header][payload] envelope. Decode
-        // the first frame and assert the header + opus payload
+        // the first frame and assert the header + PCM16 payload
         // round-trip.
         const frame = sent[0];
         expect(frame.byteLength).toBeGreaterThan(4);
@@ -154,10 +134,10 @@ describe("VoiceCaptureButton", () => {
         expect(typeof header.session).toBe("string");
         expect(header.session.length).toBeGreaterThan(0);
         expect(header.seq).toBe(0);
-        expect(header.codec).toBe("opus");
+        expect(header.codec).toBe("pcm16");
         expect(typeof header.sample_rate).toBe("number");
         const payload = new Uint8Array(frame, 4 + headerLen);
-        expect(new TextDecoder().decode(payload)).toBe("frame-bytes");
+        expect(payload.byteLength).toBe(4);
     });
 
     it("stops recording + releases mic tracks on second click", async () => {
@@ -207,7 +187,7 @@ describe("VoiceCaptureButton", () => {
 
     it("releases the mic stream when MediaRecorder construction throws", async () => {
         vi.useRealTimers();
-        installMocks({ permissionGranted: true, recorderConstructorThrows: true });
+        installMocks({ permissionGranted: true, audioContextConstructorThrows: true });
         const sendBinary = vi.fn().mockReturnValue(true);
         render(<VoiceCaptureButton sendBinary={sendBinary} />);
         fireEvent.click(screen.getByTestId("composer-voice"));

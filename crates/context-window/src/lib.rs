@@ -108,15 +108,13 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
         .map(|m| {
             let content_chars = match &m.content {
                 Some(execlaw_inference_api::MessageContent::Text(t)) => t.len(),
-                Some(execlaw_inference_api::MessageContent::Parts(parts)) => {
-                    parts
-                        .iter()
-                        .map(|p| match p {
-                            execlaw_inference_api::ContentPart::Text { text } => text.len(),
-                            execlaw_inference_api::ContentPart::ImageUrl { .. } => 256,
-                        })
-                        .sum()
-                }
+                Some(execlaw_inference_api::MessageContent::Parts(parts)) => parts
+                    .iter()
+                    .map(|p| match p {
+                        execlaw_inference_api::ContentPart::Text { text } => text.len(),
+                        execlaw_inference_api::ContentPart::ImageUrl { .. } => 256,
+                    })
+                    .sum(),
                 None => 0,
             };
             // Per-message overhead: role + structural JSON tokens (~4).
@@ -264,9 +262,7 @@ pub fn parse_policy(s: &str) -> ContextWindowPolicy {
     if let Some(rest) = s.strip_prefix("token_budget:") {
         let parts: Vec<&str> = rest.splitn(2, ':').collect();
         if parts.len() == 2 {
-            if let (Ok(max), Ok(reserve)) =
-                (parts[0].parse::<usize>(), parts[1].parse::<usize>())
-            {
+            if let (Ok(max), Ok(reserve)) = (parts[0].parse::<usize>(), parts[1].parse::<usize>()) {
                 return ContextWindowPolicy::TokenBudget {
                     max_tokens: max,
                     reserve_for_reply: reserve,
@@ -341,7 +337,11 @@ mod tests {
         apply(&ContextWindowPolicy::SlidingTurns(3), &mut msgs);
         // System prompt + 3 most recent user/asst pairs = 1 + 6 = 7
         // (turns 3, 4, 5 kept)
-        assert_eq!(msgs[0].role, Role::System, "system prompt must be at index 0");
+        assert_eq!(
+            msgs[0].role,
+            Role::System,
+            "system prompt must be at index 0"
+        );
         let user_count = msgs.iter().filter(|m| m.role == Role::User).count();
         assert_eq!(user_count, 3, "exactly 3 user messages should remain");
     }
@@ -372,7 +372,10 @@ mod tests {
             "first message must remain the system prompt"
         );
         if let Some(MessageContent::Text(t)) = &msgs[0].content {
-            assert!(t.contains("helpful assistant"), "system prompt content preserved");
+            assert!(
+                t.contains("helpful assistant"),
+                "system prompt content preserved"
+            );
         }
     }
 
@@ -392,7 +395,10 @@ mod tests {
             &mut msgs,
         );
         let tokens = estimate_tokens(&msgs);
-        assert!(tokens <= 25, "estimated tokens {tokens} should be ≤ budget 25");
+        assert!(
+            tokens <= 25,
+            "estimated tokens {tokens} should be ≤ budget 25"
+        );
         // System prompt must survive.
         assert_eq!(msgs[0].role, Role::System);
     }
@@ -408,7 +414,11 @@ mod tests {
             },
             &mut msgs,
         );
-        assert_eq!(msgs.len(), original_len, "no trimming needed for tiny history");
+        assert_eq!(
+            msgs.len(),
+            original_len,
+            "no trimming needed for tiny history"
+        );
     }
 
     #[test]
@@ -475,6 +485,9 @@ mod tests {
         let msgs = vec![sys()];
         let est = estimate_tokens(&msgs);
         // System prompt "You are a helpful assistant." = 35 chars → ≈ 8 + 4 = 12
-        assert!(est > 0 && est < 50, "reasonable estimate for short system prompt");
+        assert!(
+            est > 0 && est < 50,
+            "reasonable estimate for short system prompt"
+        );
     }
 }

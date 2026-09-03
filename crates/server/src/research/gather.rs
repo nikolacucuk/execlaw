@@ -378,6 +378,9 @@ async fn gather_one(
             let mut fallback_urls = extract_inline_urls(&step.query);
             if fallback_urls.is_empty() {
                 fallback_urls.push(wikipedia_opensearch_url(&step.query));
+                if let Some(term) = wikipedia_search_term(&step.query) {
+                    fallback_urls.push(wikipedia_opensearch_url(&term));
+                }
             }
             tracing::warn!(
                 query = %step.query,
@@ -569,6 +572,21 @@ fn wikipedia_opensearch_url(query: &str) -> String {
     format!(
         "https://en.wikipedia.org/w/api.php?action=opensearch&search={encoded}&limit=5&namespace=0&format=json"
     )
+}
+
+/// Return a focused proper-name term for Wikipedia fallback search.
+///
+/// Research plans tend to be full sentences, which OpenSearch often
+/// cannot match even when its central named entity has an article.
+/// Preserve the full query above, then try the first capitalized term
+/// (for example, `Pastrović`) as a second, narrower lookup.
+fn wikipedia_search_term(query: &str) -> Option<String> {
+    query
+        .split(|c: char| !c.is_alphabetic())
+        .find(|word| {
+            word.chars().next().is_some_and(char::is_uppercase) && word.chars().count() >= 4
+        })
+        .map(str::to_owned)
 }
 
 const BODY_TRUNCATE_PER_URL: usize = 4_000;

@@ -148,6 +148,20 @@ All optional; see `crates/plugin-sdk/src/manifest.rs` for full per-section schem
 - `[[ui_panels]]` registers an operator-facing settings page. `mount = "admin/plugins/myplugin"` maps the panel to `/settings/plugins/myplugin` in the SPA; `entry = "ui/panel.js"` names the file inside the ZIP that the host serves at `GET /api/admin/plugins/{plugin_id}/ui/panel.js`. The SPA's `DynamicPluginPanel` fetches that JS, blob-URLs it, and `import()`s the module at runtime. **See section 11 for the full authoring walkthrough.** Install-time validation refuses any plugin whose `entry` file is missing from the staged ZIP.
 - `[[skills]]` registers operator-authored skill markdown files into the host's `SkillStore` namespaced as `<plugin_id>/<skill_name>`.
 
+### Filesystem skills
+
+The control plane also imports every `SKILL.md` below the instance data
+directory's `skills/` folder at startup. A file such as
+`~/.execlaw/skills/research/gather/SKILL.md` is loaded as
+`research/gather`, scanner-gated, and stored in the versioned skill store.
+Unchanged files are idempotent; editing a file creates a new skill version.
+
+This is the portable source-of-truth location for operator-managed skills.
+Plugin ZIPs remain useful for distributing skills together with plugin tools,
+but a deployment can restore skills by copying the `skills/` directory and
+restarting execlaw. The Skills page and the model-facing `skills.list` /
+`skills.view` tools read the resulting database records.
+
 ---
 
 ## 4. Sidecar model

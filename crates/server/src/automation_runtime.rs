@@ -73,7 +73,10 @@ impl HttpFetchRateLimiter {
     /// Try to record a call for `automation_id`. Returns `true` if the
     /// call is allowed; `false` if the per-minute cap has been reached.
     pub fn try_call(&self, automation_id: &str) -> bool {
-        let mut guard = self.windows.lock().expect("HttpFetchRateLimiter mutex poisoned");
+        let mut guard = self
+            .windows
+            .lock()
+            .expect("HttpFetchRateLimiter mutex poisoned");
         let now = Instant::now();
         let window = guard.entry(automation_id.to_owned()).or_default();
         // Prune entries older than 60 s.
@@ -2497,7 +2500,10 @@ mod tests {
         let limiter = HttpFetchRateLimiter::new(3);
         assert!(limiter.try_call("auto-1"), "1st call should be allowed");
         assert!(limiter.try_call("auto-1"), "2nd call should be allowed");
-        assert!(limiter.try_call("auto-1"), "3rd call should be allowed (at cap)");
+        assert!(
+            limiter.try_call("auto-1"),
+            "3rd call should be allowed (at cap)"
+        );
         assert!(!limiter.try_call("auto-1"), "4th call should be denied");
     }
 
@@ -2508,9 +2514,15 @@ mod tests {
         assert!(limiter.try_call("auto-a"));
         assert!(!limiter.try_call("auto-a"), "auto-a should be rate-limited");
         // Different automation id should have its own fresh window.
-        assert!(limiter.try_call("auto-b"), "auto-b is independent of auto-a");
+        assert!(
+            limiter.try_call("auto-b"),
+            "auto-b is independent of auto-a"
+        );
         assert!(limiter.try_call("auto-b"));
-        assert!(!limiter.try_call("auto-b"), "auto-b should now be rate-limited too");
+        assert!(
+            !limiter.try_call("auto-b"),
+            "auto-b should now be rate-limited too"
+        );
     }
 
     #[test]

@@ -260,7 +260,10 @@ impl VoiceRuntime {
                 );
                 continue;
             }
-            let samples = decode_pcm16_le(&chunk.payload);
+            let samples = resample_to_whisper_rate(
+                &decode_pcm16_le(&chunk.payload),
+                chunk.sample_rate,
+            );
             if samples.is_empty() {
                 continue;
             }
@@ -501,6 +504,23 @@ fn decode_pcm16_le(bytes: &[u8]) -> Vec<i16> {
     out
 }
 
+fn resample_to_whisper_rate(samples: &[i16], sample_rate: u32) -> Vec<i16> {
+    if samples.is_empty() || sample_rate == 16_000 {
+        return samples.to_vec();
+    }
+    let output_len = ((samples.len() as u64 * 16_000) / sample_rate as u64) as usize;
+    let mut output = Vec::with_capacity(output_len.max(1));
+    for index in 0..output_len {
+        let source_position = index as f64 * sample_rate as f64 / 16_000.0;
+        let left = source_position.floor() as usize;
+        let right = (left + 1).min(samples.len() - 1);
+        let fraction = source_position - left as f64;
+        let value = samples[left] as f64 * (1.0 - fraction) + samples[right] as f64 * fraction;
+        output.push(value.round().clamp(i16::MIN as f64, i16::MAX as f64) as i16);
+    }
+    output
+}
+
 fn encode_pcm16_le(samples: &[i16]) -> Vec<u8> {
     let mut out = Vec::with_capacity(samples.len() * 2);
     for s in samples {
@@ -572,6 +592,14 @@ mod tests {
         let mut bytes = encode_pcm16_le(&[1, 2]);
         bytes.push(0xff);
         assert_eq!(decode_pcm16_le(&bytes), vec![1, 2]);
+    }
+
+    #[test]
+    fn resample_to_whisper_rate_converts_browser_rate() {
+        let input: Vec<i16> = (0..48_000).map(|n| n as i16).collect();
+        let output = resample_to_whisper_rate(&input, 48_000);
+        assert_eq!(output.len(), 16_000);
+        assert_eq!(output[1], input[3]);
     }
 
     #[tokio::test]
