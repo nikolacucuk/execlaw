@@ -166,6 +166,25 @@ The initial setup wizard detects the mounted Docker socket directly, so it
 should report Docker as available even though the minimal control-plane image
 does not include the Docker CLI.
 
+### Sidecar-backed plugins
+
+The `EXECLAW_SIDECAR_*` settings apply to every plugin whose manifest declares
+`[services.sidecar]`, not just WhatsApp:
+
+| Plugin | Sidecar | TrueNAS behavior |
+|---|---|---|
+| WhatsApp | `asternic/wuzapi` | QR pairing and message API use the Docker-host gateway. |
+| Signal | `bbernhard/signal-cli-rest-api` | Pairing and message API use the Docker-host gateway. |
+| Web Scraper | `execlaw/web-scraper` | Scraper health checks and tools use the Docker-host gateway. |
+
+After rebuilding the control-plane image, disable and re-enable any of these
+plugins so the supervisor reconciles the sidecar with the new configuration.
+The `discord` plugin is sidecar-free and connects directly to Discord, so it
+does not need this setting. The `sms-socket` plugin connects to the Android
+gateway configured in its admin panel; on TrueNAS its `gateway_url` must be
+the phone's LAN address, for example `ws://192.168.1.50:8787/`, rather than
+the default `ws://127.0.0.1:8787/`.
+
 ### Runner image inspection failed
 
 If the control-plane log says `runner image not found locally` immediately
