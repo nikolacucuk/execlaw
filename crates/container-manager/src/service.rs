@@ -464,7 +464,14 @@ impl ServiceController for BollardServiceController {
         port_bindings.insert(
             key.clone(),
             Some(vec![PortBinding {
-                host_ip: Some("127.0.0.1".into()),
+                // Native deployments keep sidecars loopback-only. A
+                // containerized control plane can opt into the Docker host
+                // gateway instead; loopback would point back at the control
+                // plane container and make every sidecar unreachable.
+                host_ip: Some(
+                    std::env::var("EXECLAW_SIDECAR_BIND_HOST")
+                        .unwrap_or_else(|_| "127.0.0.1".into()),
+                ),
                 host_port: Some(spec.host_port.to_string()),
             }]),
         );

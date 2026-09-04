@@ -99,6 +99,32 @@ All 12 in-tree plugins ship as ZIPs under [`dist/`](dist/) and install via the S
 
 Tools, host-side built-ins, and the manifest schema are documented in [`docs/plugins.md`](docs/plugins.md). Chart rendering (`chart.render`) is a host-side built-in as of 2026-05-15 — it was previously inside `open-meteo`.
 
+### Building plugin ZIPs
+
+The source directories under [`plugins/`](plugins/) are not themselves
+installable uploads. Generate the operator-installable archives under
+[`dist/`](dist/) with the repository packaging scripts. On Windows
+PowerShell, install the root JavaScript build dependency once, then run:
+
+```powershell
+npm ci --no-audit --no-fund
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\scripts\package-plugins.ps1
+```
+
+On Linux, macOS, WSL, or Git Bash, run:
+
+```bash
+./scripts/package-plugins.sh
+```
+
+The scripts build declared plugin UI panels and package every in-tree
+plugin as `dist/<plugin-id>-<version>.zip`, together with a matching
+`.sha256` checksum. For example, the WhatsApp source in
+[`plugins/whatsapp/`](plugins/whatsapp/) produces
+[`dist/whatsapp-0.2.0.zip`](dist/whatsapp-0.2.0.zip). Upload the generated
+ZIP through **Settings → Plugins** or `POST /api/admin/plugins/install`.
+
 ---
 
 ## Internationalisation (i18n)

@@ -82,14 +82,16 @@ impl HostCapabilities for AppStateHostCapabilities {
         // crash-looping — plugin's responsibility to handle.
         let supervisor = self.state.sidecar_supervisor.as_ref()?;
         let port = supervisor.host_port_for(sidecar_name).await?;
-        Some(format!("http://127.0.0.1:{port}"))
+        let host = std::env::var("EXECLAW_SIDECAR_CONNECT_HOST")
+            .unwrap_or_else(|_| "127.0.0.1".into());
+        Some(format!("http://{host}:{port}"))
     }
 
     async fn is_known_sidecar_url(&self, url: &str) -> bool {
         // Parse host:port out of the URL and compare against every
-        // supervised sidecar's published port. Only `http://127.0.0.1:*`
-        // qualifies — defends against a plugin smuggling a
-        // non-loopback URL through the sidecar_http_* path.
+        // supervised sidecar's published port. Only the configured
+        // sidecar host qualifies — defends against a plugin smuggling
+        // an unrelated URL through the sidecar_http_* path.
         let parsed = match url::Url::parse(url) {
             Ok(u) => u,
             Err(_) => return false,
@@ -97,7 +99,9 @@ impl HostCapabilities for AppStateHostCapabilities {
         if parsed.scheme() != "http" && parsed.scheme() != "ws" {
             return false;
         }
-        if parsed.host_str() != Some("127.0.0.1") {
+        let allowed_host = std::env::var("EXECLAW_SIDECAR_CONNECT_HOST")
+            .unwrap_or_else(|_| "127.0.0.1".into());
+        if parsed.host_str() != Some(allowed_host.as_str()) {
             return false;
         }
         let port = match parsed.port() {

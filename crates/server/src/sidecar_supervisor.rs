@@ -512,7 +512,11 @@ impl SidecarSupervisor {
                 let restart_attempts = slot.map(|s| s.restart_attempts).unwrap_or(0);
                 let rpc_url = slot
                     .and_then(|s| s.handle.as_ref())
-                    .map(|h| format!("http://127.0.0.1:{}", h.host_port));
+                    .map(|h| {
+                        let host = std::env::var("EXECLAW_SIDECAR_CONNECT_HOST")
+                            .unwrap_or_else(|_| "127.0.0.1".into());
+                        format!("http://{host}:{}", h.host_port)
+                    });
                 SidecarRuntimeStatus {
                     name: b.name.clone(),
                     plugin_id: b.plugin_id.clone(),
@@ -935,8 +939,10 @@ impl SidecarSupervisor {
                 // truly broken sidecar surfaces as a stuck-Starting
                 // status the operator can `kick` from the Sidecars
                 // page).
+                let host = std::env::var("EXECLAW_SIDECAR_CONNECT_HOST")
+                    .unwrap_or_else(|_| "127.0.0.1".into());
                 let url = format!(
-                    "http://127.0.0.1:{}{}",
+                    "http://{host}:{}{}",
                     handle.host_port, sidecar.rpc_health_path
                 );
                 match self.controller.health_check(&url).await {
@@ -981,8 +987,10 @@ impl SidecarSupervisor {
                 // Validate via the sidecar's own RPC healthcheck —
                 // `inspect` only tells us the container is up; the
                 // sidecar process inside might still be initialising.
+                let host = std::env::var("EXECLAW_SIDECAR_CONNECT_HOST")
+                    .unwrap_or_else(|_| "127.0.0.1".into());
                 let url = format!(
-                    "http://127.0.0.1:{}{}",
+                    "http://{host}:{}{}",
                     handle.host_port, sidecar.rpc_health_path
                 );
                 // Audit fix: capture the underlying error so an

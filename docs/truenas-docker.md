@@ -115,11 +115,19 @@ services:
       EXECLAW_RUNNER_IMAGE: execlaw/runner:truenas
       EXECLAW_RUNNER_NETWORK: execlaw-net
       EXECLAW_RPC_URL: ws://execlaw:3031
+      # Sidecars are published by the Docker host. The control plane must
+      # not use its own loopback address to reach them. This exposes the
+      # dynamically allocated sidecar ports on the host; restrict access
+      # with the TrueNAS firewall if the host has an untrusted interface.
+      EXECLAW_SIDECAR_BIND_HOST: 0.0.0.0
+      EXECLAW_SIDECAR_CONNECT_HOST: host.docker.internal
       # Boot-time fallback; the backend record below becomes the per-turn source.
       EXECLAW_INFERENCE_URL: ${OLLAMA_OPENAI_URL}
       RUST_LOG: info
     group_add:
       - "${DOCKER_GID}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${EXECLAW_DATA_DIR}:/var/lib/execlaw
       - /var/run/docker.sock:/var/run/docker.sock
