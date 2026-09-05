@@ -26,6 +26,24 @@ pub struct AgentRow {
     pub last_error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub trigger: serde_json::Value,
+    pub reply_mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplyDraftRow {
+    pub id: String,
+    pub agent_id: String,
+    pub conversation_id: String,
+    pub channel: String,
+    pub recipient: String,
+    pub inbound_text: String,
+    pub draft_text: String,
+    pub status: String,
+    pub created_at: i64,
+    pub reviewed_at: Option<i64>,
+    pub sent_at: Option<i64>,
+    pub review_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +97,8 @@ pub struct AgentUpsert {
     pub max_runtime_secs: u32,
     pub concurrency_limit: u32,
     pub enabled: bool,
+    pub trigger: serde_json::Value,
+    pub reply_mode: String,
 }
 
 #[derive(Clone)]
@@ -93,14 +113,14 @@ impl AgentStore {
 
     pub fn list(&self) -> Result<Vec<AgentRow>, AgentError> {
         self.db.with_conn(|c| {
-            let mut stmt = c.prepare("SELECT id,name,role_prompt,model,backend_purpose,tools_json,trust_policy_json,interval_secs,token_budget,max_runtime_secs,concurrency_limit,enabled,paused,next_run_at,last_run_at,last_run_status,last_error,created_at,updated_at FROM config_agents ORDER BY name")?;
+            let mut stmt = c.prepare("SELECT id,name,role_prompt,model,backend_purpose,tools_json,trust_policy_json,interval_secs,token_budget,max_runtime_secs,concurrency_limit,enabled,paused,next_run_at,last_run_at,last_run_status,last_error,created_at,updated_at,trigger_json,reply_mode FROM config_agents ORDER BY name")?;
             let rows = stmt.query_map([], map_agent)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
         }).map_err(Into::into)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<AgentRow>, AgentError> {
-        self.db.with_conn(|c| Ok(c.query_row("SELECT id,name,role_prompt,model,backend_purpose,tools_json,trust_policy_json,interval_secs,token_budget,max_runtime_secs,concurrency_limit,enabled,paused,next_run_at,last_run_at,last_run_status,last_error,created_at,updated_at FROM config_agents WHERE id=?1", [id], map_agent).optional()?)).map_err(Into::into)
+        self.db.with_conn(|c| Ok(c.query_row("SELECT id,name,role_prompt,model,backend_purpose,tools_json,trust_policy_json,interval_secs,token_budget,max_runtime_secs,concurrency_limit,enabled,paused,next_run_at,last_run_at,last_run_status,last_error,created_at,updated_at,trigger_json,reply_mode FROM config_agents WHERE id=?1", [id], map_agent).optional()?)).map_err(Into::into)
     }
 
     pub fn upsert(&self, input: &AgentUpsert, now: i64) -> Result<AgentRow, AgentError> {
@@ -127,7 +147,8 @@ impl AgentStore {
         let trust = serde_json::to_string(&input.trust_policy)
             .map_err(|e| AgentError::Encoding(e.to_string()))?;
         self.db.with_conn(|c| {
-            c.execute("INSERT INTO config_agents (id,name,role_prompt,model,backend_purpose,tools_json,trust_policy_json,interval_secs,token_budget,max_runtime_secs,concurrency_limit,enabled,paused,next_run_at,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?13,?13) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role_prompt=excluded.role_prompt,model=excluded.model,backend_purpose=excluded.backend_purpose,tools_json=excluded.tools_json,trust_policy_json=excluded.trust_policy_json,interval_secs=excluded.interval_secs,token_budget=excluded.token_budget,max_runtime_secs=excluded.max_runtime_secs,concurrency_limit=excluded.concurrency_limit,enabled=excluded.enabled,next_run_at=COALESCE(config_agents.next_run_at, excluded.next_run_at),updated_at=excluded.updated_at", params![id,input.name,input.role_prompt,input.model,input.backend_purpose,tools,trust,input.interval_secs,input.token_budget,input.max_runtime_secs,input.concurrency_limit,input.enabled as i64,now])?;
+            let trigger = serde_json::to_string(&input.trigger).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
+            c.execute("INSERT INTO config_agents (id,name,role_prompt,model,backend_purpose,tools_json,trust_policy_json,interval_secs,token_budget,max_runtime_secs,concurrency_limit,enabled,paused,next_run_at,created_at,updated_at,trigger_json,reply_mode) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?13,?13,?14,?15) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role_prompt=excluded.role_prompt,model=excluded.model,backend_purpose=excluded.backend_purpose,tools_json=excluded.tools_json,trust_policy_json=excluded.trust_policy_json,interval_secs=excluded.interval_secs,token_budget=excluded.token_budget,max_runtime_secs=excluded.max_runtime_secs,concurrency_limit=excluded.concurrency_limit,enabled=excluded.enabled,trigger_json=excluded.trigger_json,reply_mode=excluded.reply_mode,next_run_at=COALESCE(config_agents.next_run_at, excluded.next_run_at),updated_at=excluded.updated_at", params![id,input.name,input.role_prompt,input.model,input.backend_purpose,tools,trust,input.interval_secs,input.token_budget,input.max_runtime_secs,input.concurrency_limit,input.enabled as i64,now,trigger,input.reply_mode])?;
             Ok(())
         })?;
         self.get(&id)?.ok_or(AgentError::NotFound(id))
@@ -150,7 +171,7 @@ impl AgentStore {
     }
 
     pub fn claim_due(&self, id: &str, now: i64) -> Result<Option<AgentRow>, AgentError> {
-        self.db.with_conn(|c| { let n = c.execute("UPDATE config_agents SET next_run_at=?1, last_run_status='running', last_error=NULL, updated_at=?1 WHERE id=?2 AND enabled=1 AND paused=0 AND (next_run_at IS NULL OR next_run_at<=?1)", params![now.saturating_add(1),id])?; if n == 0 { return Ok(None); } Ok(Some(c.query_row("SELECT id,name,role_prompt,model,backend_purpose,tools_json,trust_policy_json,interval_secs,token_budget,max_runtime_secs,concurrency_limit,enabled,paused,next_run_at,last_run_at,last_run_status,last_error,created_at,updated_at FROM config_agents WHERE id=?1", [id], map_agent)?)) }).map_err(Into::into)
+        self.db.with_conn(|c| { let n = c.execute("UPDATE config_agents SET next_run_at=?1, last_run_status='running', last_error=NULL, updated_at=?1 WHERE id=?2 AND enabled=1 AND paused=0 AND (next_run_at IS NULL OR next_run_at<=?1)", params![now.saturating_add(1),id])?; if n == 0 { return Ok(None); } Ok(Some(c.query_row("SELECT id,name,role_prompt,model,backend_purpose,tools_json,trust_policy_json,interval_secs,token_budget,max_runtime_secs,concurrency_limit,enabled,paused,next_run_at,last_run_at,last_run_status,last_error,created_at,updated_at,trigger_json,reply_mode FROM config_agents WHERE id=?1", [id], map_agent)?)) }).map_err(Into::into)
     }
 
     pub fn finish(
@@ -238,6 +259,8 @@ fn map_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRow> {
         last_error: r.get(16)?,
         created_at: r.get(17)?,
         updated_at: r.get(18)?,
+        trigger: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(19)?).unwrap_or_else(|_| serde_json::json!({})),
+        reply_mode: r.get(20)?,
     })
 }
 fn map_run(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRunRow> {
@@ -290,6 +313,8 @@ mod tests {
                     max_runtime_secs: 30,
                     concurrency_limit: 1,
                     enabled: true,
+                    trigger: serde_json::json!({}),
+                    reply_mode: "draft".into(),
                 },
                 1,
             )

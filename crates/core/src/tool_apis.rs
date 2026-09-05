@@ -172,13 +172,23 @@ impl ConversationApi for DbConversationApi {
         before_seq: Option<i64>,
         limit: u32,
     ) -> Result<Vec<HistoryEntry>, ApiError> {
+        self.read_history_for(self.conversation_id.as_str(), before_seq, limit)
+            .await
+    }
+
+    async fn read_history_for(
+        &self,
+        conversation_id: &str,
+        before_seq: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<HistoryEntry>, ApiError> {
         let limit = limit.clamp(1, MAX_HISTORY_LIMIT) as i64;
         // i64::MAX as the "no upper bound" sentinel — every real seq
         // is < this, so the predicate becomes a tautology and the
         // ORDER BY DESC LIMIT clause runs as expected.
         let before = before_seq.unwrap_or(i64::MAX);
         let db = self.db.clone();
-        let cid = self.conversation_id.clone();
+        let cid = ConversationId::from(conversation_id.to_owned());
 
         let rows: Vec<(i64, String, Vec<u8>, i64)> = tokio::task::spawn_blocking(move || {
             db.with_conn(|c| {

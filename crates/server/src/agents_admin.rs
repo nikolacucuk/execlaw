@@ -33,6 +33,8 @@ pub struct AgentView {
     pub last_run_at: Option<i64>,
     pub last_run_status: Option<String>,
     pub last_error: Option<String>,
+    pub trigger: serde_json::Value,
+    pub reply_mode: String,
 }
 impl From<execlaw_core::agents::AgentRow> for AgentView {
     fn from(a: execlaw_core::agents::AgentRow) -> Self {
@@ -54,6 +56,8 @@ impl From<execlaw_core::agents::AgentRow> for AgentView {
             last_run_at: a.last_run_at,
             last_run_status: a.last_run_status,
             last_error: a.last_error,
+            trigger: a.trigger,
+            reply_mode: a.reply_mode,
         }
     }
 }
@@ -78,7 +82,12 @@ pub struct AgentRequest {
     pub concurrency_limit: u32,
     #[serde(default = "yes")]
     pub enabled: bool,
+    #[serde(default)]
+    pub trigger: serde_json::Value,
+    #[serde(default = "draft_mode")]
+    pub reply_mode: String,
 }
+fn draft_mode() -> String { "draft".into() }
 fn standard() -> String {
     "standard".into()
 }
@@ -173,6 +182,8 @@ async fn create(
                 max_runtime_secs: r.max_runtime_secs,
                 concurrency_limit: r.concurrency_limit,
                 enabled: r.enabled,
+                trigger: r.trigger,
+                reply_mode: r.reply_mode,
             },
             chrono::Utc::now().timestamp(),
         )
@@ -201,6 +212,8 @@ async fn update(
                 max_runtime_secs: r.max_runtime_secs,
                 concurrency_limit: r.concurrency_limit,
                 enabled: r.enabled,
+                trigger: r.trigger,
+                reply_mode: r.reply_mode,
             },
             chrono::Utc::now().timestamp(),
         )

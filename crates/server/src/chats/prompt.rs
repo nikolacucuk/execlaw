@@ -232,6 +232,9 @@ pub fn build_turn_context_prose(
     if let Some(ch) = origin_channel {
         out.push_str(&format!("* Origin channel: `{ch}`\n"));
         if ch != "web" {
+            out.push_str(
+                "* This turn was triggered by the inbound message shown in the conversation. Read and process that message directly; do not claim that inbound messages are unavailable. To answer it, use the originating transport's reply tool or let the host bridge your text reply.\n",
+            );
             // 2026-05-16 — trimmed from a 4-line "no card/chip/
             // download button" expansion to one short sentence.
             // The longer block correlated with the model emitting
@@ -709,9 +712,10 @@ pub(crate) fn build_tool_routing_prose(
         ),
         (
             "chat",
-            "* `read_chat_history` / `list_chats` / `get_thread` / `set_thread_name` — inspect \
-             other conversations the operator is having. Use when the user references \"that \
-             thread\", \"the conversation about X\", or to find a thread to rename.",
+              "* `list_chats` + `read_conversation_history` — find and read another conversation, \
+               including a WhatsApp thread. `read_chat_history` reads the current thread only; \
+               `get_thread` / `set_thread_name` inspect or rename the current thread. Use these \
+               when the operator references \"that thread\" or a received message from a contact.",
         ),
         (
             "controller",

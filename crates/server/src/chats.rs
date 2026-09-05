@@ -3381,6 +3381,22 @@ async fn bridge_text_reply_to_originating_transport(
     let channel = &resolved.channel;
     let foreign_id = &resolved.foreign_id;
 
+    // WhatsApp suggestions are review-only by default. The inbound message
+    // and the model's proposed reply are already committed to the chat; the
+    // plugin setting controls only whether this final external side effect is
+    // performed automatically.
+    if channel == "whatsapp" {
+        use execlaw_core::vault_row::VaultRowStore;
+        let mode = VaultRowStore::new(&state.db)
+            .get(Some("whatsapp"), "inbound_reply_mode")
+            .map_err(|e| format!("read WhatsApp reply mode: {e}"))?
+            .and_then(|raw| String::from_utf8(raw).ok())
+            .unwrap_or_else(|| "review".to_owned());
+        if mode != "automatic" {
+            return Ok(());
+        }
+    }
+
     // Step 3: scan the conversation's events to find the most
     // recent turn. We need (a) the last model_turn's text and
     // (b) any tool_use names emitted in the same turn.

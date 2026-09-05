@@ -506,6 +506,14 @@ pub trait ConversationApi: Send + Sync {
         before_seq: Option<i64>,
         limit: u32,
     ) -> Result<Vec<HistoryEntry>, ApiError>;
+    /// Read another conversation's transcript. The controller-only tool is
+    /// the sole caller; ordinary history remains current-thread scoped.
+    async fn read_history_for(
+        &self,
+        conversation_id: &str,
+        before_seq: Option<i64>,
+        limit: u32,
+    ) -> Result<Vec<HistoryEntry>, ApiError>;
 
     /// List threads visible to the caller. Phase 1: returns every
     /// non-ephemeral thread. Future trust-class scoping (a

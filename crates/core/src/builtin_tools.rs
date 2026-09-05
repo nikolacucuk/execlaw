@@ -476,6 +476,94 @@ impl ToolImpl for ReadChatHistoryTool {
 }
 
 // ---------------------------------------------------------------
+// read_conversation_history
+// ---------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct ReadConversationHistoryArgs {
+    conversation_id: String,
+    #[serde(default)]
+    before_seq: Option<i64>,
+    #[serde(default = "default_history_limit")]
+    limit: u32,
+}
+
+pub struct ReadConversationHistoryTool {
+    descriptor: ToolDescriptor,
+}
+
+impl Default for ReadConversationHistoryTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ReadConversationHistoryTool {
+    pub fn new() -> Self {
+        Self {
+            descriptor: ToolDescriptor {
+                name: "read_conversation_history".into(),
+                description:
+                    "Read recent user and agent messages from another conversation by id. Use `list_chats` first to find the WhatsApp conversation. Controller-only; returns newest first and excludes internal events.".into(),
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "conversation_id": { "type": "string" },
+                        "before_seq": { "type": ["integer", "null"] },
+                        "limit": { "type": "integer", "default": 20, "minimum": 1, "maximum": 200 }
+                    },
+                    "required": ["conversation_id"],
+                    "additionalProperties": false
+                }),
+                source: ToolSource::Builtin,
+                latency: ToolLatency::Low,
+                capabilities: vec![Capability::ConversationRead],
+                default_allowed_classes: vec!["Controller".into()],
+                sensitive: true,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl ToolImpl for ReadConversationHistoryTool {
+    fn descriptor(&self) -> &ToolDescriptor {
+        &self.descriptor
+    }
+
+    async fn invoke(&self, ctx: ToolCtx, args: Value) -> ToolOutcome {
+        if ctx.caller_trust != "Controller" {
+            return ToolOutcome::denied("reading another conversation requires Controller trust");
+        }
+        let args: ReadConversationHistoryArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => return ToolOutcome::err("invalid_argument", e.to_string()),
+        };
+        let conv = match ctx.conversation.as_ref() {
+            Some(c) => c,
+            None => return ToolOutcome::denied("conversation capability not granted to this tool"),
+        };
+        match conv
+            .read_history_for(&args.conversation_id, args.before_seq, args.limit)
+            .await
+        {
+            Ok(entries) => ToolOutcome::Ok(json!({
+                "conversation_id": args.conversation_id,
+                "entries": entries.iter().map(|e| json!({
+                    "seq": e.seq,
+                    "role": e.role,
+                    "text": e.text,
+                    "committed_at": e.committed_at,
+                })).collect::<Vec<_>>(),
+                "count": entries.len(),
+                "next_before_seq": entries.last().map(|e| e.seq),
+            })),
+            Err(e) => e.into_outcome(),
+        }
+    }
+}
+
+// ---------------------------------------------------------------
 // list_chats
 // ---------------------------------------------------------------
 
@@ -2898,6 +2986,7 @@ pub fn core_builtin_tools() -> Vec<Arc<dyn ToolImpl>> {
         Arc::new(GetThreadTool::new()),
         Arc::new(ListChatsTool::new()),
         Arc::new(ReadChatHistoryTool::new()),
+        Arc::new(ReadConversationHistoryTool::new()),
         Arc::new(NotifyControllerTool::new()),
         Arc::new(CreateRoutineTool::new()),
         Arc::new(ListRoutinesTool::new()),
@@ -3187,6 +3276,7 @@ mod tests {
         assert!(names.contains(&"set_thread_name"));
         assert!(names.contains(&"get_thread"));
         assert!(names.contains(&"read_chat_history"));
+        assert!(names.contains(&"read_conversation_history"));
         assert!(names.contains(&"notify_controller"));
         assert!(names.contains(&"routine_create"));
         assert!(names.contains(&"routine_list"));
@@ -3212,7 +3302,17 @@ mod tests {
         assert!(names.contains(&"mcp_list_servers"));
         assert!(names.contains(&"mcp_add_server"));
         assert!(names.contains(&"mcp_remove_server"));
-        assert_eq!(names.len(), 28);
+        assert_eq!(names.len(), 29);
+    }
+
+    #[test]
+    fn cross_conversation_history_is_controller_only() {
+        let tool = ReadConversationHistoryTool::new();
+        assert_eq!(
+            tool.descriptor().default_allowed_classes,
+            vec!["Controller".to_owned()]
+        );
+        assert!(tool.descriptor().sensitive);
     }
 
     #[test]

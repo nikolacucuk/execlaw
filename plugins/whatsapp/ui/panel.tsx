@@ -41,6 +41,7 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     const [status, setStatus] = useState<WhatsAppStatusResponse | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    const [replyMode, setReplyMode] = useState<"review" | "automatic">("review");
 
     const refresh = useCallback(async () => {
         try {
@@ -55,13 +56,44 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
         }
     }, [bridge]);
 
+    const refreshReplyMode = useCallback(async () => {
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>(
+                "GET",
+                "/api/admin/plugins/whatsapp/settings/inbound_reply_mode",
+            );
+            setReplyMode(setting.value === "automatic" ? "automatic" : "review");
+        } catch {
+            // No row means the secure default: show suggestions, never send.
+            setReplyMode("review");
+        }
+    }, [bridge]);
+
+    const saveReplyMode = useCallback(async (mode: "review" | "automatic") => {
+        setBusy(true);
+        try {
+            await bridge.fetchJson(
+                "PUT",
+                "/api/admin/plugins/whatsapp/settings/inbound_reply_mode",
+                { value: mode },
+            );
+            setReplyMode(mode);
+            setError(null);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setBusy(false);
+        }
+    }, [bridge]);
+
     useEffect(() => {
         void refresh();
+        void refreshReplyMode();
         const id = window.setInterval(() => {
             void refresh();
         }, POLL_INTERVAL_MS);
         return () => window.clearInterval(id);
-    }, [refresh]);
+    }, [refresh, refreshReplyMode]);
 
     const onUnregister = useCallback(async () => {
         if (
@@ -129,6 +161,40 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                             Button={Button}
                         />
                     )}
+                    <div className="execlaw-card mb-3" data-testid="whatsapp-reply-settings">
+                        <div className="execlaw-card__title mb-2">Inbound reply suggestions</div>
+                        <p className="execlaw-muted small mb-3">
+                            New WhatsApp messages already appear in their execlaw chat. In review mode,
+                            the agent proposes a reply there and waits for you to send it.
+                        </p>
+                        <div className="d-flex gap-2 align-items-center flex-wrap">
+                            <Button
+                                variant={replyMode === "review" ? "primary" : "outline-primary"}
+                                size="sm"
+                                disabled={busy}
+                                onClick={() => void saveReplyMode("review")}
+                                data-testid="whatsapp-reply-review"
+                            >
+                                Review before sending
+                            </Button>
+                            <Button
+                                variant={replyMode === "automatic" ? "warning" : "outline-warning"}
+                                size="sm"
+                                disabled={busy}
+                                onClick={() => {
+                                    if (window.confirm("Automatically send agent replies to new WhatsApp messages?")) {
+                                        void saveReplyMode("automatic");
+                                    }
+                                }}
+                                data-testid="whatsapp-reply-automatic"
+                            >
+                                Send automatically
+                            </Button>
+                            <span className="small execlaw-muted">
+                                Current mode: {replyMode === "automatic" ? "automatic" : "review"}
+                            </span>
+                        </div>
+                    </div>
                 </>
             )}
         </div>
