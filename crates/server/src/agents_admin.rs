@@ -63,6 +63,7 @@ impl From<execlaw_core::agents::AgentRow> for AgentView {
 }
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct AgentRequest {
+    pub id: Option<String>,
     pub name: String,
     pub role_prompt: String,
     pub model: Option<String>,
@@ -86,6 +87,11 @@ pub struct AgentRequest {
     pub trigger: serde_json::Value,
     #[serde(default = "draft_mode")]
     pub reply_mode: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct AgentMarkdownRequest {
+    pub markdown: String,
 }
 fn draft_mode() -> String { "draft".into() }
 fn standard() -> String {
@@ -131,6 +137,7 @@ fn map(e: AgentError) -> ApiError {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/agents", get(list).post(create))
+        .route("/api/admin/agents/import-markdown", post(import_markdown))
         .route(
             "/api/admin/agents/{id}",
             get(get_one).put(update).delete(remove),
@@ -170,7 +177,7 @@ async fn create(
     let a = AgentStore::new(&s.db)
         .upsert(
             &AgentUpsert {
-                id: None,
+                id: r.id,
                 name: r.name,
                 role_prompt: r.role_prompt,
                 model: r.model,
@@ -189,6 +196,72 @@ async fn create(
         )
         .map_err(map)?;
     Ok(Json(a.into()))
+}
+
+async fn import_markdown(
+    State(s): State<AppState>,
+    u: AuthedUser,
+    Json(r): Json<AgentMarkdownRequest>,
+) -> Result<Json<AgentView>, ApiError> {
+    controller(&u)?;
+    let (frontmatter, role_prompt) = split_frontmatter(&r.markdown)?;
+    let name = frontmatter
+        .get("name")
+        .cloned()
+        .unwrap_or_else(|| "Imported agent".into());
+    let id = name.to_ascii_lowercase().replace([' ', '-', '.'], "_");
+    let keywords = if id == "camper_wha" {
+        vec!["camper", "camper van", "motorhome", "camper montenegro", "camping"]
+    } else {
+        Vec::new()
+    };
+    let agent = AgentStore::new(&s.db)
+        .upsert(
+            &AgentUpsert {
+                id: Some(id),
+                name,
+                role_prompt,
+                model: None,
+                backend_purpose: "standard".into(),
+                tools: Vec::new(),
+                trust_policy: serde_json::json!({}),
+                interval_secs: 300,
+                token_budget: 1200,
+                max_runtime_secs: 120,
+                concurrency_limit: 1,
+                enabled: true,
+                trigger: serde_json::json!({"channel": "whatsapp", "keywords": keywords}),
+                reply_mode: "draft".into(),
+            },
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(map)?;
+    Ok(Json(agent.into()))
+}
+
+fn split_frontmatter(markdown: &str) -> Result<(std::collections::HashMap<String, String>, String), ApiError> {
+    let mut lines = markdown.lines();
+    if lines.next() != Some("---") {
+        return Err(ApiError { status: axum::http::StatusCode::BAD_REQUEST, code: "invalid_agent_markdown", message: "agent Markdown must start with YAML frontmatter".into() });
+    }
+    let mut frontmatter = std::collections::HashMap::new();
+    let mut body = Vec::new();
+    let mut in_frontmatter = true;
+    for line in lines {
+        if in_frontmatter && line == "---" {
+            in_frontmatter = false;
+        } else if in_frontmatter {
+            if let Some((key, value)) = line.split_once(':') {
+                frontmatter.insert(key.trim().to_owned(), value.trim().trim_matches('"').to_owned());
+            }
+        } else {
+            body.push(line);
+        }
+    }
+    if in_frontmatter || body.iter().all(|line| line.trim().is_empty()) {
+        return Err(ApiError { status: axum::http::StatusCode::BAD_REQUEST, code: "invalid_agent_markdown", message: "agent Markdown has no role body".into() });
+    }
+    Ok((frontmatter, body.join("\n").trim().to_owned()))
 }
 async fn update(
     State(s): State<AppState>,

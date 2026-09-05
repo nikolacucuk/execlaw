@@ -240,6 +240,10 @@ pub async fn route_inbound(
         None
     };
 
+    enqueue_triggered_agents(state, channel, &cid, &msg).map_err(|e| {
+        HostCapError::new(format!("enqueue triggered agents: {e}"))
+    })?;
+
     // 7. Dispatch the turn through the standard pipeline.
     crate::chats::dispatch_external_turn(
         state,
@@ -254,6 +258,54 @@ pub async fn route_inbound(
     .await
     .map_err(|e| HostCapError::new(format!("dispatch_external_turn: {e}")))?;
     Ok(RouteOutcome::Dispatched)
+}
+
+fn enqueue_triggered_agents(
+    state: &AppState,
+    channel: &str,
+    conversation_id: &ConversationId,
+    msg: &InboundMessage,
+) -> Result<(), String> {
+    let store = execlaw_core::agents::AgentStore::new(&state.db);
+    let now = chrono::Utc::now().timestamp();
+    let agents = store.list().map_err(|e| e.to_string())?;
+    let mut queued = false;
+    for agent in agents.into_iter().filter(|agent| agent.enabled && !agent.paused) {
+        if !trigger_matches(&agent.trigger, channel, &msg.text) {
+            continue;
+        }
+        let envelope = serde_json::json!({
+            "channel": channel,
+            "conversation_id": conversation_id.as_str(),
+            "recipient": msg.native_id,
+            "display_name": msg.display_name,
+            "text": msg.text,
+            "group_id": msg.group_id,
+            "group_name": msg.group_name,
+        });
+        store
+            .enqueue_triggered(&agent.id, &envelope.to_string(), now)
+            .map_err(|e| e.to_string())?;
+        queued = true;
+    }
+    if queued {
+        crate::agent_supervisor::AgentSupervisor::kick_global();
+    }
+    Ok(())
+}
+
+fn trigger_matches(trigger: &serde_json::Value, channel: &str, text: &str) -> bool {
+    let configured_channel = trigger.get("channel").and_then(|v| v.as_str());
+    if configured_channel.is_some_and(|value| !value.eq_ignore_ascii_case(channel)) {
+        return false;
+    }
+    let Some(keywords) = trigger.get("keywords").and_then(|v| v.as_array()) else {
+        return configured_channel.is_some();
+    };
+    let normalized = text.to_ascii_lowercase();
+    keywords.iter().filter_map(|v| v.as_str()).any(|keyword| {
+        !keyword.trim().is_empty() && normalized.contains(&keyword.to_ascii_lowercase())
+    })
 }
 
 async fn resolve_group(
@@ -373,4 +425,28 @@ async fn resolve_dm(
         })
         .map_err(|e| HostCapError::new(format!("conversation resolve: {e}")))?;
     Ok((outcome.conversation_id().clone(), principal_group_id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::trigger_matches;
+    use serde_json::json;
+
+    #[test]
+    fn trigger_matches_channel_and_keyword_case_insensitively() {
+        let trigger = json!({
+            "channel": "whatsapp",
+            "keywords": ["camper", "camper van", "motorhome"]
+        });
+        assert!(trigger_matches(&trigger, "WhatsApp", "Do you rent a CAMPER van?"));
+        assert!(!trigger_matches(&trigger, "signal", "Do you rent a camper?"));
+        assert!(!trigger_matches(&trigger, "whatsapp", "Can you help with a boat?"));
+    }
+
+    #[test]
+    fn channel_only_trigger_matches_without_keywords() {
+        let trigger = json!({"channel": "whatsapp"});
+        assert!(trigger_matches(&trigger, "whatsapp", "hello"));
+        assert!(!trigger_matches(&trigger, "signal", "hello"));
+    }
 }

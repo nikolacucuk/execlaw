@@ -13,6 +13,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 pub const DEFAULT_TICK_INTERVAL: Duration = Duration::from_secs(5);
+static GLOBAL_WAKE: std::sync::OnceLock<Arc<Notify>> = std::sync::OnceLock::new();
 
 #[derive(Clone)]
 pub struct AgentSupervisor {
@@ -25,10 +26,12 @@ pub struct AgentSupervisor {
 
 impl AgentSupervisor {
     pub fn new(db: Database, inference: Arc<InferenceResolver>) -> Self {
+        let wake = Arc::new(Notify::new());
+        let _ = GLOBAL_WAKE.set(wake.clone());
         Self {
             db,
             inference,
-            wake: Arc::new(Notify::new()),
+            wake,
             stop: CancellationToken::new(),
             permits: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -36,6 +39,12 @@ impl AgentSupervisor {
 
     pub fn kick(&self) {
         self.wake.notify_one();
+    }
+
+    pub fn kick_global() {
+        if let Some(wake) = GLOBAL_WAKE.get() {
+            wake.notify_one();
+        }
     }
     pub fn stop(&self) {
         self.stop.cancel();

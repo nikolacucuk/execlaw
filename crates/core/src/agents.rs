@@ -227,6 +227,23 @@ impl AgentStore {
         Ok(id)
     }
 
+    pub fn enqueue_triggered(
+        &self,
+        agent_id: &str,
+        content: &str,
+        now: i64,
+    ) -> Result<String, AgentError> {
+        let id = self.enqueue(agent_id, None, content, now)?;
+        self.db.with_conn(|c| {
+            c.execute(
+                "UPDATE config_agents SET next_run_at=?1, updated_at=?1 WHERE id=?2",
+                params![now, agent_id],
+            )?;
+            Ok(())
+        })?;
+        Ok(id)
+    }
+
     pub fn deliver(&self, ids: &[String], run_id: &str, now: i64) -> Result<(), AgentError> {
         self.db.with_conn(|c|{for id in ids{c.execute("UPDATE state_agent_messages SET delivered_at=?1,result_run_id=?2 WHERE id=?3",params![now,run_id,id])?;}Ok(())}).map_err(Into::into)
     }

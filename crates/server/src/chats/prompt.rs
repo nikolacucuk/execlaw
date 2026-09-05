@@ -717,6 +717,12 @@ pub(crate) fn build_tool_routing_prose(
                `get_thread` / `set_thread_name` inspect or rename the current thread. Use these \
                when the operator references \"that thread\" or a received message from a contact.",
         ),
+                (
+                        "whatsapp",
+                        "* WhatsApp delivery uses the transport recipient, not the internal chat id. For a \
+                         1:1 message, pass the contact's phone number in E.164 format to `whatsapp.send_message` \
+                         or `whatsapp.reply`; a visible `conv-` id is never required for delivery.",
+                ),
         (
             "controller",
             "* `notify_controller` — sends a private message to the operator on their highest-\

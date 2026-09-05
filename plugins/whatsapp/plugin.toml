@@ -69,7 +69,10 @@ This tool IS the user-visible message — do NOT also produce a text \
 reply summarising what you sent. After calling this tool, return an \
 empty text response to end your turn. \
 Args: { to: string (E.164 phone, or `<id>@g.us` group jid), \
-text: string }."""
+text: string }. The `to` value is the phone number or group JID, \
+not an execlaw `conv-` conversation ID. Use the conversation's \
+transport recipient when replying; an internal conversation ID is \
+not required for delivery."""
 schema = "schemas/whatsapp.send_message.json"
 trust_floor = "Controller"
 latency = "low"
@@ -80,8 +83,10 @@ description = """Reply in the current WhatsApp conversation. \
 This tool IS the user-visible reply — do NOT also produce a text \
 response summarising what you replied. After calling this tool, \
 return an empty text response to end your turn. \
-Args: { to: string (recipient — host fills from the conversation's binding), \
-text: string }."""
+Args: { to: string (phone number or group JID from the transport \
+binding — never an execlaw conversation ID), text: string }. The \
+host may provide the recipient from the inbound binding, but delivery \
+does not depend on a visible `conv-` ID."""
 schema = "schemas/whatsapp.send_message.json"
 latency = "low"
 
