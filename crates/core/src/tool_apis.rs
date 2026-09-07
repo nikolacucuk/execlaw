@@ -27,7 +27,7 @@ use crate::tool::{
     ThreadListEntry,
 };
 use async_trait::async_trait;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::params;
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -275,36 +275,78 @@ impl ConversationApi for DbConversationApi {
     ) -> Result<Option<ThreadListEntry>, ApiError> {
         let db = self.db.clone();
         let channel = channel.to_owned();
-        let foreign_id = foreign_id.to_owned();
+        let foreign_id = normalize_transport_foreign_id(foreign_id);
         tokio::task::spawn_blocking(move || {
             db.with_conn(|c| {
-                c.query_row(
-                    "SELECT sc.conversation_id, sc.display_name, sc.trust_class, \
-                            sc.is_pinned, sc.last_activity_at \
-                     FROM state_transport_bindings b \
-                     JOIN state_conversations sc \
-                       ON sc.principal_group_id = b.principal_group_id \
-                     WHERE b.channel = ?1 AND b.foreign_id = ?2 \
-                     ORDER BY sc.last_activity_at DESC \
-                     LIMIT 1",
-                    params![channel, foreign_id],
-                    |r| {
-                        Ok(ThreadListEntry {
+                {
+                    let mut stmt = c.prepare(
+                        "SELECT sc.conversation_id, sc.display_name, sc.trust_class, \
+                                sc.is_pinned, sc.last_activity_at, b.foreign_id \
+                         FROM state_transport_bindings b \
+                         JOIN state_conversations sc \
+                           ON sc.principal_group_id = b.principal_group_id \
+                         WHERE b.channel = ?1 \
+                         ORDER BY sc.last_activity_at DESC",
+                    )?;
+                    let mut rows = stmt.query(params![channel])?;
+                    while let Some(r) = rows.next()? {
+                        let stored_id: String = r.get(5)?;
+                        if normalize_transport_foreign_id(&stored_id) != foreign_id {
+                            continue;
+                        }
+                        return Ok(Some(ThreadListEntry {
                             conversation_id: r.get(0)?,
                             display_name: r.get(1)?,
                             trust_class: r.get(2)?,
                             is_pinned: r.get::<_, i64>(3)? != 0,
                             last_activity_at: r.get(4)?,
-                        })
-                    },
-                )
-                .optional()
-                .map_err(Into::into)
+                        }));
+                    }
+                }
+
+                let mut stmt = c.prepare(
+                    "SELECT tc.conversation_id, sc.display_name, sc.trust_class, \
+                            sc.is_pinned, sc.last_activity_at, tc.transport_handle \
+                     FROM transport_conversations tc \
+                     JOIN state_conversations sc \
+                       ON sc.conversation_id = tc.conversation_id \
+                     WHERE tc.plugin_id = ?1 \
+                     ORDER BY sc.last_activity_at DESC, tc.last_message_at DESC",
+                )?;
+                let mut rows = stmt.query(params![format!("plugin-{channel}")])?;
+                while let Some(r) = rows.next()? {
+                    let stored_id: String = r.get(5)?;
+                    if normalize_transport_foreign_id(&stored_id) != foreign_id {
+                        continue;
+                    }
+                    return Ok(Some(ThreadListEntry {
+                        conversation_id: r.get(0)?,
+                        display_name: r.get(1)?,
+                        trust_class: r.get(2)?,
+                        is_pinned: r.get::<_, i64>(3)? != 0,
+                        last_activity_at: r.get(4)?,
+                    }));
+                }
+                Ok(None)
             })
         })
         .await
         .map_err(|e| ApiError::Storage(format!("join: {e}")))?
         .map_err(|e| ApiError::Storage(format!("find_transport_conversation: {e}")))
+    }
+}
+
+fn normalize_transport_foreign_id(raw: &str) -> String {
+    let value = raw.trim();
+    if value.ends_with("@g.us") {
+        return value.to_ascii_lowercase();
+    }
+    let local = value.split('@').next().unwrap_or(value);
+    let local = local.split(':').next().unwrap_or(local);
+    if local.chars().all(|c| c.is_ascii_digit()) {
+        format!("+{local}")
+    } else {
+        value.to_ascii_lowercase()
     }
 }
 
@@ -1172,6 +1214,19 @@ mod tests {
         assert_eq!(chain.last(), Some(&"Blocked"));
         assert!(!chain.contains(&"Controller"));
         assert!(!chain.contains(&"Delegated"));
+    }
+
+    #[test]
+    fn transport_recipient_normalization_accepts_whatsapp_jid_forms() {
+        assert_eq!(
+            normalize_transport_foreign_id("16047005800:4@s.whatsapp.net"),
+            "+16047005800"
+        );
+        assert_eq!(
+            normalize_transport_foreign_id("+16047005800"),
+            "+16047005800"
+        );
+        assert_eq!(normalize_transport_foreign_id("123@g.us"), "123@g.us");
     }
 
     // --- ConversationApi ----------------------------------------------

@@ -23,6 +23,8 @@ export function Agents() {
     const [runs, setRuns] = useState<AgentRun[]>([]);
     const [message, setMessage] = useState("");
     const [form, setForm] = useState({ name: "", role_prompt: "", interval_secs: 300 });
+    const [markdownFile, setMarkdownFile] = useState<File | null>(null);
+    const [importStatus, setImportStatus] = useState<string | null>(null);
 
     const refresh = async () => setAgents(await listAgents(token));
 
@@ -40,10 +42,17 @@ export function Agents() {
         await refresh();
     }
 
-    async function importMarkdown(file: File | undefined) {
-        if (!file) return;
-        await importAgentMarkdown(await file.text(), token);
-        await refresh();
+    async function importMarkdown() {
+        if (!markdownFile) return;
+        setImportStatus(null);
+        try {
+            const imported = await importAgentMarkdown(await markdownFile.text(), token);
+            setMarkdownFile(null);
+            setImportStatus(`Loaded ${imported.name}.`);
+            await refresh();
+        } catch (error) {
+            setImportStatus(error instanceof Error ? error.message : "Agent Markdown could not be loaded.");
+        }
     }
 
     async function toggle(agent: AgentView) {
@@ -71,9 +80,13 @@ export function Agents() {
                         <Form.Control
                             type="file"
                             accept=".md,text/markdown,text/plain"
-                            onChange={(event) => void importMarkdown((event.target as HTMLInputElement).files?.[0])}
+                            onChange={(event) => setMarkdownFile((event.target as HTMLInputElement).files?.[0] ?? null)}
                             aria-label="Load agent Markdown file"
                         />
+                        <Button className="mt-2" disabled={!markdownFile} onClick={() => void importMarkdown()}>
+                            <i className="bi bi-upload me-2" aria-hidden />Load into execlaw
+                        </Button>
+                        {importStatus && <p className="small mt-2" role="status">{importStatus}</p>}
                         <p className="small text-muted mt-2">Select an .agent.md file to store its instructions in the controller database.</p>
                         <h3 className="h5">Create agent</h3>
                         <div className="row g-2">
