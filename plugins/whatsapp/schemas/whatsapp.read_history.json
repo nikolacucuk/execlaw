@@ -11,6 +11,11 @@
             "default": 20,
             "minimum": 1,
             "maximum": 200
+        },
+        "refresh": {
+            "type": "boolean",
+            "description": "Request a WhatsApp history sync before reading. When true, wait before calling again with false.",
+            "default": true
         }
     },
     "required": ["to"],

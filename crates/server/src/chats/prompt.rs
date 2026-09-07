@@ -721,7 +721,12 @@ pub(crate) fn build_tool_routing_prose(
                you need to inspect all threads; `read_chat_history` reads the current \
                          thread only. If the WhatsApp lookup returns `found: false`, call \
                          `whatsapp.read_history` with the same phone number instead of claiming the message \
-                         is inaccessible. `get_thread` / `set_thread_name` inspect or rename the current thread.",
+             is inaccessible. For a request for the latest WhatsApp message, first call \
+             `whatsapp.read_history` with `refresh: true`; if it reports `history_sync_requested`, \
+             call `sleep_ms` for at least its `retry_after_seconds`, then call it again with \
+             `refresh: false`. Only use the first entry from that second call as the latest \
+             message; never present an older cached message as current. `get_thread` / `set_thread_name` inspect or \
+             rename the current thread.",
         ),
                 (
                         "whatsapp",

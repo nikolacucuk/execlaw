@@ -42,6 +42,7 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const [replyMode, setReplyMode] = useState<"review" | "automatic">("review");
+    const [inboundImportEnabled, setInboundImportEnabled] = useState(true);
 
     const refresh = useCallback(async () => {
         try {
@@ -86,14 +87,46 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
         }
     }, [bridge]);
 
+    const refreshInboundImport = useCallback(async () => {
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>(
+                "GET",
+                "/api/admin/plugins/whatsapp/settings/inbound_import_enabled",
+            );
+            setInboundImportEnabled(setting.value !== "false");
+        } catch {
+            // Missing setting keeps the secure, backwards-compatible default:
+            // import every authenticated inbound message.
+            setInboundImportEnabled(true);
+        }
+    }, [bridge]);
+
+    const saveInboundImport = useCallback(async (enabled: boolean) => {
+        setBusy(true);
+        try {
+            await bridge.fetchJson(
+                "PUT",
+                "/api/admin/plugins/whatsapp/settings/inbound_import_enabled",
+                { value: enabled ? "true" : "false" },
+            );
+            setInboundImportEnabled(enabled);
+            setError(null);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setBusy(false);
+        }
+    }, [bridge]);
+
     useEffect(() => {
         void refresh();
         void refreshReplyMode();
+        void refreshInboundImport();
         const id = window.setInterval(() => {
             void refresh();
         }, POLL_INTERVAL_MS);
         return () => window.clearInterval(id);
-    }, [refresh, refreshReplyMode]);
+    }, [refresh, refreshReplyMode, refreshInboundImport]);
 
     const onUnregister = useCallback(async () => {
         if (
@@ -161,6 +194,19 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                             Button={Button}
                         />
                     )}
+                    <div className="execlaw-card mb-3" data-testid="whatsapp-inbound-import-settings">
+                        <div className="execlaw-card__title mb-2">Inbound message import</div>
+                        <label className="d-flex gap-2 align-items-center small">
+                            <input
+                                type="checkbox"
+                                checked={inboundImportEnabled}
+                                disabled={busy}
+                                onChange={(event) => void saveInboundImport(event.target.checked)}
+                                data-testid="whatsapp-inbound-import-toggle"
+                            />
+                            <span>Show new WhatsApp messages in execlaw and trigger matching agents</span>
+                        </label>
+                    </div>
                     <div className="execlaw-card mb-3" data-testid="whatsapp-reply-settings">
                         <div className="execlaw-card__title mb-2">Inbound reply suggestions</div>
                         <p className="execlaw-muted small mb-3">

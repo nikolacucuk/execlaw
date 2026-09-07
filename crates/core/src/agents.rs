@@ -149,6 +149,9 @@ impl AgentStore {
         self.db.with_conn(|c| {
             let trigger = serde_json::to_string(&input.trigger).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
             c.execute("INSERT INTO config_agents (id,name,role_prompt,model,backend_purpose,tools_json,trust_policy_json,interval_secs,token_budget,max_runtime_secs,concurrency_limit,enabled,paused,next_run_at,created_at,updated_at,trigger_json,reply_mode) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,0,?13,?13,?13,?14,?15) ON CONFLICT(id) DO UPDATE SET name=excluded.name,role_prompt=excluded.role_prompt,model=excluded.model,backend_purpose=excluded.backend_purpose,tools_json=excluded.tools_json,trust_policy_json=excluded.trust_policy_json,interval_secs=excluded.interval_secs,token_budget=excluded.token_budget,max_runtime_secs=excluded.max_runtime_secs,concurrency_limit=excluded.concurrency_limit,enabled=excluded.enabled,trigger_json=excluded.trigger_json,reply_mode=excluded.reply_mode,next_run_at=COALESCE(config_agents.next_run_at, excluded.next_run_at),updated_at=excluded.updated_at", params![id,input.name,input.role_prompt,input.model,input.backend_purpose,tools,trust,input.interval_secs,input.token_budget,input.max_runtime_secs,input.concurrency_limit,input.enabled as i64,now,trigger,input.reply_mode])?;
+            if trigger_is_event_only(&input.trigger) {
+                c.execute("UPDATE config_agents SET next_run_at=NULL WHERE id=?1", [&id])?;
+            }
             Ok(())
         })?;
         self.get(&id)?.ok_or(AgentError::NotFound(id))
@@ -180,7 +183,7 @@ impl AgentStore {
         run_id: &str,
         status: &str,
         now: i64,
-        next_run_at: i64,
+        next_run_at: Option<i64>,
         tokens: Option<u32>,
         output: Option<&str>,
         error: Option<&str>,
@@ -251,6 +254,14 @@ impl AgentStore {
     pub fn runs(&self, agent_id: &str, limit: u32) -> Result<Vec<AgentRunRow>, AgentError> {
         self.db.with_conn(|c|{let mut s=c.prepare("SELECT id,agent_id,status,started_at,finished_at,tokens_used,checkpoint_json,output_text,error FROM state_agent_runs WHERE agent_id=?1 ORDER BY started_at DESC LIMIT ?2")?;let rows=s.query_map(params![agent_id,limit],map_run)?;rows.collect::<Result<Vec<_>,_>>().map_err(Into::into)}).map_err(Into::into)
     }
+}
+
+/// Returns whether this agent runs only when an external event enqueues it.
+pub fn trigger_is_event_only(trigger: &serde_json::Value) -> bool {
+    trigger
+        .get("event_only")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn map_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRow> {
@@ -347,7 +358,7 @@ mod tests {
             &run,
             "success",
             5,
-            65,
+            Some(65),
             Some(3),
             Some("done"),
             None,
@@ -355,5 +366,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(s.runs(&a.id, 10).unwrap()[0].status, "success");
+    }
+
+    #[test]
+    fn event_only_agent_waits_for_a_triggered_message() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let s = AgentStore::new(&db);
+        let a = s
+            .upsert(
+                &AgentUpsert {
+                    id: None,
+                    name: "camper".into(),
+                    role_prompt: "Draft replies".into(),
+                    model: None,
+                    backend_purpose: "standard".into(),
+                    tools: Vec::new(),
+                    trust_policy: serde_json::json!({}),
+                    interval_secs: 300,
+                    token_budget: 100,
+                    max_runtime_secs: 30,
+                    concurrency_limit: 1,
+                    enabled: true,
+                    trigger: serde_json::json!({"channel":"whatsapp","event_only":true}),
+                    reply_mode: "draft".into(),
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(a.next_run_at, None);
+        s.enqueue_triggered(&a.id, "new WhatsApp message", 2).unwrap();
+        assert_eq!(s.get(&a.id).unwrap().unwrap().next_run_at, Some(2));
     }
 }

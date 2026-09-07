@@ -212,7 +212,7 @@ message creates the transport binding and can then be retrieved with
 
 #### Reading WhatsApp history already on the linked device
 
-Plugin version `0.2.2` adds `whatsapp.read_history`, a Controller-only tool
+Plugin version `0.2.4` adds `whatsapp.read_history`, a Controller-only tool
 that reads WuzAPI's locally retained messages for a direct contact. When the
 tool finds no retained history, it requests a bounded WhatsApp history sync
 for that contact and reports `history_sync_requested: true`; call it again
@@ -224,11 +224,22 @@ cd /mnt/AI_Pool/execlaw-source
 ./scripts/package-plugins.sh
 ```
 
-Upload `dist/whatsapp-0.2.2.zip` in **Settings -> Plugins**, then use the
+Upload `dist/whatsapp-0.2.4.zip` in **Settings -> Plugins**, then use the
 plugin's upgrade/reinstall flow and re-enable it. The plugin configures
 WuzAPI to retain the newest 200 messages per chat locally at provisioning and
 on every enable. Existing messages are available only to the extent WhatsApp
 provides them to the linked device in its history-sync response.
+
+#### Event-driven inbound messages
+
+The WhatsApp plugin handles each inbound `Message` through WuzAPI's webhook;
+it does not poll WhatsApp for new messages. When **Inbound message import** is
+enabled in **Settings -> Plugins -> WhatsApp**, each authenticated inbound
+message is persisted in its execlaw conversation before any group-addressing
+or trust decision. Matching event-only agents are queued immediately by that
+same webhook and run from their mailbox without a recurring schedule. Disable
+the switch to acknowledge inbound webhook deliveries without creating chat
+events or triggering agents.
 
 After rebuilding the control-plane image, disable and re-enable any of these
 plugins so the supervisor reconciles the sidecar with the new configuration.

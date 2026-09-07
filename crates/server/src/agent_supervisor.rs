@@ -2,7 +2,7 @@
 
 use crate::inference_resolver::InferenceResolver;
 use execlaw_core::Database;
-use execlaw_core::agents::{AgentRow, AgentStore};
+use execlaw_core::agents::{AgentRow, AgentStore, trigger_is_event_only};
 use execlaw_core::backends::BackendPurpose;
 use execlaw_inference_api::{ChatMessage, ChatRequest, ModelId};
 use std::collections::HashMap;
@@ -177,7 +177,11 @@ async fn run_agent(
                     &run_id,
                     "success",
                     now,
-                    now.saturating_add(agent.interval_secs as i64),
+                    if trigger_is_event_only(&agent.trigger) {
+                        None
+                    } else {
+                        Some(now.saturating_add(agent.interval_secs as i64))
+                    },
                     tokens,
                     Some(&text),
                     None,
@@ -212,7 +216,11 @@ fn finish_error(
             run_id,
             "failed",
             now,
-            now.saturating_add((agent.interval_secs as i64).saturating_mul(2)),
+            if trigger_is_event_only(&agent.trigger) {
+                None
+            } else {
+                Some(now.saturating_add((agent.interval_secs as i64).saturating_mul(2)))
+            },
             None,
             None,
             Some(&error),

@@ -268,6 +268,7 @@ fn ensure_session_connected(base) {
 // =====================================================================
 
 fn on_frame(raw) {
+    if !inbound_import_enabled() { return; }
     let inbound = decode_frame(raw);
     if inbound == () { return; }
     try {
@@ -311,6 +312,11 @@ fn on_webhook_event(args) {
     if supplied == () || supplied != expected {
         log_warn("whatsapp: webhook token mismatch from caller; rejecting");
         return #{ "ok": false, "error": "invalid_token" };
+    }
+    if !inbound_import_enabled() {
+        // Keep a successful response so WuzAPI does not retry a deliberately
+        // disabled import path. No conversation or agent work is created.
+        return #{ "ok": true, "inbound_import_enabled": false };
     }
     let body = args.body;
     if body == () || type_of(body) != "map" {
@@ -399,6 +405,18 @@ fn on_webhook_event(args) {
         log_warn("whatsapp: markread failed: " + e);
     }
     #{ "ok": true }
+}
+
+// Default-on operator switch for event-driven inbound import. The setting is
+// read at webhook handling time, so a change takes effect on the next message
+// without waiting for a poll or restarting the plugin.
+fn inbound_import_enabled() {
+    try {
+        let value = vault_get("inbound_import_enabled");
+        value != "false"
+    } catch (e) {
+        true
+    }
 }
 
 // Vault-backed dedupe ring of recent message IDs, capped at 100.
@@ -725,12 +743,30 @@ fn read_history_impl(args) {
     let to = args.to;
     if to == () || to == "" { throw "whatsapp.read_history requires `to`"; }
     let limit = if args.limit != () { args.limit } else { 20 };
+    let refresh = if args.refresh != () { args.refresh == true } else { true };
     if limit < 1 || limit > 200 {
         throw "whatsapp.read_history `limit` must be between 1 and 200";
     }
     let base = sidecar_url("wuzapi");
     ensure_history_retention(base);
     let chat_jid = wire_recipient(to);
+    if refresh {
+        // WuzAPI acknowledges this request before WhatsApp sends the records.
+        // Return no cache entries here so a caller cannot mistake stale rows
+        // for the latest message; it must wait, then read with refresh: false.
+        sidecar_http_get(
+            base + "/session/history",
+            #{ "chat_jid": chat_jid, "count": limit },
+            user_headers(),
+        );
+        return #{
+            "chat_jid": chat_jid,
+            "entries": [],
+            "count": 0,
+            "history_sync_requested": true,
+            "retry_after_seconds": 5,
+        };
+    }
     let history = sidecar_http_get(
         base + "/chat/history",
         #{ "chat_jid": chat_jid, "limit": limit },
@@ -740,22 +776,18 @@ fn read_history_impl(args) {
         else if type_of(history) == "map" && history.data != () { history.data }
         else { [] };
     if type_of(entries) == "array" && !entries.is_empty() {
-        return #{ "chat_jid": chat_jid, "entries": entries, "count": entries.len() };
+        return #{
+            "chat_jid": chat_jid,
+            "entries": entries,
+            "count": entries.len(),
+            "history_read_after_sync": true,
+        };
     }
-    // WuzAPI keeps its own message_history table. Ask the linked device
-    // for this chat when that table has no retained records; WhatsApp sends
-    // the response asynchronously, so the caller retries after a short wait.
-    sidecar_http_get(
-        base + "/session/history",
-        #{ "chat_jid": chat_jid, "count": limit },
-        user_headers(),
-    );
     #{
         "chat_jid": chat_jid,
         "entries": [],
         "count": 0,
-        "history_sync_requested": true,
-        "retry_after_seconds": 5,
+        "history_read_after_sync": true,
     }
 }
 

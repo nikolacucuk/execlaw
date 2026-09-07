@@ -215,6 +215,9 @@ async fn import_markdown(
     } else {
         Vec::new()
     };
+    let event_only = frontmatter
+        .get("event_only")
+        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
     let agent = AgentStore::new(&s.db)
         .upsert(
             &AgentUpsert {
@@ -230,7 +233,11 @@ async fn import_markdown(
                 max_runtime_secs: 120,
                 concurrency_limit: 1,
                 enabled: true,
-                trigger: serde_json::json!({"channel": "whatsapp", "keywords": keywords}),
+                trigger: serde_json::json!({
+                    "channel": "whatsapp",
+                    "keywords": keywords,
+                    "event_only": event_only,
+                }),
                 reply_mode: "draft".into(),
             },
             chrono::Utc::now().timestamp(),
