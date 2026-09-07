@@ -1,7 +1,7 @@
 [plugin]
 id = "whatsapp"
 name = "WhatsApp"
-version = "0.2.5"
+version = "0.2.6"
 description = "WhatsApp Multi-Device transport via wuzapi (whatsmeow-backed). Mirrors the Signal plugin shape: 7 agent-callable tools (send_message, reply, read_history, list_groups, create_group, add_group_members, leave_group) + 3 host-internal convention tools (set_typing, send_with_attachments, fetch_attachment), inbound WS consumer, QR-pairing admin flow."
 author = "execlaw"
 license = "Apache-2.0"
@@ -92,13 +92,16 @@ latency = "low"
 
 [[tools]]
 name = "whatsapp.read_history"
-description = """Read messages WuzAPI has retained for a direct WhatsApp chat. \
-Use this when `find_transport_conversation` cannot find a direct-message thread. \
-Args: { to: string (E.164 phone or WhatsApp JID), limit?: integer (1-200; default 20), \
-refresh?: boolean (default true) }. Controller-only. With `refresh: true`, the tool requests \
-a targeted WhatsApp sync and returns no messages; wait at least 5 seconds, then call it with \
-`refresh: false` to read retained entries newest-first. Only the first entry from that second \
-call may be described as the latest message."""
+description = """Read WuzAPI's retained messages for a WhatsApp direct chat or group. \
+ALWAYS use this tool for a WhatsApp request asking for the latest, last, or most recent \
+message; do not use execlaw `read_conversation_history` for that purpose because it only \
+contains previously imported events and can be stale. Args: { to: string (E.164 phone, direct \
+WhatsApp JID, or `<id>@g.us` group JID), limit?: integer (1-200; default 20), refresh?: \
+boolean (default true) }. For a group name, call `whatsapp.list_groups` first and pass its \
+exact group id. Controller-only. With `refresh: true`, this tool requests a targeted WhatsApp \
+sync and returns no messages; wait at least 5 seconds, then call it with `refresh: false` to \
+read retained entries newest-first. Only the first entry from that second call may be described \
+as the latest message."""
 schema = "schemas/whatsapp.read_history.json"
 trust_floor = "Controller"
 latency = "medium"

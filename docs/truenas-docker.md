@@ -212,10 +212,11 @@ message creates the transport binding and can then be retrieved with
 
 #### Reading WhatsApp history already on the linked device
 
-Plugin version `0.2.4` adds `whatsapp.read_history`, a Controller-only tool
-that reads WuzAPI's locally retained messages for a direct contact. When the
-tool finds no retained history, it requests a bounded WhatsApp history sync
-for that contact and reports `history_sync_requested: true`; call it again
+Plugin version `0.2.6` adds `whatsapp.read_history`, a Controller-only tool
+that reads WuzAPI's locally retained messages for a direct contact or group.
+For a group, call `whatsapp.list_groups` and pass its exact `id`, not its
+display name. The tool first requests a bounded WhatsApp history sync and
+reports `history_sync_requested: true`; call it again with `refresh: false`
 after a few seconds. This requires the upgraded plugin ZIP, not only a
 control-plane image rebuild:
 
@@ -224,7 +225,7 @@ cd /mnt/AI_Pool/execlaw-source
 ./scripts/package-plugins.sh
 ```
 
-Upload `dist/whatsapp-0.2.4.zip` in **Settings -> Plugins**, then use the
+Upload `dist/whatsapp-0.2.6.zip` in **Settings -> Plugins**, then use the
 plugin's upgrade/reinstall flow and re-enable it. The plugin configures
 WuzAPI to retain the newest 200 messages per chat locally at provisioning and
 on every enable. Existing messages are available only to the extent WhatsApp

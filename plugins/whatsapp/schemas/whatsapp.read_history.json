@@ -3,7 +3,7 @@
     "properties": {
         "to": {
             "type": "string",
-            "description": "Direct-chat recipient as an E.164 phone number or WhatsApp JID."
+            "description": "Direct-chat recipient as an E.164 phone number or WhatsApp JID, or a group JID ending in @g.us."
         },
         "limit": {
             "type": "integer",

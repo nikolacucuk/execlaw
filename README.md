@@ -85,7 +85,7 @@ All 12 in-tree plugins ship as ZIPs under [`dist/`](dist/) and install via the S
 | Plugin | Version | Tier | Kind | What it does |
 |---|---|---|---|---|
 | [`signal`](plugins/signal/) | 0.5.0 | script | transport | Signal Messenger via a supervised [`signal-cli`](https://github.com/AsamK/signal-cli) sidecar. Inbound consumer + outbound + group ops + QR/number pairing. |
-| [`whatsapp`](plugins/whatsapp/) | 0.2.5 | script | transport | WhatsApp Multi-Device via a supervised [wuzapi](https://github.com/asternic/wuzapi) (whatsmeow-backed) sidecar. Event-driven inbound import, refreshed direct-chat history, group ops, attachments, read receipts. |
+| [`whatsapp`](plugins/whatsapp/) | 0.2.6 | script | transport | WhatsApp Multi-Device via a supervised [wuzapi](https://github.com/asternic/wuzapi) (whatsmeow-backed) sidecar. Event-driven inbound import, refreshed direct and group history, group ops, attachments, read receipts. |
 | [`slack`](plugins/slack/) | 0.3.2 | script | transport | Multi-workspace Slack via Socket Mode (no public URL). Sidecar-free — pure-Rhai over `http_post` + `ws_subscribe` + `ws_send`. |
 | [`discord`](plugins/discord/) | 0.2.0 | script | transport | Discord bot via the Gateway WebSocket. Multi-guild from one bot token, sidecar-free, gateway heartbeats over `ws_set_keepalive`. |
 | [`sms-socket`](plugins/sms-socket/) | 0.2.0 | script | transport | SMS / MMS via the [Android SMS Socket app](https://github.com/crockpotveggies/sms-socket-app) — WebSocket to the operator's phone on LAN. |

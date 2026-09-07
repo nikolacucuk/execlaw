@@ -712,21 +712,22 @@ pub(crate) fn build_tool_routing_prose(
         ),
         (
             "chat",
-            "* `find_transport_conversation` + `read_conversation_history` — find and read a \
-             transport conversation, especially when the operator gives a WhatsApp phone number. \
-             Pass channel `whatsapp` and the recipient phone number to the lookup, then pass its \
-               returned conversation id to `read_conversation_history`. Do not pass a WhatsApp \
-               group JID from `whatsapp.list_groups` as a conversation id; group listing and \
-               execlaw thread history are separate systems. `list_chats` remains available when \
-               you need to inspect all threads; `read_chat_history` reads the current \
-                         thread only. If the WhatsApp lookup returns `found: false`, call \
-                         `whatsapp.read_history` with the same phone number instead of claiming the message \
-             is inaccessible. For a request for the latest WhatsApp message, first call \
-             `whatsapp.read_history` with `refresh: true`; if it reports `history_sync_requested`, \
-             call `sleep_ms` for at least its `retry_after_seconds`, then call it again with \
-             `refresh: false`. Only use the first entry from that second call as the latest \
-             message; never present an older cached message as current. `get_thread` / `set_thread_name` inspect or \
-             rename the current thread.",
+                        "* `find_transport_conversation` + `read_conversation_history` — find and read \
+                         previously imported transport conversations. Pass channel `whatsapp` and a phone \
+                         number to the lookup, then pass its returned conversation id to \
+                         `read_conversation_history`. Do not pass a WhatsApp group JID from \
+                         `whatsapp.list_groups` as a conversation id; group listing and execlaw thread \
+                         history are separate systems. `list_chats` remains available when you need to \
+                         inspect all threads; `read_chat_history` reads the current thread only. For ANY \
+                         WhatsApp request asking for the latest, last, or most recent message, use \
+                         `whatsapp.read_history`, not `read_conversation_history`, even if a conversation \
+                         lookup succeeds. For a group name, call `whatsapp.list_groups` first and pass its \
+                         returned `id` to `whatsapp.read_history`. First call `whatsapp.read_history` with \
+                         `refresh: true`; if it reports `history_sync_requested`, wait at least its \
+                         `retry_after_seconds`, then call it again with `refresh: false`. Only use the first \
+                         entry from that second call as the latest message; never present an older imported \
+                         conversation event as current. `get_thread` / `set_thread_name` inspect or rename \
+                         the current thread.",
         ),
                 (
                         "whatsapp",
