@@ -715,8 +715,10 @@ pub(crate) fn build_tool_routing_prose(
             "* `find_transport_conversation` + `read_conversation_history` — find and read a \
              transport conversation, especially when the operator gives a WhatsApp phone number. \
              Pass channel `whatsapp` and the recipient phone number to the lookup, then pass its \
-             returned conversation id to `read_conversation_history`. `list_chats` remains \
-             available when you need to inspect all threads; `read_chat_history` reads the current \
+               returned conversation id to `read_conversation_history`. Do not pass a WhatsApp \
+               group JID from `whatsapp.list_groups` as a conversation id; group listing and \
+               execlaw thread history are separate systems. `list_chats` remains available when \
+               you need to inspect all threads; `read_chat_history` reads the current \
              thread only. `get_thread` / `set_thread_name` inspect or rename the current thread.",
         ),
                 (

@@ -101,6 +101,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "agents",
         sql: include_str!("../migrations/0015_agents.sql"),
     },
+    Migration {
+        id: 16,
+        name: "reply_drafts",
+        sql: include_str!("../migrations/0016_reply_drafts.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

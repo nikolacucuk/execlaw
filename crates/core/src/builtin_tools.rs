@@ -504,7 +504,7 @@ impl ReadConversationHistoryTool {
             descriptor: ToolDescriptor {
                 name: "read_conversation_history".into(),
                 description:
-                    "Read recent user and agent messages from another conversation by id. Use `list_chats` first to find the WhatsApp conversation. Controller-only; returns newest first and excludes internal events.".into(),
+                    "Read recent user and agent messages from another execlaw conversation by its internal conversation_id. For a WhatsApp phone number, use find_transport_conversation first. Do not pass a WhatsApp group JID or group id here; list_groups returns WhatsApp groups, not execlaw conversation ids. Controller-only; returns newest first and excludes internal events.".into(),
                 schema: json!({
                     "type": "object",
                     "properties": {

@@ -35,6 +35,13 @@ pub async fn route_inbound(
     let now = chrono::Utc::now().timestamp();
     let channel = msg.channel.as_str();
     let plugin_id = format!("plugin-{channel}"); // ConversationResolver routing key
+    tracing::info!(
+        target: "generic_inbound",
+        channel,
+        native_id = %msg.native_id,
+        group_id = ?msg.group_id,
+        "inbound message received",
+    );
 
     // 1. Resolve / mint the sender's principal via the shared
     //    admit helper. Same shape `signal_inbound` uses today.
@@ -77,6 +84,13 @@ pub async fn route_inbound(
     pg_store
         .bind_conversation(cid.as_str(), &principal_group_id)
         .map_err(|e| HostCapError::new(format!("bind conversation: {e}")))?;
+    tracing::info!(
+        target: "generic_inbound",
+        channel,
+        conversation_id = %cid,
+        principal_group_id = %principal_group_id,
+        "inbound message mapped to conversation",
+    );
 
     // 3b. For groups, opportunistically grow the principal_group's
     // member list as senders appear. `resolve_group` mints with
