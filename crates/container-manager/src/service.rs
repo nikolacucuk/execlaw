@@ -578,6 +578,12 @@ impl ServiceController for BollardServiceController {
             device_requests,
             devices,
             binds: if binds.is_empty() { None } else { Some(binds) },
+            // Transport sidecars call back into the control plane using
+            // host.docker.internal. Docker Desktop provides this alias,
+            // but Linux Docker requires the explicit host-gateway entry.
+            // Without it, WuzAPI accepts the webhook URL but cannot resolve
+            // or connect to the callback after an inbound WhatsApp message.
+            extra_hosts: Some(vec!["host.docker.internal:host-gateway".into()]),
             log_config: Some(HostConfigLogConfig {
                 typ: Some("json-file".into()),
                 config: Some(
