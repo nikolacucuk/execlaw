@@ -719,7 +719,9 @@ pub(crate) fn build_tool_routing_prose(
                group JID from `whatsapp.list_groups` as a conversation id; group listing and \
                execlaw thread history are separate systems. `list_chats` remains available when \
                you need to inspect all threads; `read_chat_history` reads the current \
-             thread only. `get_thread` / `set_thread_name` inspect or rename the current thread.",
+                         thread only. If the WhatsApp lookup returns `found: false`, call \
+                         `whatsapp.read_history` with the same phone number instead of claiming the message \
+                         is inaccessible. `get_thread` / `set_thread_name` inspect or rename the current thread.",
         ),
                 (
                         "whatsapp",

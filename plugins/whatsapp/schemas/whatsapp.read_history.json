@@ -1,0 +1,18 @@
+{
+    "type": "object",
+    "properties": {
+        "to": {
+            "type": "string",
+            "description": "Direct-chat recipient as an E.164 phone number or WhatsApp JID."
+        },
+        "limit": {
+            "type": "integer",
+            "description": "Maximum retained messages to return, newest first.",
+            "default": 20,
+            "minimum": 1,
+            "maximum": 200
+        }
+    },
+    "required": ["to"],
+    "additionalProperties": false
+}

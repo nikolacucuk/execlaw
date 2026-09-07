@@ -1,8 +1,8 @@
 [plugin]
 id = "whatsapp"
 name = "WhatsApp"
-version = "0.2.0"
-description = "WhatsApp Multi-Device transport via wuzapi (whatsmeow-backed). Mirrors the Signal plugin shape: 6 agent-callable tools (send_message, reply, list_groups, create_group, add_group_members, leave_group) + 3 host-internal convention tools (set_typing, send_with_attachments, fetch_attachment), inbound WS consumer, QR-pairing admin flow."
+version = "0.2.2"
+description = "WhatsApp Multi-Device transport via wuzapi (whatsmeow-backed). Mirrors the Signal plugin shape: 7 agent-callable tools (send_message, reply, read_history, list_groups, create_group, add_group_members, leave_group) + 3 host-internal convention tools (set_typing, send_with_attachments, fetch_attachment), inbound WS consumer, QR-pairing admin flow."
 author = "execlaw"
 license = "Apache-2.0"
 
@@ -89,6 +89,17 @@ host may provide the recipient from the inbound binding, but delivery \
 does not depend on a visible `conv-` ID."""
 schema = "schemas/whatsapp.send_message.json"
 latency = "low"
+
+[[tools]]
+name = "whatsapp.read_history"
+description = """Read messages WuzAPI has retained for a direct WhatsApp chat. \
+Use this when `find_transport_conversation` cannot find a direct-message thread. \
+Args: { to: string (E.164 phone or WhatsApp JID), limit?: integer (1-200; default 20) }. \
+Controller-only. If no retained messages exist, the result requests a WhatsApp history \
+sync; wait briefly and call this tool again."""
+schema = "schemas/whatsapp.read_history.json"
+trust_floor = "Controller"
+latency = "medium"
 
 [[tools]]
 name = "whatsapp.list_groups"

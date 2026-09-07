@@ -66,6 +66,11 @@ fn on_enable() {
     } catch (e) {
         log_warn("whatsapp: /session/connect failed: " + e + " — pairing UI will retry on each poll");
     }
+    try {
+        ensure_history_retention(base);
+    } catch (e) {
+        log_warn("whatsapp: history retention setup failed: " + e + " — whatsapp.read_history will retry when used");
+    }
     // wuzapi has no WebSocket event surface (verified upstream:
     // routes.go has /session/qr / /webhook / /chat/* but no /ws,
     // and the surveyed alternatives — WAHA / WPPConnect /
@@ -167,7 +172,7 @@ fn ensure_webhook_registered(base) {
     let webhook_url = "http://host.docker.internal:3031/api/webhooks/whatsapp/event?token=" + secret;
     let body = #{
         "webhookurl": webhook_url,
-        "events": ["Message"],
+        "events": ["Message", "HistorySync"],
     };
     sidecar_http_post(base + "/webhook", body, user_headers());
     log_info("whatsapp: webhook registered at " + webhook_url.sub_string(0, 50) + "...");
@@ -193,6 +198,7 @@ fn ensure_user_token(base) {
             "token": token,
             "webhook": "",
             "events": "All",
+            "history": 200,
         }, admin_h);
         log_info("whatsapp: provisioned wuzapi user 'execlaw'");
     } catch (e) {
@@ -235,7 +241,7 @@ fn ensure_user_token(base) {
 fn ensure_session_connected(base) {
     try {
         sidecar_http_post(base + "/session/connect", #{
-            "Subscribe": ["Message"],
+            "Subscribe": ["Message", "HistorySync"],
             "Immediate": true,
         }, user_headers());
     } catch (e) {
@@ -685,6 +691,7 @@ fn ts_to_ms(t) {
 fn tool_call(name, args, oauth) {
     if name == "whatsapp.send_message"           { return send_message_impl(args); }
     if name == "whatsapp.reply"                  { return reply_impl(args); }
+    if name == "whatsapp.read_history"           { return read_history_impl(args); }
     if name == "whatsapp.list_groups"            { return list_groups_impl(); }
     if name == "whatsapp.create_group"           { return create_group_impl(args); }
     if name == "whatsapp.add_group_members"      { return add_group_members_impl(args); }
@@ -712,6 +719,52 @@ fn reply_impl(args) {
         throw "whatsapp.reply requires `to` — host fills this from the conversation's binding";
     }
     send_message_impl(args)
+}
+
+fn read_history_impl(args) {
+    let to = args.to;
+    if to == () || to == "" { throw "whatsapp.read_history requires `to`"; }
+    let limit = if args.limit != () { args.limit } else { 20 };
+    if limit < 1 || limit > 200 {
+        throw "whatsapp.read_history `limit` must be between 1 and 200";
+    }
+    let base = sidecar_url("wuzapi");
+    ensure_history_retention(base);
+    let chat_jid = wire_recipient(to);
+    let history = sidecar_http_get(
+        base + "/chat/history",
+        #{ "chat_jid": chat_jid, "limit": limit },
+        user_headers(),
+    );
+    let entries = if type_of(history) == "array" { history }
+        else if type_of(history) == "map" && history.data != () { history.data }
+        else { [] };
+    if type_of(entries) == "array" && !entries.is_empty() {
+        return #{ "chat_jid": chat_jid, "entries": entries, "count": entries.len() };
+    }
+    // WuzAPI keeps its own message_history table. Ask the linked device
+    // for this chat when that table has no retained records; WhatsApp sends
+    // the response asynchronously, so the caller retries after a short wait.
+    sidecar_http_get(
+        base + "/session/history",
+        #{ "chat_jid": chat_jid, "count": limit },
+        user_headers(),
+    );
+    #{
+        "chat_jid": chat_jid,
+        "entries": [],
+        "count": 0,
+        "history_sync_requested": true,
+        "retry_after_seconds": 5,
+    }
+}
+
+// WuzAPI's /chat/history is disabled until a positive per-chat retention
+// limit is configured. Keep a bounded local cache so the Controller can read
+// recent messages without granting arbitrary history retention to the bridge.
+fn ensure_history_retention(base) {
+    sidecar_http_post(base + "/session/history", #{ "history": 200 }, user_headers());
+    ()
 }
 
 fn list_groups_impl() {

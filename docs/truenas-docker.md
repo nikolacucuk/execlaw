@@ -177,6 +177,59 @@ The `EXECLAW_SIDECAR_*` settings apply to every plugin whose manifest declares
 | Signal | `bbernhard/signal-cli-rest-api` | Pairing and message API use the Docker-host gateway. |
 | Web Scraper | `execlaw/web-scraper` | Scraper health checks and tools use the Docker-host gateway. |
 
+#### WhatsApp inbound messages are not imported
+
+The dynamically created WuzAPI container must resolve
+`host.docker.internal` so it can deliver its webhook to the control plane.
+The `extra_hosts` entry in `compose.yaml` only applies to the `execlaw`
+container; it does not propagate to sidecars created through the mounted
+Docker socket. Current control-plane images add the Docker `host-gateway`
+mapping when they create each sidecar.
+
+If `docker inspect execlaw-sidecar-whatsapp-wuzapi --format '{{json .HostConfig.ExtraHosts}}'`
+prints `null`, the running control-plane image predates that fix. From the
+source directory, rebuild the image, recreate the control plane, and remove
+the old sidecar so the supervisor creates it with the mapping:
+
+```bash
+sudo docker compose build --no-cache execlaw runner-image
+sudo docker compose up -d --force-recreate execlaw
+sudo docker rm -f execlaw-sidecar-whatsapp-wuzapi
+```
+
+After the supervisor recreates the sidecar, verify the mapping:
+
+```bash
+sudo docker inspect execlaw-sidecar-whatsapp-wuzapi \
+  --format '{{json .HostConfig.ExtraHosts}}'
+```
+
+It must include `host.docker.internal:host-gateway`. Send a new direct
+WhatsApp message after that check; WuzAPI does not retroactively create
+execlaw conversations for messages that never reached its webhook. The new
+message creates the transport binding and can then be retrieved with
+`find_transport_conversation` followed by `read_conversation_history`.
+
+#### Reading WhatsApp history already on the linked device
+
+Plugin version `0.2.2` adds `whatsapp.read_history`, a Controller-only tool
+that reads WuzAPI's locally retained messages for a direct contact. When the
+tool finds no retained history, it requests a bounded WhatsApp history sync
+for that contact and reports `history_sync_requested: true`; call it again
+after a few seconds. This requires the upgraded plugin ZIP, not only a
+control-plane image rebuild:
+
+```bash
+cd /mnt/AI_Pool/execlaw-source
+./scripts/package-plugins.sh
+```
+
+Upload `dist/whatsapp-0.2.2.zip` in **Settings -> Plugins**, then use the
+plugin's upgrade/reinstall flow and re-enable it. The plugin configures
+WuzAPI to retain the newest 200 messages per chat locally at provisioning and
+on every enable. Existing messages are available only to the extent WhatsApp
+provides them to the linked device in its history-sync response.
+
 After rebuilding the control-plane image, disable and re-enable any of these
 plugins so the supervisor reconciles the sidecar with the new configuration.
 The `discord` plugin is sidecar-free and connects directly to Discord, so it
