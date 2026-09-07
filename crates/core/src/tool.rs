@@ -520,6 +520,15 @@ pub trait ConversationApi: Send + Sync {
     /// `KnownTrusted` caller only seeing their own threads) lands in
     /// a follow-up that goes alongside the principal-graph work.
     async fn list_threads(&self) -> Result<Vec<ThreadListEntry>, ApiError>;
+
+    /// Resolve a transport channel and foreign recipient to its newest
+    /// persisted conversation. Controller-only callers use this to avoid
+    /// guessing internal conversation ids from a phone number.
+    async fn find_transport_conversation(
+        &self,
+        channel: &str,
+        foreign_id: &str,
+    ) -> Result<Option<ThreadListEntry>, ApiError>;
 }
 
 /// One memory key + its update timestamp. Returned by

@@ -712,10 +712,12 @@ pub(crate) fn build_tool_routing_prose(
         ),
         (
             "chat",
-              "* `list_chats` + `read_conversation_history` — find and read another conversation, \
-               including a WhatsApp thread. `read_chat_history` reads the current thread only; \
-               `get_thread` / `set_thread_name` inspect or rename the current thread. Use these \
-               when the operator references \"that thread\" or a received message from a contact.",
+            "* `find_transport_conversation` + `read_conversation_history` — find and read a \
+             transport conversation, especially when the operator gives a WhatsApp phone number. \
+             Pass channel `whatsapp` and the recipient phone number to the lookup, then pass its \
+             returned conversation id to `read_conversation_history`. `list_chats` remains \
+             available when you need to inspect all threads; `read_chat_history` reads the current \
+             thread only. `get_thread` / `set_thread_name` inspect or rename the current thread.",
         ),
                 (
                         "whatsapp",
@@ -832,7 +834,10 @@ pub(crate) fn build_tool_routing_prose(
             "read" | "write" | "list" => {
                 if name.contains("memory") {
                     present.insert("memory");
-                } else if name.contains("chat") || name == "list_chats" {
+                } else if name.contains("chat")
+                    || name == "list_chats"
+                    || name == "find_transport_conversation"
+                {
                     present.insert("chat");
                 }
             }

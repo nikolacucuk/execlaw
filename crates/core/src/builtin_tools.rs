@@ -571,6 +571,92 @@ pub struct ListChatsTool {
     descriptor: ToolDescriptor,
 }
 
+// ---------------------------------------------------------------
+// find_transport_conversation
+// ---------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct FindTransportConversationArgs {
+    channel: String,
+    foreign_id: String,
+}
+
+pub struct FindTransportConversationTool {
+    descriptor: ToolDescriptor,
+}
+
+impl Default for FindTransportConversationTool {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl FindTransportConversationTool {
+    pub fn new() -> Self {
+        Self {
+            descriptor: ToolDescriptor {
+                name: "find_transport_conversation".into(),
+                description: "Find the newest conversation for a transport recipient, such as a WhatsApp phone number. Use the returned conversation_id with read_conversation_history. Controller-only.".into(),
+                schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "channel": { "type": "string", "description": "Transport channel, for example whatsapp." },
+                        "foreign_id": { "type": "string", "description": "Transport recipient id, for example +17788637530." }
+                    },
+                    "required": ["channel", "foreign_id"],
+                    "additionalProperties": false
+                }),
+                source: ToolSource::Builtin,
+                latency: ToolLatency::Low,
+                capabilities: vec![Capability::ConversationRead],
+                default_allowed_classes: vec!["Controller".into()],
+                sensitive: true,
+            },
+        }
+    }
+}
+
+#[async_trait]
+impl ToolImpl for FindTransportConversationTool {
+    fn descriptor(&self) -> &ToolDescriptor {
+        &self.descriptor
+    }
+
+    async fn invoke(&self, ctx: ToolCtx, args: Value) -> ToolOutcome {
+        if ctx.caller_trust != "Controller" {
+            return ToolOutcome::denied(
+                "finding another conversation by transport recipient requires Controller trust",
+            );
+        }
+        let args: FindTransportConversationArgs = match serde_json::from_value(args) {
+            Ok(a) => a,
+            Err(e) => return ToolOutcome::err("invalid_argument", e.to_string()),
+        };
+        let conv = match ctx.conversation.as_ref() {
+            Some(c) => c,
+            None => return ToolOutcome::denied("conversation capability not granted to this tool"),
+        };
+        match conv
+            .find_transport_conversation(&args.channel, &args.foreign_id)
+            .await
+        {
+            Ok(Some(thread)) => ToolOutcome::Ok(json!({
+                "found": true,
+                "conversation_id": thread.conversation_id,
+                "display_name": thread.display_name,
+                "trust_class": thread.trust_class,
+                "last_activity_at": thread.last_activity_at,
+            })),
+            Ok(None) => ToolOutcome::Ok(json!({
+                "found": false,
+                "channel": args.channel,
+                "foreign_id": args.foreign_id,
+            })),
+            Err(e) => e.into_outcome(),
+        }
+    }
+}
+
 impl Default for ListChatsTool {
     fn default() -> Self {
         Self::new()
@@ -2987,6 +3073,7 @@ pub fn core_builtin_tools() -> Vec<Arc<dyn ToolImpl>> {
         Arc::new(ListChatsTool::new()),
         Arc::new(ReadChatHistoryTool::new()),
         Arc::new(ReadConversationHistoryTool::new()),
+        Arc::new(FindTransportConversationTool::new()),
         Arc::new(NotifyControllerTool::new()),
         Arc::new(CreateRoutineTool::new()),
         Arc::new(ListRoutinesTool::new()),
@@ -3277,6 +3364,7 @@ mod tests {
         assert!(names.contains(&"get_thread"));
         assert!(names.contains(&"read_chat_history"));
         assert!(names.contains(&"read_conversation_history"));
+        assert!(names.contains(&"find_transport_conversation"));
         assert!(names.contains(&"notify_controller"));
         assert!(names.contains(&"routine_create"));
         assert!(names.contains(&"routine_list"));
@@ -3302,7 +3390,7 @@ mod tests {
         assert!(names.contains(&"mcp_list_servers"));
         assert!(names.contains(&"mcp_add_server"));
         assert!(names.contains(&"mcp_remove_server"));
-        assert_eq!(names.len(), 29);
+        assert_eq!(names.len(), 30);
     }
 
     #[test]

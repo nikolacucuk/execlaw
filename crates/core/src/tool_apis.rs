@@ -27,7 +27,7 @@ use crate::tool::{
     ThreadListEntry,
 };
 use async_trait::async_trait;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -266,6 +266,45 @@ impl ConversationApi for DbConversationApi {
                 last_activity_at: s.last_activity_at,
             })
             .collect())
+    }
+
+    async fn find_transport_conversation(
+        &self,
+        channel: &str,
+        foreign_id: &str,
+    ) -> Result<Option<ThreadListEntry>, ApiError> {
+        let db = self.db.clone();
+        let channel = channel.to_owned();
+        let foreign_id = foreign_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            db.with_conn(|c| {
+                c.query_row(
+                    "SELECT sc.conversation_id, sc.display_name, sc.trust_class, \
+                            sc.is_pinned, sc.last_activity_at \
+                     FROM state_transport_bindings b \
+                     JOIN state_conversations sc \
+                       ON sc.principal_group_id = b.principal_group_id \
+                     WHERE b.channel = ?1 AND b.foreign_id = ?2 \
+                     ORDER BY sc.last_activity_at DESC \
+                     LIMIT 1",
+                    params![channel, foreign_id],
+                    |r| {
+                        Ok(ThreadListEntry {
+                            conversation_id: r.get(0)?,
+                            display_name: r.get(1)?,
+                            trust_class: r.get(2)?,
+                            is_pinned: r.get::<_, i64>(3)? != 0,
+                            last_activity_at: r.get(4)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(Into::into)
+            })
+        })
+        .await
+        .map_err(|e| ApiError::Storage(format!("join: {e}")))?
+        .map_err(|e| ApiError::Storage(format!("find_transport_conversation: {e}")))
     }
 }
 
