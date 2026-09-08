@@ -577,10 +577,7 @@ export function Chat() {
                             .then((r) => setMessages(cid, r.messages))
                             .catch(() => {});
                     }
-                    if (
-                        ev.kind === "chat_message_outbound" &&
-                        cid !== activeId
-                    ) {
+                    if (cid !== activeId) {
                         markUnread(cid);
                     }
                 }

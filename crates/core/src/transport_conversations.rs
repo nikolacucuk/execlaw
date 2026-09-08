@@ -128,9 +128,9 @@ pub struct ResolveInput<'a> {
     /// knows the trust class so it doesn't make sense to re-query here.
     pub is_controller: bool,
     /// Idle window after which a non-controller principal's next message
-    /// rotates into a fresh thread. See MIGRATION_PLAN §2.6 for the
-    /// recommended per-transport defaults.
-    pub idle_timeout_ms: i64,
+    /// rotates into a fresh thread. `None` keeps the current mapping
+    /// indefinitely for transports without a new-chat affordance.
+    pub idle_timeout_ms: Option<i64>,
     /// `now` in unix seconds. Threaded explicitly so tests can pin time.
     pub now: i64,
 }
@@ -188,8 +188,6 @@ impl<'db> ConversationResolver<'db> {
         // The idle window is expressed in milliseconds in the public
         // API (matches every other transport-tier knob in execlaw)
         // even though `last_message_at` is unix seconds; scale here.
-        let idle_secs = input.idle_timeout_ms / 1_000;
-
         self.db.transaction(|tx| {
             // 1. Look up the existing current row.
             let existing: Option<(String, i64)> = tx
@@ -206,7 +204,10 @@ impl<'db> ConversationResolver<'db> {
 
             // 2. Idle-window check.
             if let Some((cid, last_at)) = existing.as_ref() {
-                if input.now - last_at < idle_secs {
+                let within_idle_window = input
+                    .idle_timeout_ms
+                    .is_none_or(|timeout_ms| input.now - last_at < timeout_ms / 1_000);
+                if within_idle_window {
                     tx.execute(
                         "UPDATE transport_conversations \
                          SET last_message_at = ?1 \
@@ -279,7 +280,7 @@ mod tests {
             transport_handle: handle,
             principal_id: principal,
             is_controller,
-            idle_timeout_ms: 60_000, // 60s, easy math
+            idle_timeout_ms: Some(60_000), // 60s, easy math
             now,
         }
     }
@@ -372,6 +373,69 @@ mod tests {
         let store = TransportConversationStore::new(&db);
         let row = store.get_current("p", "h", "outsider").unwrap().unwrap();
         assert_eq!(row.last_message_at, 130);
+    }
+
+    #[test]
+    fn no_idle_timeout_continues_existing_thread_after_long_gap() {
+        let db = fresh_db();
+        let resolver = ConversationResolver::new(&db);
+
+        let first = resolver
+            .resolve_or_mint(&ResolveInput {
+                plugin_id: "plugin-whatsapp",
+                transport_handle: "+15551234",
+                principal_id: "whatsapp-contact",
+                is_controller: false,
+                idle_timeout_ms: None,
+                now: 100,
+            })
+            .unwrap();
+        let second = resolver
+            .resolve_or_mint(&ResolveInput {
+                plugin_id: "plugin-whatsapp",
+                transport_handle: "+15551234",
+                principal_id: "whatsapp-contact",
+                is_controller: false,
+                idle_timeout_ms: None,
+                now: 100 + 31 * 60,
+            })
+            .unwrap();
+
+        assert_eq!(first.conversation_id(), second.conversation_id());
+        assert!(matches!(second, ResolveOutcome::Continued(_)));
+        let row = TransportConversationStore::new(&db)
+            .get_current("plugin-whatsapp", "+15551234", "whatsapp-contact")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.last_message_at, 100 + 31 * 60);
+    }
+
+    #[test]
+    fn no_idle_timeout_keeps_different_whatsapp_handles_separate() {
+        let db = fresh_db();
+        let resolver = ConversationResolver::new(&db);
+        let first = resolver
+            .resolve_or_mint(&ResolveInput {
+                plugin_id: "plugin-whatsapp",
+                transport_handle: "+15551234",
+                principal_id: "whatsapp-contact-1",
+                is_controller: false,
+                idle_timeout_ms: None,
+                now: 100,
+            })
+            .unwrap();
+        let second = resolver
+            .resolve_or_mint(&ResolveInput {
+                plugin_id: "plugin-whatsapp",
+                transport_handle: "12345-678@g.us",
+                principal_id: "12345-678@g.us",
+                is_controller: false,
+                idle_timeout_ms: None,
+                now: 100 + 31 * 60,
+            })
+            .unwrap();
+
+        assert_ne!(first.conversation_id(), second.conversation_id());
     }
 
     #[test]

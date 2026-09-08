@@ -124,6 +124,7 @@ async fn decode_canonical_dm_text_event() {
     });
     let out = invoke_map(&plugin, "decode_event_map", event).await;
     assert_eq!(out["channel"], "whatsapp");
+    assert_eq!(out["reuse_conversation"], true);
     // E.164 prefix added by `native_id_from_jid` so the principal
     // matches the controller's identity bindings (`whatsapp:+...`).
     assert_eq!(out["native_id"], "+15553334444");
@@ -159,6 +160,7 @@ async fn decode_group_event_sets_group_id_from_chat_jid() {
     });
     let out = invoke_map(&plugin, "decode_event_map", event).await;
     assert_eq!(out["channel"], "whatsapp");
+    assert_eq!(out["reuse_conversation"], true);
     // E.164 prefix added by `native_id_from_jid` so the principal
     // matches the controller's identity bindings (`whatsapp:+...`).
     assert_eq!(out["native_id"], "+15553334444");

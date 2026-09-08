@@ -93,6 +93,9 @@ pub struct InboundMessage {
     /// classifier — saving inference cost AND ensuring an explicit
     /// `@agent` mention is never misclassified as group banter.
     pub mention_of_self: Option<bool>,
+    /// Reuse the current transport conversation regardless of idle time.
+    /// `false` preserves the transport's normal idle-window rotation.
+    pub reuse_conversation: bool,
 }
 
 #[derive(Debug, Clone)]

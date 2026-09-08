@@ -2573,6 +2573,10 @@ fn inbound_from_rhai_map(plugin_id: &str, msg: &Map) -> Result<InboundMessage, B
     };
     let opt_i64 = |key: &str| -> Option<i64> { msg.get(key).and_then(|v| v.as_int().ok()) };
     let opt_bool = |key: &str| -> Option<bool> { msg.get(key).and_then(|v| v.as_bool().ok()) };
+    let reuse_conversation = msg
+        .get("reuse_conversation")
+        .and_then(|v| v.as_bool().ok())
+        .unwrap_or(false);
 
     let channel = required_str("channel")?;
     let native_id = required_str("native_id")?;
@@ -2622,6 +2626,7 @@ fn inbound_from_rhai_map(plugin_id: &str, msg: &Map) -> Result<InboundMessage, B
         timestamp_ms: opt_i64("timestamp_ms"),
         attachments,
         mention_of_self: opt_bool("mention_of_self"),
+        reuse_conversation,
     })
 }
 

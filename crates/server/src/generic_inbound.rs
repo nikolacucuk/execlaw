@@ -67,9 +67,18 @@ pub async fn route_inbound(
     // 2. Branch on group vs DM. The two shapes are similar enough
     //    that one function handles both.
     let (cid, principal_group_id) = if let Some(gid) = msg.group_id.as_deref() {
-        resolve_group(state, channel, gid, &plugin_id, now).await?
+        resolve_group(state, channel, gid, &plugin_id, now, msg.reuse_conversation).await?
     } else {
-        resolve_dm(state, channel, &msg.native_id, &sender, &plugin_id, now).await?
+        resolve_dm(
+            state,
+            channel,
+            &msg.native_id,
+            &sender,
+            &plugin_id,
+            now,
+            msg.reuse_conversation,
+        )
+        .await?
     };
 
     // 3. Conversation row + binding.
@@ -328,6 +337,7 @@ async fn resolve_group(
     group_id: &str,
     plugin_id: &str,
     now: i64,
+    reuse_conversation: bool,
 ) -> Result<(ConversationId, String), HostCapError> {
     let binding_store = TransportBindingStore::new(&state.db);
     let pg_store = PrincipalGroupStore::new(&state.db);
@@ -368,7 +378,11 @@ async fn resolve_group(
             transport_handle: group_id,
             principal_id: group_id,
             is_controller: false,
-            idle_timeout_ms: 30 * 60 * 1000,
+            idle_timeout_ms: if reuse_conversation {
+                None
+            } else {
+                Some(30 * 60 * 1000)
+            },
             now,
         })
         .map_err(|e| HostCapError::new(format!("group conversation resolve: {e}")))?;
@@ -382,6 +396,7 @@ async fn resolve_dm(
     sender: &execlaw_core::principal::Principal,
     plugin_id: &str,
     now: i64,
+    reuse_conversation: bool,
 ) -> Result<(ConversationId, String), HostCapError> {
     let binding_store = TransportBindingStore::new(&state.db);
     let pg_store = PrincipalGroupStore::new(&state.db);
@@ -434,7 +449,11 @@ async fn resolve_dm(
             transport_handle: native_id,
             principal_id: sender.id.as_str(),
             is_controller,
-            idle_timeout_ms: 30 * 60 * 1000,
+            idle_timeout_ms: if reuse_conversation {
+                None
+            } else {
+                Some(30 * 60 * 1000)
+            },
             now,
         })
         .map_err(|e| HostCapError::new(format!("conversation resolve: {e}")))?;

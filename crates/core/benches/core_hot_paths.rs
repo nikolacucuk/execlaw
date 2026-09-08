@@ -499,7 +499,7 @@ fn bench_conversation_resolver(c: &mut Criterion) {
                     transport_handle: black_box("signal:+15551234"),
                     principal_id: black_box("controller-1"),
                     is_controller: true,
-                    idle_timeout_ms: 60_000,
+                    idle_timeout_ms: Some(60_000),
                     now: black_box(1_000_000),
                 })
                 .unwrap();
@@ -519,7 +519,7 @@ fn bench_conversation_resolver(c: &mut Criterion) {
                 transport_handle: "h",
                 principal_id: "x",
                 is_controller: false,
-                idle_timeout_ms: 60_000,
+                idle_timeout_ms: Some(60_000),
                 now: 1_000,
             })
             .unwrap();
@@ -533,7 +533,7 @@ fn bench_conversation_resolver(c: &mut Criterion) {
                     transport_handle: "h",
                     principal_id: "x",
                     is_controller: false,
-                    idle_timeout_ms: 60_000,
+                    idle_timeout_ms: Some(60_000),
                     now: black_box(now),
                 })
                 .unwrap();
