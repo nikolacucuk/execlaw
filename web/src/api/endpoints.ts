@@ -188,7 +188,15 @@ export interface MessageView {
      * when set so the operator can tell at a glance "this came in
      * via Signal" / "the agent replied via Signal".
      */
-    channel_origin?: "signal" | "email" | "voice" | "sms" | null;
+    channel_origin?:
+        | "signal"
+        | "email"
+        | "voice"
+        | "sms"
+        | "whatsapp"
+        | null;
+    /** Human-readable inbound sender, phone, and group context. */
+    transport_context?: string | null;
     /**
      * 2026-05-15 — image attachments included on a user_msg via the
      * composer's `+` menu. Each entry resolves to a download via

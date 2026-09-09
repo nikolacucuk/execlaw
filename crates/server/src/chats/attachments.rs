@@ -24,8 +24,8 @@ use execlaw_core::events::{EventKind, EventRecord, ToolResultPayload, ToolUsePay
 use execlaw_core::ids::ConversationId;
 
 use crate::chats::types::{
-    InlineAttachmentRequest, MessageAttachmentView, RealModelTurnPayload, StubModelTurnPayload,
-    UserMessagePayload,
+    ColdContactPayload, InlineAttachmentRequest, MessageAttachmentView, RealModelTurnPayload,
+    StubModelTurnPayload, UserMessagePayload,
 };
 use crate::state::AppState;
 
@@ -934,6 +934,10 @@ pub(crate) fn extract_text(e: &EventRecord) -> Option<String> {
             .decode_payload::<UserMessagePayload>()
             .ok()
             .map(|p| p.text),
+        EventKind::ColdContactArrived => e
+            .decode_payload::<ColdContactPayload>()
+            .ok()
+            .map(|p| p.text),
         EventKind::ModelTurn => e
             .decode_payload::<StubModelTurnPayload>()
             .ok()
@@ -988,6 +992,10 @@ pub(crate) fn extract_channel_origin(e: &EventRecord) -> Option<String> {
     match e.kind {
         EventKind::UserMsg => e
             .decode_payload::<UserMessagePayload>()
+            .ok()
+            .and_then(|p| p.channel_origin),
+        EventKind::ColdContactArrived => e
+            .decode_payload::<ColdContactPayload>()
             .ok()
             .and_then(|p| p.channel_origin),
         EventKind::ModelTurn => e

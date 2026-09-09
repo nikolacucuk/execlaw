@@ -894,6 +894,12 @@ body {
     margin-bottom: 0.2rem;
 }
 
+.execlaw-msg__transport-context {
+    display: block;
+    color: $text-primary;
+    font-weight: 600;
+}
+
 .execlaw-msg__attachments {
     display: flex;
     flex-wrap: wrap;

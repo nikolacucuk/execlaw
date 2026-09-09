@@ -103,6 +103,61 @@ describe("MessageStream", () => {
         );
     });
 
+    it("renders WhatsApp sender context above the message", () => {
+        appendMessage("conv-whatsapp-context", {
+            ...baseMsg(1, "hello from Jovan"),
+            channel_origin: "whatsapp",
+            transport_context: "Jovan · +38267123456 · CamperMontenegro",
+        } as never);
+        render(<MessageStream conversationId="conv-whatsapp-context" />);
+        expect(
+            document.querySelector(".execlaw-msg__transport-context"),
+        ).toHaveTextContent("Jovan · +38267123456 · CamperMontenegro");
+    });
+
+    it("offers send and cancel actions for the latest WhatsApp reply", async () => {
+        const onSend = vi.fn().mockResolvedValue(undefined);
+        appendMessage("conv-whatsapp-review", {
+            ...baseMsg(1, "draft reply", "model_turn"),
+            channel_origin: "whatsapp",
+        } as never);
+        render(
+            <MessageStream
+                conversationId="conv-whatsapp-review"
+                onSendTransportReply={onSend}
+            />,
+        );
+
+        expect(screen.getByTestId("send-transport-reply")).toBeInTheDocument();
+        expect(screen.getByTestId("cancel-transport-reply")).toBeInTheDocument();
+
+        fireEvent.click(screen.getByTestId("cancel-transport-reply"));
+        expect(screen.queryByTestId("send-transport-reply")).toBeNull();
+        expect(screen.queryByTestId("cancel-transport-reply")).toBeNull();
+        expect(onSend).not.toHaveBeenCalled();
+    });
+
+    it("does not offer WhatsApp actions for a non-WhatsApp latest reply", () => {
+        setMessages("conv-mixed-origins", [
+            {
+                ...baseMsg(1, "WhatsApp inbound", "user_msg"),
+                channel_origin: "whatsapp",
+            },
+            {
+                ...baseMsg(2, "web reply", "model_turn"),
+                channel_origin: null,
+            },
+        ] as never);
+        render(
+            <MessageStream
+                conversationId="conv-mixed-origins"
+                onSendTransportReply={vi.fn().mockResolvedValue(undefined)}
+            />,
+        );
+        expect(screen.queryByTestId("send-transport-reply")).toBeNull();
+        expect(screen.queryByTestId("cancel-transport-reply")).toBeNull();
+    });
+
     it("uses bootstrap-icons for non-Signal transports", () => {
         // Email / voice / sms ride on `bi-*` since their generic
         // glyphs communicate the channel without needing a brand

@@ -2642,6 +2642,7 @@ async fn handle_cold_contact(
         text: req.text.clone(),
         sender_principal_id: principal.id.as_str().to_owned(),
         approval_id: approval_id.clone(),
+        channel_origin: None,
     };
     let pending = match PendingEvent::encode(
         EventKind::ColdContactArrived,
@@ -2964,6 +2965,7 @@ pub async fn handle_cold_contact_for_inbound(
     cid: &ConversationId,
     principal: &Principal,
     text: &str,
+    channel_origin: &str,
 ) -> Result<(), String> {
     use execlaw_core::conversation::Phase as CPhase;
 
@@ -2973,6 +2975,7 @@ pub async fn handle_cold_contact_for_inbound(
         text: text.to_owned(),
         sender_principal_id: principal.id.as_str().to_owned(),
         approval_id: approval_id.clone(),
+        channel_origin: Some(channel_origin.to_owned()),
     };
     let pending = PendingEvent::encode(
         EventKind::ColdContactArrived,
@@ -4083,12 +4086,18 @@ pub async fn list_messages(
         Err(e) => return err_500(&format!("replay: {e}")),
     };
 
+    let conversation_context = ConversationStore::new(&state.db)
+        .get(&cid)
+        .ok()
+        .flatten()
+        .and_then(|row| row.display_name);
     let messages: Vec<MessageView> = events
         .into_iter()
         .filter(|e| {
             matches!(
                 e.kind,
                 EventKind::UserMsg
+                    | EventKind::ColdContactArrived
                     | EventKind::ModelTurn
                     | EventKind::ToolUse
                     | EventKind::ToolResult
@@ -4105,12 +4114,17 @@ pub async fn list_messages(
         // model what question it asked the user). This filter is
         // strictly an SPA-rendering concern.
         .filter(|e| {
-            !matches!(e.kind, EventKind::UserMsg)
+            !matches!(e.kind, EventKind::UserMsg | EventKind::ColdContactArrived)
                 || e.actor.as_deref() != Some(SYSTEM_ORCHESTRATOR_ACTOR)
         })
         .take(limit as usize)
         .map(|e| {
             let attachment_ids = extract_attachment_ids(&e);
+            let transport_context = inbound_transport_context(
+                &state.db,
+                &e,
+                conversation_context.as_deref(),
+            );
             MessageView {
                 seq: e.seq.0,
                 kind: e.kind.as_str().to_owned(),
@@ -4118,6 +4132,7 @@ pub async fn list_messages(
                 actor: e.actor.clone(),
                 committed_at: e.committed_at,
                 channel_origin: extract_channel_origin(&e),
+                transport_context,
                 attachments: hydrate_message_attachments(&state.db, &cid, &attachment_ids),
                 applied_skill_names: extract_applied_skill_names(&e),
             }
@@ -4132,6 +4147,61 @@ pub async fn list_messages(
         })),
     )
         .into_response()
+}
+
+fn inbound_transport_context(
+    db: &execlaw_core::db::Database,
+    event: &EventRecord,
+    conversation_name: Option<&str>,
+) -> Option<String> {
+    let channel = extract_channel_origin(event)?;
+    if channel == "web" {
+        return None;
+    }
+    let principal_id = match event.kind {
+        EventKind::UserMsg => event
+            .decode_payload::<UserMessagePayload>()
+            .ok()
+            .and_then(|p| p.sender_principal_id),
+        EventKind::ColdContactArrived => event
+            .decode_payload::<ColdContactPayload>()
+            .ok()
+            .map(|p| p.sender_principal_id),
+        _ => None,
+    }?;
+    let principal = PrincipalStore::new(db)
+        .get(&execlaw_core::ids::PrincipalId::from(principal_id))
+        .ok()
+        .flatten()?;
+    let display_name = principal
+        .metadata
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_owned);
+    let handle = principal
+        .identifiers
+        .iter()
+        .find(|i| i.transport == channel)
+        .map(|i| i.handle.clone());
+    let mut parts = Vec::new();
+    if let Some(name) = display_name.as_deref() {
+        parts.push(name.to_owned());
+    }
+    if let Some(handle) = handle {
+        parts.push(handle);
+    }
+    if channel == "whatsapp" {
+        let is_group_label = conversation_name
+            .zip(display_name.as_deref())
+            .is_some_and(|(conversation, sender)| conversation != sender);
+        if is_group_label {
+            if let Some(group) = conversation_name.filter(|s| !s.trim().is_empty()) {
+                parts.push(group.to_owned());
+            }
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// `GET /api/chats/:id/cards` — projection of every card in this

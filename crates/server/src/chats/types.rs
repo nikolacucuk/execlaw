@@ -210,6 +210,10 @@ pub struct MessageView {
     /// via Signal".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_origin: Option<String>,
+    /// Human-readable sender and transport context for inbound messages,
+    /// such as `Jovan · +382... · CamperMontenegro`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_context: Option<String>,
     /// 2026-05-15 — image attachments included on a user_msg via
     /// the composer's `+` menu. Empty (and serialised as absent)
     /// for every other message kind. The SPA renders each entry
@@ -335,6 +339,8 @@ pub(crate) struct ColdContactPayload {
     pub(crate) text: String,
     pub(crate) sender_principal_id: String,
     pub(crate) approval_id: String,
+    #[serde(default)]
+    pub(crate) channel_origin: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

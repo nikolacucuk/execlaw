@@ -61,6 +61,22 @@ pub async fn route_inbound(
     {
         let mut updated = sender.clone();
         updated.last_seen = Some(now);
+        if let Some(metadata) = updated.metadata.as_object_mut() {
+            metadata.insert(
+                "native_id".to_owned(),
+                serde_json::Value::String(msg.native_id.clone()),
+            );
+            if let Some(display_name) = msg
+                .display_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty())
+            {
+                metadata.insert(
+                    "display_name".to_owned(),
+                    serde_json::Value::String(display_name.to_owned()),
+                );
+            }
+        }
         let _ = PrincipalStore::new(&state.db).upsert(&updated);
     }
 
@@ -182,7 +198,13 @@ pub async fn route_inbound(
     }
 
     if trust_flat == TrustLevel::UnknownPending {
-        crate::chats::handle_cold_contact_for_inbound(state, &cid, &sender, &msg.text)
+        crate::chats::handle_cold_contact_for_inbound(
+            state,
+            &cid,
+            &sender,
+            &msg.text,
+            channel,
+        )
             .await
             .map_err(|e| HostCapError::new(format!("cold-contact handler: {e}")))?;
         return Ok(RouteOutcome::ColdContact);
@@ -231,9 +253,7 @@ pub async fn route_inbound(
                 crate::group_addressing::AddressedReason::AttachmentDirected,
             )
         } else {
-            let decision = if msg.conversation_scope.is_some()
-                && looks_like_direct_question(&msg.text)
-            {
+            let decision = if channel == "whatsapp" && msg.conversation_scope.is_some() {
                 crate::group_addressing::DispatchDecision::Dispatch(
                     crate::group_addressing::AddressedReason::TransportMention,
                 )
@@ -312,23 +332,30 @@ fn merge_scoped_conversation_if_needed(
     current_cid: &ConversationId,
     now: i64,
 ) -> Result<ConversationId, HostCapError> {
-    if crate::chats::has_non_whatsapp_activity(state, current_cid) {
-        return Ok(current_cid.clone());
-    }
-
     let summaries = execlaw_core::conversation::ConversationStore::new(&state.db)
         .list_thread_summaries()
         .map_err(|e| HostCapError::new(format!("list active conversations: {e}")))?;
-    let target = summaries.into_iter().find(|summary| {
-        !summary.is_pinned
-            && !summary.is_ephemeral
-            && !summary.conversation_id.as_str().starts_with("controller-thread:")
-            && summary.conversation_id != *current_cid
-            && crate::chats::has_non_whatsapp_activity(state, &summary.conversation_id)
-    });
+    let target = summaries
+        .into_iter()
+        .filter(|summary| {
+            !summary.is_pinned
+                && !summary.is_ephemeral
+                && !summary.conversation_id.as_str().starts_with("controller-thread:")
+                && summary.conversation_id != *current_cid
+        })
+        .max_by_key(|summary| summary.last_activity_at);
     let Some(target) = target else {
         return Ok(current_cid.clone());
     };
+
+    // WhatsApp is intentionally a shared operator thread: once a normal
+    // chat exists, every WhatsApp contact/group scope follows the newest
+    // normal conversation. Keep the current mapping when it is already
+    // the selected target; otherwise move only this scope so the next
+    // inbound lands in the latest chat without rewriting event history.
+    if target.conversation_id == *current_cid {
+        return Ok(current_cid.clone());
+    }
 
     let store = execlaw_core::transport_conversations::TransportConversationStore::new(&state.db);
     let moved = store
@@ -346,17 +373,6 @@ fn merge_scoped_conversation_if_needed(
     } else {
         Ok(current_cid.clone())
     }
-}
-
-fn looks_like_direct_question(text: &str) -> bool {
-    let normalized = text.trim().to_ascii_lowercase();
-    normalized.ends_with('?')
-        || [
-            "who ", "what ", "when ", "where ", "why ", "how ", "can ", "could ",
-            "would ", "should ", "is ", "are ", "do ", "does ", "did ",
-        ]
-        .iter()
-        .any(|prefix| normalized.starts_with(prefix))
 }
 
 fn enqueue_triggered_agents(

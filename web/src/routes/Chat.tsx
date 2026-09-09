@@ -1385,7 +1385,6 @@ function ActiveThreadPane({
             <MessageStream
                 conversationId={conversationId}
                 showToolResults={toolResultsVisible}
-                transportChannel={thread?.transport_channel ?? null}
                 onSendTransportReply={(text) =>
                     sendTransportReply(conversationId, text, getToken).then(
                         () => undefined,
