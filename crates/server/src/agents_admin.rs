@@ -221,7 +221,7 @@ async fn import_markdown(
     let agent = AgentStore::new(&s.db)
         .upsert(
             &AgentUpsert {
-                id: Some(id),
+                id: Some(id.clone()),
                 name,
                 role_prompt,
                 model: None,
