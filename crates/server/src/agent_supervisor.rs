@@ -72,6 +72,14 @@ impl AgentSupervisor {
             .list()
             .map_err(|e| e.to_string())?;
         for agent in agents.into_iter().filter(|a| a.enabled && !a.paused) {
+            if trigger_is_event_only(&agent.trigger)
+                && AgentStore::new(&self.db)
+                    .pending_messages(&agent.id, 1)
+                    .map_err(|e| e.to_string())?
+                    .is_empty()
+            {
+                continue;
+            }
             let db = self.db.clone();
             let inference = self.inference.clone();
             let permits = self.permits.clone();

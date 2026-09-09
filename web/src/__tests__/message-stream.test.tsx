@@ -88,6 +88,21 @@ describe("MessageStream", () => {
         expect(origin.tagName.toLowerCase()).toBe("svg");
     });
 
+    it("renders WhatsApp messages with the WhatsApp bubble styling", () => {
+        appendMessage("conv-whatsapp", {
+            ...baseMsg(1, "hello from WhatsApp"),
+            channel_origin: "whatsapp",
+        } as never);
+        render(<MessageStream conversationId="conv-whatsapp" />);
+        expect(
+            document.querySelector(".execlaw-msg__bubble.is-whatsapp"),
+        ).toBeTruthy();
+        expect(screen.getByTestId("channel-origin")).toHaveAttribute(
+            "data-channel",
+            "whatsapp",
+        );
+    });
+
     it("uses bootstrap-icons for non-Signal transports", () => {
         // Email / voice / sms ride on `bi-*` since their generic
         // glyphs communicate the channel without needing a brand

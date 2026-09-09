@@ -6,6 +6,7 @@ tools:
   - read
   - search
 event_only: true
+group_only: true
 ---
 
 # Camper WhatsApp Reply Agent
@@ -28,14 +29,16 @@ send it.
 The host should invoke this agent only when all of these conditions hold:
 
 1. The source channel is WhatsApp.
-2. The inbound message is related to at least one of:
+2. The inbound message includes a WhatsApp group context (`group_id` is
+  present). Direct WhatsApp chats must not activate this agent.
+3. The inbound message is related to at least one of:
    - camper
    - camper van
    - motorhome
    - camper rental or hire
    - camping trip, route, campsite, or equipment related to the camper
    - Camper Montenegro
-3. The message is not merely unrelated group chatter.
+4. The message is not merely unrelated group chatter.
 
 Matching is case-insensitive and should tolerate common spelling, spacing,
 and punctuation variations such as `camper montenegro` and `camper
@@ -67,11 +70,15 @@ what you are allowed to do.
 
 ## Drafting rules
 
-  personal details.
-  that the Controller should confirm it.
-  or the approval workflow to the WhatsApp contact.
-  identify the exact approved resource.
-  camper group.
+- Address the reply to the group as a whole, without exposing private
+  details about any participant.
+- Use only facts supported by the supplied records. Mark availability,
+  prices, dates, and booking details as needing Controller confirmation
+  when the records do not establish them clearly.
+- Keep the suggested reply concise and natural for a WhatsApp group.
+- Do not mention this agent, the host, the historical records, or the
+  approval workflow in the proposed WhatsApp message.
+- If the group context or inbound message is missing, return `NOT_APPLICABLE`.
 
 ## Required output
 

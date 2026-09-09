@@ -83,6 +83,35 @@ impl<'db> TransportConversationStore<'db> {
         })
     }
 
+    /// Move the current mapping to an existing conversation. This is used
+    /// when a transport-wide scope is first merged into an already active
+    /// operator thread instead of minting a dedicated transport thread.
+    pub fn retarget_current(
+        &self,
+        plugin_id: &str,
+        transport_handle: &str,
+        principal_id: &str,
+        conversation_id: &ConversationId,
+        now: i64,
+    ) -> Result<bool, DbError> {
+        self.db.with_conn(|c| {
+            let changed = c.execute(
+                "UPDATE transport_conversations \
+                 SET conversation_id = ?1, last_message_at = ?2 \
+                 WHERE plugin_id = ?3 AND transport_handle = ?4 \
+                   AND principal_id = ?5 AND is_current = 1",
+                params![
+                    conversation_id.as_str(),
+                    now,
+                    plugin_id,
+                    transport_handle,
+                    principal_id,
+                ],
+            )?;
+            Ok(changed > 0)
+        })
+    }
+
     /// Every row (current + rotated) for the principal across every
     /// transport. Used by the "previous threads with X" UI affordance.
     pub fn list_for_principal(
@@ -436,6 +465,43 @@ mod tests {
             .unwrap();
 
         assert_ne!(first.conversation_id(), second.conversation_id());
+    }
+
+    #[test]
+    fn retarget_current_moves_shared_scope_to_existing_thread() {
+        let db = fresh_db();
+        let resolver = ConversationResolver::new(&db);
+        let original = resolver
+            .resolve_or_mint(&ResolveInput {
+                plugin_id: "plugin-whatsapp",
+                transport_handle: "whatsapp",
+                principal_id: "whatsapp",
+                is_controller: false,
+                idle_timeout_ms: None,
+                now: 100,
+            })
+            .unwrap();
+        let target = ConversationId::from("conv-existing");
+        let moved = TransportConversationStore::new(&db)
+            .retarget_current(
+                "plugin-whatsapp",
+                "whatsapp",
+                "whatsapp",
+                &target,
+                200,
+            )
+            .unwrap();
+
+        assert!(moved);
+        assert_ne!(original.conversation_id(), &target);
+        assert_eq!(
+            TransportConversationStore::new(&db)
+                .get_current("plugin-whatsapp", "whatsapp", "whatsapp")
+                .unwrap()
+                .unwrap()
+                .conversation_id,
+            target
+        );
     }
 
     #[test]

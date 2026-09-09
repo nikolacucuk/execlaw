@@ -75,7 +75,7 @@ plugins/whatsapp/plugin.toml
 version = "0.2.5"
 
 -> edit implementation and increment to 0.2.6
--> package to dist/whatsapp-0.2.8.zip
+-> package to dist/whatsapp-0.2.9.zip
 -> upgrade that ZIP in Settings -> Plugins
 ```
 

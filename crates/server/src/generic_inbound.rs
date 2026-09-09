@@ -66,7 +66,7 @@ pub async fn route_inbound(
 
     // 2. Branch on group vs DM. The two shapes are similar enough
     //    that one function handles both.
-    let (cid, principal_group_id) = if let Some(gid) = msg.group_id.as_deref() {
+    let (mut cid, principal_group_id) = if let Some(gid) = msg.group_id.as_deref() {
         resolve_group(
             state,
             channel,
@@ -90,6 +90,10 @@ pub async fn route_inbound(
         )
         .await?
     };
+
+    if let Some(scope) = msg.conversation_scope.as_deref() {
+        cid = merge_scoped_conversation_if_needed(state, &plugin_id, scope, &cid, now)?;
+    }
 
     // 3. Conversation row + binding.
     crate::chats::ensure_conversation_for(&state.db, &cid);
@@ -227,13 +231,21 @@ pub async fn route_inbound(
                 crate::group_addressing::AddressedReason::AttachmentDirected,
             )
         } else {
-            let decision = crate::group_addressing::should_dispatch_to_agent(
-                state,
-                &cid,
-                &msg.text,
-                msg.mention_of_self,
-            )
-            .await;
+            let decision = if msg.conversation_scope.is_some()
+                && looks_like_direct_question(&msg.text)
+            {
+                crate::group_addressing::DispatchDecision::Dispatch(
+                    crate::group_addressing::AddressedReason::TransportMention,
+                )
+            } else {
+                crate::group_addressing::should_dispatch_to_agent(
+                    state,
+                    &cid,
+                    &msg.text,
+                    msg.mention_of_self,
+                )
+                .await
+            };
             match decision {
                 crate::group_addressing::DispatchDecision::Skip => {
                     // Persist for context; skip dispatch.
@@ -293,6 +305,60 @@ pub async fn route_inbound(
     Ok(RouteOutcome::Dispatched)
 }
 
+fn merge_scoped_conversation_if_needed(
+    state: &AppState,
+    plugin_id: &str,
+    scope: &str,
+    current_cid: &ConversationId,
+    now: i64,
+) -> Result<ConversationId, HostCapError> {
+    if crate::chats::has_non_whatsapp_activity(state, current_cid) {
+        return Ok(current_cid.clone());
+    }
+
+    let summaries = execlaw_core::conversation::ConversationStore::new(&state.db)
+        .list_thread_summaries()
+        .map_err(|e| HostCapError::new(format!("list active conversations: {e}")))?;
+    let target = summaries.into_iter().find(|summary| {
+        !summary.is_pinned
+            && !summary.is_ephemeral
+            && !summary.conversation_id.as_str().starts_with("controller-thread:")
+            && summary.conversation_id != *current_cid
+            && crate::chats::has_non_whatsapp_activity(state, &summary.conversation_id)
+    });
+    let Some(target) = target else {
+        return Ok(current_cid.clone());
+    };
+
+    let store = execlaw_core::transport_conversations::TransportConversationStore::new(&state.db);
+    let moved = store
+        .retarget_current(plugin_id, scope, scope, &target.conversation_id, now)
+        .map_err(|e| HostCapError::new(format!("retarget scoped conversation: {e}")))?;
+    if moved {
+        tracing::info!(
+            target: "generic_inbound",
+            from = %current_cid,
+            to = %target.conversation_id,
+            scope,
+            "merged scoped transport into active conversation"
+        );
+        Ok(target.conversation_id)
+    } else {
+        Ok(current_cid.clone())
+    }
+}
+
+fn looks_like_direct_question(text: &str) -> bool {
+    let normalized = text.trim().to_ascii_lowercase();
+    normalized.ends_with('?')
+        || [
+            "who ", "what ", "when ", "where ", "why ", "how ", "can ", "could ",
+            "would ", "should ", "is ", "are ", "do ", "does ", "did ",
+        ]
+        .iter()
+        .any(|prefix| normalized.starts_with(prefix))
+}
+
 fn enqueue_triggered_agents(
     state: &AppState,
     channel: &str,
@@ -304,7 +370,7 @@ fn enqueue_triggered_agents(
     let agents = store.list().map_err(|e| e.to_string())?;
     let mut queued = false;
     for agent in agents.into_iter().filter(|agent| agent.enabled && !agent.paused) {
-        if !trigger_matches(&agent.trigger, channel, &msg.text) {
+        if !trigger_matches(&agent.trigger, channel, msg.group_id.as_deref(), &msg.text) {
             continue;
         }
         let envelope = serde_json::json!({
@@ -327,9 +393,22 @@ fn enqueue_triggered_agents(
     Ok(())
 }
 
-fn trigger_matches(trigger: &serde_json::Value, channel: &str, text: &str) -> bool {
+fn trigger_matches(
+    trigger: &serde_json::Value,
+    channel: &str,
+    group_id: Option<&str>,
+    text: &str,
+) -> bool {
     let configured_channel = trigger.get("channel").and_then(|v| v.as_str());
     if configured_channel.is_some_and(|value| !value.eq_ignore_ascii_case(channel)) {
+        return false;
+    }
+    if trigger
+        .get("group_only")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && group_id.is_none()
+    {
         return false;
     }
     let Some(keywords) = trigger.get("keywords").and_then(|v| v.as_array()) else {
@@ -491,15 +570,54 @@ mod tests {
             "channel": "whatsapp",
             "keywords": ["camper", "camper van", "motorhome"]
         });
-        assert!(trigger_matches(&trigger, "WhatsApp", "Do you rent a CAMPER van?"));
-        assert!(!trigger_matches(&trigger, "signal", "Do you rent a camper?"));
-        assert!(!trigger_matches(&trigger, "whatsapp", "Can you help with a boat?"));
+        assert!(trigger_matches(&trigger, "WhatsApp", None, "Do you rent a CAMPER van?"));
+        assert!(!trigger_matches(&trigger, "signal", None, "Do you rent a camper?"));
+        assert!(!trigger_matches(&trigger, "whatsapp", None, "Can you help with a boat?"));
     }
 
     #[test]
     fn channel_only_trigger_matches_without_keywords() {
         let trigger = json!({"channel": "whatsapp"});
-        assert!(trigger_matches(&trigger, "whatsapp", "hello"));
-        assert!(!trigger_matches(&trigger, "signal", "hello"));
+        assert!(trigger_matches(&trigger, "whatsapp", None, "hello"));
+        assert!(!trigger_matches(&trigger, "signal", None, "hello"));
+    }
+
+    #[test]
+    fn group_only_trigger_ignores_matching_direct_messages() {
+        let trigger = json!({
+            "channel": "whatsapp",
+            "group_only": true,
+            "keywords": ["camper"]
+        });
+
+        assert!(!trigger_matches(&trigger, "whatsapp", None, "Camper available?"));
+        assert!(trigger_matches(
+            &trigger,
+            "whatsapp",
+            Some("group-123"),
+            "Camper available?"
+        ));
+    }
+
+    #[test]
+    fn group_only_trigger_still_requires_channel_and_keyword() {
+        let trigger = json!({
+            "channel": "whatsapp",
+            "group_only": true,
+            "keywords": ["camper"]
+        });
+
+        assert!(!trigger_matches(
+            &trigger,
+            "signal",
+            Some("group-123"),
+            "Camper available?"
+        ));
+        assert!(!trigger_matches(
+            &trigger,
+            "whatsapp",
+            Some("group-123"),
+            "What time is dinner?"
+        ));
     }
 }

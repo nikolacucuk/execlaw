@@ -396,14 +396,9 @@ fn on_webhook_event(args) {
     } catch (e) {
         log_warn("whatsapp: host_route_inbound_spawn rejected: " + e);
     }
-    // Read receipt is also fire-and-forget — but it's a quick
-    // round-trip to the local sidecar (~100ms), well inside the
-    // 30s timeout, so we don't need to spawn it.
-    try {
-        mark_inbound_read(event_map);
-    } catch (e) {
-        log_warn("whatsapp: markread failed: " + e);
-    }
+    // Do not acknowledge the message as read here. The operator needs
+    // WhatsApp itself to retain the unread state until they choose to
+    // read it in WhatsApp; execlaw tracks its own local unread badge too.
     #{ "ok": true }
 }
 

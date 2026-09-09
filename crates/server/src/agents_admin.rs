@@ -236,6 +236,7 @@ async fn import_markdown(
                 trigger: serde_json::json!({
                     "channel": "whatsapp",
                     "keywords": keywords,
+                    "group_only": id == "camper_wha",
                     "event_only": event_only,
                 }),
                 reply_mode: "draft".into(),

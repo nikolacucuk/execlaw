@@ -578,7 +578,12 @@ export function Chat() {
                             .then((r) => setMessages(cid, r.messages))
                             .catch(() => {});
                     }
-                    if (cid !== activeId) {
+                    const thread = getChatState().threads.find(
+                        (candidate) => candidate.conversation_id === cid,
+                    );
+                    const isWhatsAppThread =
+                        thread?.transport_channel === "whatsapp";
+                    if (cid !== activeId || isWhatsAppThread) {
                         markUnread(cid);
                     }
                 }

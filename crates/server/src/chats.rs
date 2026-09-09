@@ -68,6 +68,19 @@ pub(crate) use helpers::{
     event_log, fallback_title_from_user_text, leading_sentences, refresh_conversation_kind,
     resolve_skill_prepend, rewrite_url_for_container, sanitize_generated_title,
 };
+
+/// Returns whether a conversation already contains activity that did not
+/// originate on WhatsApp. Used to migrate the old dedicated WhatsApp thread
+/// into the operator's existing active execlaw thread exactly once.
+pub(crate) fn has_non_whatsapp_activity(state: &AppState, cid: &ConversationId) -> bool {
+    let Ok(events) = event_log(state).replay_since(cid, EventSeq(0)) else {
+        return false;
+    };
+    events.iter().any(|event| {
+        matches!(event.kind, EventKind::UserMsg | EventKind::ModelTurn)
+            && extract_channel_origin(event).as_deref() != Some("whatsapp")
+    })
+}
 // `rewrite_url_with_alias` is consumed by this file's in-line test
 // module via `super::rewrite_url_with_alias(...)`. Gated to test
 // builds so the lib build path sees zero unused-import warnings.

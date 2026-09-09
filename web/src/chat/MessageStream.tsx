@@ -422,6 +422,7 @@ function MessageBubble({
             ? ` · ${message.actor}`
             : "";
     const isUserMessage = message.kind === "user_msg";
+    const isWhatsAppMessage = channelOrigin === "whatsapp";
     const timestamp = formatMessageTimestamp(message.committed_at);
 
     let metaText = role + actorSuffix;
@@ -457,6 +458,7 @@ function MessageBubble({
                 className={
                     "execlaw-msg__bubble" +
                     (isUserMessage ? " is-user" : "") +
+                    (isWhatsAppMessage ? " is-whatsapp" : "") +
                     (isToolKind(message.kind) ? " is-tool" : "") +
                     (ChatComponentRenderer ? " is-rich-component" : "")
                 }
@@ -569,13 +571,26 @@ function readChannelOrigin(m: MessageView): ChannelOrigin {
     // (signal / email / voice / sms). Web-originated turns leave it
     // absent; the SPA defaults to "web" and shows no icon.
     const raw = (m as MessageView & { channel_origin?: unknown }).channel_origin;
-    if (raw === "signal" || raw === "email" || raw === "voice" || raw === "sms") {
-        return raw;
+    const origin: string = typeof raw === "string" ? raw : "";
+    if (
+        origin === "signal" ||
+        origin === "email" ||
+        origin === "voice" ||
+        origin === "sms" ||
+        origin === "whatsapp"
+    ) {
+        return origin;
     }
     return "web";
 }
 
-type ChannelOrigin = "web" | "signal" | "email" | "voice" | "sms";
+type ChannelOrigin =
+    | "web"
+    | "signal"
+    | "email"
+    | "voice"
+    | "sms"
+    | "whatsapp";
 
 function ChannelOriginIcon({ origin }: { origin: ChannelOrigin }) {
     return (

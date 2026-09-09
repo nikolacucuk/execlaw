@@ -990,6 +990,14 @@ body {
         max-width: 75%;
     }
 
+    // WhatsApp inbound messages retain a calm green tint so they are
+    // visually distinct from messages typed in the execlaw composer.
+    &.is-whatsapp {
+        background-color: rgba(94, 180, 112, 0.18);
+        border: 1px solid rgba(72, 150, 88, 0.28);
+        padding: 0.7rem 0.9rem;
+    }
+
     &.is-tool {
         font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
         font-size: 0.8rem;
