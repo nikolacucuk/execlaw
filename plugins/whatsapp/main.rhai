@@ -639,6 +639,7 @@ fn decode_event_map(env) {
         return #{
             "channel": "whatsapp",
             "reuse_conversation": true,
+            "conversation_scope": "whatsapp",
             "native_id": native_id,
             "display_name": info.PushName,
             "group_id": group_id,

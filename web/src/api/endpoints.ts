@@ -247,6 +247,18 @@ export async function listMessages(
     return apiFetch<MessagesListResponse>(path, {}, tokenAccessor);
 }
 
+export async function sendTransportReply(
+    conversationId: string,
+    text: string,
+    tokenAccessor: () => string | null,
+): Promise<{ sent: boolean; channel: string }> {
+    return apiFetch<{ sent: boolean; channel: string }>(
+        `/api/chats/${encodeURIComponent(conversationId)}/transport-reply`,
+        { method: "POST", body: { text } },
+        tokenAccessor,
+    );
+}
+
 /// Card-history projection for a conversation. The chat-pane
 /// fetches this on thread load (alongside `listMessages`) and
 /// seeds `cardStore` so a page refresh re-hydrates inline cards

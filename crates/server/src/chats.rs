@@ -26,6 +26,7 @@ use execlaw_core::ids::{ConversationId, EventSeq};
 use execlaw_core::principal::{Principal, PrincipalStore, TrustLevel as CoreTrustLevel};
 use execlaw_inference_api::ModelId;
 use execlaw_policy::trust::{TrustLevel, TurnPolicyInput, evaluate_turn};
+use serde::Deserialize;
 use std::sync::Arc;
 
 use crate::events::UiEvent;
@@ -3947,6 +3948,96 @@ pub async fn stop_turn(
         })),
     )
         .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SendTransportReplyRequest {
+    pub text: String,
+}
+
+/// `POST /api/chats/:id/transport-reply` sends a reviewed assistant reply
+/// verbatim through the conversation's originating transport.
+pub async fn send_transport_reply(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<SendTransportReplyRequest>,
+) -> impl IntoResponse {
+    let text = req.text.trim();
+    if text.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "text must not be empty"})),
+        )
+            .into_response();
+    }
+    let cid = ConversationId::from(conversation_id.as_str());
+    match send_transport_text(&state, &cid, text).await {
+        Ok(channel) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"sent": true, "channel": channel})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response(),
+    }
+}
+
+async fn send_transport_text(
+    state: &AppState,
+    cid: &ConversationId,
+    text: &str,
+) -> Result<String, String> {
+    use execlaw_core::principal_groups::PrincipalGroupStore;
+    use execlaw_core::transport_bindings::TransportBindingStore;
+
+    let pg_id = PrincipalGroupStore::new(&state.db)
+        .principal_group_id_for(cid.as_str())
+        .map_err(|e| format!("conversation binding lookup: {e}"))?
+        .ok_or_else(|| "conversation has no transport binding".to_owned())?;
+    let bindings = TransportBindingStore::new(&state.db)
+        .bindings_for_group_any_channel(&pg_id)
+        .map_err(|e| format!("transport binding lookup: {e}"))?;
+    // A transport-wide conversation can have one binding per contact or
+    // group. Use the most recently active WhatsApp binding so review mode
+    // replies go to the inbound source that most recently updated the thread.
+    let Some(latest_whatsapp) = bindings
+        .iter()
+        .filter(|binding| binding.channel == "whatsapp")
+        .max_by_key(|binding| {
+            (
+                binding.last_seen_at.unwrap_or(binding.created_at),
+                binding.created_at,
+            )
+        })
+    else {
+        return Err("conversation has no WhatsApp binding".to_owned());
+    };
+    let resolved = state
+        .host_transports
+        .lookup_first_supported_binding(std::slice::from_ref(latest_whatsapp))
+        .ok_or_else(|| "no installed transport can send this conversation".to_owned())?;
+    let channel = resolved.channel.clone();
+    let tool_name = format!("{channel}.send_message");
+    state
+        .plugin_host
+        .call_tool(
+            &tool_name,
+            serde_json::json!({"to": resolved.foreign_id, "text": text}),
+            &["*"],
+            Some("Controller"),
+        )
+        .await
+        .map_err(|e| format!("send via {tool_name}: {e}"))?;
+    tracing::info!(
+        target: "chats::send_transport_text",
+        conversation_id = %cid.as_str(),
+        channel = %channel,
+        "reviewed transport reply sent"
+    );
+    Ok(channel)
 }
 
 /// `GET /api/chats/:id/messages?before=0&limit=200`

@@ -89,6 +89,8 @@ function formatBytes(n: number): string {
 
 interface Props {
     conversationId: string;
+    transportChannel?: string | null;
+    onSendTransportReply?: (text: string) => Promise<void>;
     /**
      * 2026-05-16 — when false, `tool_use` / `tool_result` messages
      * are filtered out of the stream entirely (not just hidden via
@@ -112,7 +114,12 @@ type StreamItem =
     | { kind: "message"; message: MessageView; sortKey: number }
     | { kind: "card"; card: Card; sortKey: number };
 
-export function MessageStream({ conversationId, showToolResults = true }: Props) {
+export function MessageStream({
+    conversationId,
+    showToolResults = true,
+    transportChannel,
+    onSendTransportReply,
+}: Props) {
     const messages = useChatState(
         (s) => s.messages[conversationId] ?? null,
     );
@@ -160,6 +167,11 @@ export function MessageStream({ conversationId, showToolResults = true }: Props)
     }, [messages, cards, showToolResults]);
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const [isAtBottom, setIsAtBottom] = useState(true);
+    const [sendingReplySeq, setSendingReplySeq] = useState<number | null>(null);
+    const [sentReplySeq, setSentReplySeq] = useState<number | null>(null);
+    const latestModelSeq = [...(messages ?? [])]
+        .reverse()
+        .find((m) => m.kind === "model_turn")?.seq;
 
     // Auto-stick to the bottom only when the operator is already
     // there. Mid-history scroll-up means "I'm reading older content,
@@ -241,6 +253,24 @@ export function MessageStream({ conversationId, showToolResults = true }: Props)
                             <MessageBubble
                                 key={`msg-${m.kind}-${m.seq}`}
                                 message={m}
+                                showTransportSend={
+                                    transportChannel === "whatsapp" &&
+                                    m.kind === "model_turn" &&
+                                    m.seq === latestModelSeq &&
+                                    m.seq !== sentReplySeq &&
+                                    !!onSendTransportReply
+                                }
+                                transportSendBusy={sendingReplySeq === m.seq}
+                                onSendTransportReply={async () => {
+                                    if (!onSendTransportReply) return;
+                                    setSendingReplySeq(m.seq);
+                                    try {
+                                        await onSendTransportReply(m.text);
+                                        setSentReplySeq(m.seq);
+                                    } finally {
+                                        setSendingReplySeq(null);
+                                    }
+                                }}
                             />
                         );
                     }
@@ -319,7 +349,17 @@ export function formatMessageTimestamp(unixSeconds: number): string {
     }).format(d);
 }
 
-function MessageBubble({ message }: { message: MessageView }) {
+function MessageBubble({
+    message,
+    showTransportSend = false,
+    transportSendBusy = false,
+    onSendTransportReply,
+}: {
+    message: MessageView;
+    showTransportSend?: boolean;
+    transportSendBusy?: boolean;
+    onSendTransportReply?: () => Promise<void>;
+}) {
     // 2026-05-15 — read AuthContext directly (not via the `useAuth()`
     // wrapper that throws when there's no provider). MessageStream
     // unit tests render the component in isolation without an
@@ -474,6 +514,18 @@ function MessageBubble({ message }: { message: MessageView }) {
                             </span>
                         ))}
                     </div>
+                )}
+                {showTransportSend && (
+                    <button
+                        type="button"
+                        className="btn btn-sm btn-outline-success mt-3"
+                        disabled={transportSendBusy}
+                        onClick={() => void onSendTransportReply?.()}
+                        data-testid="send-transport-reply"
+                    >
+                        <i className="bi bi-send me-1" aria-hidden />
+                        {transportSendBusy ? "Sending..." : "Send to WhatsApp"}
+                    </button>
                 )}
             </div>
         </div>

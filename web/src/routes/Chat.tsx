@@ -25,6 +25,7 @@ import {
     postGenerateTitle,
     postMessage,
     postStopTurn,
+    sendTransportReply,
     respondApproval,
     type ApprovalVerb,
     type InlineAttachment,
@@ -1379,6 +1380,12 @@ function ActiveThreadPane({
             <MessageStream
                 conversationId={conversationId}
                 showToolResults={toolResultsVisible}
+                transportChannel={thread?.transport_channel ?? null}
+                onSendTransportReply={(text) =>
+                    sendTransportReply(conversationId, text, getToken).then(
+                        () => undefined,
+                    )
+                }
             />
 
             <div className="execlaw-composer" data-flip-id="composer-shell">
@@ -1389,7 +1396,6 @@ function ActiveThreadPane({
                 />
                 <Composer
                     onSend={onSend}
-                    bridgedChannel={thread?.transport_channel ?? null}
                     sendVoiceFrame={sendVoiceFrame}
                     sendVoiceControl={sendVoiceControl}
                     voiceTranscript={voiceTranscript}

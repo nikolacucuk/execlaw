@@ -96,6 +96,9 @@ pub struct InboundMessage {
     /// Reuse the current transport conversation regardless of idle time.
     /// `false` preserves the transport's normal idle-window rotation.
     pub reuse_conversation: bool,
+    /// Optional stable conversation scope for transports that intentionally
+    /// expose one shared operator thread while retaining delivery bindings.
+    pub conversation_scope: Option<String>,
 }
 
 #[derive(Debug, Clone)]

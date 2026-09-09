@@ -67,7 +67,16 @@ pub async fn route_inbound(
     // 2. Branch on group vs DM. The two shapes are similar enough
     //    that one function handles both.
     let (cid, principal_group_id) = if let Some(gid) = msg.group_id.as_deref() {
-        resolve_group(state, channel, gid, &plugin_id, now, msg.reuse_conversation).await?
+        resolve_group(
+            state,
+            channel,
+            gid,
+            &plugin_id,
+            now,
+            msg.reuse_conversation,
+            msg.conversation_scope.as_deref(),
+        )
+        .await?
     } else {
         resolve_dm(
             state,
@@ -77,6 +86,7 @@ pub async fn route_inbound(
             &plugin_id,
             now,
             msg.reuse_conversation,
+            msg.conversation_scope.as_deref(),
         )
         .await?
     };
@@ -338,6 +348,7 @@ async fn resolve_group(
     plugin_id: &str,
     now: i64,
     reuse_conversation: bool,
+    conversation_scope: Option<&str>,
 ) -> Result<(ConversationId, String), HostCapError> {
     let binding_store = TransportBindingStore::new(&state.db);
     let pg_store = PrincipalGroupStore::new(&state.db);
@@ -372,11 +383,13 @@ async fn resolve_group(
         }
     };
     let resolver = ConversationResolver::new(&state.db);
+    let resolver_handle = conversation_scope.unwrap_or(group_id);
+    let resolver_principal = conversation_scope.unwrap_or(group_id);
     let outcome = resolver
         .resolve_or_mint(&ResolveInput {
             plugin_id,
-            transport_handle: group_id,
-            principal_id: group_id,
+            transport_handle: resolver_handle,
+            principal_id: resolver_principal,
             is_controller: false,
             idle_timeout_ms: if reuse_conversation {
                 None
@@ -397,6 +410,7 @@ async fn resolve_dm(
     plugin_id: &str,
     now: i64,
     reuse_conversation: bool,
+    conversation_scope: Option<&str>,
 ) -> Result<(ConversationId, String), HostCapError> {
     let binding_store = TransportBindingStore::new(&state.db);
     let pg_store = PrincipalGroupStore::new(&state.db);
@@ -443,11 +457,17 @@ async fn resolve_dm(
     };
     let is_controller = matches!(sender.trust_level, CoreTrustLevel::Controller);
     let resolver = ConversationResolver::new(&state.db);
+    let resolver_handle = conversation_scope.unwrap_or(native_id);
+    let resolver_principal = if is_controller {
+        sender.id.as_str()
+    } else {
+        conversation_scope.unwrap_or(sender.id.as_str())
+    };
     let outcome = resolver
         .resolve_or_mint(&ResolveInput {
             plugin_id,
-            transport_handle: native_id,
-            principal_id: sender.id.as_str(),
+            transport_handle: resolver_handle,
+            principal_id: resolver_principal,
             is_controller,
             idle_timeout_ms: if reuse_conversation {
                 None

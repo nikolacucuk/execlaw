@@ -2577,6 +2577,7 @@ fn inbound_from_rhai_map(plugin_id: &str, msg: &Map) -> Result<InboundMessage, B
         .get("reuse_conversation")
         .and_then(|v| v.as_bool().ok())
         .unwrap_or(false);
+    let conversation_scope = opt_str("conversation_scope");
 
     let channel = required_str("channel")?;
     let native_id = required_str("native_id")?;
@@ -2627,6 +2628,7 @@ fn inbound_from_rhai_map(plugin_id: &str, msg: &Map) -> Result<InboundMessage, B
         attachments,
         mention_of_self: opt_bool("mention_of_self"),
         reuse_conversation,
+        conversation_scope,
     })
 }
 
