@@ -265,7 +265,7 @@ export function MessageStream({
                                     if (!onSendTransportReply) return;
                                     setSendingReplySeq(m.seq);
                                     try {
-                                        await onSendTransportReply(m.text);
+                                        await onSendTransportReply(m.text ?? "");
                                         setSentReplySeq(m.seq);
                                     } finally {
                                         setSendingReplySeq(null);

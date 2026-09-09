@@ -279,7 +279,6 @@ interface Props {
 
 export function Composer({
     disabled,
-    bridgedChannel,
     onSend,
     sendVoiceFrame,
     sendVoiceControl,
