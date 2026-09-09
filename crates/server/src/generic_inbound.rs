@@ -341,7 +341,6 @@ fn merge_scoped_conversation_if_needed(
             !summary.is_pinned
                 && !summary.is_ephemeral
                 && !summary.conversation_id.as_str().starts_with("controller-thread:")
-                && summary.conversation_id != *current_cid
         })
         .max_by_key(|summary| summary.last_activity_at);
     let Some(target) = target else {
@@ -478,6 +477,10 @@ async fn resolve_group(
         }
     };
     let resolver = ConversationResolver::new(&state.db);
+    // A transport-wide scope intentionally overrides the sender/group key.
+    // WhatsApp supplies `conversation_scope = "whatsapp"`, so every direct
+    // contact and group shares one current operator conversation while the
+    // principal-group binding still preserves the real reply destination.
     let resolver_handle = conversation_scope.unwrap_or(group_id);
     let resolver_principal = conversation_scope.unwrap_or(group_id);
     let outcome = resolver
@@ -552,6 +555,8 @@ async fn resolve_dm(
     };
     let is_controller = matches!(sender.trust_level, CoreTrustLevel::Controller);
     let resolver = ConversationResolver::new(&state.db);
+    // Keep the resolver key transport-scoped rather than contact-scoped
+    // when the plugin declares a shared operator conversation.
     let resolver_handle = conversation_scope.unwrap_or(native_id);
     let resolver_principal = if is_controller {
         sender.id.as_str()

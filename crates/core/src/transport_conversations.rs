@@ -505,6 +505,37 @@ mod tests {
     }
 
     #[test]
+    fn shared_transport_scope_converges_different_whatsapp_sources() {
+        let db = fresh_db();
+        let resolver = ConversationResolver::new(&db);
+        let first = resolver
+            .resolve_or_mint(&ResolveInput {
+                plugin_id: "plugin-whatsapp",
+                transport_handle: "whatsapp",
+                principal_id: "whatsapp",
+                is_controller: false,
+                idle_timeout_ms: None,
+                now: 100,
+            })
+            .unwrap();
+        // The sender/group identity is retained by the binding layer; the
+        // conversation resolver receives the transport-wide scope for both.
+        let second = resolver
+            .resolve_or_mint(&ResolveInput {
+                plugin_id: "plugin-whatsapp",
+                transport_handle: "whatsapp",
+                principal_id: "whatsapp",
+                is_controller: false,
+                idle_timeout_ms: None,
+                now: 31 * 60,
+            })
+            .unwrap();
+
+        assert_eq!(first.conversation_id(), second.conversation_id());
+        assert!(matches!(second, ResolveOutcome::Continued(_)));
+    }
+
+    #[test]
     fn past_idle_window_rotates_to_fresh_thread_and_retires_old_row() {
         let db = fresh_db();
         let resolver = ConversationResolver::new(&db);

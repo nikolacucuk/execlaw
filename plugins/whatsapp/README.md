@@ -14,7 +14,7 @@ For generic plugin creation and packaging instructions, read
 ## Current version and layout
 
 The current source manifest is `plugins/whatsapp/plugin.toml`. Its plugin id
-is `whatsapp` and its current version is `0.2.10`.
+is `whatsapp` and its current version is `0.2.11`.
 
 ```text
 plugins/whatsapp/
@@ -144,6 +144,13 @@ An event-only agent must not run an interval-based "no new mailbox messages"
 turn. It becomes due only when `generic_inbound::enqueue_triggered_agents`
 receives a matching inbound webhook event. The supervisor wake signal is an
 internal scheduling notification, not a WhatsApp polling mechanism.
+
+## Release 0.2.11: One shared WhatsApp operator thread
+
+This release makes the transport-wide WhatsApp scope explicit in the host
+resolver path and regression-tests convergence across long gaps. Direct
+contacts and groups retain separate transport bindings for reviewed replies,
+but their imported messages use the newest shared execlaw operator chat.
 
 ## Release 0.2.10: WhatsApp routing and review controls
 
