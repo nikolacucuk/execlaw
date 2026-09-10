@@ -842,7 +842,6 @@ async fn run_real_turn(
         sender_principal_id.as_deref(),
         sender_trust.as_str(),
         inbound_channel_origin,
-                transport_recipient,
         caller_timezone,
         group_context.as_ref(),
     );
@@ -2303,7 +2302,7 @@ async fn run_tool_capable_turn(
     spotlight_content: bool,
     planner_executor: bool,
     inbound_channel_origin: Option<&str>,
-    transport_recipient: Option<&str>,
+    _transport_recipient: Option<&str>,
     caller_timezone: Option<&str>,
     group_context: Option<GroupTurnContext>,
     attachment_ids: Vec<String>,
