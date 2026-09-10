@@ -1,7 +1,7 @@
 //! Supervisor for durable always-on child agents.
 
-use crate::inference_resolver::InferenceResolver;
 use crate::events::{EventBus, UiEvent};
+use crate::inference_resolver::InferenceResolver;
 use execlaw_core::Database;
 use execlaw_core::agents::{AgentRow, AgentStore, trigger_is_event_only};
 use execlaw_core::backends::BackendPurpose;
@@ -211,9 +211,11 @@ async fn run_agent(
                 run_id: run_id.clone(),
                 status: "success".into(),
             });
-                for parent_id in messages.iter().filter_map(|m| m.parent_agent_id.as_deref()) {
-                    store.enqueue(parent_id, Some(&agent.id), &text, now).map_err(|e| e.to_string())?;
-                }
+            for parent_id in messages.iter().filter_map(|m| m.parent_agent_id.as_deref()) {
+                store
+                    .enqueue(parent_id, Some(&agent.id), &text, now)
+                    .map_err(|e| e.to_string())?;
+            }
         }
         Ok(Err(error)) => {
             finish_error(&store, &agent, &run_id, format!("inference: {error}"))?;
@@ -225,10 +227,10 @@ async fn run_agent(
         }
         Err(_) => {
             finish_error(
-            &store,
-            &agent,
-            &run_id,
-            "runtime budget exceeded".to_owned(),
+                &store,
+                &agent,
+                &run_id,
+                "runtime budget exceeded".to_owned(),
             )?;
             events.publish(UiEvent::AgentRunChanged {
                 agent_id: agent.id.clone(),
@@ -284,11 +286,8 @@ mod tests {
     async fn supervisor_does_not_claim_future_agent() {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
-        let supervisor = AgentSupervisor::new(
-            db,
-            Arc::new(InferenceResolver::new(None)),
-            EventBus::new(),
-        );
+        let supervisor =
+            AgentSupervisor::new(db, Arc::new(InferenceResolver::new(None)), EventBus::new());
         supervisor.tick_once().await.unwrap();
     }
 }

@@ -197,6 +197,8 @@ export interface MessageView {
         | null;
     /** Human-readable inbound sender, phone, and group context. */
     transport_context?: string | null;
+    /** Durable review decision for a transport-originated model reply. */
+    review_state?: "sent" | "cancelled" | "pending" | null;
     /**
      * 2026-05-15 — image attachments included on a user_msg via the
      * composer's `+` menu. Each entry resolves to a download via
@@ -276,6 +278,19 @@ export async function forceTransportResponse(
     return apiFetch<{ accepted: boolean }>(
         `/api/chats/${encodeURIComponent(conversationId)}/force-transport-response`,
         { method: "POST", body: { source_seq: sourceSeq } },
+        tokenAccessor,
+    );
+}
+
+export async function setTransportReviewDecision(
+    conversationId: string,
+    modelSeq: number,
+    decision: "sent" | "cancelled" | "pending",
+    tokenAccessor: () => string | null,
+): Promise<{ saved: boolean }> {
+    return apiFetch<{ saved: boolean }>(
+        `/api/chats/${encodeURIComponent(conversationId)}/transport-review-decision`,
+        { method: "POST", body: { model_seq: modelSeq, decision } },
         tokenAccessor,
     );
 }
