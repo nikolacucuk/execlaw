@@ -228,6 +228,24 @@ pub async fn route_inbound(
     let attachment_ids: Vec<String> =
         crate::chats::persist_inbound_attachments(state, &cid, channel, &msg.attachments).await;
 
+    if !msg.agent_handling_enabled {
+        if let Err(e) = crate::chats::commit_inbound_user_msg_silently(
+            state,
+            &cid,
+            sender.id.as_str(),
+            &msg.text,
+            channel,
+            attachment_ids,
+        )
+        .await
+        {
+            return Err(HostCapError::new(format!(
+                "persist inbound message with agent handling disabled: {e}"
+            )));
+        }
+        return Ok(RouteOutcome::GroupNotAddressed);
+    }
+
     // 6. Group address filter + group-context resolution. For DMs
     // we leave `group_context = None` and dispatch directly. For
     // groups we consult the addressing classifier; on Skip we
@@ -317,6 +335,7 @@ pub async fn route_inbound(
         trust_flat,
         &msg.text,
         Some(channel),
+        Some(msg.group_id.as_deref().unwrap_or(&msg.native_id)),
         group_context,
         attachment_ids,
     )

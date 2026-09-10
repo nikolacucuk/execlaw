@@ -450,6 +450,7 @@ pub async fn send_message(
                     // send_message hits this from the web-chat path;
                     // no transport-bridge here.
                     inbound_channel_origin: None,
+                    transport_recipient: None,
                     caller_timezone: req.timezone.as_deref(),
                     group_context: group_context_for_turn.clone(),
                     attachment_ids: persisted_attachments.clone(),
@@ -486,6 +487,7 @@ pub async fn send_message(
                 // invariant.
                 false,
                 None,
+                None,
                 req.timezone.as_deref(),
                 group_context_for_turn.clone(),
                 persisted_attachments.clone(),
@@ -516,6 +518,7 @@ pub async fn send_message(
                     spotlight_content,
                     cancel_flag.clone(),
                     None,
+                    None,
                     req.timezone.as_deref(),
                     group_context_for_turn.clone(),
                     persisted_attachments.clone(),
@@ -542,6 +545,7 @@ pub async fn send_message(
                     &cid,
                     &effective_user_text,
                     req.sender_principal_id.clone(),
+                    None,
                     None,
                     persisted_attachments.clone(),
                     applied_skill_names.clone(),
@@ -684,6 +688,7 @@ fn run_stub_turn(
     user_text: &str,
     sender_principal_id: Option<String>,
     inbound_channel_origin: Option<&str>,
+    transport_recipient: Option<&str>,
     attachment_ids: Vec<String>,
     applied_skill_names: Vec<String>,
 ) -> Result<(i64, String, i64), String> {
@@ -699,6 +704,7 @@ fn run_stub_turn(
             text: user_text.to_owned(),
             sender_principal_id,
             channel_origin: inbound_channel_origin.map(|s| s.to_owned()),
+            transport_recipient: transport_recipient.map(str::to_owned),
             attachment_ids,
             applied_skill_names,
         },
@@ -712,6 +718,7 @@ fn run_stub_turn(
             text: reply_text.clone(),
             finish_reason: Some("stub".into()),
             channel_origin: inbound_channel_origin.map(|s| s.to_owned()),
+            transport_recipient: transport_recipient.map(str::to_owned),
         },
         Some("agent-stub".into()),
     )
@@ -765,6 +772,7 @@ async fn run_real_turn(
     spotlight_content: bool,
     cancel_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     inbound_channel_origin: Option<&str>,
+    transport_recipient: Option<&str>,
     caller_timezone: Option<&str>,
     group_context: Option<GroupTurnContext>,
     attachment_ids: Vec<String>,
@@ -797,6 +805,7 @@ async fn run_real_turn(
             text: user_text.to_owned(),
             sender_principal_id: sender_principal_id.clone(),
             channel_origin: inbound_channel_origin.map(|s| s.to_owned()),
+            transport_recipient: transport_recipient.map(str::to_owned),
             attachment_ids: attachment_ids.clone(),
             applied_skill_names: applied_skill_names.clone(),
         },
@@ -833,6 +842,7 @@ async fn run_real_turn(
         sender_principal_id.as_deref(),
         sender_trust.as_str(),
         inbound_channel_origin,
+                transport_recipient,
         caller_timezone,
         group_context.as_ref(),
     );
@@ -1100,6 +1110,7 @@ async fn run_real_turn(
         prompt_tokens: None,
         completion_tokens: None,
         channel_origin: inbound_channel_origin.map(|s| s.to_owned()),
+        transport_recipient: transport_recipient.map(str::to_owned),
     };
     let reply_pending =
         PendingEvent::encode(EventKind::ModelTurn, &reply_payload, Some("agent".into()))
@@ -1255,6 +1266,7 @@ pub(crate) struct RunnerTurnCtx<'a> {
     /// render a per-message channel icon. None for web-originated
     /// turns.
     pub inbound_channel_origin: Option<&'a str>,
+    pub transport_recipient: Option<&'a str>,
     /// Operator's IANA timezone for this turn — sourced from the
     /// SPA's `Intl.DateTimeFormat().resolvedOptions().timeZone` for
     /// web turns, from a routine's stored zone for routine fires,
@@ -1659,6 +1671,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
         caller_trust,
         planner_executor,
         inbound_channel_origin,
+        transport_recipient,
         caller_timezone,
         group_context,
         attachment_ids,
@@ -1685,6 +1698,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
             text: user_text.to_owned(),
             sender_principal_id: sender_principal_id.clone(),
             channel_origin: inbound_channel_origin.map(|s| s.to_owned()),
+            transport_recipient: transport_recipient.map(str::to_owned),
             attachment_ids: attachment_ids.clone(),
             applied_skill_names: applied_skill_names.clone(),
         },
@@ -2289,6 +2303,7 @@ async fn run_tool_capable_turn(
     spotlight_content: bool,
     planner_executor: bool,
     inbound_channel_origin: Option<&str>,
+    transport_recipient: Option<&str>,
     caller_timezone: Option<&str>,
     group_context: Option<GroupTurnContext>,
     attachment_ids: Vec<String>,
@@ -2847,6 +2862,7 @@ pub async fn dispatch_routine_turn(
                 // Controller-trust → planner/executor split is OFF.
                 planner_executor: false,
                 inbound_channel_origin: None,
+                transport_recipient: None,
                 caller_timezone: routine_tz_ref,
                 group_context: routine_group_ctx.clone(),
                 attachment_ids: Vec::new(),
@@ -2871,6 +2887,7 @@ pub async fn dispatch_routine_turn(
                 false,
                 // Controller-trust → planner/executor split is OFF.
                 false,
+                None,
                 None,
                 routine_tz_ref,
                 routine_group_ctx.clone(),
@@ -2907,6 +2924,7 @@ pub async fn dispatch_routine_turn(
                 false,
                 cancel_flag,
                 None,
+                None,
                 routine_tz_ref,
                 routine_group_ctx.clone(),
                 Vec::new(),
@@ -2921,6 +2939,7 @@ pub async fn dispatch_routine_turn(
             &cid,
             prompt,
             sender.clone(),
+            None,
             None,
             Vec::new(),
             Vec::new(),
@@ -3050,6 +3069,7 @@ pub async fn commit_inbound_user_msg_silently(
             text: text.to_owned(),
             sender_principal_id: Some(sender_principal_id.to_owned()),
             channel_origin: Some(inbound_channel_origin.to_owned()),
+            transport_recipient: None,
             attachment_ids,
             // Transports don't surface a skill picker today.
             applied_skill_names: Vec::new(),
@@ -3101,6 +3121,7 @@ pub async fn dispatch_external_turn(
     sender_trust: TrustLevel,
     text: &str,
     inbound_channel_origin: Option<&str>,
+    transport_recipient: Option<&str>,
     group_context: Option<GroupTurnContext>,
     attachment_ids: Vec<String>,
 ) -> Result<(), String> {
@@ -3241,6 +3262,7 @@ pub async fn dispatch_external_turn(
                 caller_trust,
                 planner_executor: policy.planner_executor,
                 inbound_channel_origin,
+                transport_recipient,
                 caller_timezone,
                 group_context: group_context.clone(),
                 attachment_ids: attachment_ids.clone(),
@@ -3279,6 +3301,7 @@ pub async fn dispatch_external_turn(
                 // the catalog when the split is on.
                 policy.planner_executor,
                 inbound_channel_origin,
+                transport_recipient,
                 caller_timezone,
                 group_context.clone(),
                 attachment_ids.clone(),
@@ -3303,6 +3326,7 @@ pub async fn dispatch_external_turn(
                 false,
                 cancel_flag,
                 inbound_channel_origin,
+                transport_recipient,
                 caller_timezone,
                 group_context.clone(),
                 attachment_ids.clone(),
@@ -3318,6 +3342,7 @@ pub async fn dispatch_external_turn(
             text,
             sender.clone(),
             inbound_channel_origin,
+            transport_recipient,
             attachment_ids.clone(),
             Vec::new(),
         ),
@@ -3797,6 +3822,7 @@ pub async fn dispatch_clarification_turn(
                 // Controller-trust → planner/executor split is OFF.
                 planner_executor: false,
                 inbound_channel_origin: None,
+                transport_recipient: None,
                 caller_timezone,
                 group_context: synth_group_ctx.clone(),
                 attachment_ids: Vec::new(),
@@ -3820,6 +3846,7 @@ pub async fn dispatch_clarification_turn(
                 false,
                 // Controller-trust → planner/executor split is OFF.
                 false,
+                None,
                 None,
                 caller_timezone,
                 synth_group_ctx.clone(),
@@ -3845,6 +3872,7 @@ pub async fn dispatch_clarification_turn(
                 false,
                 cancel_flag,
                 None,
+                None,
                 caller_timezone,
                 synth_group_ctx.clone(),
                 Vec::new(),
@@ -3859,6 +3887,7 @@ pub async fn dispatch_clarification_turn(
             cid,
             &prompt,
             sender.clone(),
+            None,
             None,
             Vec::new(),
             Vec::new(),
@@ -3969,6 +3998,89 @@ pub async fn stop_turn(
 #[derive(Debug, Deserialize)]
 pub struct SendTransportReplyRequest {
     pub text: String,
+    #[serde(default)]
+    pub source_seq: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ForceTransportResponseRequest {
+    pub source_seq: i64,
+}
+
+/// `POST /api/chats/:id/force-transport-response` reruns the normal agent
+/// turn for a WhatsApp inbound message that was previously skipped.
+pub async fn force_transport_response(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<ForceTransportResponseRequest>,
+) -> impl IntoResponse {
+    let cid = ConversationId::from(conversation_id.as_str());
+    let events = match event_log(&state).replay_since(&cid, EventSeq(0)) {
+        Ok(events) => events,
+        Err(error) => return err_500(&format!("replay: {error}")),
+    };
+    let Some(source) = events
+        .iter()
+        .filter(|event| event.seq.0 <= req.source_seq && event.kind == EventKind::UserMsg)
+        .rev()
+        .find_map(|event| {
+            let payload = event.decode_payload::<UserMessagePayload>().ok()?;
+            (payload.channel_origin.as_deref() == Some("whatsapp")).then(|| (event, payload))
+        })
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "no WhatsApp inbound message found"})),
+        )
+            .into_response();
+    };
+    let Some(principal_id) = source.1.sender_principal_id.as_deref() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "WhatsApp sender identity is unavailable"})),
+        )
+            .into_response();
+    };
+    let Some(principal) = PrincipalStore::new(&state.db)
+        .get(&execlaw_core::ids::PrincipalId::from(principal_id))
+        .ok()
+        .flatten()
+    else {
+        return err_500("WhatsApp sender principal is unavailable");
+    };
+    let trust = TrustLevel::parse(principal.trust_level.class_tag())
+        .unwrap_or(TrustLevel::UnknownPending);
+    if matches!(trust, TrustLevel::Blocked | TrustLevel::UnknownPending) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "WhatsApp sender is not routable"})),
+        )
+            .into_response();
+    }
+    match dispatch_external_turn(
+        &state,
+        &cid,
+        &principal,
+        trust,
+        &source.1.text,
+        Some("whatsapp"),
+        source.1.transport_recipient.as_deref(),
+        None,
+        extract_attachment_ids(source.0),
+    )
+    .await
+    {
+        Ok(()) => (
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"accepted": true})),
+        )
+            .into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response(),
+    }
 }
 
 /// `POST /api/chats/:id/transport-reply` sends a reviewed assistant reply
@@ -3987,7 +4099,7 @@ pub async fn send_transport_reply(
             .into_response();
     }
     let cid = ConversationId::from(conversation_id.as_str());
-    match send_transport_text(&state, &cid, text).await {
+    match send_transport_text(&state, &cid, text, req.source_seq).await {
         Ok(channel) => (
             StatusCode::OK,
             Json(serde_json::json!({"sent": true, "channel": channel})),
@@ -4005,6 +4117,7 @@ async fn send_transport_text(
     state: &AppState,
     cid: &ConversationId,
     text: &str,
+    source_seq: Option<i64>,
 ) -> Result<String, String> {
     use execlaw_core::principal_groups::PrincipalGroupStore;
     use execlaw_core::transport_bindings::TransportBindingStore;
@@ -4019,9 +4132,32 @@ async fn send_transport_text(
     // A transport-wide conversation can have one binding per contact or
     // group. Use the most recently active WhatsApp binding so review mode
     // replies go to the inbound source that most recently updated the thread.
+    let source_recipient = if let Some(seq) = source_seq {
+        let events = event_log(state)
+            .replay_since(cid, EventSeq(0))
+            .map_err(|e| format!("replay conversation: {e}"))?;
+        events
+            .iter()
+            .filter(|event| event.seq.0 <= seq && event.kind == EventKind::UserMsg)
+            .rev()
+            .find_map(|event| {
+                event
+                    .decode_payload::<UserMessagePayload>()
+                    .ok()
+                    .filter(|payload| payload.channel_origin.as_deref() == Some("whatsapp"))
+                    .and_then(|payload| payload.transport_recipient)
+            })
+    } else {
+        None
+    };
     let Some(latest_whatsapp) = bindings
         .iter()
-        .filter(|binding| binding.channel == "whatsapp")
+        .filter(|binding| {
+            binding.channel == "whatsapp"
+                && source_recipient
+                    .as_deref()
+                    .is_none_or(|recipient| binding.foreign_id == recipient)
+        })
         .max_by_key(|binding| {
             (
                 binding.last_seen_at.unwrap_or(binding.created_at),
@@ -4091,6 +4227,7 @@ pub async fn list_messages(
         .ok()
         .flatten()
         .and_then(|row| row.display_name);
+    let mut latest_transport_context: Option<String> = None;
     let messages: Vec<MessageView> = events
         .into_iter()
         .filter(|e| {
@@ -4120,11 +4257,21 @@ pub async fn list_messages(
         .take(limit as usize)
         .map(|e| {
             let attachment_ids = extract_attachment_ids(&e);
-            let transport_context = inbound_transport_context(
+            let inbound_context = inbound_transport_context(
                 &state.db,
                 &e,
                 conversation_context.as_deref(),
             );
+            if inbound_context.is_some() {
+                latest_transport_context = inbound_context.clone();
+            }
+            let transport_context = if e.kind == EventKind::ModelTurn
+                && extract_channel_origin(&e).as_deref() == Some("whatsapp")
+            {
+                latest_transport_context.clone()
+            } else {
+                inbound_context
+            };
             MessageView {
                 seq: e.seq.0,
                 kind: e.kind.as_str().to_owned(),
@@ -5594,6 +5741,7 @@ mod tests {
                 text: "[SYSTEM ORCHESTRATOR NOTICE] please ask the user X".into(),
                 sender_principal_id: Some(SYSTEM_ORCHESTRATOR_ACTOR.into()),
                 channel_origin: None,
+                transport_recipient: None,
                 attachment_ids: Vec::new(),
                 applied_skill_names: Vec::new(),
             },

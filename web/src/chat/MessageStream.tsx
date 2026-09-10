@@ -89,7 +89,8 @@ function formatBytes(n: number): string {
 
 interface Props {
     conversationId: string;
-    onSendTransportReply?: (text: string) => Promise<void>;
+    onSendTransportReply?: (text: string, sourceSeq: number) => Promise<void>;
+    onForceTransportResponse?: (sourceSeq: number) => Promise<void>;
     /**
      * 2026-05-16 — when false, `tool_use` / `tool_result` messages
      * are filtered out of the stream entirely (not just hidden via
@@ -117,6 +118,7 @@ export function MessageStream({
     conversationId,
     showToolResults = true,
     onSendTransportReply,
+    onForceTransportResponse,
 }: Props) {
     const messages = useChatState(
         (s) => s.messages[conversationId] ?? null,
@@ -166,11 +168,8 @@ export function MessageStream({
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const [isAtBottom, setIsAtBottom] = useState(true);
     const [sendingReplySeq, setSendingReplySeq] = useState<number | null>(null);
-    const [sentReplySeq, setSentReplySeq] = useState<number | null>(null);
-    const [cancelledReplySeq, setCancelledReplySeq] = useState<number | null>(null);
-    const latestModelSeq = [...(messages ?? [])]
-        .reverse()
-        .find((m) => m.kind === "model_turn")?.seq;
+    const [sentReplySeqs, setSentReplySeqs] = useState<number[]>([]);
+    const [cancelledReplySeqs, setCancelledReplySeqs] = useState<number[]>([]);
 
     // Auto-stick to the bottom only when the operator is already
     // there. Mid-history scroll-up means "I'm reading older content,
@@ -202,8 +201,8 @@ export function MessageStream({
     // thread starts in autoscroll mode.
     useEffect(() => {
         setIsAtBottom(true);
-        setSentReplySeq(null);
-        setCancelledReplySeq(null);
+        setSentReplySeqs([]);
+        setCancelledReplySeqs([]);
     }, [conversationId]);
 
     if (messages === null) {
@@ -257,9 +256,8 @@ export function MessageStream({
                                 showTransportSend={
                                     readChannelOrigin(m) === "whatsapp" &&
                                     m.kind === "model_turn" &&
-                                    m.seq === latestModelSeq &&
-                                    m.seq !== sentReplySeq &&
-                                    m.seq !== cancelledReplySeq &&
+                                    !sentReplySeqs.includes(m.seq) &&
+                                    !cancelledReplySeqs.includes(m.seq) &&
                                     !!onSendTransportReply
                                 }
                                 transportSendBusy={sendingReplySeq === m.seq}
@@ -267,15 +265,24 @@ export function MessageStream({
                                     if (!onSendTransportReply) return;
                                     setSendingReplySeq(m.seq);
                                     try {
-                                        await onSendTransportReply(m.text ?? "");
-                                        setSentReplySeq(m.seq);
+                                        await onSendTransportReply(m.text ?? "", m.seq);
+                                        setSentReplySeqs((seqs) => [...seqs, m.seq]);
                                     } finally {
                                         setSendingReplySeq(null);
                                     }
                                 }}
                                 onCancelTransportReply={() =>
-                                    setCancelledReplySeq(m.seq)
+                                    setCancelledReplySeqs((seqs) => [...seqs, m.seq])
                                 }
+                                showForceResponse={
+                                    readChannelOrigin(m) === "whatsapp" &&
+                                    m.kind === "model_turn" &&
+                                    isQuietAgentResponse(m.text) &&
+                                    !!onForceTransportResponse
+                                }
+                                onForceResponse={async () => {
+                                    await onForceTransportResponse?.(m.seq);
+                                }}
                             />
                         );
                     }
@@ -360,12 +367,16 @@ function MessageBubble({
     transportSendBusy = false,
     onSendTransportReply,
     onCancelTransportReply,
+    showForceResponse = false,
+    onForceResponse,
 }: {
     message: MessageView;
     showTransportSend?: boolean;
     transportSendBusy?: boolean;
     onSendTransportReply?: () => Promise<void>;
     onCancelTransportReply?: () => void;
+    showForceResponse?: boolean;
+    onForceResponse?: () => Promise<void>;
 }) {
     // 2026-05-15 — read AuthContext directly (not via the `useAuth()`
     // wrapper that throws when there's no provider). MessageStream
@@ -471,6 +482,7 @@ function MessageBubble({
                 className={
                     "execlaw-msg__bubble" +
                     (isUserMessage ? " is-user" : "") +
+                    (message.kind === "model_turn" ? " is-agent" : "") +
                     (isWhatsAppMessage ? " is-whatsapp" : "") +
                     (isToolKind(message.kind) ? " is-tool" : "") +
                     (ChatComponentRenderer ? " is-rich-component" : "")
@@ -554,8 +566,25 @@ function MessageBubble({
                         </button>
                     </div>
                 )}
+                {showForceResponse && (
+                    <button
+                        type="button"
+                        className="btn btn-sm btn-outline-info mt-3"
+                        onClick={() => void onForceResponse?.()}
+                        data-testid="force-transport-response"
+                    >
+                        <i className="bi bi-arrow-repeat me-1" aria-hidden />
+                        Force response
+                    </button>
+                )}
             </div>
         </div>
+    );
+}
+
+function isQuietAgentResponse(text: string | null): boolean {
+    return /\b(stay quiet|not directed at me|no response needed|won't respond|will not respond)\b/i.test(
+        text ?? "",
     );
 }
 

@@ -99,6 +99,9 @@ pub struct InboundMessage {
     /// Optional stable conversation scope for transports that intentionally
     /// expose one shared operator thread while retaining delivery bindings.
     pub conversation_scope: Option<String>,
+    /// Whether this inbound message may trigger matching agents or an LLM
+    /// turn. Missing plugin fields default to true for compatibility.
+    pub agent_handling_enabled: bool,
 }
 
 #[derive(Debug, Clone)]

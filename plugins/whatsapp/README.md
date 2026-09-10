@@ -1,9 +1,9 @@
 # WhatsApp Plugin Maintainer Guide
 
-This document is the working guide for future changes to the WhatsApp plugin.
+This document is the working guide for changes to the WhatsApp plugin.
 Read it before modifying, packaging, or releasing `plugins/whatsapp/`. It
-records the current architecture, deployment lessons, and the next requested
-release requirements. It is not an operator guide and does not itself create a
+records the current architecture, deployment lessons, and the implemented
+release behavior. It is not an operator guide and does not itself create a
 new plugin version.
 
 For generic plugin creation and packaging instructions, read
@@ -14,7 +14,7 @@ For generic plugin creation and packaging instructions, read
 ## Current version and layout
 
 The current source manifest is `plugins/whatsapp/plugin.toml`. Its plugin id
-is `whatsapp` and its current version is `0.2.11`.
+is `whatsapp` and its current version is `0.2.13`.
 
 ```text
 plugins/whatsapp/
@@ -112,7 +112,14 @@ The current plugin provides:
   `whatsapp.add_group_members`, and `whatsapp.leave_group`.
 - Inbound read receipts and attachments.
 - `whatsapp.read_history` for WuzAPI-retained direct or group history.
-- Stable direct/group conversation mappings across idle periods.
+- One shared current execlaw operator conversation for all WhatsApp direct and
+  group inbound messages, selected by latest activity.
+- Separate transport bindings for each direct contact and group so a reviewed
+  reply still knows its WhatsApp destination.
+- Per-reply review controls for every pending WhatsApp model response, with
+  each approval routed to the recipient that produced that response.
+- Independent settings for importing messages into execlaw chats and for
+  allowing agent/LLM handling of imported messages.
 - Local SPA unread indicators for imported inbound direct and group messages;
   opening the conversation clears the indicator.
 
@@ -144,6 +151,34 @@ An event-only agent must not run an interval-based "no new mailbox messages"
 turn. It becomes due only when `generic_inbound::enqueue_triggered_agents`
 receives a matching inbound webhook event. The supervisor wake signal is an
 internal scheduling notification, not a WhatsApp polling mechanism.
+
+## Release 0.2.13: Per-reply WhatsApp approval
+
+Every WhatsApp-originated model response in the shared execlaw chat now has
+its own **Send to WhatsApp** and **Cancel reply** controls. Approving one
+response does not approve, cancel, or redirect the others. Each inbound event
+stores its originating phone number or group JID, and the reviewed send uses
+that stored recipient rather than the latest binding for the entire shared
+conversation. This supports multiple direct chats and groups arriving at the
+same time.
+
+The recipient metadata is new event data. Older events created before this
+release may fall back to the conversation's latest binding when their original
+recipient was not persisted.
+
+## Release 0.2.12: Separate chat import and agent handling
+
+The WhatsApp settings panel now exposes two independent controls:
+
+- **Show new WhatsApp messages in execlaw chats** controls whether inbound
+  messages are imported at all.
+- **Enable agent handling of new WhatsApp messages** controls matching-agent
+  triggers and general LLM turns. When disabled, messages remain visible in
+  execlaw but no agent or LLM response is generated.
+
+The existing `inbound_import_enabled` setting remains the chat-import key for
+backward compatibility. The new `inbound_agent_handling_enabled` setting
+defaults to enabled when absent.
 
 ## Release 0.2.11: One shared WhatsApp operator thread
 
@@ -182,7 +217,7 @@ The normal execlaw composer remains available in the thread. In review mode,
 the latest agent response also has a **Send to WhatsApp** action; it sends the
 visible response verbatim and does not start another agent turn.
 
-## Release 0.2.7: unread visibility and stable conversations
+## Release 0.2.7: unread visibility and shared-thread foundations
 
 This release addresses the two user-facing requirements below. The unread state
 remains local to the SPA, following the existing `has_unread` convention; it is
@@ -191,7 +226,7 @@ not a WhatsApp read receipt and does not send anything back to WhatsApp.
 ### 1. Mark imported WhatsApp conversations unread
 
 When an enabled inbound WhatsApp message arrives and execlaw persists it, the
-matching group or direct-message conversation becomes unread in the SPA.
+shared WhatsApp operator conversation becomes unread in the SPA.
 The Controller must be able to see that a message arrived and open the relevant
 chat to read it.
 
@@ -214,34 +249,38 @@ new table or ad hoc browser-only state. The inbound owning path is
 is under `crates/server/src/chats.rs`; the SPA chat/sidebar behavior is under
 `web/src/`. Add backend and frontend tests for the full inbound-to-unread path.
 
-### 2. Reuse one active execlaw conversation per WhatsApp chat
+### 2. Reuse one active execlaw conversation for WhatsApp
 
-New WhatsApp messages for the same direct contact or the same WhatsApp group
-must continue in the existing current execlaw conversation. They must not mint
-a new visible chat merely because time has passed.
+New WhatsApp messages from any direct contact or group continue in the shared
+current execlaw operator conversation. They must not mint a new visible chat
+merely because the sender, group, or idle time changed.
 
-The current cause is `ConversationResolver::resolve_or_mint` in
-`crates/core/src/transport_conversations.rs`: it rotates non-controller
-transport conversations after the supplied idle window. The WhatsApp inbound
-path currently supplies a 30-minute idle timeout in
-`crates/server/src/generic_inbound.rs` for both direct messages and groups.
-This creates a new conversation after a period of inactivity.
+The generic `ConversationResolver::resolve_or_mint` in
+`crates/core/src/transport_conversations.rs` still supports idle rotation for
+ordinary transports. WhatsApp avoids that rotation by supplying the shared
+transport scope with no idle timeout, then retargets that scope to the newest
+eligible active operator chat.
 
 Required behavior for WhatsApp:
 
-- Resolve direct messages by the stable WhatsApp contact identity and groups by
-  their stable `@g.us` group JID.
-- Continue the current mapped conversation regardless of idle time, unless the
-  Controller explicitly starts/archives/rotates a conversation through a future
-  deliberate user action.
+- Resolve the shared operator conversation through the transport-wide
+  `conversation_scope = "whatsapp"` key and continue it regardless of idle
+  time, unless the Controller explicitly starts/archives/rotates a
+  conversation through a future deliberate user action.
+- Preserve the stable contact or `@g.us` group identity in the transport
+  binding used for reply delivery; the binding is not the execlaw chat key.
 - Update `last_message_at` and the conversation's activity timestamp so the
   continued conversation is the newest visible chat.
 - Preserve existing idle-window rotation for other transports unless their own
   contract explicitly changes.
-- Do not merge different contacts or different groups into one conversation.
+- Do not merge different contacts or different groups at the transport-binding
+  layer. Their inbound transcript events may share the operator conversation,
+  but reviewed replies remain scoped to the latest inbound destination.
 - Keep the Controller's fixed controller thread behavior intact.
 
-Prefer a transport-level configuration or an explicit resolver input such as
+The shared behavior is implemented through the transport-level scope and an
+explicit resolver input rather than a per-contact special case. Prefer this
+kind of transport-level configuration or resolver input such as
 "no idle rotation" over a hardcoded `if channel == "whatsapp"` branch in
 shared host code. The host must remain plugin-generic. A manifest-declared
 transport setting, propagated into generic inbound routing, is the preferred
@@ -249,17 +288,18 @@ architecture if the manifest schema supports an additive field.
 
 Add regression tests that prove:
 
-1. Two WhatsApp messages from the same direct contact more than 30 minutes
-   apart use the same conversation ID.
-2. Two messages to the same WhatsApp group more than 30 minutes apart use the
-   same conversation ID.
-3. A different contact and a different group receive distinct conversation IDs.
+1. Two WhatsApp messages from different direct contacts use the shared
+  conversation scope.
+2. Messages from direct contacts and groups use the same shared operator
+  conversation after latest-active-chat retargeting.
+3. The stable contact and group bindings remain distinct for reviewed reply
+  delivery.
 4. The continued conversation becomes unread and is surfaced as current in the
    operator chat UI after each inbound message.
 5. The inbound import toggle disables both the conversation event and agent
    trigger without causing WuzAPI retries.
 
-## Future release procedure
+## Release procedure
 
 Use this process for every WhatsApp plugin release, including the requested
 unread/stable-conversation work.

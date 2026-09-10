@@ -15,7 +15,7 @@ Relationship to other docs:
 
 > _"Every extension is a plugin."_ — Architecture principle #6.
 
-A plugin is a ZIP bundle the operator uploads to a running execlaw control plane. It declares (via TOML manifest) a set of capabilities the host should mount: agent-callable tools, sidecar containers, admin/webhook HTTP routes, identity providers, OAuth client metadata, skills, alert sources, transport bindings, UI panels. The host registers everything the manifest declares atomically at install time and unwires it atomically at uninstall. **No host code change is required to add, upgrade, or remove a plugin** — that's the architectural contract.
+A plugin is a ZIP bundle the operator uploads to a running execlaw control plane. It declares (via TOML manifest) a set of capabilities the host should mount: agent-callable tools, sidecar containers, admin/webhook HTTP routes, identity providers, OAuth client metadata, skills, alert sources, transport bindings, UI panels. The host registers everything the manifest declares atomically at install time and unwires it atomically at uninstall. **No host code change is required to add, upgrade, or remove a plugin's manifest-declared capabilities** — that's the architectural contract. Host changes are still required when changing shared behavior such as transport routing, event projection, or policy semantics.
 
 A plugin's runtime behaviour is one of two tiers (`crates/plugin-sdk/src/manifest.rs:535-591`):
 
@@ -753,7 +753,43 @@ The dev loop for a plugin author:
 No execlaw restart. No SPA rebuild. Backend `main.rhai` changes
 work the same way — repackage + reinstall picks them up live.
 
-### 11.6 What the SPA host owns vs. what your panel owns
+### 11.6 Host-owned transport behavior
+
+Plugin bundles own their declared transport handlers, webhook decoding, tools,
+and settings panels. The control plane owns cross-plugin behavior such as
+conversation resolution, shared operator threads, event-log projections,
+trust gates, and review-send routing. A plugin ZIP cannot update those Rust
+paths.
+
+WhatsApp `0.2.11` declares the transport-wide
+`conversation_scope = "whatsapp"`. The host uses that scope to place all
+WhatsApp inbound events in the newest eligible active execlaw conversation.
+The per-contact and per-group transport bindings remain separate so a review
+action can send to the correct WhatsApp destination. Deploying this behavior
+requires both a rebuilt control-plane image and the matching
+`whatsapp-0.2.11.zip` bundle. Reinstalling the ZIP alone does not update host
+Rust behavior.
+
+WhatsApp `0.2.12` adds two independent settings in its dynamic panel:
+
+- **Show new WhatsApp messages in execlaw chats** (`inbound_import_enabled`):
+  when disabled, the webhook acknowledges messages but does not import or
+  process them.
+- **Enable agent handling of new WhatsApp messages**
+  (`inbound_agent_handling_enabled`): when disabled, authenticated messages
+  are still persisted and visible in the shared chat, but matching agents and
+  general LLM turns are not started. The setting defaults to enabled when it
+  has not yet been saved.
+
+WhatsApp `0.2.13` adds per-reply review routing. Every pending
+WhatsApp-originated model response in the shared chat gets independent
+**Send to WhatsApp** and **Cancel reply** actions. The inbound event stores
+the originating phone number or group JID, and the send endpoint receives the
+model event sequence so it can send that specific response to its own
+recipient. Older events without recipient metadata may use the conversation's
+latest binding as a compatibility fallback.
+
+### 11.7 What the SPA host owns vs. what your panel owns
 
 | Owned by host scaffold                                   | Owned by your panel.tsx                            |
 | --------------------------------------------------------- | -------------------------------------------------- |
@@ -767,7 +803,7 @@ If a behaviour you need isn't in this list, propose it on the
 `BridgeApi` interface — adding helpers to the bridge is preferable
 to side-stepping the contract.
 
-### 11.7 Testing
+### 11.8 Testing
 
 Plugin panels are testable in isolation by providing a mock
 `bridge` object that conforms to `BridgeApi`. There's no shared
@@ -775,7 +811,7 @@ Vitest config under `plugins/` yet — drop a `plugins/<id>/ui/__tests__/`
 directory with your own `vitest.config.ts` if/when you want to
 ship tests inside your plugin ZIP.
 
-### 11.8 Common pitfalls
+### 11.9 Common pitfalls
 
 - **Forgetting the `const React = globalThis.execlawHost!.React`** at
   module top. JSX expands to `React.createElement(...)` which expects

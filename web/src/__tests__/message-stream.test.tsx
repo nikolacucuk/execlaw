@@ -115,6 +115,27 @@ describe("MessageStream", () => {
         ).toHaveTextContent("Jovan · +38267123456 · CamperMontenegro");
     });
 
+    it("renders agent replies in cyan and offers a force action for quiet replies", () => {
+        const onForce = vi.fn().mockResolvedValue(undefined);
+        appendMessage("conv-whatsapp-quiet", {
+            ...baseMsg(1, "I'll stay quiet here since this message isn't directed at me.", "model_turn"),
+            channel_origin: "whatsapp",
+        } as never);
+        render(
+            <MessageStream
+                conversationId="conv-whatsapp-quiet"
+                onForceTransportResponse={onForce}
+            />,
+        );
+
+        expect(
+            document.querySelector(".execlaw-msg__bubble.is-agent.is-whatsapp"),
+        ).toBeTruthy();
+        expect(screen.getByTestId("force-transport-response")).toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("force-transport-response"));
+        expect(onForce).toHaveBeenCalledWith(1);
+    });
+
     it("offers send and cancel actions for the latest WhatsApp reply", async () => {
         const onSend = vi.fn().mockResolvedValue(undefined);
         appendMessage("conv-whatsapp-review", {
@@ -156,6 +177,35 @@ describe("MessageStream", () => {
         );
         expect(screen.queryByTestId("send-transport-reply")).toBeNull();
         expect(screen.queryByTestId("cancel-transport-reply")).toBeNull();
+    });
+
+    it("offers independent approval controls for multiple WhatsApp replies", () => {
+        setMessages("conv-many-whatsapp-replies", [
+            {
+                ...baseMsg(1, "first inbound", "user_msg"),
+                channel_origin: "whatsapp",
+            },
+            {
+                ...baseMsg(2, "first draft", "model_turn"),
+                channel_origin: "whatsapp",
+            },
+            {
+                ...baseMsg(3, "second inbound", "user_msg"),
+                channel_origin: "whatsapp",
+            },
+            {
+                ...baseMsg(4, "second draft", "model_turn"),
+                channel_origin: "whatsapp",
+            },
+        ] as never);
+        render(
+            <MessageStream
+                conversationId="conv-many-whatsapp-replies"
+                onSendTransportReply={vi.fn().mockResolvedValue(undefined)}
+            />,
+        );
+        expect(screen.getAllByTestId("send-transport-reply")).toHaveLength(2);
+        expect(screen.getAllByTestId("cancel-transport-reply")).toHaveLength(2);
     });
 
     it("uses bootstrap-icons for non-Signal transports", () => {

@@ -358,6 +358,10 @@ pub(crate) struct UserMessagePayload {
     /// deserialize as `None` and the SPA shows no icon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) channel_origin: Option<String>,
+    /// Foreign transport recipient that produced this inbound message.
+    /// Required for per-message review sends in a shared conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transport_recipient: Option<String>,
     /// 2026-05-15 — IDs into `state_attachments` for image attachments
     /// the operator added via the composer's `+` menu. Backward-
     /// compatible default `Vec::new()` so prior events without the
@@ -388,6 +392,8 @@ pub(crate) struct StubModelTurnPayload {
     /// transport). Same encoding as [`UserMessagePayload::channel_origin`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) channel_origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transport_recipient: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -401,4 +407,6 @@ pub(crate) struct RealModelTurnPayload {
     /// transport). Same encoding as [`UserMessagePayload::channel_origin`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) channel_origin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) transport_recipient: Option<String>,
 }

@@ -313,7 +313,7 @@ fn on_webhook_event(args) {
         log_warn("whatsapp: webhook token mismatch from caller; rejecting");
         return #{ "ok": false, "error": "invalid_token" };
     }
-    if !inbound_import_enabled() {
+    if !inbound_chat_import_enabled() {
         // Keep a successful response so WuzAPI does not retry a deliberately
         // disabled import path. No conversation or agent work is created.
         return #{ "ok": true, "inbound_import_enabled": false };
@@ -402,12 +402,21 @@ fn on_webhook_event(args) {
     #{ "ok": true }
 }
 
-// Default-on operator switch for event-driven inbound import. The setting is
-// read at webhook handling time, so a change takes effect on the next message
-// without waiting for a poll or restarting the plugin.
-fn inbound_import_enabled() {
+// Default-on operator switch for importing messages into execlaw chats.
+fn inbound_chat_import_enabled() {
     try {
         let value = vault_get("inbound_import_enabled");
+        value != "false"
+    } catch (e) {
+        true
+    }
+}
+
+// Independent agent-routing switch. Messages remain visible in execlaw when
+// this is false, but no matching agent or general LLM turn is started.
+fn inbound_agent_handling_enabled() {
+    try {
+        let value = vault_get("inbound_agent_handling_enabled");
         value != "false"
     } catch (e) {
         true
@@ -635,6 +644,7 @@ fn decode_event_map(env) {
             "channel": "whatsapp",
             "reuse_conversation": true,
             "conversation_scope": "whatsapp",
+            "agent_handling_enabled": inbound_agent_handling_enabled(),
             "native_id": native_id,
             "display_name": info.PushName,
             "group_id": group_id,

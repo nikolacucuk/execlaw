@@ -2578,6 +2578,10 @@ fn inbound_from_rhai_map(plugin_id: &str, msg: &Map) -> Result<InboundMessage, B
         .and_then(|v| v.as_bool().ok())
         .unwrap_or(false);
     let conversation_scope = opt_str("conversation_scope");
+    let agent_handling_enabled = msg
+        .get("agent_handling_enabled")
+        .and_then(|v| v.as_bool().ok())
+        .unwrap_or(true);
 
     let channel = required_str("channel")?;
     let native_id = required_str("native_id")?;
@@ -2629,6 +2633,7 @@ fn inbound_from_rhai_map(plugin_id: &str, msg: &Map) -> Result<InboundMessage, B
         mention_of_self: opt_bool("mention_of_self"),
         reuse_conversation,
         conversation_scope,
+        agent_handling_enabled,
     })
 }
 

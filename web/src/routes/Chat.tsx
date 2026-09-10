@@ -26,6 +26,7 @@ import {
     postMessage,
     postStopTurn,
     sendTransportReply,
+    forceTransportResponse,
     respondApproval,
     type ApprovalVerb,
     type InlineAttachment,
@@ -1385,8 +1386,13 @@ function ActiveThreadPane({
             <MessageStream
                 conversationId={conversationId}
                 showToolResults={toolResultsVisible}
-                onSendTransportReply={(text) =>
-                    sendTransportReply(conversationId, text, getToken).then(
+                onSendTransportReply={(text, sourceSeq) =>
+                    sendTransportReply(conversationId, text, sourceSeq, getToken).then(
+                        () => undefined,
+                    )
+                }
+                onForceTransportResponse={(sourceSeq) =>
+                    forceTransportResponse(conversationId, sourceSeq, getToken).then(
                         () => undefined,
                     )
                 }

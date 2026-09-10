@@ -416,6 +416,7 @@ pub async fn respond_handler(
             trust_flat,
             &original_text,
             origin_channel.as_deref(),
+            None,
             replay_group_ctx,
             // Approval-replay paths don't carry attachments — the
             // cold-contact's first message arrived before the
@@ -709,6 +710,7 @@ async fn claim_as_me(
         trust_flat,
         &original_text,
         origin_channel.as_deref(),
+        None,
         claim_group_ctx,
         // claim_as_me replay path doesn't carry attachments — see
         // the comment in the cold-contact branch above.

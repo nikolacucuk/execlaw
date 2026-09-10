@@ -996,12 +996,25 @@ body {
         max-width: 75%;
     }
 
+    // Agent replies use a light cyan tint so they remain easy to scan
+    // alongside WhatsApp's green inbound messages.
+    &.is-agent {
+        background-color: rgba(93, 214, 226, 0.16);
+        border: 1px solid rgba(68, 186, 202, 0.3);
+        padding: 0.7rem 0.9rem;
+    }
+
     // WhatsApp inbound messages retain a calm green tint so they are
     // visually distinct from messages typed in the execlaw composer.
     &.is-whatsapp {
         background-color: rgba(94, 180, 112, 0.18);
         border: 1px solid rgba(72, 150, 88, 0.28);
         padding: 0.7rem 0.9rem;
+    }
+
+    &.is-whatsapp.is-agent {
+        background-color: rgba(93, 214, 226, 0.16);
+        border-color: rgba(68, 186, 202, 0.3);
     }
 
     &.is-tool {

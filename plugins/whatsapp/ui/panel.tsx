@@ -42,7 +42,8 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
     const [replyMode, setReplyMode] = useState<"review" | "automatic">("review");
-    const [inboundImportEnabled, setInboundImportEnabled] = useState(true);
+    const [chatImportEnabled, setChatImportEnabled] = useState(true);
+    const [agentHandlingEnabled, setAgentHandlingEnabled] = useState(true);
 
     const refresh = useCallback(async () => {
         try {
@@ -87,29 +88,35 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
         }
     }, [bridge]);
 
-    const refreshInboundImport = useCallback(async () => {
+    const refreshInboundSettings = useCallback(async () => {
         try {
-            const setting = await bridge.fetchJson<{ value: string }>(
+            const chatSetting = await bridge.fetchJson<{ value: string }>(
                 "GET",
                 "/api/admin/plugins/whatsapp/settings/inbound_import_enabled",
             );
-            setInboundImportEnabled(setting.value !== "false");
+            setChatImportEnabled(chatSetting.value !== "false");
         } catch {
-            // Missing setting keeps the secure, backwards-compatible default:
-            // import every authenticated inbound message.
-            setInboundImportEnabled(true);
+            setChatImportEnabled(true);
+        }
+        try {
+            const agentSetting = await bridge.fetchJson<{ value: string }>(
+                "GET",
+                "/api/admin/plugins/whatsapp/settings/inbound_agent_handling_enabled",
+            );
+            setAgentHandlingEnabled(agentSetting.value !== "false");
+        } catch {
+            setAgentHandlingEnabled(true);
         }
     }, [bridge]);
 
-    const saveInboundImport = useCallback(async (enabled: boolean) => {
+    const saveInboundSetting = useCallback(async (key: string, enabled: boolean) => {
         setBusy(true);
         try {
             await bridge.fetchJson(
                 "PUT",
-                "/api/admin/plugins/whatsapp/settings/inbound_import_enabled",
+                `/api/admin/plugins/whatsapp/settings/${key}`,
                 { value: enabled ? "true" : "false" },
             );
-            setInboundImportEnabled(enabled);
             setError(null);
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -121,12 +128,12 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     useEffect(() => {
         void refresh();
         void refreshReplyMode();
-        void refreshInboundImport();
+        void refreshInboundSettings();
         const id = window.setInterval(() => {
             void refresh();
         }, POLL_INTERVAL_MS);
         return () => window.clearInterval(id);
-    }, [refresh, refreshReplyMode, refreshInboundImport]);
+    }, [refresh, refreshReplyMode, refreshInboundSettings]);
 
     const onUnregister = useCallback(async () => {
         if (
@@ -194,17 +201,33 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                             Button={Button}
                         />
                     )}
-                    <div className="execlaw-card mb-3" data-testid="whatsapp-inbound-import-settings">
-                        <div className="execlaw-card__title mb-2">Inbound message import</div>
+                    <div className="execlaw-card mb-3" data-testid="whatsapp-inbound-settings">
+                        <div className="execlaw-card__title mb-2">WhatsApp inbound handling</div>
+                        <label className="d-flex gap-2 align-items-center small mb-2">
+                            <input
+                                type="checkbox"
+                                checked={chatImportEnabled}
+                                disabled={busy}
+                                onChange={(event) => {
+                                    setChatImportEnabled(event.target.checked);
+                                    void saveInboundSetting("inbound_import_enabled", event.target.checked);
+                                }}
+                                data-testid="whatsapp-chat-import-toggle"
+                            />
+                            <span>Show new WhatsApp messages in execlaw chats</span>
+                        </label>
                         <label className="d-flex gap-2 align-items-center small">
                             <input
                                 type="checkbox"
-                                checked={inboundImportEnabled}
+                                checked={agentHandlingEnabled}
                                 disabled={busy}
-                                onChange={(event) => void saveInboundImport(event.target.checked)}
-                                data-testid="whatsapp-inbound-import-toggle"
+                                onChange={(event) => {
+                                    setAgentHandlingEnabled(event.target.checked);
+                                    void saveInboundSetting("inbound_agent_handling_enabled", event.target.checked);
+                                }}
+                                data-testid="whatsapp-agent-handling-toggle"
                             />
-                            <span>Show new WhatsApp messages in execlaw and trigger matching agents</span>
+                            <span>Enable agent handling of new WhatsApp messages</span>
                         </label>
                     </div>
                     <div className="execlaw-card mb-3" data-testid="whatsapp-reply-settings">

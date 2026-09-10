@@ -884,6 +884,10 @@ pub fn build_router(state: AppState) -> Router {
             post(crate::chats::send_transport_reply),
         )
         .route(
+            "/api/chats/{conversation_id}/force-transport-response",
+            post(crate::chats::force_transport_response),
+        )
+        .route(
             "/api/chats/{conversation_id}/stop",
             post(crate::chats::stop_turn),
         )

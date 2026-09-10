@@ -258,11 +258,24 @@ export async function listMessages(
 export async function sendTransportReply(
     conversationId: string,
     text: string,
+    sourceSeq: number,
     tokenAccessor: () => string | null,
 ): Promise<{ sent: boolean; channel: string }> {
     return apiFetch<{ sent: boolean; channel: string }>(
         `/api/chats/${encodeURIComponent(conversationId)}/transport-reply`,
-        { method: "POST", body: { text } },
+        { method: "POST", body: { text, source_seq: sourceSeq } },
+        tokenAccessor,
+    );
+}
+
+export async function forceTransportResponse(
+    conversationId: string,
+    sourceSeq: number,
+    tokenAccessor: () => string | null,
+): Promise<{ accepted: boolean }> {
+    return apiFetch<{ accepted: boolean }>(
+        `/api/chats/${encodeURIComponent(conversationId)}/force-transport-response`,
+        { method: "POST", body: { source_seq: sourceSeq } },
         tokenAccessor,
     );
 }
