@@ -153,9 +153,17 @@ conversation and wakes matching always-on agents.
 
 The `camper_wha` agent definition at
 [`ai/agents/camper_wha.agent.md`](../ai/agents/camper_wha.agent.md) declares
-`event_only: true`. Once imported through the Agents screen, it runs only when
-a matching WhatsApp camper-related message is received; it does not perform
-scheduled no-message runs. Its response is a draft for Controller review.
+`event_only: true` and `group_only: true`. Once imported through the Agents
+screen, it runs only when a matching WhatsApp camper-related message is
+received in a WhatsApp group; direct chats and unrelated group messages do not
+activate it. It does not perform scheduled no-message runs. Its response is a
+draft for Controller review.
+
+The Agents page is event-driven as well. The controller wakes the agent
+supervisor when a matching webhook or controller mailbox message is enqueued.
+The supervisor publishes `agent_run_changed` WebSocket events for `running`,
+`success`, and `failed` transitions. The page reloads the selected run history
+when those events arrive; it does not poll the agent endpoint.
 
 Disabling **Inbound message import** acknowledges WuzAPI webhook deliveries but
 does not create conversations, display messages, or trigger agents.

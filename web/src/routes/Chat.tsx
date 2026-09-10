@@ -27,6 +27,7 @@ import {
     postStopTurn,
     sendTransportReply,
     forceTransportResponse,
+    setTransportReviewDecision,
     respondApproval,
     type ApprovalVerb,
     type InlineAttachment,
@@ -1395,6 +1396,14 @@ function ActiveThreadPane({
                     forceTransportResponse(conversationId, sourceSeq, getToken).then(
                         () => undefined,
                     )
+                }
+                onSetTransportReviewDecision={(sourceSeq, decision) =>
+                    setTransportReviewDecision(
+                        conversationId,
+                        sourceSeq,
+                        decision,
+                        getToken,
+                    ).then(() => undefined)
                 }
             />
 

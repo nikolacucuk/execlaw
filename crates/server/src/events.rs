@@ -154,6 +154,14 @@ pub enum UiEvent {
         status: String,
     },
 
+    /// A durable child-agent run changed state. The Agents page uses this
+    /// event to rehydrate the selected run list without polling.
+    AgentRunChanged {
+        agent_id: String,
+        run_id: String,
+        status: String,
+    },
+
     // ---- Phase 13.B — voice session lifecycle ----------------
     /// A voice session opened — first frame for the given session
     /// id arrived. Consumed by the SPA to render a "live mic" UX.

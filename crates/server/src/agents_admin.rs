@@ -339,16 +339,16 @@ async fn message(
 ) -> Result<Json<String>, ApiError> {
     controller(&u)?;
     let content = body.get("content").and_then(|v| v.as_str()).unwrap_or("");
-    Ok(Json(
-        AgentStore::new(&s.db)
-            .enqueue(
-                &id,
-                Some("controller"),
-                content,
-                chrono::Utc::now().timestamp(),
-            )
-            .map_err(map)?,
-    ))
+    let message_id = AgentStore::new(&s.db)
+        .enqueue(
+            &id,
+            Some("controller"),
+            content,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(map)?;
+    crate::agent_supervisor::AgentSupervisor::kick_global();
+    Ok(Json(message_id))
 }
 async fn runs(
     State(s): State<AppState>,

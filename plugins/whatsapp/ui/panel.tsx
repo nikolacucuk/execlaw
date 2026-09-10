@@ -44,6 +44,7 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     const [replyMode, setReplyMode] = useState<"review" | "automatic">("review");
     const [chatImportEnabled, setChatImportEnabled] = useState(true);
     const [agentHandlingEnabled, setAgentHandlingEnabled] = useState(true);
+    const [dedicatedChatEnabled, setDedicatedChatEnabled] = useState(false);
 
     const refresh = useCallback(async () => {
         try {
@@ -106,6 +107,15 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
             setAgentHandlingEnabled(agentSetting.value !== "false");
         } catch {
             setAgentHandlingEnabled(true);
+        }
+        try {
+            const dedicatedSetting = await bridge.fetchJson<{ value: string }>(
+                "GET",
+                "/api/admin/plugins/whatsapp/settings/dedicated_chat_enabled",
+            );
+            setDedicatedChatEnabled(dedicatedSetting.value === "true");
+        } catch {
+            setDedicatedChatEnabled(false);
         }
     }, [bridge]);
 
@@ -228,6 +238,19 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                                 data-testid="whatsapp-agent-handling-toggle"
                             />
                             <span>Enable agent handling of new WhatsApp messages</span>
+                        </label>
+                        <label className="d-flex gap-2 align-items-center small mt-2">
+                            <input
+                                type="checkbox"
+                                checked={dedicatedChatEnabled}
+                                disabled={busy}
+                                onChange={(event) => {
+                                    setDedicatedChatEnabled(event.target.checked);
+                                    void saveInboundSetting("dedicated_chat_enabled", event.target.checked);
+                                }}
+                                data-testid="whatsapp-dedicated-chat-toggle"
+                            />
+                            <span>Show WhatsApp messages in a dedicated WhatsApp chat</span>
                         </label>
                     </div>
                     <div className="execlaw-card mb-3" data-testid="whatsapp-reply-settings">

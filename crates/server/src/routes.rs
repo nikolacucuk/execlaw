@@ -888,6 +888,10 @@ pub fn build_router(state: AppState) -> Router {
             post(crate::chats::force_transport_response),
         )
         .route(
+            "/api/chats/{conversation_id}/transport-review-decision",
+            post(crate::chats::set_transport_review_decision),
+        )
+        .route(
             "/api/chats/{conversation_id}/stop",
             post(crate::chats::stop_turn),
         )

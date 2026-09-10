@@ -1,6 +1,7 @@
 //! Supervisor for durable always-on child agents.
 
 use crate::inference_resolver::InferenceResolver;
+use crate::events::{EventBus, UiEvent};
 use execlaw_core::Database;
 use execlaw_core::agents::{AgentRow, AgentStore, trigger_is_event_only};
 use execlaw_core::backends::BackendPurpose;
@@ -19,18 +20,20 @@ static GLOBAL_WAKE: std::sync::OnceLock<Arc<Notify>> = std::sync::OnceLock::new(
 pub struct AgentSupervisor {
     db: Database,
     inference: Arc<InferenceResolver>,
+    events: EventBus,
     wake: Arc<Notify>,
     stop: CancellationToken,
     permits: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 impl AgentSupervisor {
-    pub fn new(db: Database, inference: Arc<InferenceResolver>) -> Self {
+    pub fn new(db: Database, inference: Arc<InferenceResolver>, events: EventBus) -> Self {
         let wake = Arc::new(Notify::new());
         let _ = GLOBAL_WAKE.set(wake.clone());
         Self {
             db,
             inference,
+            events,
             wake,
             stop: CancellationToken::new(),
             permits: Arc::new(Mutex::new(HashMap::new())),
@@ -83,6 +86,7 @@ impl AgentSupervisor {
             let db = self.db.clone();
             let inference = self.inference.clone();
             let permits = self.permits.clone();
+            let events = self.events.clone();
             tokio::spawn(async move {
                 let permit = {
                     let mut all = permits.lock().await;
@@ -92,7 +96,7 @@ impl AgentSupervisor {
                         })
                         .clone()
                 };
-                if let Err(error) = run_agent(db, inference, agent, permit).await {
+                if let Err(error) = run_agent(db, inference, agent, permit, events).await {
                     warn!(%error, "agent run failed");
                 }
             });
@@ -106,6 +110,7 @@ async fn run_agent(
     inference: Arc<InferenceResolver>,
     agent: AgentRow,
     semaphore: Arc<Semaphore>,
+    events: EventBus,
 ) -> Result<(), String> {
     let store = AgentStore::new(&db);
     let claimed = store
@@ -157,6 +162,11 @@ async fn run_agent(
             &serde_json::json!({"mailbox_count": messages.len()}),
         )
         .map_err(|e| e.to_string())?;
+    events.publish(UiEvent::AgentRunChanged {
+        agent_id: agent.id.clone(),
+        run_id: run_id.clone(),
+        status: "running".into(),
+    });
     let result = tokio::time::timeout(
         Duration::from_secs(agent.max_runtime_secs as u64),
         resolved.client.chat_completions(&request),
@@ -196,17 +206,36 @@ async fn run_agent(
                     &serde_json::json!({"mailbox_count": messages.len(), "last_output": text}),
                 )
                 .map_err(|e| e.to_string())?;
+            events.publish(UiEvent::AgentRunChanged {
+                agent_id: agent.id.clone(),
+                run_id: run_id.clone(),
+                status: "success".into(),
+            });
                 for parent_id in messages.iter().filter_map(|m| m.parent_agent_id.as_deref()) {
                     store.enqueue(parent_id, Some(&agent.id), &text, now).map_err(|e| e.to_string())?;
                 }
         }
-        Ok(Err(error)) => finish_error(&store, &agent, &run_id, format!("inference: {error}"))?,
-        Err(_) => finish_error(
+        Ok(Err(error)) => {
+            finish_error(&store, &agent, &run_id, format!("inference: {error}"))?;
+            events.publish(UiEvent::AgentRunChanged {
+                agent_id: agent.id.clone(),
+                run_id: run_id.clone(),
+                status: "failed".into(),
+            });
+        }
+        Err(_) => {
+            finish_error(
             &store,
             &agent,
             &run_id,
             "runtime budget exceeded".to_owned(),
-        )?,
+            )?;
+            events.publish(UiEvent::AgentRunChanged {
+                agent_id: agent.id.clone(),
+                run_id,
+                status: "failed".into(),
+            });
+        }
     }
     Ok(())
 }
@@ -255,7 +284,11 @@ mod tests {
     async fn supervisor_does_not_claim_future_agent() {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
-        let supervisor = AgentSupervisor::new(db, Arc::new(InferenceResolver::new(None)));
+        let supervisor = AgentSupervisor::new(
+            db,
+            Arc::new(InferenceResolver::new(None)),
+            EventBus::new(),
+        );
         supervisor.tick_once().await.unwrap();
     }
 }

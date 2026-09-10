@@ -423,6 +423,14 @@ fn inbound_agent_handling_enabled() {
     }
 }
 
+fn inbound_conversation_scope() {
+    try {
+        let value = vault_get("dedicated_chat_enabled");
+        if value == "true" { return "whatsapp-dedicated"; }
+    } catch (e) { }
+    "whatsapp"
+}
+
 // Vault-backed dedupe ring of recent message IDs, capped at 100.
 // Returns true when `id` is already in the ring (duplicate),
 // false on first sight (and inserts).
@@ -643,7 +651,7 @@ fn decode_event_map(env) {
         return #{
             "channel": "whatsapp",
             "reuse_conversation": true,
-            "conversation_scope": "whatsapp",
+            "conversation_scope": inbound_conversation_scope(),
             "agent_handling_enabled": inbound_agent_handling_enabled(),
             "native_id": native_id,
             "display_name": info.PushName,

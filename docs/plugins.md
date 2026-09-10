@@ -26,6 +26,29 @@ Both tiers expose the same capabilities to the agent. Tier choice is an implemen
 
 ---
 
+### Agents and inbound transport events
+
+Plugins that receive inbound traffic hand decoded messages to the host inbound
+router. The router evaluates imported agent trigger metadata before enqueueing
+an agent mailbox message. Trigger fields currently used by the host include
+`channel`, `keywords`, `group_only`, and `event_only`.
+
+`event_only: true` means the agent is mailbox-driven: it runs after a matching
+event is enqueued and never performs an empty scheduled turn. `group_only: true`
+requires the inbound envelope to contain a transport group identifier, which is
+useful for agents intended for group conversations rather than direct chats.
+For example, the camper WhatsApp agent uses both fields and is activated only
+by camper-related messages in WhatsApp groups. The agent returns a draft for
+Controller review; it is not a transport sender.
+
+Agent run state is persisted in the agent run tables. The host emits
+`agent_run_changed` notifications on `/api/stream` when a run enters
+`running`, `success`, or `failed`. The Agents page uses those WebSocket
+notifications to re-fetch the durable run history; it does not poll the agent
+API.
+
+---
+
 ## 2. Plugins vs. MCP servers
 
 execlaw supports two ways to add tools the agent can call: **plugins** (this doc) and **MCP servers** (`crates/mcp-client/src/lib.rs`, `config_mcp_servers` table). They look identical to the model — both surface as `{name, description, json_schema}` entries in the per-turn tool list — but the runtime contract is very different.
@@ -780,6 +803,14 @@ WhatsApp `0.2.12` adds two independent settings in its dynamic panel:
   are still persisted and visible in the shared chat, but matching agents and
   general LLM turns are not started. The setting defaults to enabled when it
   has not yet been saved.
+
+WhatsApp `0.2.14` adds durable review decisions and dedicated chat routing.
+Sent and cancelled replies remain decided across chat switching, reloads, and
+SPA refetches. **Override decision** writes a pending decision and reopens
+that individual response. The **Show WhatsApp messages in a dedicated
+WhatsApp chat** setting uses `dedicated_chat_enabled`; enabled messages use a
+stable dedicated scope, while disabled messages continue through the
+latest-active-chat routing.
 
 WhatsApp `0.2.13` adds per-reply review routing. Every pending
 WhatsApp-originated model response in the shared chat gets independent

@@ -87,7 +87,10 @@ pub(crate) fn has_non_whatsapp_activity(state: &AppState, cid: &ConversationId) 
 #[cfg(test)]
 pub(crate) use helpers::rewrite_url_with_alias;
 pub use helpers::{apply_auto_display_name, ensure_conversation_for};
-use types::{ColdContactPayload, RealModelTurnPayload, StubModelTurnPayload, UserMessagePayload};
+use types::{
+    ColdContactPayload, RealModelTurnPayload, StubModelTurnPayload,
+    TransportReviewDecisionPayload, UserMessagePayload,
+};
 // Consumed by this file's in-line test module via
 // `super::MAX_PREPEND_SKILL_BYTES`. Gated to test builds so the lib
 // build path sees zero unused-import warnings.
@@ -4002,6 +4005,54 @@ pub struct SendTransportReplyRequest {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct TransportReviewDecisionRequest {
+    pub model_seq: i64,
+    pub decision: String,
+}
+
+fn append_transport_review_decision(
+    state: &AppState,
+    cid: &ConversationId,
+    model_seq: i64,
+    decision: &str,
+) -> Result<(), String> {
+    if !matches!(decision, "sent" | "cancelled" | "pending") {
+        return Err("decision must be sent, cancelled, or pending".to_owned());
+    }
+    let payload = TransportReviewDecisionPayload {
+        model_seq,
+        decision: decision.to_owned(),
+    };
+    let log = event_log(state);
+    let base = log.last_seq(cid).map_err(|e| format!("last_seq: {e}"))?;
+    let event = PendingEvent::encode(
+        EventKind::TransportReviewDecision,
+        &payload,
+        Some("controller".to_owned()),
+    )
+    .map_err(|e| format!("encode review decision: {e}"))?;
+    log.commit_turn(cid, base, vec![event])
+        .map_err(|e| format!("commit review decision: {e}"))?;
+    Ok(())
+}
+
+pub async fn set_transport_review_decision(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<TransportReviewDecisionRequest>,
+) -> impl IntoResponse {
+    let cid = ConversationId::from(conversation_id.as_str());
+    match append_transport_review_decision(&state, &cid, req.model_seq, &req.decision) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"saved": true}))).into_response(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ForceTransportResponseRequest {
     pub source_seq: i64,
 }
@@ -4099,11 +4150,23 @@ pub async fn send_transport_reply(
     }
     let cid = ConversationId::from(conversation_id.as_str());
     match send_transport_text(&state, &cid, text, req.source_seq).await {
-        Ok(channel) => (
-            StatusCode::OK,
-            Json(serde_json::json!({"sent": true, "channel": channel})),
-        )
-            .into_response(),
+        Ok(channel) => match req.source_seq {
+            Some(model_seq) => match append_transport_review_decision(
+                &state, &cid, model_seq, "sent",
+            ) {
+                Ok(()) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({"sent": true, "channel": channel})),
+                )
+                    .into_response(),
+                Err(error) => err_500(&error),
+            },
+            None => (
+                StatusCode::OK,
+                Json(serde_json::json!({"sent": true, "channel": channel})),
+            )
+                .into_response(),
+        },
         Err(error) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": error})),
@@ -4226,6 +4289,16 @@ pub async fn list_messages(
         .ok()
         .flatten()
         .and_then(|row| row.display_name);
+    let review_states: std::collections::HashMap<i64, String> = events
+        .iter()
+        .filter(|event| event.kind == EventKind::TransportReviewDecision)
+        .filter_map(|event| {
+            event
+                .decode_payload::<TransportReviewDecisionPayload>()
+                .ok()
+                .map(|payload| (payload.model_seq, payload.decision))
+        })
+        .collect();
     let mut latest_transport_context: Option<String> = None;
     let messages: Vec<MessageView> = events
         .into_iter()
@@ -4279,6 +4352,11 @@ pub async fn list_messages(
                 committed_at: e.committed_at,
                 channel_origin: extract_channel_origin(&e),
                 transport_context,
+                review_state: if e.kind == EventKind::ModelTurn {
+                    review_states.get(&e.seq.0).cloned()
+                } else {
+                    None
+                },
                 attachments: hydrate_message_attachments(&state.db, &cid, &attachment_ids),
                 applied_skill_names: extract_applied_skill_names(&e),
             }

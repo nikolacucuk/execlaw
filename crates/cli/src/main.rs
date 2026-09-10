@@ -2155,7 +2155,11 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
     // runs, and checkpoints live in SQLite; the process task is only
     // the wake-up and execution mechanism and can be recreated safely.
     let agent_supervisor =
-        execlaw_server::agent_supervisor::AgentSupervisor::new(db.clone(), inference.clone());
+        execlaw_server::agent_supervisor::AgentSupervisor::new(
+            db.clone(),
+            inference.clone(),
+            state.events.clone(),
+        );
     let _agent_supervisor = agent_supervisor.spawn();
 
     // C3 — research subsystem supervisor. Picks up `Pending` rows

@@ -71,6 +71,25 @@ Two shapes worth memorising:
 | **Outbox** | Durable queue of effects (messages to send, tool side-effects). The LLM never makes external calls; it asks for outbox rows. |
 | **Hot runner** | A short-lived runner container associated 1:1 with an active conversation. Stateless against the log. |
 
+## 2.1 Always-on child agents and live run history
+
+Child agents are durable definitions and mailbox-driven workers stored in
+`config_agents` and `state_agent_messages`. An agent with a trigger containing
+`event_only: true` is not a periodic no-message task: the supervisor skips it
+unless an inbound mailbox message is pending. Transport-triggered messages are
+matched before enqueueing by channel, keywords, and optional `group_only`; the
+WhatsApp camper agent therefore requires both a WhatsApp source and a group
+context.
+
+The supervisor is woken when a matching transport event or controller mailbox
+message is enqueued. It emits `agent_run_changed` on the authenticated
+`/api/stream` WebSocket after a run is inserted (`running`) and after its
+terminal result is persisted (`success` or `failed`). The Agents page uses
+those events to reload the selected agent's runs, so run history and generated
+drafts appear without a timer or manual page refresh. The run-history API
+remains the durable source of truth; WebSocket events are notifications that
+trigger rehydration, not the stored result itself.
+
 ---
 
 ## 3. The turn — anatomy of one inference round

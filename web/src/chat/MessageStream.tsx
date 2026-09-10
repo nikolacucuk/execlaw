@@ -91,6 +91,10 @@ interface Props {
     conversationId: string;
     onSendTransportReply?: (text: string, sourceSeq: number) => Promise<void>;
     onForceTransportResponse?: (sourceSeq: number) => Promise<void>;
+    onSetTransportReviewDecision?: (
+        sourceSeq: number,
+        decision: "cancelled" | "pending",
+    ) => Promise<void>;
     /**
      * 2026-05-16 — when false, `tool_use` / `tool_result` messages
      * are filtered out of the stream entirely (not just hidden via
@@ -119,6 +123,7 @@ export function MessageStream({
     showToolResults = true,
     onSendTransportReply,
     onForceTransportResponse,
+    onSetTransportReviewDecision,
 }: Props) {
     const messages = useChatState(
         (s) => s.messages[conversationId] ?? null,
@@ -168,8 +173,9 @@ export function MessageStream({
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const [isAtBottom, setIsAtBottom] = useState(true);
     const [sendingReplySeq, setSendingReplySeq] = useState<number | null>(null);
-    const [sentReplySeqs, setSentReplySeqs] = useState<number[]>([]);
-    const [cancelledReplySeqs, setCancelledReplySeqs] = useState<number[]>([]);
+    const [optimisticReviewStates, setOptimisticReviewStates] = useState<
+        Record<number, "sent" | "cancelled">
+    >({});
 
     // Auto-stick to the bottom only when the operator is already
     // there. Mid-history scroll-up means "I'm reading older content,
@@ -201,8 +207,6 @@ export function MessageStream({
     // thread starts in autoscroll mode.
     useEffect(() => {
         setIsAtBottom(true);
-        setSentReplySeqs([]);
-        setCancelledReplySeqs([]);
     }, [conversationId]);
 
     if (messages === null) {
@@ -256,8 +260,9 @@ export function MessageStream({
                                 showTransportSend={
                                     readChannelOrigin(m) === "whatsapp" &&
                                     m.kind === "model_turn" &&
-                                    !sentReplySeqs.includes(m.seq) &&
-                                    !cancelledReplySeqs.includes(m.seq) &&
+                                    m.review_state !== "sent" &&
+                                    m.review_state !== "cancelled" &&
+                                    !optimisticReviewStates[m.seq] &&
                                     !!onSendTransportReply
                                 }
                                 transportSendBusy={sendingReplySeq === m.seq}
@@ -266,14 +271,36 @@ export function MessageStream({
                                     setSendingReplySeq(m.seq);
                                     try {
                                         await onSendTransportReply(m.text ?? "", m.seq);
-                                        setSentReplySeqs((seqs) => [...seqs, m.seq]);
+                                        setOptimisticReviewStates((states) => ({
+                                            ...states,
+                                            [m.seq]: "sent",
+                                        }));
                                     } finally {
                                         setSendingReplySeq(null);
                                     }
                                 }}
-                                onCancelTransportReply={() =>
-                                    setCancelledReplySeqs((seqs) => [...seqs, m.seq])
+                                onCancelTransportReply={async () => {
+                                    setOptimisticReviewStates((states) => ({
+                                        ...states,
+                                        [m.seq]: "cancelled",
+                                    }));
+                                    await onSetTransportReviewDecision?.(m.seq, "cancelled");
+                                }}
+                                showReviewOverride={
+                                    readChannelOrigin(m) === "whatsapp" &&
+                                    m.kind === "model_turn" &&
+                                    (m.review_state === "sent" || m.review_state === "cancelled" ||
+                                        !!optimisticReviewStates[m.seq]) &&
+                                    !!onSetTransportReviewDecision
                                 }
+                                onReviewOverride={async () => {
+                                    await onSetTransportReviewDecision?.(m.seq, "pending");
+                                    setOptimisticReviewStates((states) => {
+                                        const next = { ...states };
+                                        delete next[m.seq];
+                                        return next;
+                                    });
+                                }}
                                 showForceResponse={
                                     readChannelOrigin(m) === "whatsapp" &&
                                     m.kind === "model_turn" &&
@@ -367,6 +394,8 @@ function MessageBubble({
     transportSendBusy = false,
     onSendTransportReply,
     onCancelTransportReply,
+    showReviewOverride = false,
+    onReviewOverride,
     showForceResponse = false,
     onForceResponse,
 }: {
@@ -375,6 +404,8 @@ function MessageBubble({
     transportSendBusy?: boolean;
     onSendTransportReply?: () => Promise<void>;
     onCancelTransportReply?: () => void;
+    showReviewOverride?: boolean;
+    onReviewOverride?: () => Promise<void>;
     showForceResponse?: boolean;
     onForceResponse?: () => Promise<void>;
 }) {
@@ -565,6 +596,17 @@ function MessageBubble({
                             Cancel reply
                         </button>
                     </div>
+                )}
+                {showReviewOverride && (
+                    <button
+                        type="button"
+                        className="btn btn-sm btn-outline-secondary mt-3"
+                        onClick={() => void onReviewOverride?.()}
+                        data-testid="override-transport-review"
+                    >
+                        <i className="bi bi-arrow-counterclockwise me-1" aria-hidden />
+                        Override decision
+                    </button>
                 )}
                 {showForceResponse && (
                     <button

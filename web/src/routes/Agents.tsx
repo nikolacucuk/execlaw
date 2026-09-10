@@ -3,6 +3,7 @@ import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
 import { Sidebar } from "../chat/Sidebar";
 import { useAuth } from "../auth/AuthContext";
+import { WsClient, type WsEvent } from "../api/ws";
 import {
     createAgent,
     importAgentMarkdown,
@@ -28,12 +29,30 @@ export function Agents() {
 
     const refresh = async () => setAgents(await listAgents(token));
 
+    const refreshRuns = async (agentId: string) => {
+        setRuns(await listAgentRuns(agentId, token));
+    };
+
     useEffect(() => {
         void refresh();
     }, []);
 
     useEffect(() => {
-        if (selected) void listAgentRuns(selected, token).then(setRuns);
+        if (!selected) {
+            setRuns([]);
+            return;
+        }
+        void refreshRuns(selected);
+        const client = new WsClient({
+            accessToken: token,
+            onEvent: (event: WsEvent) => {
+                if (event.kind !== "agent_run_changed" || event.agent_id !== selected) return;
+                void refreshRuns(selected);
+                void refresh();
+            },
+        });
+        client.open();
+        return () => client.close();
     }, [selected]);
 
     async function save() {
@@ -65,6 +84,8 @@ export function Agents() {
         if (!selected || !message.trim()) return;
         await sendAgentMessage(selected, message, token);
         setMessage("");
+        await refreshRuns(selected);
+        await refresh();
     }
 
     return (

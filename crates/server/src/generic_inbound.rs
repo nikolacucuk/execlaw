@@ -108,7 +108,9 @@ pub async fn route_inbound(
     };
 
     if let Some(scope) = msg.conversation_scope.as_deref() {
-        cid = merge_scoped_conversation_if_needed(state, &plugin_id, scope, &cid, now)?;
+        if scope != "whatsapp-dedicated" {
+            cid = merge_scoped_conversation_if_needed(state, &plugin_id, scope, &cid, now)?;
+        }
     }
 
     // 3. Conversation row + binding.
