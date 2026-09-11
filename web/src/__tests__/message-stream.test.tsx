@@ -136,6 +136,21 @@ describe("MessageStream", () => {
         expect(onForce).toHaveBeenCalledWith(1);
     });
 
+    it("offers a force action for an empty model response", () => {
+        const onForce = vi.fn().mockResolvedValue(undefined);
+        appendMessage("conv-whatsapp-empty", {
+            ...baseMsg(1, "[Empty response]", "model_turn"),
+            channel_origin: "whatsapp",
+        } as never);
+        render(
+            <MessageStream
+                conversationId="conv-whatsapp-empty"
+                onForceTransportResponse={onForce}
+            />,
+        );
+        expect(screen.getByTestId("force-transport-response")).toBeInTheDocument();
+    });
+
     it("offers send and cancel actions for the latest WhatsApp reply", async () => {
         const onSend = vi.fn().mockResolvedValue(undefined);
         appendMessage("conv-whatsapp-review", {

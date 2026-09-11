@@ -625,8 +625,16 @@ function MessageBubble({
 }
 
 function isQuietAgentResponse(text: string | null): boolean {
+    const normalized = (text ?? "").trim();
+    if (
+        normalized === "" ||
+        /^\[?empty response\]?$/i.test(normalized) ||
+        /^\(empty response\)$/i.test(normalized)
+    ) {
+        return true;
+    }
     return /\b(stay quiet|not directed at me|no response needed|won't respond|will not respond)\b/i.test(
-        text ?? "",
+        normalized,
     );
 }
 
