@@ -93,7 +93,9 @@ pub struct AgentRequest {
 pub struct AgentMarkdownRequest {
     pub markdown: String,
 }
-fn draft_mode() -> String { "draft".into() }
+fn draft_mode() -> String {
+    "draft".into()
+}
 fn standard() -> String {
     "standard".into()
 }
@@ -211,7 +213,13 @@ async fn import_markdown(
         .unwrap_or_else(|| "Imported agent".into());
     let id = name.to_ascii_lowercase().replace([' ', '-', '.'], "_");
     let keywords = if id == "camper_wha" {
-        vec!["camper", "camper van", "motorhome", "camper montenegro", "camping"]
+        vec![
+            "camper",
+            "camper van",
+            "motorhome",
+            "camper montenegro",
+            "camping",
+        ]
     } else {
         Vec::new()
     };
@@ -247,10 +255,16 @@ async fn import_markdown(
     Ok(Json(agent.into()))
 }
 
-fn split_frontmatter(markdown: &str) -> Result<(std::collections::HashMap<String, String>, String), ApiError> {
+fn split_frontmatter(
+    markdown: &str,
+) -> Result<(std::collections::HashMap<String, String>, String), ApiError> {
     let mut lines = markdown.lines();
     if lines.next() != Some("---") {
-        return Err(ApiError { status: axum::http::StatusCode::BAD_REQUEST, code: "invalid_agent_markdown", message: "agent Markdown must start with YAML frontmatter".into() });
+        return Err(ApiError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "invalid_agent_markdown",
+            message: "agent Markdown must start with YAML frontmatter".into(),
+        });
     }
     let mut frontmatter = std::collections::HashMap::new();
     let mut body = Vec::new();
@@ -260,14 +274,21 @@ fn split_frontmatter(markdown: &str) -> Result<(std::collections::HashMap<String
             in_frontmatter = false;
         } else if in_frontmatter {
             if let Some((key, value)) = line.split_once(':') {
-                frontmatter.insert(key.trim().to_owned(), value.trim().trim_matches('"').to_owned());
+                frontmatter.insert(
+                    key.trim().to_owned(),
+                    value.trim().trim_matches('"').to_owned(),
+                );
             }
         } else {
             body.push(line);
         }
     }
     if in_frontmatter || body.iter().all(|line| line.trim().is_empty()) {
-        return Err(ApiError { status: axum::http::StatusCode::BAD_REQUEST, code: "invalid_agent_markdown", message: "agent Markdown has no role body".into() });
+        return Err(ApiError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "invalid_agent_markdown",
+            message: "agent Markdown has no role body".into(),
+        });
     }
     Ok((frontmatter, body.join("\n").trim().to_owned()))
 }

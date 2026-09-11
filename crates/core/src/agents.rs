@@ -287,7 +287,8 @@ fn map_agent(r: &rusqlite::Row<'_>) -> rusqlite::Result<AgentRow> {
         last_error: r.get(16)?,
         created_at: r.get(17)?,
         updated_at: r.get(18)?,
-        trigger: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(19)?).unwrap_or_else(|_| serde_json::json!({})),
+        trigger: serde_json::from_str::<serde_json::Value>(&r.get::<_, String>(19)?)
+            .unwrap_or_else(|_| serde_json::json!({})),
         reply_mode: r.get(20)?,
     })
 }
@@ -395,7 +396,8 @@ mod tests {
             )
             .unwrap();
         assert_eq!(a.next_run_at, None);
-        s.enqueue_triggered(&a.id, "new WhatsApp message", 2).unwrap();
+        s.enqueue_triggered(&a.id, "new WhatsApp message", 2)
+            .unwrap();
         assert_eq!(s.get(&a.id).unwrap().unwrap().next_run_at, Some(2));
     }
 }

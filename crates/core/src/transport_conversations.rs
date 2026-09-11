@@ -483,13 +483,7 @@ mod tests {
             .unwrap();
         let target = ConversationId::from("conv-existing");
         let moved = TransportConversationStore::new(&db)
-            .retarget_current(
-                "plugin-whatsapp",
-                "whatsapp",
-                "whatsapp",
-                &target,
-                200,
-            )
+            .retarget_current("plugin-whatsapp", "whatsapp", "whatsapp", &target, 200)
             .unwrap();
 
         assert!(moved);

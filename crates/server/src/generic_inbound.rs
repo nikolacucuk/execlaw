@@ -200,13 +200,7 @@ pub async fn route_inbound(
     }
 
     if trust_flat == TrustLevel::UnknownPending {
-        crate::chats::handle_cold_contact_for_inbound(
-            state,
-            &cid,
-            &sender,
-            &msg.text,
-            channel,
-        )
+        crate::chats::handle_cold_contact_for_inbound(state, &cid, &sender, &msg.text, channel)
             .await
             .map_err(|e| HostCapError::new(format!("cold-contact handler: {e}")))?;
         return Ok(RouteOutcome::ColdContact);
@@ -325,9 +319,8 @@ pub async fn route_inbound(
         None
     };
 
-    enqueue_triggered_agents(state, channel, &cid, &msg).map_err(|e| {
-        HostCapError::new(format!("enqueue triggered agents: {e}"))
-    })?;
+    enqueue_triggered_agents(state, channel, &cid, &msg)
+        .map_err(|e| HostCapError::new(format!("enqueue triggered agents: {e}")))?;
 
     // 7. Dispatch the turn through the standard pipeline.
     crate::chats::dispatch_external_turn(
@@ -361,7 +354,10 @@ fn merge_scoped_conversation_if_needed(
         .filter(|summary| {
             !summary.is_pinned
                 && !summary.is_ephemeral
-                && !summary.conversation_id.as_str().starts_with("controller-thread:")
+                && !summary
+                    .conversation_id
+                    .as_str()
+                    .starts_with("controller-thread:")
         })
         .max_by_key(|summary| summary.last_activity_at);
     let Some(target) = target else {
@@ -405,7 +401,10 @@ fn enqueue_triggered_agents(
     let now = chrono::Utc::now().timestamp();
     let agents = store.list().map_err(|e| e.to_string())?;
     let mut queued = false;
-    for agent in agents.into_iter().filter(|agent| agent.enabled && !agent.paused) {
+    for agent in agents
+        .into_iter()
+        .filter(|agent| agent.enabled && !agent.paused)
+    {
         if !trigger_matches(&agent.trigger, channel, msg.group_id.as_deref(), &msg.text) {
             continue;
         }
@@ -612,9 +611,24 @@ mod tests {
             "channel": "whatsapp",
             "keywords": ["camper", "camper van", "motorhome"]
         });
-        assert!(trigger_matches(&trigger, "WhatsApp", None, "Do you rent a CAMPER van?"));
-        assert!(!trigger_matches(&trigger, "signal", None, "Do you rent a camper?"));
-        assert!(!trigger_matches(&trigger, "whatsapp", None, "Can you help with a boat?"));
+        assert!(trigger_matches(
+            &trigger,
+            "WhatsApp",
+            None,
+            "Do you rent a CAMPER van?"
+        ));
+        assert!(!trigger_matches(
+            &trigger,
+            "signal",
+            None,
+            "Do you rent a camper?"
+        ));
+        assert!(!trigger_matches(
+            &trigger,
+            "whatsapp",
+            None,
+            "Can you help with a boat?"
+        ));
     }
 
     #[test]
@@ -632,7 +646,12 @@ mod tests {
             "keywords": ["camper"]
         });
 
-        assert!(!trigger_matches(&trigger, "whatsapp", None, "Camper available?"));
+        assert!(!trigger_matches(
+            &trigger,
+            "whatsapp",
+            None,
+            "Camper available?"
+        ));
         assert!(trigger_matches(
             &trigger,
             "whatsapp",

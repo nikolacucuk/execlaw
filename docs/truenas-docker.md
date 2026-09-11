@@ -39,7 +39,7 @@ dataset name in every command below. Create the directory and give the image's
 non-root user ownership:
 
 ```bash
-sudo mkdir -p /mnt/AI_Pool/execlaw/backups
+sudo mkdir -p /mnt/AI_Pool/execlaw/backups /mnt/AI_Pool/execlaw/skills
 sudo chown -R 1000:1000 /mnt/AI_Pool/execlaw
 sudo chmod 700 /mnt/AI_Pool/execlaw
 ```
@@ -50,9 +50,26 @@ The following persistent files/directories will appear there after first boot:
 execlaw.db             Encrypted SQLite state and event log
 .execlaw/master.key    The durable SQLCipher, JWT, and event-log key
 plugins/               Installed plugin staging area
+skills/                Operator-managed filesystem skills
 .execlaw/logs/         Server logs
 backups/               Recommended destination for database backups
 ```
+
+The control plane imports filesystem skills from the persistent mount at
+startup. It only scans files named `SKILL.md` below `skills/`; the repository
+source tree is not scanned by the running container. For example:
+
+```text
+/mnt/AI_Pool/execlaw/skills/research/gather/SKILL.md
+```
+
+is stored as the skill `research/gather`. A repository file such as
+`plugins/obsidian-skills/skills/vault-workflow.md` is a plugin resource, not a
+filesystem skill. Install the plugin ZIP to import it, or copy its content
+into a data-directory path ending in `SKILL.md`.
+
+After adding or changing filesystem skills, restart the service. The importer
+runs during control-plane startup and is idempotent for unchanged files.
 
 Do not delete or rotate `.execlaw/master.key` independently of
 `execlaw.db`. The database cannot be opened and the event log cannot be
@@ -158,6 +175,32 @@ sudo docker compose up -d execlaw
 sudo docker compose logs -f execlaw
 ```
 
+Use the Compose service name for inspection rather than assuming the
+container is literally named `execlaw`. Compose commonly generates a name
+such as `<project>-execlaw-1`:
+
+```bash
+sudo docker compose ps -a
+sudo docker compose exec execlaw sh -lc \
+  'find /var/lib/execlaw/skills -type f -name SKILL.md -print'
+```
+
+An absent `/var/lib/execlaw/skills` directory means that no filesystem skills
+have been provisioned yet; it is not created by the importer until an
+operator creates it. To provision one from the source checkout:
+
+```bash
+sudo mkdir -p /mnt/AI_Pool/execlaw/skills/obsidian/vault-workflow
+sudo cp plugins/obsidian-skills/skills/vault-workflow.md \
+  /mnt/AI_Pool/execlaw/skills/obsidian/vault-workflow/SKILL.md
+sudo chown -R 1000:1000 /mnt/AI_Pool/execlaw/skills
+sudo docker compose restart execlaw
+sudo docker compose logs --tail=200 execlaw | grep -i 'filesystem skill'
+```
+
+Refresh `/skills` after the restart. The imported record is persisted in the
+SQLite skill store, so the page does not read the source file directly.
+
 The runner image is intentionally built separately: execlaw's control plane
 uses the host Docker daemon to start it on demand, one isolated container per
 active conversation. The runner joins `execlaw-net`, resolves `execlaw` to the
@@ -165,6 +208,109 @@ control-plane container, and calls Ollama through the reachable LAN endpoint.
 The initial setup wizard detects the mounted Docker socket directly, so it
 should report Docker as available even though the minimal control-plane image
 does not include the Docker CLI.
+
+### Graphify on TrueNAS
+
+Graphify runs inside the control-plane container. The production runtime image
+does not include Node.js, so the SPA preview sync script cannot be run with
+`docker compose exec execlaw node ...`. Use a temporary Node container for
+that optional sync instead.
+
+The control plane needs Python, Graphify, the repository bind mount, and the
+Ollama endpoint in its runtime environment:
+
+```yaml
+services:
+  execlaw:
+    working_dir: /workspace/execlaw-source
+    environment:
+      EXECLAW_GRAPHIFY_BIN: /usr/local/bin/graphify
+      EXECLAW_GRAPHIFY_GRAPH_JSON: /workspace/execlaw-source/graphify-out/graph.json
+      OLLAMA_HOST: http://host.docker.internal:30068
+      OLLAMA_API_KEY: local
+      OLLAMA_MODEL: qwen3.5:9b
+    volumes:
+      - /mnt/AI_Pool/execlaw-source:/workspace/execlaw-source
+```
+
+Install Python and Graphify in `Dockerfile.control-plane`, not on the
+TrueNAS host OS:
+
+```dockerfile
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates curl libfontconfig1 python3 python3-venv \
+    && python3 -m venv /opt/graphify \
+    && /opt/graphify/bin/pip install --no-cache-dir graphifyy openai \
+    && ln -s /opt/graphify/bin/graphify /usr/local/bin/graphify \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+After changing the Dockerfile, validate and rebuild:
+
+```bash
+cd /mnt/AI_Pool/execlaw-source
+sudo docker compose config
+sudo docker compose build --no-cache execlaw runner-image
+sudo docker compose up -d --force-recreate execlaw
+```
+
+Graphify writes into the repository bind mount. The container runs as UID 1000:
+
+```bash
+sudo mkdir -p /mnt/AI_Pool/execlaw-source/graphify-out
+sudo chown -R 1000:1000 /mnt/AI_Pool/execlaw-source/graphify-out
+sudo chmod 775 /mnt/AI_Pool/execlaw-source/graphify-out
+```
+
+Verify the runtime and build the AST graph:
+
+```bash
+sudo docker compose exec execlaw sh -lc \
+  'command -v python3; command -v graphify; python3 --version; echo "$OLLAMA_HOST"'
+sudo docker compose exec execlaw \
+  graphify update /workspace/execlaw-source --force
+sudo docker compose exec execlaw \
+  graphify cluster-only /workspace/execlaw-source --no-label
+```
+
+Run semantic extraction and wiki generation against Ollama:
+
+```bash
+sudo docker compose exec \
+  -e OLLAMA_HOST=http://host.docker.internal:30068 \
+  -e OLLAMA_API_KEY=local \
+  -e OLLAMA_MODEL=qwen3.5:9b \
+  execlaw \
+  graphify /workspace/execlaw-source --wiki --backend ollama
+```
+
+Warnings about `Cargo.toml` producing zero nodes, SQL files being skipped
+without `tree_sitter_sql`, or semantic cache entries being out of scope are
+non-blocking. To include SQL migrations, install `"graphifyy[sql]" openai`
+instead and rebuild the image.
+
+To update the SPA's optional welcome-screen preview, use a temporary Node
+container because Node is not present in the production runtime image:
+
+```bash
+sudo docker run --rm \
+  -v /mnt/AI_Pool/execlaw-source:/workspace/execlaw-source \
+  -w /workspace/execlaw-source \
+  node:22-bookworm \
+  node scripts/graphify_sync_preview.mjs
+sudo chown -R 1000:1000 \
+  /mnt/AI_Pool/execlaw-source/web/src/generated
+sudo docker compose build execlaw
+sudo docker compose up -d --force-recreate execlaw
+```
+
+Confirm the artifacts:
+
+```bash
+find /mnt/AI_Pool/execlaw-source/graphify-out \
+  -maxdepth 2 -type f -print
+```
 
 ### Sidecar-backed plugins
 

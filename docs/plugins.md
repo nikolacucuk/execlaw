@@ -179,6 +179,13 @@ directory's `skills/` folder at startup. A file such as
 `research/gather`, scanner-gated, and stored in the versioned skill store.
 Unchanged files are idempotent; editing a file creates a new skill version.
 
+This path is resolved from the directory containing the active database. In
+the Docker deployment, that is normally `/var/lib/execlaw/skills` inside the
+container and the host's directory mounted there by Compose. The importer
+does not scan the repository checkout, plugin source directories, or arbitrary
+`.md` files; the filename must be exactly `SKILL.md` somewhere below the data
+directory's `skills/` root.
+
 This is the portable source-of-truth location for operator-managed skills.
 Plugin ZIPs remain useful for distributing skills together with plugin tools,
 but a deployment can restore skills by copying the `skills/` directory and

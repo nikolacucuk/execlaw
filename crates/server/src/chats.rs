@@ -88,8 +88,8 @@ pub(crate) fn has_non_whatsapp_activity(state: &AppState, cid: &ConversationId) 
 pub(crate) use helpers::rewrite_url_with_alias;
 pub use helpers::{apply_auto_display_name, ensure_conversation_for};
 use types::{
-    ColdContactPayload, RealModelTurnPayload, StubModelTurnPayload,
-    TransportReviewDecisionPayload, UserMessagePayload,
+    ColdContactPayload, RealModelTurnPayload, StubModelTurnPayload, TransportReviewDecisionPayload,
+    UserMessagePayload,
 };
 // Consumed by this file's in-line test module via
 // `super::MAX_PREPEND_SKILL_BYTES`. Gated to test builds so the lib
@@ -4098,8 +4098,8 @@ pub async fn force_transport_response(
     else {
         return err_500("WhatsApp sender principal is unavailable");
     };
-    let trust = TrustLevel::parse(principal.trust_level.class_tag())
-        .unwrap_or(TrustLevel::UnknownPending);
+    let trust =
+        TrustLevel::parse(principal.trust_level.class_tag()).unwrap_or(TrustLevel::UnknownPending);
     if matches!(trust, TrustLevel::Blocked | TrustLevel::UnknownPending) {
         return (
             StatusCode::FORBIDDEN,
@@ -4151,16 +4151,16 @@ pub async fn send_transport_reply(
     let cid = ConversationId::from(conversation_id.as_str());
     match send_transport_text(&state, &cid, text, req.source_seq).await {
         Ok(channel) => match req.source_seq {
-            Some(model_seq) => match append_transport_review_decision(
-                &state, &cid, model_seq, "sent",
-            ) {
-                Ok(()) => (
-                    StatusCode::OK,
-                    Json(serde_json::json!({"sent": true, "channel": channel})),
-                )
-                    .into_response(),
-                Err(error) => err_500(&error),
-            },
+            Some(model_seq) => {
+                match append_transport_review_decision(&state, &cid, model_seq, "sent") {
+                    Ok(()) => (
+                        StatusCode::OK,
+                        Json(serde_json::json!({"sent": true, "channel": channel})),
+                    )
+                        .into_response(),
+                    Err(error) => err_500(&error),
+                }
+            }
             None => (
                 StatusCode::OK,
                 Json(serde_json::json!({"sent": true, "channel": channel})),
@@ -4329,11 +4329,8 @@ pub async fn list_messages(
         .take(limit as usize)
         .map(|e| {
             let attachment_ids = extract_attachment_ids(&e);
-            let inbound_context = inbound_transport_context(
-                &state.db,
-                &e,
-                conversation_context.as_deref(),
-            );
+            let inbound_context =
+                inbound_transport_context(&state.db, &e, conversation_context.as_deref());
             if inbound_context.is_some() {
                 latest_transport_context = inbound_context.clone();
             }

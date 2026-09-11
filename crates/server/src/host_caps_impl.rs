@@ -82,8 +82,8 @@ impl HostCapabilities for AppStateHostCapabilities {
         // crash-looping — plugin's responsibility to handle.
         let supervisor = self.state.sidecar_supervisor.as_ref()?;
         let port = supervisor.host_port_for(sidecar_name).await?;
-        let host = std::env::var("EXECLAW_SIDECAR_CONNECT_HOST")
-            .unwrap_or_else(|_| "127.0.0.1".into());
+        let host =
+            std::env::var("EXECLAW_SIDECAR_CONNECT_HOST").unwrap_or_else(|_| "127.0.0.1".into());
         Some(format!("http://{host}:{port}"))
     }
 
@@ -99,8 +99,8 @@ impl HostCapabilities for AppStateHostCapabilities {
         if parsed.scheme() != "http" && parsed.scheme() != "ws" {
             return false;
         }
-        let allowed_host = std::env::var("EXECLAW_SIDECAR_CONNECT_HOST")
-            .unwrap_or_else(|_| "127.0.0.1".into());
+        let allowed_host =
+            std::env::var("EXECLAW_SIDECAR_CONNECT_HOST").unwrap_or_else(|_| "127.0.0.1".into());
         if parsed.host_str() != Some(allowed_host.as_str()) {
             return false;
         }

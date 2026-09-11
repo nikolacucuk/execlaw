@@ -260,10 +260,8 @@ impl VoiceRuntime {
                 );
                 continue;
             }
-            let samples = resample_to_whisper_rate(
-                &decode_pcm16_le(&chunk.payload),
-                chunk.sample_rate,
-            );
+            let samples =
+                resample_to_whisper_rate(&decode_pcm16_le(&chunk.payload), chunk.sample_rate);
             if samples.is_empty() {
                 continue;
             }

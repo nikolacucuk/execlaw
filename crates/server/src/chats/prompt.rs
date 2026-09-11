@@ -712,7 +712,7 @@ pub(crate) fn build_tool_routing_prose(
         ),
         (
             "chat",
-                        "* `find_transport_conversation` + `read_conversation_history` — find and read \
+            "* `find_transport_conversation` + `read_conversation_history` — find and read \
                          previously imported transport conversations. Pass channel `whatsapp` and a phone \
                          number to the lookup, then pass its returned conversation id to \
                          `read_conversation_history`. Do not pass a WhatsApp group JID from \
@@ -729,12 +729,12 @@ pub(crate) fn build_tool_routing_prose(
                          conversation event as current. `get_thread` / `set_thread_name` inspect or rename \
                          the current thread.",
         ),
-                (
-                        "whatsapp",
-                        "* WhatsApp delivery uses the transport recipient, not the internal chat id. For a \
+        (
+            "whatsapp",
+            "* WhatsApp delivery uses the transport recipient, not the internal chat id. For a \
                          1:1 message, pass the contact's phone number in E.164 format to `whatsapp.send_message` \
                          or `whatsapp.reply`; a visible `conv-` id is never required for delivery.",
-                ),
+        ),
         (
             "controller",
             "* `notify_controller` — sends a private message to the operator on their highest-\

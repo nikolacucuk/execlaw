@@ -101,7 +101,7 @@ struct OllamaOptions {
     /// payloads — the model knows the tool name from chat-template
     /// scaffolding but no longer has the schema or earlier results
     /// in view, so it re-queries indefinitely. Execlaw pins this to
-    /// 100000 so long tool schemas + replayed history + memory
+    /// 98,304 so long tool schemas + replayed history + memory
     /// retrieval context stay available during complex agent turns.
     #[serde(skip_serializing_if = "Option::is_none")]
     num_ctx: Option<u32>,
@@ -115,10 +115,10 @@ impl OllamaOptions {
 
 /// Pinned context-window size for every Ollama request.
 ///
-/// Requirement: keep this at 100000 so new-task routing can carry
+/// Requirement: keep this at 98,304 so new-task routing can carry
 /// graph lookups, tool schemas, and Obsidian-memory retrieval without
 /// mid-prompt truncation.
-const DEFAULT_NUM_CTX: u32 = 100000;
+const DEFAULT_NUM_CTX: u32 = 98_304;
 
 /// Ollama's message shape on the wire — close enough to OpenAI's
 /// that we serialize a borrowed view rather than cloning. `name`

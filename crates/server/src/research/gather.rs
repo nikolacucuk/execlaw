@@ -528,11 +528,15 @@ async fn gather_one(
                 tokens_consumed.fetch_add(t, Ordering::Relaxed);
             }
             if resp.text.trim().is_empty() {
-                return Ok(failed_note(
+                return Ok(ResearchNote {
                     index,
-                    &step.query,
-                    "subagent returned an empty extraction",
-                ));
+                    sub_query: step.query.clone(),
+                    state: SubQueryState::Failed,
+                    excerpt: String::new(),
+                    sources,
+                    tokens_used: resp.tokens_used,
+                    error: Some("subagent returned an empty extraction".into()),
+                });
             }
             Ok(ResearchNote {
                 index,
@@ -590,7 +594,9 @@ fn wikipedia_search_term(query: &str) -> Option<String> {
 }
 
 const BODY_TRUNCATE_PER_URL: usize = 4_000;
-const SUBAGENT_MAX_TOKENS: u32 = 512;
+// The deployed Ollama context is 98,304 tokens. Reserve 32,768 for the
+// system/task prompts, fetched pages, and tokenizer variance.
+const SUBAGENT_MAX_TOKENS: u32 = 65_536;
 
 fn truncate_body(body: &str, max: usize) -> String {
     if body.chars().count() <= max {
@@ -881,6 +887,19 @@ mod tests {
         }
     }
 
+    struct StubEmptySubagent;
+    #[async_trait]
+    impl SubagentApi for StubEmptySubagent {
+        async fn delegate(&self, req: &SubagentRequest) -> Result<SubagentResponse, ApiError> {
+            assert_eq!(req.max_tokens, Some(65_536));
+            Ok(SubagentResponse {
+                text: String::new(),
+                task_id: "stub-empty".into(),
+                tokens_used: Some(SUBAGENT_MAX_TOKENS),
+            })
+        }
+    }
+
     fn fixture_plan(n: usize) -> ResearchPlan {
         ResearchPlan {
             thesis: "thesis".into(),
@@ -1138,6 +1157,30 @@ mod tests {
             assert_eq!(note.state, SubQueryState::Done);
             assert!(note.excerpt.contains("no subagent"));
         }
+    }
+
+    #[tokio::test]
+    async fn run_gather_empty_subagent_output_preserves_fetched_sources() {
+        let db = fresh_db();
+        let plan = fixture_plan(1);
+        let deps = GatherDeps {
+            search: Arc::new(StubSearch {
+                per_query_results: 2,
+            }),
+            fetch: Arc::new(StubFetch::new()),
+            subagent: Some(Arc::new(StubEmptySubagent)),
+        };
+        let ctx = make_ctx(&db, plan, config_with(1, 10, 10_000), deps);
+        let notes = run_gather(ctx).await.unwrap();
+
+        assert_eq!(notes[0].state, SubQueryState::Failed);
+        assert_eq!(notes[0].sources.len(), 2);
+        assert!(notes[0].sources.iter().all(|source| source.fetched_ok));
+        assert_eq!(notes[0].tokens_used, Some(SUBAGENT_MAX_TOKENS));
+        assert_eq!(
+            notes[0].error.as_deref(),
+            Some("subagent returned an empty extraction")
+        );
     }
 
     /// 2026-05-03 (rev 4) regression: the every-fetch-failed branch

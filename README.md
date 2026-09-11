@@ -68,7 +68,7 @@ setx PATH "$env:PATH;C:\Users\DjEnKa\.local\bin"
 - **Trust ladder + Rule of Two**: `Controller / Delegated / KnownTrusted / KnownLimited / UnknownPending / Blocked` with cold-contact escalation, signed approval-token JWTs, sideband HITL.
 - **HMAC-chained event log**: every committed row is tamper-evident; replay rebuilds state deterministically.
 - **Outbox + idempotency**: framework-minted `(conversation_id, turn_seq, tool_call_ordinal)` keys, retries with backoff, dead-letter queue.
-- **Plugin framework** (12 in-tree plugins — see [Plugins shipped](#plugins-shipped)): script-tier (Rhai) + subprocess-tier (JSON-RPC), full manifest schema (tools / transports / identity providers / OAuth / sidecars / admin routes / webhook routes / UI panels / skills).
+- **Plugin framework** (18 in-tree plugins — see [Plugins shipped](#plugins-shipped)): script-tier (Rhai) + subprocess-tier (JSON-RPC), full manifest schema (tools / transports / identity providers / OAuth / sidecars / admin routes / webhook routes / UI panels / skills).
 - **Five shipped transports**: Signal (signal-cli sidecar), WhatsApp (wuzapi sidecar), Slack (multi-workspace Socket Mode OAuth), Discord (multi-guild Gateway WebSocket), SMS (Android-gateway WebSocket).
 - **HTTP integrations**: Google Apps (Gmail/Calendar/Contacts/Tasks/Drive in one OAuth), Google Places, Open-Meteo (key-less weather), Yahoo Finance (market data), Pushover.
 - **Research subsystem**: deep-research plan/gather/synthesize pipeline with retention and per-phase event flow.
@@ -80,22 +80,28 @@ See [`docs/architecture.md` §18](docs/architecture.md) for the full milestone b
 
 ## Plugins shipped
 
-All 12 in-tree plugins ship as ZIPs under [`dist/`](dist/) and install via the SPA's Settings → Plugins page (or `POST /api/admin/plugins/install`). Source under [`plugins/`](plugins/).
+All 18 in-tree plugins ship as ZIPs under [`dist/`](dist/) and install via the SPA's Settings → Plugins page (or `POST /api/admin/plugins/install`). Source under [`plugins/`](plugins/).
 
 | Plugin | Version | Tier | Kind | What it does |
 |---|---|---|---|---|
 | [`signal`](plugins/signal/) | 0.5.0 | script | transport | Signal Messenger via a supervised [`signal-cli`](https://github.com/AsamK/signal-cli) sidecar. Inbound consumer + outbound + group ops + QR/number pairing. |
-| [`whatsapp`](plugins/whatsapp/) | 0.2.6 | script | transport | WhatsApp Multi-Device via a supervised [wuzapi](https://github.com/asternic/wuzapi) (whatsmeow-backed) sidecar. Event-driven inbound import, refreshed direct and group history, group ops, attachments, read receipts. |
+| [`whatsapp`](plugins/whatsapp/) | 0.2.14 | script | transport | WhatsApp Multi-Device via a supervised [wuzapi](https://github.com/asternic/wuzapi) (whatsmeow-backed) sidecar. Event-driven inbound import, refreshed direct and group history, group ops, attachments, read receipts. |
 | [`slack`](plugins/slack/) | 0.3.2 | script | transport | Multi-workspace Slack via Socket Mode (no public URL). Sidecar-free — pure-Rhai over `http_post` + `ws_subscribe` + `ws_send`. |
 | [`discord`](plugins/discord/) | 0.2.0 | script | transport | Discord bot via the Gateway WebSocket. Multi-guild from one bot token, sidecar-free, gateway heartbeats over `ws_set_keepalive`. |
 | [`sms-socket`](plugins/sms-socket/) | 0.2.0 | script | transport | SMS / MMS via the [Android SMS Socket app](https://github.com/crockpotveggies/sms-socket-app) — WebSocket to the operator's phone on LAN. |
 | [`google-apps`](plugins/google-apps/) | 0.3.0 | script | integration + identity | Gmail + Calendar + Contacts + Tasks + Drive in one OAuth grant. Per-module toggle. Identity provider for email/phone via the People API. |
 | [`google-places`](plugins/google-places/) | 0.2.0 | script | integration | Google Places (New) API — text search, nearby search, place details. API-key only, no OAuth. |
-| [`open-meteo`](plugins/open-meteo/) | 0.4.0 | script | integration | Key-less weather, marine, air-quality, seasonal, ensemble, flood, climate, geocoding, elevation via the public [Open-Meteo](https://open-meteo.com/) APIs. |
-| [`finance-yahoo`](plugins/finance-yahoo/) | 0.1.0 | script | integration | Real-time + historical market data via Yahoo Finance's public quote / chart endpoints. No API key. |
+| [`open-meteo`](plugins/open-meteo/) | 0.5.1 | script | integration | Key-less weather, marine, air-quality, seasonal, ensemble, flood, climate, geocoding, elevation via the public [Open-Meteo](https://open-meteo.com/) APIs. |
+| [`finance-yahoo`](plugins/finance-yahoo/) | 0.2.1 | script | integration | Real-time + historical market data via Yahoo Finance's public quote / chart endpoints. No API key. |
 | [`pushover`](plugins/pushover/) | 0.2.0 | script | notifier | One-way [Pushover](https://pushover.net/) push notifications to the operator's phone. |
 | [`identity-local-address-book`](plugins/identity-local-address-book/) | 0.1.0 | subprocess | identity | Local JSON contact list at `~/.execlaw/contacts.json` — auto-trusts saved contacts as `KnownTrusted`. |
 | [`hello`](plugins/hello/) | 0.1.0 | subprocess | reference | Echo tool exercising the subprocess JSON-RPC tier. Template for new plugin authors. |
+| [`autoresearch`](plugins/autoresearch/) | 0.1.0 | script | research | Multi-step query decomposition, parallel web-scraper fan-out, and synthesis workflow. |
+| [`python-sandbox`](plugins/python-sandbox/) | 0.1.0 | script | execution | Persistent per-conversation Python execution through a supervised Jupyter Kernel Gateway sidecar. |
+| [`web-scraper`](plugins/web-scraper/) | 0.1.0 | script | integration | JavaScript-rendered page extraction through a supervised Playwright sidecar. |
+| [`tool-chain`](plugins/tool-chain/) | 0.1.0 | script | orchestration | Deterministic multi-step plans with approval-aware execution implemented by host tools. |
+| [`humanizer-skills`](plugins/humanizer-skills/) | 0.1.0 | script | skills | Writing-style skills for more natural responses. |
+| [`obsidian-skills`](plugins/obsidian-skills/) | 0.1.0 | script | skills | Obsidian vault workflow and atomic-note skills. |
 
 Tools, host-side built-ins, and the manifest schema are documented in [`docs/plugins.md`](docs/plugins.md). Chart rendering (`chart.render`) is a host-side built-in as of 2026-05-15 — it was previously inside `open-meteo`.
 
@@ -122,7 +128,7 @@ The scripts build declared plugin UI panels and package every in-tree
 plugin as `dist/<plugin-id>-<version>.zip`, together with a matching
 `.sha256` checksum. For example, the WhatsApp source in
 [`plugins/whatsapp/`](plugins/whatsapp/) produces
-[`dist/whatsapp-0.2.0.zip`](dist/whatsapp-0.2.0.zip). Upload the generated
+[`dist/whatsapp-0.2.14.zip`](dist/whatsapp-0.2.14.zip). Upload the generated
 ZIP through **Settings → Plugins** or `POST /api/admin/plugins/install`.
 
 ---
@@ -585,6 +591,10 @@ execlaw now supports a local Graphify knowledge-graph preview in the
 chat welcome screen (above the mascot / New chat animation). The preview
 is interactive (mouse-reactive, moving nodes) and is derived from
 `graphify-out/graph.json`.
+
+For Docker/TrueNAS installation, including Python/Graphify image setup,
+bind-mount permissions, Ollama connectivity, and the optional SPA preview
+sync, see [`docs/truenas-docker.md`](docs/truenas-docker.md).
 
 ### Install Graphify (Windows)
 

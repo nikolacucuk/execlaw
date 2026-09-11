@@ -24,7 +24,11 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const DEFAULT_MAX_TOKENS: u32 = 1024;
-const HARD_CAP_TOKENS: u32 = 4096;
+const HARD_CAP_TOKENS: u32 = 65_536;
+
+fn bounded_max_tokens(requested: Option<u32>) -> u32 {
+    requested.unwrap_or(DEFAULT_MAX_TOKENS).min(HARD_CAP_TOKENS)
+}
 
 /// System prompt the parent hands to the child. Deliberately
 /// minimal: the parent's `task` + `context` is the entire substance
@@ -146,10 +150,7 @@ impl SubagentApi for InferenceSubagentApi {
         }
         messages.push(ChatMessage::user(req.task.clone()));
 
-        let max_tokens = req
-            .max_tokens
-            .unwrap_or(DEFAULT_MAX_TOKENS)
-            .min(HARD_CAP_TOKENS);
+        let max_tokens = bounded_max_tokens(req.max_tokens);
         let chat_req = ChatRequest {
             model: ModelId(self.model.clone()),
             messages,
@@ -340,6 +341,13 @@ mod tests {
         let preview = InferenceSubagentApi::truncate_for_preview(&long);
         assert!(preview.chars().count() <= 80);
         assert!(preview.ends_with('…'));
+    }
+
+    #[test]
+    fn max_tokens_reserves_one_third_of_ollama_context_for_input() {
+        assert_eq!(bounded_max_tokens(None), DEFAULT_MAX_TOKENS);
+        assert_eq!(bounded_max_tokens(Some(65_536)), 65_536);
+        assert_eq!(bounded_max_tokens(Some(98_304)), 65_536);
     }
 
     #[test]
