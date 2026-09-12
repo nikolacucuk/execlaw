@@ -13,9 +13,66 @@
 
 #![forbid(unsafe_code)]
 
-pub use execlaw_core::tool::{ToolFailure, ToolFailureKind};
 use execlaw_inference_api::{ChatMessage, ToolCall, ToolDeclaration};
 use serde::{Deserialize, Deserializer, Serialize};
+
+/// Stable tool-failure categories carried over the runner wire protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolFailureKind {
+    Validation,
+    PolicyDenied,
+    ApprovalDenied,
+    Transient,
+    Timeout,
+    Cancelled,
+    Permanent,
+}
+
+impl ToolFailureKind {
+    /// Whether this category may be retried by the runner.
+    pub fn may_retry(self) -> bool {
+        matches!(self, Self::Transient | Self::Timeout)
+    }
+}
+
+/// Version-stable failure details returned by the control plane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolFailure {
+    pub kind: ToolFailureKind,
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<String>,
+}
+
+impl ToolFailure {
+    pub fn new(kind: ToolFailureKind, code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            code: code.into(),
+            message: message.into(),
+            retryable: kind.may_retry(),
+            retry_after_ms: None,
+            attempt: 0,
+            guidance: None,
+        }
+    }
+
+    /// Normalize untrusted retry metadata so terminal decisions never retry.
+    pub fn normalized(mut self) -> Self {
+        if !self.kind.may_retry() {
+            self.retryable = false;
+            self.retry_after_ms = None;
+        }
+        self
+    }
+}
 
 /// Bumped whenever the wire protocol changes incompatibly. Both
 /// sides verify on registration. Bump rules:
@@ -414,6 +471,7 @@ mod tests {
             history: vec![ChatMessage {
                 role: Role::User,
                 content: Some(execlaw_inference_api::MessageContent::Text("prior".into())),
+                reasoning_content: None,
                 tool_call_id: None,
                 name: None,
                 tool_calls: vec![],

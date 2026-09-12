@@ -2207,7 +2207,25 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
                                 execlaw_runner_protocol::ToolOutcome::Ok { value }
                             }
                             execlaw_core::tool::ToolResultEnvelope::Err { failure } => {
-                                execlaw_runner_protocol::ToolOutcome::Err { failure }
+                                execlaw_runner_protocol::ToolOutcome::Err {
+                                    failure: execlaw_runner_protocol::ToolFailure {
+                                        kind: match failure.kind {
+                                            execlaw_core::tool::ToolFailureKind::Validation => execlaw_runner_protocol::ToolFailureKind::Validation,
+                                            execlaw_core::tool::ToolFailureKind::PolicyDenied => execlaw_runner_protocol::ToolFailureKind::PolicyDenied,
+                                            execlaw_core::tool::ToolFailureKind::ApprovalDenied => execlaw_runner_protocol::ToolFailureKind::ApprovalDenied,
+                                            execlaw_core::tool::ToolFailureKind::Transient => execlaw_runner_protocol::ToolFailureKind::Transient,
+                                            execlaw_core::tool::ToolFailureKind::Timeout => execlaw_runner_protocol::ToolFailureKind::Timeout,
+                                            execlaw_core::tool::ToolFailureKind::Cancelled => execlaw_runner_protocol::ToolFailureKind::Cancelled,
+                                            execlaw_core::tool::ToolFailureKind::Permanent => execlaw_runner_protocol::ToolFailureKind::Permanent,
+                                        },
+                                        code: failure.code,
+                                        message: failure.message,
+                                        retryable: failure.retryable,
+                                        retry_after_ms: failure.retry_after_ms,
+                                        attempt: failure.attempt,
+                                        guidance: failure.guidance,
+                                    },
+                                }
                             }
                         };
                         durable

@@ -299,13 +299,11 @@ artifact and detects byte substitution; it does not make that plugin safe.
 
 ### Release provenance handoff
 
-Platform workflows generate GitHub SLSA attestations and packaging scripts
-generate SPDX 2.3 sidecars. Bundled installation, however, consumes detached
-`.provenance.json` and offline `.sigstore.json` files. The current release file
-lists do not publish those two runtime-consumed files, so a release is not yet
-end-to-end installable through the verified bundled path without an additional
-export step. Do not treat the existence of a GitHub-hosted attestation alone as
-proof that this handoff is complete.
+Packaging scripts generate SPDX 2.3 sidecars. Platform workflows then keylessly
+create detached `.provenance.json` statements and offline `.sigstore.json` SLSA
+bundles before desktop packaging. The exact ZIP and sidecars are embedded in
+the desktop artifact and published together; bundled installation verifies
+them offline against the Controller allowlists.
 
 ### CI absence (until first push of `.github/workflows/ci.yml`)
 

@@ -1365,19 +1365,22 @@ is complete unless the text says so.
   `$ref` documents, built-in input/declared-result schemas, and MCP input
   schemas; hash registered contracts and reject plugin upgrades whose hashes
   change in place.
-- [ ] Persist the applicable schema hashes on each invocation/trace. MCP does
-  not advertise a result schema, so its returned envelope remains unvalidated.
+- [x] Persist input/result schema hashes on durable tool-invocation traces;
+  validate MCP's standard result shape and any advertised `outputSchema` before
+  exposing structured content to the model.
 - [x] Add the SQLite-backed `RunStore` with stable step definitions, leases,
   approval waits, atomic outbox enqueue/completion, cursor advancement, and a
   `next_safe_action` recovery decision. Reopen and lease-expiry tests exist.
-- [ ] Drive normal runner/server turns through `RunStore` and complete the
-  process-kill crash matrix, including child-run join recovery.
+- [x] Drive normal runner/server turns through `RunStore`, replay completed
+  model/tool checkpoints after reopen, and preserve atomic event pairing and
+  outbox idempotency. Durable child fan-out/join remains part of the P1 run-tree
+  enhancement below because normal turns do not create child runs today.
 - [x] Add the typed in-process `ToolResultEnvelope`/`ToolFailure` contract,
   bounded schema correction, transient retry/backoff, repeated-call detection,
   and per-integration circuit breaking.
-- [ ] Persist retry budgets/backoff/circuit state and carry the same typed
-  failure envelope through `runner-protocol`; the container runner still has
-  the older `{status, message}` error shape.
+- [x] Persist retry budgets, backoff, repeated-call fingerprints, schema hashes,
+  and circuit state; carry the typed failure envelope through
+  `runner-protocol` with legacy `{status,message}` deserialization.
 - [x] Add the shared local-endpoint policy with SQLite-approved CIDRs/DNS names,
   public/mixed-answer rejection, DNS pinning, redirect denial, IPv4/IPv6 and
   alternate-numeric-host tests, and persisted resolution diagnostics. It is
@@ -1396,10 +1399,9 @@ is complete unless the text says so.
 - [x] Enforce persisted provenance policy for bundled plugin ZIPs, subprocess
   executables, digest-pinned sidecar/runner OCI images, and audited Controller
   local-development overrides; generate SPDX 2.3 plugin sidecars.
-- [ ] Complete release handoff of the detached provenance statement and
-  offline cosign bundle expected by bundled-plugin installation. GitHub Actions
-  emits SLSA attestations, but the release artifact lists currently publish the
-  ZIP/checksum/SPDX files rather than those runtime-consumed detached files.
+- [x] Generate detached runtime provenance statements and offline cosign SLSA
+  bundles before desktop packaging; embed and publish them beside each exact
+  ZIP/checksum/SPDX artifact on Linux, macOS, and Windows.
 
 ### Outstanding P1/P2 and lab work
 

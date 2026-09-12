@@ -399,10 +399,10 @@ rechecks the bytes. The ordinary upload endpoint is the explicit local
 development path and calls `authorize_local_plugin_archive`, which is disabled
 by default and records each Controller-approved override.
 
-Packaging scripts emit `.zip.sha256` and SPDX 2.3 `.zip.spdx.json` sidecars,
-and platform release workflows create GitHub SLSA build attestations. The
-remaining release gap is exporting the detached `.provenance.json` and
-`.sigstore.json` files in the exact offline format consumed by bundled install.
+Packaging scripts emit `.zip.sha256` and SPDX 2.3 `.zip.spdx.json` sidecars.
+Platform release workflows keylessly create an offline cosign SLSA bundle and
+the runtime `ProvenanceStatement` before desktop packaging, then embed and
+publish the exact ZIP plus all detached verification files.
 
 `state_plugins` row layout:
 

@@ -1648,7 +1648,6 @@ dependencies = [
 name = "execlaw-runner-protocol"
 version = "0.1.0"
 dependencies = [
- "execlaw-core",
  "execlaw-inference-api",
  "serde",
  "serde_json",

@@ -61,10 +61,11 @@ use std::path::{Path, PathBuf};
 /// hand (Linux / Windows).
 pub const BUNDLED_DIR_NAME: &str = "bundled-plugins";
 
-/// Copy every `*.zip` from the .app's bundled-plugins source dir
-/// into `<data_dir>/bundled-plugins/`. Best-effort: any individual
-/// file failure is logged + skipped so a single broken plugin
-/// doesn't gate the whole boot.
+/// Copy every plugin ZIP and detached provenance/Sigstore/SBOM sidecar from
+/// the bundle resources into `<data_dir>/bundled-plugins/`. Best-effort: any
+/// individual file failure is logged + skipped so a single broken plugin does
+/// not gate the whole boot; installation still fails closed if its set is
+/// incomplete.
 ///
 /// Idempotent: files that already exist at the destination AND
 /// match the source's size are skipped. A size mismatch (e.g.
@@ -143,7 +144,7 @@ pub fn mirror_bundled_plugins_into_data_dir(data_dir: &Path) {
                 tracing::debug!(
                     src = %path.display(),
                     dest = %dest_path.display(),
-                    "mirrored bundled plugin ZIP",
+                    "mirrored bundled plugin artifact",
                 );
             }
             Err(e) => {
@@ -151,7 +152,7 @@ pub fn mirror_bundled_plugins_into_data_dir(data_dir: &Path) {
                     error = %e,
                     src = %path.display(),
                     dest = %dest_path.display(),
-                    "failed to mirror bundled plugin ZIP",
+                    "failed to mirror bundled plugin artifact",
                 );
             }
         }

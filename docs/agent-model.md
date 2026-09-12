@@ -174,10 +174,10 @@ backoff, stops a third identical canonical `(tool, args)` call, bounds schema
 corrections, and opens a 30-second per-integration circuit after repeated
 terminal transient failures.
 
-These retry counters and circuits are process memory, not `RunStore` state.
-The persisted `ToolResultPayload` and container `runner-protocol` still carry
-legacy string errors, so durable retry budgets and protocol-wide typed failures
-remain P0 follow-up work.
+Migration 0023 persists run retry budgets, canonical call fingerprints,
+attempt/backoff state, input/result schema hashes, and integration circuit
+state. `runner-protocol` carries the same typed failure fields end to end while
+accepting legacy `{status,message}` errors during rolling upgrades.
 
 ### 3.3 Why a per-conversation runner
 
