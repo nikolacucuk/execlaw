@@ -68,7 +68,7 @@ Notes vs the original sketch:
 
 ## Storage
 
-New table — see `crates/core/migrations/0032_transport_bindings.sql` for the live schema. Notes vs the original sketch:
+The live schema is consolidated in `crates/core/migrations/0001_baseline.sql`. Notes vs the original sketch:
 
 - Column is `channel`, not `transport_id` — matches `state_principal_groups.channel`.
 - PK is `(channel, foreign_id)` — inbound routing is the dominant hot path.

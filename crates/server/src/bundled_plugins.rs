@@ -108,7 +108,15 @@ pub fn mirror_bundled_plugins_into_data_dir(data_dir: &Path) {
     let mut skipped = 0usize;
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("zip") {
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !(name.ends_with(".zip")
+            || name.ends_with(".zip.provenance.json")
+            || name.ends_with(".zip.sigstore.json")
+            || name.ends_with(".zip.cdx.json")
+            || name.ends_with(".zip.spdx.json"))
+        {
             continue;
         }
         let Some(filename) = path.file_name() else {
@@ -384,6 +392,32 @@ pub async fn install_bundled_handler(
         message: format!("stage failed: {e}"),
     })?;
 
+    let provenance_path = path.with_file_name(format!("{}.provenance.json", q.file));
+    let provenance_bytes = std::fs::read(&provenance_path).map_err(|error| ApiError {
+        status: StatusCode::FORBIDDEN,
+        code: "provenance_required",
+        message: format!(
+            "missing detached provenance {}: {error}",
+            provenance_path.display()
+        ),
+    })?;
+    let mut provenance: execlaw_core::artifact_provenance::ProvenanceStatement =
+        serde_json::from_slice(&provenance_bytes).map_err(|error| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_provenance",
+            message: error.to_string(),
+        })?;
+    provenance.artifact_locator = path.to_string_lossy().into_owned();
+    let bundle_path = path.with_file_name(format!("{}.sigstore.json", q.file));
+    let sbom_suffix = match provenance.sbom_format.as_str() {
+        "cyclonedx" => "cdx.json",
+        "spdx" => "spdx.json",
+        _ => "invalid",
+    };
+    let sbom_path = path.with_file_name(format!("{}.{}", q.file, sbom_suffix));
+    provenance.signature_reference = bundle_path.to_string_lossy().into_owned();
+    provenance.sbom_location = sbom_path.to_string_lossy().into_owned();
+
     let plugin_id_for_log = staged.manifest.plugin.id.clone();
     let plugin_version_for_log = staged.manifest.plugin.version.clone();
     let target: PathBuf = state.plugin_host.stage_root().join(format!(
@@ -433,6 +467,20 @@ pub async fn install_bundled_handler(
             });
         }
         let _ = std::fs::remove_dir_all(&released);
+    }
+
+    if let Err(error) = state.plugin_host.authorize_verified_plugin_archive(
+        &bytes,
+        &provenance,
+        &staged.manifest,
+        &target,
+    ) {
+        let _ = std::fs::remove_dir_all(&target);
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "provenance_verification_failed",
+            message: error.to_string(),
+        });
     }
 
     let result = if upgrade {

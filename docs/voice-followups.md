@@ -26,31 +26,15 @@ hands-free desktop + speakerphone setups.
 because phone audio comes back in the mic by definition and we can't
 require headphones on a phone bridge.
 
-## SPA mic capture: Opus → PCM16 (deferred)
+## SPA mic capture: PCM16 (completed)
 
-**Status**: VoiceCaptureButton emits Opus chunks via MediaRecorder
-(`audio/webm;codecs=opus` on Chromium/Firefox, `audio/mp4` on Safari).
-Server-side `voice_runtime::ingest_chunks` only accepts `pcm16le` /
-`pcm16`; non-PCM frames are logged at WARN and dropped.
+**Status**: `VoiceCaptureButton` captures browser audio samples and converts
+them to PCM16 before sending them to the server. Server-side
+`voice_runtime::ingest_chunks` accepts the resulting `pcm16le` / `pcm16`
+frames.
 
-**Implication**: in this commit, voice mode round-trips successfully for
-TTS playback (server emits PCM, SPA decodes via `VoicePlayback`) but the
-Whisper round-trip is wired but inert until the codec gap closes.
-
-**Two paths forward**:
-
-1. **Client-side PCM capture** — replace the MediaRecorder path with an
-   `AudioWorkletNode` that emits raw PCM16 at 16 kHz. Smallest change to
-   the protocol; loses Opus's bandwidth advantage (acceptable on a LAN /
-   self-hosted setup).
-2. **Server-side Opus decoder** — add the `opus` crate to
-   `crates/server`. Decodes inbound Opus → PCM16 before handing to
-   `voice_runtime`. Keeps the SPA path unchanged. Adds a native dep that
-   may complicate the Windows-host dev story but builds cleanly on Linux.
-
-Recommendation for the follow-up commit: option 1 (client-side AudioWorklet)
-since it also enables future mobile native + phone-bridge sources to send
-PCM uniformly without negotiating per-source codecs.
+The former MediaRecorder/Opus compatibility gap is closed. Future codec work
+would be an optimization for bandwidth, not a prerequisite for Whisper input.
 
 ## Continuous VAD-driven endpointing (deferred)
 

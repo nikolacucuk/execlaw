@@ -31,6 +31,9 @@ use tracing::{debug, warn};
 pub struct SubprocessSpec {
     pub plugin_id: String,
     pub executable: String,
+    /// Persisted install-time digest. `None` is allowed only when the caller
+    /// has already recorded a Controller-approved local-development override.
+    pub expected_sha256: Option<String>,
     pub args: Vec<String>,
     pub cwd: Option<std::path::PathBuf>,
 }
@@ -112,6 +115,13 @@ impl SubprocessPlugin {
         spec: SubprocessSpec,
         notifications: Option<mpsc::UnboundedSender<PluginNotification>>,
     ) -> Result<Self, String> {
+        if let Some(expected) = &spec.expected_sha256 {
+            execlaw_core::artifact_provenance::verify_file_sha256(
+                std::path::Path::new(&spec.executable),
+                expected,
+            )
+            .map_err(|error| format!("subprocess provenance check failed: {error}"))?;
+        }
         let mut cmd = Command::new(&spec.executable);
         cmd.args(&spec.args)
             .stdin(Stdio::piped())
@@ -335,6 +345,7 @@ mod tests {
         let spec = SubprocessSpec {
             plugin_id: "p1".into(),
             executable: "definitely-not-a-real-binary-xyz-123".into(),
+            expected_sha256: None,
             args: vec![],
             cwd: None,
         };
@@ -356,6 +367,7 @@ done
         let spec = SubprocessSpec {
             plugin_id: "echo".into(),
             executable: "sh".into(),
+            expected_sha256: None,
             args: vec!["-c".into(), script.into()],
             cwd: None,
         };
@@ -395,6 +407,7 @@ done
         let spec = SubprocessSpec {
             plugin_id: "exit-no-reply".into(),
             executable: "sh".into(),
+            expected_sha256: None,
             args: vec!["-c".into(), script.into()],
             cwd: None,
         };
@@ -433,6 +446,7 @@ exit 1
         let spec = SubprocessSpec {
             plugin_id: "die-mid-call".into(),
             executable: "sh".into(),
+            expected_sha256: None,
             args: vec!["-c".into(), script.into()],
             cwd: None,
         };
@@ -450,5 +464,29 @@ exit 1
             "expected drop-error from reader drain; got {err:?}",
         );
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    async fn subprocess_mutation_after_install_is_rejected_before_spawn() {
+        let temp = tempfile::tempdir().unwrap();
+        let executable = temp.path().join("plugin-bin");
+        std::fs::write(&executable, b"verified bytes").unwrap();
+        let expected = execlaw_core::artifact_provenance::sha256_bytes(b"verified bytes");
+        std::fs::write(&executable, b"mutated bytes").unwrap();
+
+        let error = SubprocessPlugin::spawn(
+            SubprocessSpec {
+                plugin_id: "mutated".into(),
+                executable: executable.to_string_lossy().into_owned(),
+                expected_sha256: Some(expected),
+                args: Vec::new(),
+                cwd: None,
+            },
+            None,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("digest mismatch"), "{error}");
     }
 }

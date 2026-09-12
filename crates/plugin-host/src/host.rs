@@ -25,6 +25,9 @@
 use crate::hook_registry::HookRegistry;
 use crate::subprocess::{SubprocessPlugin, SubprocessSpec};
 use async_trait::async_trait;
+use execlaw_core::artifact_provenance::{
+    ArtifactProvenanceStore, ArtifactType, AttestationVerifier, ProvenanceStatement,
+};
 use execlaw_core::db::{Database, DbError};
 use execlaw_plugin_sdk::PluginManifest;
 use rusqlite::params;
@@ -126,6 +129,7 @@ struct PluginHostInner {
     notification_tx: std::sync::OnceLock<
         tokio::sync::mpsc::UnboundedSender<crate::subprocess::PluginNotification>,
     >,
+    attestation_verifier: std::sync::OnceLock<Arc<dyn AttestationVerifier>>,
 }
 
 impl PluginHost {
@@ -159,8 +163,18 @@ impl PluginHost {
                 stage_root,
                 skill_store: std::sync::OnceLock::new(),
                 notification_tx: std::sync::OnceLock::new(),
+                attestation_verifier: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Install the production Sigstore/SLSA verifier. The first verifier wins
+    /// so runtime code cannot swap trust roots after boot.
+    pub fn attach_attestation_verifier(
+        &self,
+        verifier: Arc<dyn AttestationVerifier>,
+    ) -> Result<(), Arc<dyn AttestationVerifier>> {
+        self.inner.attestation_verifier.set(verifier)
     }
 
     /// Attach a shared skill store. Idempotent on the same store
@@ -348,6 +362,121 @@ impl PluginHost {
         &self.inner.db
     }
 
+    /// Verify a plugin ZIP and its detached SBOM, then bind any staged
+    /// subprocess executable to the verified archive before installation.
+    pub fn authorize_verified_plugin_archive(
+        &self,
+        archive_bytes: &[u8],
+        statement: &ProvenanceStatement,
+        manifest: &PluginManifest,
+        stage_path: &Path,
+    ) -> Result<(), PluginHostError> {
+        if statement.artifact_type != ArtifactType::PluginZip {
+            return Err(PluginHostError::Manifest(
+                "plugin provenance artifact_type must be plugin_zip".into(),
+            ));
+        }
+        let store = ArtifactProvenanceStore::new(self.inner.db.clone());
+        store
+            .verify_bytes(
+                archive_bytes,
+                statement,
+                self.inner.attestation_verifier.get().map(Arc::as_ref),
+            )
+            .map_err(|error| PluginHostError::Manifest(error.to_string()))?;
+        store
+            .verify_file_digest(Path::new(&statement.sbom_location), &statement.sbom_sha256)
+            .map_err(|error| PluginHostError::Manifest(error.to_string()))?;
+        self.bind_subprocess_digest(&store, statement, manifest, stage_path)
+    }
+
+    /// Authorize an unsigned local plugin only when the persisted Controller
+    /// override is enabled. Every use is appended to the audit table.
+    pub fn authorize_local_plugin_archive(
+        &self,
+        manifest: &PluginManifest,
+        stage_path: &Path,
+    ) -> Result<(), PluginHostError> {
+        let store = ArtifactProvenanceStore::new(self.inner.db.clone());
+        let plugin_artifact_id =
+            format!("plugin:{}:{}", manifest.plugin.id, manifest.plugin.version);
+        store
+            .use_local_development_override(
+                &plugin_artifact_id,
+                ArtifactType::PluginZip,
+                &stage_path.to_string_lossy(),
+                "Controller",
+                "plugin-admin-api",
+            )
+            .map_err(|error| PluginHostError::Manifest(error.to_string()))?;
+        if let Some(runtime) = &manifest.runtime {
+            if runtime.parsed_tier() == Some(execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess)
+            {
+                let executable =
+                    resolve_executable(stage_path, runtime_executable_or_err(runtime)?);
+                store
+                    .record_local_file_override(
+                        &format!("subprocess:{}", manifest.plugin.id),
+                        ArtifactType::Subprocess,
+                        Path::new(&executable),
+                        "Controller",
+                        "plugin-admin-api",
+                    )
+                    .map_err(|error| PluginHostError::Manifest(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn bind_subprocess_digest(
+        &self,
+        store: &ArtifactProvenanceStore,
+        parent: &ProvenanceStatement,
+        manifest: &PluginManifest,
+        stage_path: &Path,
+    ) -> Result<(), PluginHostError> {
+        let Some(runtime) = &manifest.runtime else {
+            return Ok(());
+        };
+        if runtime.parsed_tier() != Some(execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess) {
+            return Ok(());
+        }
+        let executable = resolve_executable(stage_path, runtime_executable_or_err(runtime)?);
+        store
+            .record_derived_file(
+                parent,
+                &format!("subprocess:{}", manifest.plugin.id),
+                ArtifactType::Subprocess,
+                Path::new(&executable),
+            )
+            .map_err(|error| PluginHostError::Manifest(error.to_string()))
+    }
+
+    fn subprocess_digest_or_override(
+        &self,
+        plugin_id: &str,
+        executable: &str,
+    ) -> Result<Option<String>, PluginHostError> {
+        let store = ArtifactProvenanceStore::new(self.inner.db.clone());
+        let artifact_id = format!("subprocess:{plugin_id}");
+        if let Some(digest) = store
+            .digest_for_artifact_id(&artifact_id)
+            .map_err(|error| PluginHostError::Spawn(error.to_string()))?
+        {
+            return Ok(Some(digest));
+        }
+        store
+            .use_local_development_override(
+                &artifact_id,
+                ArtifactType::Subprocess,
+                executable,
+                "Controller",
+                "plugin-host",
+            )
+            .map_err(|error| PluginHostError::Spawn(error.to_string()))?;
+        Ok(None)
+    }
+
     /// Install a plugin from an already-staged directory.
     ///
     /// The caller is expected to have staged the ZIP via
@@ -433,12 +562,13 @@ impl PluginHost {
             })?;
             match tier {
                 execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess => {
+                    let executable =
+                        resolve_executable(stage_path, runtime_executable_or_err(runtime)?);
                     let spec = SubprocessSpec {
                         plugin_id: plugin_id.clone(),
-                        executable: resolve_executable(
-                            stage_path,
-                            runtime_executable_or_err(runtime)?,
-                        ),
+                        expected_sha256: self
+                            .subprocess_digest_or_override(&plugin_id, &executable)?,
+                        executable,
                         args: runtime.args.clone(),
                         cwd: Some(stage_path.to_path_buf()),
                     };
@@ -619,6 +749,11 @@ impl PluginHost {
         let existing = self
             .get_row(&new_id)?
             .ok_or_else(|| PluginHostError::NotInstalled(new_id.clone()))?;
+
+        self.inner
+            .registry
+            .validate_upgrade_schemas_with_stage(&manifest, stage_path)
+            .map_err(PluginHostError::HookConflict)?;
 
         info!(
             plugin_id = %new_id,
@@ -844,9 +979,13 @@ impl PluginHost {
             let stage = PathBuf::from(&row.stage_path);
             match tier {
                 execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess => {
+                    let executable =
+                        resolve_executable(&stage, runtime_executable_or_err(runtime)?);
                     let spec = SubprocessSpec {
                         plugin_id: plugin_id.to_owned(),
-                        executable: resolve_executable(&stage, runtime_executable_or_err(runtime)?),
+                        expected_sha256: self
+                            .subprocess_digest_or_override(plugin_id, &executable)?,
+                        executable,
                         args: runtime.args.clone(),
                         cwd: Some(stage),
                     };
@@ -943,13 +1082,8 @@ impl PluginHost {
                 .registry
                 .enable_with_stage(&manifest, Some(std::path::Path::new(&row.stage_path)))
             {
-                // Hook conflict isn't necessarily unrecoverable (it
-                // could be a transient state where another plugin
-                // owns the same hook id and will itself be purged
-                // later in this same hydrate pass). We keep the
-                // original "skip + warn" behavior here rather than
-                // auto-purging.
-                warn!(plugin_id = %row.plugin_id, error = %e, "skipping plugin with hook conflict on hydrate");
+                warn!(plugin_id = %row.plugin_id, error = %e, "plugin registration failed on hydrate; quarantining");
+                self.quarantine_plugin(&row.plugin_id, &format!("registration failed: {e}"));
                 continue;
             }
             let needs_runtime = !manifest.tools.is_empty()
@@ -977,9 +1111,21 @@ impl PluginHost {
                                     continue;
                                 }
                             };
+                            let executable = resolve_executable(&stage, exe);
+                            let expected_sha256 = match self
+                                .subprocess_digest_or_override(&row.plugin_id, &executable)
+                            {
+                                Ok(digest) => digest,
+                                Err(error) => {
+                                    warn!(plugin_id = %row.plugin_id, error = %error, "subprocess provenance check failed on hydrate; quarantining");
+                                    self.quarantine_plugin(&row.plugin_id, &error.to_string());
+                                    continue;
+                                }
+                            };
                             let spec = SubprocessSpec {
                                 plugin_id: row.plugin_id.clone(),
-                                executable: resolve_executable(&stage, exe),
+                                executable,
+                                expected_sha256,
                                 args: runtime.args.clone(),
                                 cwd: Some(stage),
                             };
@@ -1249,6 +1395,14 @@ impl PluginHost {
             }
         }
 
+        if let Some(validator) = &registered.schema_validator
+            && let Err(error) = validator.validate(&args)
+        {
+            return Err(format!(
+                "tool '{tool_name}' arguments do not match its JSON Schema: {error}"
+            ));
+        }
+
         // Dispatch by tier: try subprocess first, then script.
         let mut rpc_params = serde_json::json!({
             "tool": tool_name,
@@ -1259,24 +1413,31 @@ impl PluginHost {
             let subs = self.inner.subprocesses.read().await;
             subs.get(&registered.plugin_id).cloned()
         };
-        if let Some(plugin) = plugin {
-            return plugin.call("tool.call", rpc_params).await;
-        }
-        let script = {
+        let result = if let Some(plugin) = plugin {
+            plugin.call("tool.call", rpc_params).await?
+        } else if let Some(script) = {
             let scripts = self.inner.script_plugins.read().await;
             scripts.get(&registered.plugin_id).cloned()
-        };
-        if let Some(script) = script {
+        } {
             let oauth = oauth_map_from_params(&rpc_params);
-            return script
+            script
                 .tool_call(tool_name, args, oauth)
                 .await
-                .map_err(|e| e.to_string());
+                .map_err(|e| e.to_string())?
+        } else {
+            return Err(format!(
+                "plugin '{}' is registered but no runtime is loaded",
+                registered.plugin_id
+            ));
+        };
+        if let Some(validator) = &registered.result_schema_validator
+            && let Err(error) = validator.validate(&result)
+        {
+            return Err(format!(
+                "tool '{tool_name}' result does not match its JSON Schema: {error}"
+            ));
         }
-        Err(format!(
-            "plugin '{}' is registered but no runtime is loaded",
-            registered.plugin_id
-        ))
+        Ok(result)
     }
 
     /// Look up every `[[oauth_accounts]]` declared by `plugin_id`'s
@@ -2025,6 +2186,43 @@ source = "main.rhai"
         (dir, stage)
     }
 
+    fn stage_schema_plugin(
+        plugin_id: &str,
+        version: &str,
+        schema: &str,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let stage = dir.path().join(format!("{plugin_id}-{version}"));
+        std::fs::create_dir_all(stage.join("schemas")).unwrap();
+        std::fs::write(
+            stage.join("plugin.toml"),
+            format!(
+                r#"
+[plugin]
+id = "{plugin_id}"
+name = "Schema Upgrade Test"
+version = "{version}"
+
+[[tools]]
+name = "upgrade.lookup"
+schema = "schemas/lookup.json"
+
+[runtime]
+tier = "script"
+source = "main.rhai"
+"#
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            stage.join("main.rhai"),
+            "fn tool_call(name, args, oauth) { #{} }\n",
+        )
+        .unwrap();
+        std::fs::write(stage.join("schemas/lookup.json"), schema).unwrap();
+        (dir, stage)
+    }
+
     /// Phase B (2026-05-03) — stages a script-tier plugin that
     /// declares two `[[skills]]` rows + ships their body files.
     /// Returns the temp dir keep-alive guard, the stage path the
@@ -2433,6 +2631,32 @@ source = "main.rhai"
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn upgrade_schema_preflight_preserves_working_version_on_failure() {
+        let db = fresh_db();
+        let registry = HookRegistry::new();
+        let stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db, registry.clone(), stage_root.path().to_path_buf());
+        let (_v1_keep, v1_stage) = stage_schema_plugin(
+            "schema-upgrade",
+            "0.1.0",
+            r#"{"type":"object","properties":{"query":{"type":"string"}}}"#,
+        );
+        host.install(&v1_stage).await.unwrap();
+
+        let (_v2_keep, v2_stage) = stage_schema_plugin("schema-upgrade", "0.2.0", "not valid JSON");
+        host.upgrade(&v2_stage)
+            .await
+            .expect_err("invalid replacement schema must fail preflight");
+
+        let row = host
+            .get_row("schema-upgrade")
+            .unwrap()
+            .expect("working install must remain present");
+        assert_eq!(row.version, "0.1.0");
+        assert!(registry.tool("upgrade.lookup").is_some());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upgrade_rejects_when_no_existing_install() {
         // Operators have to use install (or `if_existing=upgrade`
         // which falls through to install). Calling upgrade
@@ -2714,7 +2938,7 @@ latency = "low"
             .health_message
             .expect("quarantined row must carry a reason");
         assert!(
-            msg.contains("script load failed"),
+            msg.contains("plugin stage") && msg.contains("unreadable"),
             "health_message must explain the failure (got: {msg})",
         );
         assert!(
@@ -3019,6 +3243,55 @@ executable = "./bin"
             err.contains("trust >= KnownTrusted"),
             "expected trust violation — got {err:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn call_tool_rejects_schema_invalid_args_before_runtime_dispatch() {
+        let db = fresh_db();
+        let registry = HookRegistry::new();
+        let stage = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(stage.path().join("schemas")).unwrap();
+        std::fs::write(
+            stage.path().join("lookup.json"),
+            r#"{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}"#,
+        )
+        .unwrap();
+        let manifest = PluginManifest::parse(
+            r#"
+[plugin]
+id = "schema-dispatch"
+name = "Schema Dispatch"
+version = "0.1.0"
+
+[[tools]]
+name = "search.lookup"
+schema = "lookup.json"
+
+[runtime]
+tier = "subprocess"
+executable = "./bin"
+"#,
+        )
+        .unwrap();
+        registry
+            .enable_with_stage(&manifest, Some(stage.path()))
+            .unwrap();
+        let host = PluginHost::new(db, registry, PathBuf::from("/tmp"));
+
+        let error = host
+            .call_tool(
+                "search.lookup",
+                serde_json::json!({"query": 42}),
+                &[],
+                Some("Controller"),
+            )
+            .await
+            .expect_err("invalid args must not reach the plugin runtime");
+        assert!(
+            error.contains("do not match its JSON Schema"),
+            "unexpected error: {error}"
+        );
+        assert!(!error.contains("no runtime is loaded"));
     }
 
     /// Regression for the 2026-05-14 plugin-self-containment work.

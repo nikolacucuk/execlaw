@@ -35,13 +35,27 @@ pub struct KokoroClient {
     /// the cancel and finishes after, the bumped counter signals it
     /// to drop the result.
     cancel_epoch: Arc<AtomicUsize>,
+    endpoint_policy_error: Option<String>,
 }
 
 impl KokoroClient {
     /// `voice_id` follows Kokoro's combined-voice syntax (e.g.
     /// `bf_emma+am_michael` for the locked-decision blend).
     pub fn new(base_url: impl Into<String>, voice_id: impl Into<String>) -> Self {
-        Self::with_client(base_url, voice_id, reqwest::Client::new())
+        let base_url = base_url.into();
+        let policy = execlaw_local_endpoint_policy::LocalEndpointPolicy::loopback_only();
+        match policy.validate(&base_url).and_then(|resolution| {
+            policy.reqwest_client(&resolution, |builder| {
+                builder.redirect(reqwest::redirect::Policy::none())
+            })
+        }) {
+            Ok(client) => Self::with_client(base_url, voice_id, client),
+            Err(error) => {
+                let mut client = Self::with_client(base_url, voice_id, reqwest::Client::new());
+                client.endpoint_policy_error = Some(error.to_string());
+                client
+            }
+        }
     }
 
     pub fn with_client(
@@ -57,6 +71,7 @@ impl KokoroClient {
             voice_id: voice_id.into(),
             request_timeout: Duration::from_secs(20),
             cancel_epoch: Arc::new(AtomicUsize::new(0)),
+            endpoint_policy_error: None,
         }
     }
 
@@ -142,6 +157,11 @@ impl InterruptHandle {
 #[async_trait]
 impl TtsClient for KokoroClient {
     async fn synthesize(&mut self, text: &str) -> Result<TtsAudio, String> {
+        if let Some(error) = &self.endpoint_policy_error {
+            return Err(format!(
+                "local endpoint policy denied Kokoro endpoint: {error}"
+            ));
+        }
         if text.trim().is_empty() {
             return Ok(TtsAudio {
                 text: text.to_owned(),

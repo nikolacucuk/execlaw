@@ -607,13 +607,24 @@ pub async fn send_message(
         let _ = store.set_last_activity_at(&cid, chrono::Utc::now().timestamp());
     }
 
-    // Phase C (2026-05-03) — auto-capture handoff. Non-blocking
-    // mpsc send; the worker pulls from the queue, gates on
+    state
+        .memory_extract
+        .enqueue(crate::memory_extract_runtime::MemoryExtractionRequest {
+            conversation_id: cid.clone(),
+            event_start_seq: execlaw_core::ids::EventSeq(user_msg_seq),
+            event_end_seq: execlaw_core::ids::EventSeq(assistant_seq),
+            run_id: format!("memory-turn-{}-{}", cid.as_str(), assistant_seq),
+            authority_scope: format!("principal:{}", principal.id.as_str()),
+            authority_trust_class: principal.trust_level.class_tag().to_owned(),
+        });
+
+    // Phase C (2026-05-03) — auto-capture handoff. The sink durably
+    // deduplicates the committed event range; the worker leases it, gates on
     // `config_skills.auto_capture_enabled` (default OFF), and runs
     // the sanitize → summarize → SkillStore::create pipeline in the
-    // background. Returns false silently when the worker isn't
-    // installed (tests) or its receiver was dropped — auto-capture
-    // failure must never affect chat-handler success.
+    // background. Returns false silently when the worker isn't installed
+    // (tests) or persistence fails; auto-capture failure must never affect
+    // chat-handler success.
     state.skill_capture.enqueue(execlaw_skills::CaptureRequest {
         conversation_id: cid.clone(),
         until_seq: execlaw_core::ids::EventSeq(assistant_seq),
@@ -1890,7 +1901,42 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
         // push the cap arbitrarily high. Pre-fix the runner used a
         // hard-coded 24 ignoring this knob entirely.
         max_tool_rounds: state.config.max_tool_rounds,
+        resume: false,
+        round_offset: 0,
     };
+
+    use execlaw_core::runs::RunStepKind;
+    use execlaw_runner_local::durable::{DurableRun, StepDecision};
+    let durable_run_id = format!("turn:{}:{}", cid.as_str(), user_seq.0);
+    let durable = DurableRun::open(
+        &state.db,
+        durable_run_id,
+        turn_id.clone(),
+        cid.clone(),
+        user_seq,
+        None,
+        chrono::Utc::now().timestamp(),
+    )
+    .map_err(|error| format!("open durable turn: {error}"))?;
+    match durable
+        .begin::<execlaw_runner_protocol::ModelRoundCheckpoint>(
+            "model:0",
+            0,
+            RunStepKind::ModelRequest,
+            &req,
+            None,
+            None,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(|error| format!("claim initial model request: {error}"))?
+    {
+        StepDecision::Execute(_) => {}
+        decision => {
+            return Err(format!(
+                "durable turn did not yield its initial model request: {decision:?}"
+            ));
+        }
+    }
 
     // Build the tool dispatcher we'll use to honour the runner's
     // `ToolCallRequest` frames. Same shape as `run_tool_capable_turn`
@@ -2008,6 +2054,13 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     let mut got_complete = false;
     let mut error_message: Option<String> = None;
     let mut was_cancelled = false;
+    let mut model_step_id = "model:0".to_owned();
+    let mut model_round = 0_u32;
+    let mut model_ordinal = 0_i64;
+    let mut terminal_model_ordinal: Option<i64> = None;
+    let mut tool_steps: std::collections::HashMap<String, (i64, String, serde_json::Value)> =
+        std::collections::HashMap::new();
+    let mut next_model: Option<(i64, String, serde_json::Value)> = None;
 
     while let Some(ev) = rx.recv().await {
         match ev {
@@ -2016,6 +2069,65 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
             }
             TurnEvent::Phase { .. } => {
                 // Same.
+            }
+            TurnEvent::ModelRoundCheckpoint { checkpoint } => {
+                if checkpoint.round != model_round {
+                    error_message = Some(format!(
+                        "runner checkpoint round {} did not match expected model round {}",
+                        checkpoint.round, model_round
+                    ));
+                    break;
+                }
+                durable
+                    .complete(&model_step_id, &checkpoint, chrono::Utc::now().timestamp())
+                    .map_err(|error| format!("complete model checkpoint: {error}"))?;
+
+                if checkpoint.tool_calls.is_empty() {
+                    terminal_model_ordinal = Some(model_ordinal);
+                    continue;
+                }
+
+                tool_steps.clear();
+                for (index, call) in checkpoint.tool_calls.iter().enumerate() {
+                    let ordinal = model_ordinal + 1 + index as i64;
+                    let step_id = format!("tool:{}:{}", checkpoint.round, index);
+                    let input = serde_json::json!({
+                        "call_id": call.id,
+                        "tool_name": call.function.name,
+                        "arguments": call.function.arguments,
+                    });
+                    durable
+                        .define(
+                            step_id.clone(),
+                            ordinal,
+                            RunStepKind::ToolDispatch,
+                            &input,
+                            None,
+                            None,
+                        )
+                        .map_err(|error| format!("define tool checkpoint: {error}"))?;
+                    tool_steps.insert(call.id.clone(), (ordinal, step_id, input));
+                }
+                let next_ordinal = model_ordinal + 1 + checkpoint.tool_calls.len() as i64;
+                let next_step_id = format!("model:{}", checkpoint.round + 1);
+                let next_input = serde_json::json!({
+                    "previous_round": checkpoint.round,
+                    "tool_call_ids": checkpoint.tool_calls.iter().map(|call| &call.id).collect::<Vec<_>>(),
+                });
+                durable
+                    .define(
+                        next_step_id.clone(),
+                        next_ordinal,
+                        RunStepKind::ModelRequest,
+                        &next_input,
+                        None,
+                        None,
+                    )
+                    .map_err(|error| format!("define next model checkpoint: {error}"))?;
+                durable
+                    .advance(model_ordinal, chrono::Utc::now().timestamp())
+                    .map_err(|error| format!("advance model checkpoint: {error}"))?;
+                next_model = Some((next_ordinal, next_step_id, next_input));
             }
             TurnEvent::ToolCallRequest {
                 call_id,
@@ -2072,9 +2184,42 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
                     }
                 }
 
-                let outcome = match dispatch.call(&tool_name, &args).await {
-                    Ok(value) => execlaw_runner_protocol::ToolOutcome::Ok { value },
-                    Err(message) => execlaw_runner_protocol::ToolOutcome::Err { message },
+                let (tool_step_ordinal, tool_step_id, tool_input) =
+                    tool_steps.get(&call_id).cloned().ok_or_else(|| {
+                        format!("tool call '{call_id}' arrived without a model checkpoint")
+                    })?;
+                let outcome = match durable
+                    .begin::<execlaw_runner_protocol::ToolOutcome>(
+                        tool_step_id.clone(),
+                        tool_step_ordinal,
+                        RunStepKind::ToolDispatch,
+                        &tool_input,
+                        None,
+                        None,
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .map_err(|error| format!("claim tool checkpoint: {error}"))?
+                {
+                    StepDecision::Replay(outcome) => outcome,
+                    StepDecision::Execute(_) => {
+                        let outcome = match dispatch.call_typed(&tool_name, &args).await {
+                            execlaw_core::tool::ToolResultEnvelope::Ok { value } => {
+                                execlaw_runner_protocol::ToolOutcome::Ok { value }
+                            }
+                            execlaw_core::tool::ToolResultEnvelope::Err { failure } => {
+                                execlaw_runner_protocol::ToolOutcome::Err { failure }
+                            }
+                        };
+                        durable
+                            .complete(&tool_step_id, &outcome, chrono::Utc::now().timestamp())
+                            .map_err(|error| format!("complete tool checkpoint: {error}"))?;
+                        outcome
+                    }
+                    decision => {
+                        return Err(format!(
+                            "tool checkpoint '{tool_step_id}' is unavailable: {decision:?}"
+                        ));
+                    }
                 };
                 // Emit the matching "finished" pulse so the SPA's
                 // loader can clear (or replace with the next tool's
@@ -2094,7 +2239,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
 
                 let result = execlaw_runner_protocol::ToolCallResult {
                     turn_id: turn_id.clone(),
-                    call_id,
+                    call_id: call_id.clone(),
                     outcome: outcome.clone(),
                 };
                 supervisor.submit_tool_result(group_id, result).await;
@@ -2106,7 +2251,10 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
                     ordinal: this_ordinal,
                     outcome: match outcome {
                         execlaw_runner_protocol::ToolOutcome::Ok { value } => Ok(value),
-                        execlaw_runner_protocol::ToolOutcome::Err { message } => Err(message),
+                        execlaw_runner_protocol::ToolOutcome::Err { failure } => {
+                            Err(serde_json::to_string(&failure)
+                                .unwrap_or_else(|_| failure.message.clone()))
+                        }
                     },
                 };
                 match PendingEvent::encode(
@@ -2124,6 +2272,37 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
                         );
                         error_message = Some(format!("encode tool_result: {e}"));
                         break;
+                    }
+                }
+                durable
+                    .advance(tool_step_ordinal, chrono::Utc::now().timestamp())
+                    .map_err(|error| format!("advance tool checkpoint: {error}"))?;
+                tool_steps.remove(&call_id);
+                if tool_steps.is_empty()
+                    && let Some((ordinal, step_id, input)) = next_model.take()
+                {
+                    match durable
+                        .begin::<execlaw_runner_protocol::ModelRoundCheckpoint>(
+                            step_id.clone(),
+                            ordinal,
+                            RunStepKind::ModelRequest,
+                            &input,
+                            None,
+                            None,
+                            chrono::Utc::now().timestamp(),
+                        )
+                        .map_err(|error| format!("claim next model checkpoint: {error}"))?
+                    {
+                        StepDecision::Execute(_) => {
+                            model_round = model_round.saturating_add(1);
+                            model_ordinal = ordinal;
+                            model_step_id = step_id;
+                        }
+                        decision => {
+                            return Err(format!(
+                                "next model checkpoint is unavailable: {decision:?}"
+                            ));
+                        }
                     }
                 }
             }
@@ -2260,6 +2439,14 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     let written = log
         .commit_turn(cid, latest, pending)
         .map_err(|e| format!("commit_turn: {e}"))?;
+    if let Some(ordinal) = terminal_model_ordinal {
+        let run = durable
+            .advance(ordinal, chrono::Utc::now().timestamp())
+            .map_err(|error| format!("advance terminal model checkpoint: {error}"))?;
+        durable
+            .finish(run.cursor, chrono::Utc::now().timestamp())
+            .map_err(|error| format!("complete durable turn: {error}"))?;
+    }
     let assistant_seq = written
         .iter()
         .find(|e| e.kind == EventKind::ModelTurn)

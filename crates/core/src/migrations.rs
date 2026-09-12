@@ -106,6 +106,46 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "reply_drafts",
         sql: include_str!("../migrations/0016_reply_drafts.sql"),
     },
+    Migration {
+        id: 17,
+        name: "durable_runs",
+        sql: include_str!("../migrations/0017_durable_runs.sql"),
+    },
+    Migration {
+        id: 18,
+        name: "local_endpoint_policy",
+        sql: include_str!("../migrations/0018_local_endpoint_policy.sql"),
+    },
+    Migration {
+        id: 19,
+        name: "graphiti_jobs",
+        sql: include_str!("../migrations/0019_graphiti_jobs.sql"),
+    },
+    Migration {
+        id: 20,
+        name: "memory_assertions_jobs",
+        sql: include_str!("../migrations/0020_memory_assertions_jobs.sql"),
+    },
+    Migration {
+        id: 21,
+        name: "event_integrity_chain",
+        sql: include_str!("../migrations/0021_event_integrity_chain.sql"),
+    },
+    Migration {
+        id: 22,
+        name: "artifact_provenance",
+        sql: include_str!("../migrations/0022_artifact_provenance.sql"),
+    },
+    Migration {
+        id: 23,
+        name: "tool_execution_contract",
+        sql: include_str!("../migrations/0023_tool_execution_contract.sql"),
+    },
+    Migration {
+        id: 24,
+        name: "memory_job_authority",
+        sql: include_str!("../migrations/0024_memory_job_authority.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -298,11 +338,17 @@ mod tests {
         // discovery surface on the /automations landing page).
         // Update this list whenever a new migration is added to
         // MIGRATIONS.
-        assert_eq!(applied, vec![1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(
+            applied,
+            vec![
+                1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
+            ]
+        );
 
         // Spot-check: every documented table exists.
         let tables = vec![
             "state_events",
+            "state_event_integrity_heads",
             "state_conversations",
             "state_outbox",
             "state_inbox",
@@ -357,6 +403,11 @@ mod tests {
             "state_chain_plans",
             "state_chain_runs",
             "state_chain_run_steps",
+            "state_runs",
+            "state_run_steps",
+            "config_local_endpoint_approvals",
+            "state_local_endpoint_resolutions",
+            "state_graphiti_jobs",
         ];
         db.with_conn(|c| {
             for t in &tables {
@@ -380,7 +431,12 @@ mod tests {
         let runner = MigrationRunner::new(&db);
         let first = runner.apply_all().unwrap();
         let second = runner.apply_all().unwrap();
-        assert_eq!(first, vec![1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]);
+        assert_eq!(
+            first,
+            vec![
+                1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
+            ]
+        );
         assert!(
             second.is_empty(),
             "rerun must not re-apply already-applied migrations"

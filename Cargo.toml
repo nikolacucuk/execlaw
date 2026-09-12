@@ -27,6 +27,7 @@ members = [
     "crates/skills",
     "crates/model-adapter",
     "crates/context-window",
+    "crates/local-endpoint-policy",
 ]
 # Tauri desktop wrappers (macOS .app + Windows .exe-installer +
 # Linux .deb) are built with their own Rust toolchain via
@@ -66,6 +67,7 @@ tower-http = { version = "0.6", features = ["trace", "cors", "fs", "catch-panic"
 hyper = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 url = "2"
+ipnet = { version = "2", features = ["serde"] }
 # tokio-tungstenite ships WITHOUT TLS in its default features — so a
 # bare `tokio-tungstenite = "0.24"` would fail every `wss://` connect
 # with "TLS support not compiled in" (signal/whatsapp sidecars use
@@ -101,6 +103,7 @@ toml = "0.9"
 
 # --- docs / schema ---
 schemars = "1.2"
+jsonschema = { version = "0.33", default-features = false }
 utoipa = { version = "5", features = ["axum_extras", "chrono", "uuid"] }
 utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }

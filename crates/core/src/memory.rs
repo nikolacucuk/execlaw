@@ -146,6 +146,47 @@ impl<'db> MemoryStore<'db> {
         key: &str,
     ) -> Result<Option<MemoryEntry>, DbError> {
         self.db.with_conn(|c| {
+            let projected = c
+                .query_row(
+                        "SELECT CAST(CASE WHEN json_type(a.object_json) = 'text' \
+                                  THEN json_extract(a.object_json, '$') \
+                                  ELSE a.object_json END AS BLOB), \
+                            p.projected_at, p.tier, p.hits, \
+                            p.last_used_at, a.created_at \
+                     FROM memory_current_projection p \
+                     JOIN memory_assertions a ON a.assertion_id = p.assertion_id \
+                     WHERE p.scope = ?1 AND p.trust_class = ?2 AND p.key = ?3 \
+                       AND a.status = 'approved' \
+                       AND EXISTS (SELECT 1 FROM memory_evidence e \
+                                                                     WHERE e.assertion_id = a.assertion_id) \
+                                             AND NOT EXISTS (\
+                                                     SELECT 1 FROM memory_assertions newer \
+                                                     WHERE newer.supersedes_id = a.assertion_id \
+                                                         AND newer.status = 'approved' \
+                                                         AND EXISTS (SELECT 1 FROM memory_evidence newer_evidence \
+                                                                                 WHERE newer_evidence.assertion_id = newer.assertion_id)\
+                                             )",
+                    params![scope, trust_class, key],
+                    |r| {
+                        Ok(MemoryEntry {
+                            scope: scope.to_owned(),
+                            trust_class: trust_class.to_owned(),
+                            key: key.to_owned(),
+                            value_blob: r.get(0)?,
+                            ttl_expires: None,
+                            updated_at: r.get(1)?,
+                            tier: MemoryTier::parse(&r.get::<_, String>(2)?)
+                                .unwrap_or(MemoryTier::Warm),
+                            hits: r.get::<_, i64>(3)?.max(0) as u64,
+                            last_used_at: r.get(4)?,
+                            created_at: r.get(5)?,
+                        })
+                    },
+                )
+                .ok();
+            if projected.is_some() {
+                return Ok(projected);
+            }
             let got = c
                 .query_row(
                     "SELECT value_blob, ttl_expires, updated_at, \
@@ -199,6 +240,21 @@ impl<'db> MemoryStore<'db> {
         now_unix: i64,
     ) -> Result<u64, DbError> {
         self.db.with_conn(|c| {
+            let projected = c.execute(
+                "UPDATE memory_current_projection \
+                    SET hits = hits + 1, last_used_at = ?4 \
+                  WHERE scope = ?1 AND trust_class = ?2 AND key = ?3",
+                params![scope, trust_class, key, now_unix],
+            )?;
+            if projected == 1 {
+                let hits = c.query_row(
+                    "SELECT hits FROM memory_current_projection \
+                     WHERE scope = ?1 AND trust_class = ?2 AND key = ?3",
+                    params![scope, trust_class, key],
+                    |r| r.get::<_, i64>(0),
+                )?;
+                return Ok(hits.max(0) as u64);
+            }
             c.execute(
                 "UPDATE memory_entries \
                     SET hits = hits + 1, last_used_at = ?4 \
@@ -255,7 +311,7 @@ impl<'db> MemoryStore<'db> {
                 params_vec.push(Box::new(cls.to_string()));
             }
             params_vec.push(Box::new(limit as i64));
-            let rows = stmt
+            let mut rows = stmt
                 .query_map(rusqlite::params_from_iter(params_vec.iter()), |r| {
                     Ok(MemoryEntry {
                         scope: r.get(0)?,
@@ -272,6 +328,17 @@ impl<'db> MemoryStore<'db> {
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
+            let projected = projected_entries(c, scope, trust_classes, Some("hot"), None, limit)?;
+            rows.retain(|legacy| {
+                !projected.iter().any(|row| {
+                    row.scope == legacy.scope
+                        && row.trust_class == legacy.trust_class
+                        && row.key == legacy.key
+                })
+            });
+            rows.extend(projected);
+            rows.sort_by_key(|row| std::cmp::Reverse(row.last_used_at.unwrap_or(row.updated_at)));
+            rows.truncate(limit as usize);
             Ok(rows)
         })
     }
@@ -313,7 +380,7 @@ impl<'db> MemoryStore<'db> {
                 params_vec.push(Box::new(cls.to_string()));
             }
             params_vec.push(Box::new(limit as i64));
-            let rows = stmt
+            let mut rows = stmt
                 .query_map(rusqlite::params_from_iter(params_vec.iter()), |r| {
                     Ok(MemoryRowSummary {
                         scope: r.get(0)?,
@@ -327,6 +394,25 @@ impl<'db> MemoryStore<'db> {
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
+            let projected = projected_entries(c, scope, trust_classes, None, Some(prefix), limit)?;
+            rows.retain(|legacy| {
+                !projected.iter().any(|row| {
+                    row.scope == legacy.scope
+                        && row.trust_class == legacy.trust_class
+                        && row.key == legacy.key
+                })
+            });
+            rows.extend(projected.into_iter().map(|entry| MemoryRowSummary {
+                scope: entry.scope,
+                trust_class: entry.trust_class,
+                key: entry.key,
+                tier: entry.tier,
+                hits: entry.hits,
+                last_used_at: entry.last_used_at,
+                updated_at: entry.updated_at,
+            }));
+            rows.sort_by_key(|row| std::cmp::Reverse(row.last_used_at.unwrap_or(row.updated_at)));
+            rows.truncate(limit as usize);
             Ok(rows)
         })
     }
@@ -411,14 +497,91 @@ impl<'db> MemoryStore<'db> {
         tier: MemoryTier,
     ) -> Result<(), DbError> {
         self.db.with_conn(|c| {
-            c.execute(
-                "UPDATE memory_entries SET tier = ?4 \
+            let projected = c.execute(
+                "UPDATE memory_current_projection SET tier = ?4 \
                   WHERE scope = ?1 AND trust_class = ?2 AND key = ?3",
                 params![scope, trust_class, key, tier.as_sql()],
             )?;
+            if projected == 0 {
+                c.execute(
+                    "UPDATE memory_entries SET tier = ?4 \
+                  WHERE scope = ?1 AND trust_class = ?2 AND key = ?3",
+                    params![scope, trust_class, key, tier.as_sql()],
+                )?;
+            }
             Ok(())
         })
     }
+}
+
+fn projected_entries(
+    conn: &rusqlite::Connection,
+    scope: &str,
+    trust_classes: &[&str],
+    tier: Option<&str>,
+    prefix: Option<&str>,
+    limit: u32,
+) -> Result<Vec<MemoryEntry>, rusqlite::Error> {
+    let placeholders = (0..trust_classes.len())
+        .map(|index| format!("?{}", index + 2))
+        .collect::<Vec<_>>()
+        .join(",");
+    let tier_clause = if tier.is_some() {
+        " AND p.tier = ?"
+    } else {
+        ""
+    };
+    let prefix_clause = if prefix.is_some() {
+        " AND p.key LIKE ? ESCAPE '\\'"
+    } else {
+        ""
+    };
+    let sql = format!(
+        "SELECT p.scope, p.trust_class, p.key, \
+            CAST(CASE WHEN json_type(a.object_json) = 'text' \
+                  THEN json_extract(a.object_json, '$') \
+                  ELSE a.object_json END AS BLOB), p.projected_at, \
+                p.tier, p.hits, p.last_used_at, a.created_at \
+         FROM memory_current_projection p \
+         JOIN memory_assertions a ON a.assertion_id = p.assertion_id \
+         WHERE p.scope = ?1 AND p.trust_class IN ({placeholders}) \
+           AND p.tier <> 'cold' AND a.status = 'approved' \
+           AND EXISTS (SELECT 1 FROM memory_evidence e WHERE e.assertion_id = a.assertion_id)\
+                     AND NOT EXISTS (SELECT 1 FROM memory_assertions newer \
+                                                     WHERE newer.supersedes_id = a.assertion_id \
+                                                         AND newer.status = 'approved' \
+                                                         AND EXISTS (SELECT 1 FROM memory_evidence newer_evidence \
+                                                                                 WHERE newer_evidence.assertion_id = newer.assertion_id))\
+           {tier_clause}{prefix_clause} \
+         ORDER BY COALESCE(p.last_used_at, p.projected_at) DESC LIMIT ?"
+    );
+    let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(scope.to_owned())];
+    for trust_class in trust_classes {
+        values.push(Box::new((*trust_class).to_owned()));
+    }
+    if let Some(tier) = tier {
+        values.push(Box::new(tier.to_owned()));
+    }
+    if let Some(prefix) = prefix {
+        values.push(Box::new(format!("{}%", prefix.replace('%', "\\%"))));
+    }
+    values.push(Box::new(limit as i64));
+    let mut stmt = conn.prepare(&sql)?;
+    stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+        Ok(MemoryEntry {
+            scope: row.get(0)?,
+            trust_class: row.get(1)?,
+            key: row.get(2)?,
+            value_blob: row.get(3)?,
+            ttl_expires: None,
+            updated_at: row.get(4)?,
+            tier: MemoryTier::parse(&row.get::<_, String>(5)?).unwrap_or(MemoryTier::Warm),
+            hits: row.get::<_, i64>(6)?.max(0) as u64,
+            last_used_at: row.get(7)?,
+            created_at: row.get(8)?,
+        })
+    })?
+    .collect()
 }
 
 #[cfg(test)]

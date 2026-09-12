@@ -94,6 +94,9 @@ pub enum TurnEvent {
     Phase {
         phase: String,
     },
+    ModelRoundCheckpoint {
+        checkpoint: execlaw_runner_protocol::ModelRoundCheckpoint,
+    },
     /// Runner asked to call a tool. Caller dispatches via the
     /// existing `ChainedToolDispatch` and replies on the
     /// supervisor's `submit_tool_result` API.
@@ -1172,6 +1175,15 @@ impl RunnerSupervisor {
                     let _ = tx.send(TurnEvent::Phase { phase });
                 }
             }
+            RunnerToServer::ModelRoundCheckpoint {
+                turn_id,
+                conversation_id: _,
+                checkpoint,
+            } => {
+                if let Some(tx) = handle.turn_streams.get(&turn_id) {
+                    let _ = tx.send(TurnEvent::ModelRoundCheckpoint { checkpoint });
+                }
+            }
             RunnerToServer::ToolCallRequest {
                 turn_id,
                 conversation_id: _,
@@ -1540,6 +1552,8 @@ mod tests {
             spotlight: None,
             user_image_urls: Vec::new(),
             max_tool_rounds: 16,
+            resume: false,
+            round_offset: 0,
         };
         let res = s.forward_turn("g-missing", req).await;
         assert!(matches!(res, Err(ForwardError::NoRunner)));
@@ -1580,6 +1594,8 @@ mod tests {
             spotlight: None,
             user_image_urls: Vec::new(),
             max_tool_rounds: 16,
+            resume: false,
+            round_offset: 0,
         };
         let res = s.forward_turn("g-dead", req).await;
         assert!(matches!(res, Err(ForwardError::RunnerGone)));

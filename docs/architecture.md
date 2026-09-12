@@ -4,7 +4,7 @@ Reference document for the execlaw agent model. This is the mental model a new c
 
 Relationship to other docs:
 
-- [`MIGRATION_PLAN.md`](../MIGRATION_PLAN.md) is the design rationale, section-by-section, with research citations and trade-off discussion. Read it when you need to understand *why*.
+- This document incorporates the durable design rationale from the retired migration plan alongside the current architecture.
 - This document is the *what*: the structure, the invariants, the flows. Read it when you need to understand *how things fit together*.
 - [`agent-model.md`](agent-model.md) is the *how* of one turn — TurnExecutor, memory layers, reflection loop, planner/executor split.
 - [`plugins.md`](plugins.md) is the plugin-author reference — manifest schema, runtime tiers, sidecar model, primitives, and a step-by-step guide for writing a custom plugin.
@@ -21,7 +21,7 @@ Relationship to other docs:
 
 ## 2. Design principles (referenced everywhere)
 
-From `MIGRATION_PLAN.md` §0 — restated here so this doc stands alone:
+These principles were established during the original migration and are restated here so this document stands alone:
 
 1. **Self-hosted only.** No cloud LLM providers on any code path. Strict.
 2. **SQLite is the source of truth** for configuration and state.
@@ -158,9 +158,13 @@ The coordinator. Owns:
 - **Login rate limiter** — per-IP sliding-window token bucket (5 attempts / 10 min) on `POST /api/login`.
 - **Automation bus** — durable `state_bus_events` inbox; dispatcher + worker pool; Rhai-evaluated typed-graph automation runtime (M1–M4). See §4.6.
 - **Inference metrics** — per-consumer attribution (chat / routines / research / automations); `in_flight`, total calls/failures, p50/p95 latency ring buffer. `GET /api/admin/inference/metrics` + `POST /api/admin/inference/probe`.
-- **Skills subsystem** — `crates/skills/` owns the versioned skill store, auto-capture worker (C), reuse-update worker (D), and built-in secret scanner. Separate from the `config_skills` DB table (operator toggles) and the `[[skills]]` manifest entries (plugin-shipped skills). See §4.9.
+- **Skills subsystem** — `crates/skills/` owns the versioned skill store, durable leased auto-capture worker (C), reuse-update worker (D), and built-in secret scanner. Auto-capture requests are deduplicated SQLite `memory_jobs` rows over committed event ranges, so restart cannot lose queued work. Separate from the `config_skills` DB table (operator toggles) and the `[[skills]]` manifest entries (plugin-shipped skills). See §4.9.
+- **Durable run store** — migration 0017 and `crates/core/src/runs.rs` define stable run/step identities, cursor transitions, leases, approval waits, and atomic outbox enqueue/completion. `next_safe_action` distinguishes claim, expired-lease reclaim, wait, cursor advance, and terminal states. The in-process `TurnExecutor` checkpoints every model request and tool dispatch under `turn:<conversation_id>:<input_event_seq>` and can resume from that persisted input event without repeating completed work. Runner-mediated server turns use the same coordinator around model-round checkpoints and host tool dispatches. HTTP callers still need a request idempotency key before an automatic retry can identify a previously appended `UserMsg`; internal recovery uses the persisted input event sequence directly.
+- **Local endpoint policy** — migration 0018 stores approved CIDRs/DNS names and last resolution diagnostics. `crates/local-endpoint-policy/` rejects public or mixed DNS answers, userinfo, and alternate numeric hosts; pins accepted DNS answers into no-redirect clients. Server adapters apply it to configured inference, HTTP MCP, Graphiti, and STT/TTS endpoints.
+- **Evidence-backed memory** — migration 0020 adds append-only assertions and evidence, validity/supersession, an evidence-gated current projection, and leased `memory_jobs`; migration 0024 pins host-derived scope and trust on extraction jobs. Successful committed turns enqueue exact event ranges for a bounded local Small/Standard extractor. The worker validates every evidence path, quote, and SHA-256 hash against replay before insertion, retries under leases, and leaves assertions pending by default. Only explicitly enabled conservative policy may approve and project non-procedural assertions; procedural candidates remain proposals.
+- **Artifact provenance** — migration 0022 stores Controller-owned allowlists, verified artifact identity, digests, SLSA/Sigstore metadata, SBOM references, and append-only verification events. Bundled plugins, subprocesses, sidecars, and runner images fail closed unless verified or covered by the audited local-development override.
 - **Model adapter** — `crates/model-adapter/` provides per-family `ModelAdapter` impls (Qwen3, DeepSeekR1, DeepSeekV3, Llama3, Mistral, Gemma, OpenAiGeneric). Every LLM call site calls `adapter_for(ModelFamily::detect(&model_id)).chat(...)` so reasoning-block extraction, thinking suppression, and guided-decoding toggling are isolated per family.
-- **Graphiti bridge** — built-in `graphiti` tool that proxies `status`, `ingest_episode`, `search`, and `raw_request` actions to a Graphiti-compatible HTTP endpoint. Admin routes `GET/POST /api/admin/graphiti/health|test-call` for operator validation. See §4.8.
+- **Graphiti bridge** — Controller-only built-in `graphiti` tool with typed `status`, `ingest`, `search`, `retract`, and `reconcile` actions. Endpoint configuration is SQLite-backed, credentials are vault-backed, and ingest/reconcile effects run as durable leased jobs. Model calls cannot select the URL, API key, HTTP method, path, or scope. See §4.11.
 - **Cards primitive** — `crates/core/src/cards.rs`; event-sourced `CardOpened`/`CardProgressed`/`CardClosed` lifecycle for long-running tasks (research, Python execution, agent fan-out). Channel-capability downgrade to plain text on non-rich transports.
 - **Routine scheduler** — minute-aligned cron tick; fires `config_routines` rows as controller-trust turns via the existing conversation path.
 - **Vault** — SQLCipher-encrypted secrets; master key from OS keyring.
@@ -252,7 +256,7 @@ Currently shipped in-tree plugins:
 | `tool-chain` | Orchestration | Deterministic multi-step plan execution with per-step approval gate; persisted to `state_chain_plans/runs/steps` |
 | `humanizer-skills` | Skills | Writing-style skill: makes replies natural and human-sounding |
 | `obsidian-skills` | Skills | Obsidian vault workflow and atomic-note skills |
-| `hello` | Reference (subprocess) | `hello.echo` reference plugin for subprocess tier |
+| `plugin-hello` | Reference (subprocess) | `hello.echo` reference plugin for subprocess tier |
 | `identity-local-address-book` | Identity provider (subprocess) | JSON-file contact list → KnownTrusted auto-admit |
 
 Transport-class plugins implement the conversation-routing contract: receive inbound events, push them to the event log with stable `(plugin_id, source_event_id)` identifiers, drain outbox rows, deliver to the external surface. Full reference in [`plugins.md`](plugins.md).
@@ -393,7 +397,7 @@ Every resolved request is then wrapped by `execlaw_model_adapter::adapter_for(Mo
 
 `crates/skills/` implements a versioned skill store and two background workers that close the learning loop without operator intervention per turn.
 
-**Phase A — skill store:** `state_skills` / `state_skill_versions` / `state_skill_proposals` tables (migration 0029). Skills are versioned markdown documents with structured frontmatter. FTS5 index for retrieval.
+**Phase A — skill store:** `state_skills` / `state_skill_versions` / `state_skill_proposals` tables in the baseline schema. Skills are versioned markdown documents with structured frontmatter. FTS5 index for retrieval.
 
 **Phase C — auto-capture worker:** enqueued by the chat handler at turn end for every turn with ≥ N tool calls.
 
@@ -460,11 +464,24 @@ Two knowledge-graph capabilities serve different audiences:
 | Action | Description |
 |---|---|
 | `status` | Check Graphiti service reachability |
-| `ingest_episode` | Write a new episode (conversation excerpt, document chunk) into Graphiti's temporal graph |
+| `ingest` | Durably enqueue a conversation episode for Graphiti ingestion |
 | `search` | Semantic + temporal search over the graph (`group_id`, `query`, `top_k`) |
-| `raw_request` | Arbitrary Graphiti HTTP call (operator-gated) |
+| `retract` | Retract one evidence ID within the host-derived conversation scope |
+| `reconcile` | Durably enqueue projection reconciliation for the conversation |
 
-Graphiti endpoint and API key are operator-configured (`EXECLAW_GRAPHITI_BASE_URL`, `EXECLAW_GRAPHITI_API_KEY` env vars, or the Settings UI). Admin routes `GET /api/admin/graphiti/health` and `POST /api/admin/graphiti/test-call` allow validation without driving a model turn.
+The model-callable contract rejects unknown fields and derives `group_id` from
+the conversation. It also derives trust scope, evidence IDs, and source-event
+references from host state. The endpoint and credential reference live in
+`config_runtime_settings`; the credential value lives in the core vault.
+Requests use the shared local-endpoint policy, DNS pinning, and no-redirect
+client. Search results are rejected unless every item matches the requested
+scope and carries a scope-bound evidence ID. Admin routes under
+`/api/admin/graphiti/config|health|test-call` configure and validate the bridge.
+Ingest and reconcile enqueue deduplicated `state_graphiti_jobs` rows keyed by
+operation and evidence ID. `GraphitiWorker` claims them with expiring leases,
+applies bounded exponential retry, and can reclaim interrupted work after
+restart. Graphiti remains an optional projection: the source event and local
+evidence identity remain authoritative.
 
 **Graphify (developer tooling, external CLI):** Graphify is an offline AST-level knowledge-graph tool (`~/.local/bin/graphify.exe`). It is not part of the execlaw runtime — it is an operator-side developer aid.
 
@@ -475,7 +492,7 @@ graphify path "<A>" "<B>"    # shortest relationship path between two nodes
 graphify explain "<concept>" # focussed concept explanation from the graph
 ```
 
-The graph persists at `graphify-out/` (graph.json, manifest.json, GRAPH_REPORT.md). A post-commit Git hook (`scripts/install_graphify_memory_hook.ps1`) runs `graphify update` automatically. `scripts/graphify_sync_preview.mjs` slices the top 300 nodes + 800 edges into `web/src/generated/graphifyPreview.json` for the SPA's optional graph panel.
+The graph persists at `graphify-out/` (graph.json, manifest.json, GRAPH_REPORT.md). An optional post-commit Git hook installed by `scripts/install_graphify_memory_hook.ps1` runs `graphify update`. `scripts/graphify_sync_preview.mjs` can slice the top 300 nodes + 800 edges into `web/src/generated/graphifyPreview.json`; the current SPA does not import or render that generated preview.
 
 **Obsidian lesson pipeline:** AI-session transcripts (GitHub Copilot, etc.) are imported into an Obsidian vault via `scripts/copilot_to_obsidian.py`. The importer classifies extracted lessons into four categories (Patterns / Mistakes / Decisions / Context) and deduplicates by `lesson_hash`. `scripts/weekly_lessons_maintenance_report.py` generates a stale/duplicate review report. The `obsidian-skills` plugin ships two skills: `vault-workflow` (Obsidian note-taking conventions) and `atomic-notes` (atomic note decomposition). See [`docs/copilot-graphify-obsidian-workspace-setup.md`](copilot-graphify-obsidian-workspace-setup.md) for setup.
 
@@ -483,7 +500,7 @@ The graph persists at `graphify-out/` (graph.json, manifest.json, GRAPH_REPORT.m
 
 ## 5. Data model
 
-Full schema is the union of every file in [`crates/core/migrations/`](../crates/core/migrations/) — initial schema in `0001_initial_schema.sql` plus 30+ incremental migrations as the system has grown (HMAC-tag column, plugin install table, eval flags, users + WebAuthn, principal groups, OAuth accounts, skills, transport bindings, search providers, memory lifecycle, …). The load-bearing tables:
+Full schema is the union of every file in [`crates/core/migrations/`](../crates/core/migrations/): the consolidated pre-v1 schema in `0001_baseline.sql` plus additive migrations through `0022`. The load-bearing tables:
 
 ### 5.1 `state_events` — the source of truth
 
@@ -495,11 +512,18 @@ CREATE TABLE state_events (
     payload         BLOB NOT NULL,     -- MessagePack
     committed_at    INTEGER NOT NULL,
     actor           TEXT,
+    tag             BLOB,              -- v1 row HMAC or v2 chain tag
+    key_id          INTEGER NOT NULL,
+    integrity_version INTEGER NOT NULL, -- 1 = legacy row MAC, 2 = chained
+    prev_tag        BLOB,               -- required for v2 rows
     PRIMARY KEY (conversation_id, seq)
 );
 ```
 
-Append-only. Monotonic `seq` per `conversation_id`. Every action in the system is a row here. Replay reconstructs state deterministically.
+  Append-only. Monotonic `seq` per `conversation_id`. Every action in the system
+  is a row here. Replay reconstructs state deterministically and, with a key ring,
+  verifies legacy v1 rows plus the v2 chain and signed terminal head before
+  returning any suffix.
 
 **Event kinds** (from [`crates/core/src/events.rs`](../crates/core/src/events.rs)):
 
@@ -604,26 +628,45 @@ CREATE TABLE memory_entries (
 
 ### 5.6 Other tables (pointer-level)
 
+- `state_runs`, `state_run_steps` (migration 0017) — execution cursors and
+  leased step boundaries. Stable input hashes, approval IDs, and unique outbox
+  idempotency keys make retries auditable and effect enqueue idempotent.
+- `config_local_endpoint_approvals`, `state_local_endpoint_resolutions`
+  (migration 0018) — operator-approved CIDR/DNS policy and the latest accepted
+  or denied resolution diagnostics.
+- `state_graphiti_jobs` (migration 0019) — leased, deduplicated ingest and
+  reconcile work bound to a source event and evidence ID.
+- `memory_assertions`, `memory_evidence`, `memory_current_projection`,
+  `memory_jobs` (migration 0020) — append-only evidence-backed memory plus
+  durable extraction/skill-capture work. Migration 0024 adds pinned
+  host-derived scope and trust to extraction jobs.
+- `state_event_integrity_heads` and the v2 columns on `state_events` (migration
+  0021) — legacy-prefix genesis anchors, chained rows, and signed terminal
+  checkpoints.
+- `config_artifact_verification`, `state_artifact_provenance`, and
+  `state_artifact_verification_events` (migration 0022) — supply-chain policy,
+  verified identities/digests/SBOM references, and audit history.
+
 - `state_alerts`, `state_incidents`, `state_alert_silences` — operational alerting (§10 of plan).
 - `state_attachments`, `state_artifacts` — blob references for inbound images and research PDFs. `state_attachments.filename` column added (migration 0006) so python-sandbox hydration and inbound transport attachments have original filenames instead of sha256-hex paths.
 - `config_runner_deployments` — GPU + model + backend mapping per `RunnerPurpose`.
 - `config_trust_policy`, `config_alert_routing`, `config_research_quota`, `config_runtime_settings`, `config_general` — operator-editable settings.
-- `config_tool_access` (migration 0009) — per-trust-class capability grants for tool dispatch.
-- `config_mcp_servers` (migration 0010) — operator-supplied MCP server registrations; tools surface dynamically alongside plugin tools.
+- `config_tool_access` — per-trust-class capability grants for tool dispatch.
+- `config_mcp_servers` — operator-supplied MCP server registrations; tools surface dynamically alongside plugin tools.
 - `config_routines` — cron-shaped recurring tasks fired through the wakeup channel.
-- `research_jobs` (migration 0027) — background research sessions (§2.9.1 of plan).
+- `research_jobs` — background research sessions.
 - `vault_secrets` — SQLCipher-encrypted secret store; references are opaque to plugins.
 - `log_entries` — SQLite half of the JSONL+SQLite dual log sink.
 - `transport_cursors` — per-transport resume point (what `source_event_id` was last processed).
-- `transport_conversations` (migration 0006) — `(plugin_id, transport_handle, principal_id) → conversation_id` mapping that the `ConversationResolver` uses on inbound to decide whether a new message continues an existing thread or rotates to a new one. The Controller principal short-circuits: every controller message — across web, voice, Signal, WhatsApp, SMS, Slack, email — collapses into one fixed `controller-thread` ConversationId so the SPA can render a single pinned **Control thread**.
-- `transport_bindings` (migration 0032) — `(transport, foreign_id) → principal_id` map that drives auto-bridge transport selection (`bridge_text_reply_to_originating_transport`).
-- `principal_groups` (migration 0024) — `principal_group_id ↔ conversation_id` mapping; lets multi-channel principals share one conversation thread.
-- `eval_flagged` (migration 0004) — operator-tagged regression-target event ranges.
-- `state_plugins` (migration 0003) — persisted plugin installs; re-hydrated on every server boot. Now carries `health_status` / `health_message` / `quarantined_at` columns (migration 0005) for non-destructive quarantine: a plugin that fails to hydrate on startup is marked quarantined (not deleted), preserving its OAuth tokens and vault state; the SPA shows a "needs reinstall" badge.
-- `state_oauth_clients`, `state_oauth_tokens` (migration 0028) — OAuth client metadata + access/refresh tokens for plugins that declare `[[oauth_accounts]]`. Plugins never see refresh tokens or client secrets.
+- `transport_conversations` — `(plugin_id, transport_handle, principal_id) → conversation_id` mapping that the `ConversationResolver` uses on inbound to decide whether a new message continues an existing thread or rotates to a new one. The Controller principal short-circuits: every controller message — across web, voice, Signal, WhatsApp, SMS, Slack, email — collapses into one fixed `controller-thread` ConversationId so the SPA can render a single pinned **Control thread**.
+- `transport_bindings` — `(transport, foreign_id) → principal_id` map that drives auto-bridge transport selection (`bridge_text_reply_to_originating_transport`).
+- `principal_groups` — `principal_group_id ↔ conversation_id` mapping; lets multi-channel principals share one conversation thread.
+- `eval_flagged` — operator-tagged regression-target event ranges.
+- `state_plugins` — persisted plugin installs; re-hydrated on every server boot. Migration 0005 adds `health_status` / `health_message` / `quarantined_at` for non-destructive quarantine: a plugin that fails to hydrate on startup is marked quarantined (not deleted), preserving its OAuth tokens and vault state; the SPA shows a "needs reinstall" badge.
+- `state_oauth_clients`, `state_oauth_tokens` — OAuth client metadata + access/refresh tokens for plugins that declare `[[oauth_accounts]]`. Plugins never see refresh tokens or client secrets.
 - `users`, `state_webauthn_credentials`, `state_refresh_tokens` (migrations 0005/0007/0008) — operator account + auth state for the SPA.
-- `state_skills`, `state_skill_proposals`, `config_skills` (migrations 0029–0031) — operator-authored skill markdown registry; plugins ship skills via `[[skills]]` manifest entries. Migration 0011 enables `auto_capture_enabled` and `reuse_update_enabled` on existing installs (skills learning loop on by default).
-- `search_providers` (migration 0033) — pluggable search backend registrations for the research subsystem.
+- `state_skills`, `state_skill_proposals`, `config_skills` — operator-authored skill markdown registry in the baseline schema; plugins ship skills via `[[skills]]` manifest entries. Migration 0011 enables `auto_capture_enabled` and `reuse_update_enabled` on existing installs (skills learning loop on by default).
+- `search_providers` — pluggable search backend registrations for the research subsystem.
 - **Automation tables** (migrations 0007–0010):
   - `state_bus_events` — durable inbox for the automation event bus (`id`, `kind`, `source`, `received_at`, `payload`, `internal`, `dispatched_at`). Independent from `state_events`; no HMAC chain.
   - `state_automations` — automation definition store (`id`, `name`, `enabled`, `definition` JSON, `created_at`, `updated_at`). Expression index on `json_extract(definition,'$.trigger.kind')` drives the matcher hot path.
@@ -1217,7 +1260,7 @@ The voice modality uses the same event log, runner, policy, memory, and outbox. 
 - **Event kinds** are finer-grained (`stt.partial`, `tts.audio_chunk`, etc.) because commits happen per utterance / tool call / approval rather than per turn.
 - **Runner deployments**: STT can run on Intel Arc via OpenVINO while LLM runs on nvidia via vLLM — the voice pipeline composes them.
 
-Full detail in [`MIGRATION_PLAN.md` §2.13](../MIGRATION_PLAN.md).
+Full detail is in [`voice-followups.md`](voice-followups.md).
 
 ---
 
@@ -1227,9 +1270,7 @@ For the reader who wants to jump into code:
 
 | File | What's there |
 |---|---|
-| [`crates/core/migrations/0001_initial_schema.sql`](../crates/core/migrations/0001_initial_schema.sql) | All 22 tables |
-| [`crates/core/migrations/0002_event_hmac_tag.sql`](../crates/core/migrations/0002_event_hmac_tag.sql) | HMAC `tag` + `key_id` on `state_events` |
-| [`crates/core/migrations/0003_state_plugins.sql`](../crates/core/migrations/0003_state_plugins.sql) | Plugin install persistence |
+| [`crates/core/migrations/0001_baseline.sql`](../crates/core/migrations/0001_baseline.sql) | Consolidated pre-v1 schema, including event HMAC fields, plugin persistence, memory lifecycle, and transport bindings |
 | [`crates/core/migrations/0005_plugin_health.sql`](../crates/core/migrations/0005_plugin_health.sql) | `health_status`, `health_message`, `quarantined_at` on `state_plugins` (non-destructive quarantine) |
 | [`crates/core/migrations/0006_add_attachments_filename.sql`](../crates/core/migrations/0006_add_attachments_filename.sql) | `filename TEXT` on `state_attachments` — needed for Python sandbox file hydration |
 | [`crates/core/migrations/0007_automation_bus.sql`](../crates/core/migrations/0007_automation_bus.sql) | `state_bus_events` table + 2 indexes |
@@ -1238,8 +1279,18 @@ For the reader who wants to jump into code:
 | [`crates/core/migrations/0010_suggestion_drafts.sql`](../crates/core/migrations/0010_suggestion_drafts.sql) | Draft storage for automation builder |
 | [`crates/core/migrations/0011_enable_skills_learning_loop_defaults.sql`](../crates/core/migrations/0011_enable_skills_learning_loop_defaults.sql) | Enables `auto_capture_enabled=1` and `reuse_update_enabled=1` in `config_skills` for existing installs |
 | [`crates/core/migrations/0012_chain_plans_runs.sql`](../crates/core/migrations/0012_chain_plans_runs.sql) | `state_chain_plans`, `state_chain_runs`, `state_chain_run_steps` for tool-chain plugin phase 2 |
+| [`crates/core/migrations/0017_durable_runs.sql`](../crates/core/migrations/0017_durable_runs.sql) | Generic durable runs, leased step boundaries, approval/outbox identities, and recovery indexes |
+| [`crates/core/migrations/0018_local_endpoint_policy.sql`](../crates/core/migrations/0018_local_endpoint_policy.sql) | SQLite-approved CIDR/DNS policy and endpoint-resolution diagnostics |
+| [`crates/core/migrations/0019_graphiti_jobs.sql`](../crates/core/migrations/0019_graphiti_jobs.sql) | Durable leased Graphiti ingest/reconcile jobs with source evidence |
+| [`crates/core/migrations/0020_memory_assertions_jobs.sql`](../crates/core/migrations/0020_memory_assertions_jobs.sql) | Append-only assertions/evidence, current projection, and durable memory jobs |
 | [`crates/core/src/events.rs`](../crates/core/src/events.rs) | Event-log primitives, `commit_turn`, `enforce_tool_pairing`, HMAC sign/verify |
 | [`crates/core/src/event_hmac.rs`](../crates/core/src/event_hmac.rs) | HMAC-SHA256 canonical bytes + constant-time verify |
+| [`crates/core/migrations/0021_event_integrity_chain.sql`](../crates/core/migrations/0021_event_integrity_chain.sql) | Versioned per-conversation event chains + signed terminal checkpoints |
+| [`crates/core/migrations/0022_artifact_provenance.sql`](../crates/core/migrations/0022_artifact_provenance.sql) | Artifact verification policy, provenance records, and append-only audit events |
+| [`crates/core/src/runs.rs`](../crates/core/src/runs.rs) | `RunStore` transitions, leases, atomic outbox completion, and `next_safe_action` recovery |
+| [`crates/core/src/local_endpoint_policy.rs`](../crates/core/src/local_endpoint_policy.rs) | SQLite policy/diagnostic store; enforcement lives in `crates/local-endpoint-policy/` |
+| [`crates/core/src/memory_assertions.rs`](../crates/core/src/memory_assertions.rs) | Assertion/evidence projection and leased memory-job store |
+| [`crates/core/src/artifact_provenance.rs`](../crates/core/src/artifact_provenance.rs) | Allowlist policy, offline cosign adapter, digest/OCI checks, and override audit |
 | [`crates/core/src/principal.rs`](../crates/core/src/principal.rs) | Trust ladder + `PrincipalStore` persistence (Phase 3) |
 | [`crates/core/src/outbox.rs`](../crates/core/src/outbox.rs) | Outbox enqueue / inbox dedup |
 | [`crates/core/src/automations.rs`](../crates/core/src/automations.rs) | M2 Automations: `AutomationDef` typed-graph store, `AutomationStore::upsert`, `list_enabled_for_kind` hot path |
@@ -1268,15 +1319,16 @@ For the reader who wants to jump into code:
 | [`crates/model-adapter/src/families.rs`](../crates/model-adapter/src/families.rs) | Per-family `ModelAdapter` impls — Qwen3 thinking suppression, DeepSeekR1 reasoning extraction, Llama3/Mistral/Gemma normalization |
 | [`crates/model-adapter/src/adapter.rs`](../crates/model-adapter/src/adapter.rs) | `ModelAdapter` trait + `OutputHint` (StructuredJson / Markdown / Conversation / Plain) + `AdaptedResponse` |
 | [`crates/skills/src/lib.rs`](../crates/skills/src/lib.rs) | `SkillStore`, `AutoCaptureWorker`, `ReuseUpdateWorker`, `scan` (secret scanner), `import_plugin_skills` |
-| [`crates/skills/src/capture.rs`](../crates/skills/src/capture.rs) | `AutoCaptureSink`, `AutoCaptureWorker` — background worker enqueued at turn end |
+| [`crates/skills/src/capture.rs`](../crates/skills/src/capture.rs) | `AutoCaptureSink`, `AutoCaptureWorker` — durable SQLite enqueue and leased background processing at turn end |
 | [`crates/skills/src/reuse_update.rs`](../crates/skills/src/reuse_update.rs) | `ReuseUpdateWorker` — detects skill reuse and proposes incremental updates |
 | [`crates/skills/src/scanner.rs`](../crates/skills/src/scanner.rs) | In-process secret scanner (API keys, PEM keys, JWTs, high-entropy strings) — runs on every skill write path |
 | [`crates/charting/src/lib.rs`](../crates/charting/src/lib.rs) | In-process SVG chart renderer used by open-meteo weather panels and finance-yahoo price charts |
 | [`crates/server/src/research/runner.rs`](../crates/server/src/research/runner.rs) | Per-job runner: Plan → Gather → Synthesize; phase-gating; LLM planner call + JSON plan parse |
 | [`crates/server/src/research/synthesize.rs`](../crates/server/src/research/synthesize.rs) | Synthesize phase: assemble notes → one LLM call → report.md → `AttachmentRow` |
 | [`crates/server/src/research/workspace.rs`](../crates/server/src/research/workspace.rs) | Per-job scratch directory + source URL registry |
-| [`crates/server/src/graphiti_tool.rs`](../crates/server/src/graphiti_tool.rs) | Built-in `graphiti` tool — `status`, `ingest_episode`, `search`, `raw_request` actions; HTTP bridge to Graphiti endpoint |
-| [`crates/server/src/graphiti_admin.rs`](../crates/server/src/graphiti_admin.rs) | Admin routes `GET /api/admin/graphiti/health` + `POST /api/admin/graphiti/test-call` |
+| [`crates/server/src/graphiti_tool.rs`](../crates/server/src/graphiti_tool.rs) | Controller-only typed Graphiti actions, host-derived scope/evidence, SQLite/vault config, and local-endpoint enforcement |
+| [`crates/server/src/graphiti_worker.rs`](../crates/server/src/graphiti_worker.rs) | Leased ingest/reconcile worker with bounded retry and restart reclaim |
+| [`crates/server/src/graphiti_admin.rs`](../crates/server/src/graphiti_admin.rs) | Admin configuration, health, and test-call routes |
 | [`crates/server/src/mcp_http_client.rs`](../crates/server/src/mcp_http_client.rs) | Streamable HTTP MCP client (JSON-RPC-2.0, `2025-06-18` protocol version, bearer auth) |
 | [`crates/server/src/routine_runner.rs`](../crates/server/src/routine_runner.rs) | Minute-aligned cron tick; fires `config_routines` rows as controller-trust turns |
 | [`crates/core/src/cards.rs`](../crates/core/src/cards.rs) | `CardKind` enum + event-sourced card lifecycle (`CardOpened`, `CardProgressed`, `CardClosed`); channel-capability downgrade |
@@ -1311,7 +1363,7 @@ This section documents the seven enhancements implemented in June 2026.
 
 ### 17.2 HttpOnly session cookies + sensitive_tool flag (#10)
 
-**HttpOnly cookies:** `POST /api/login`, `POST /api/auth/refresh`, and `DELETE /api/auth/logout` now return `Set-Cookie` headers with `HttpOnly; Secure; SameSite=Strict` flags set via the `cookie` crate. This prevents JavaScript from reading the session token, mitigating XSS-based session theft.
+**HttpOnly cookies:** `POST /api/login`, `POST /api/token/refresh`, and `POST /api/logout` return or clear cookies with `HttpOnly; Secure; SameSite=Strict` attributes. This prevents JavaScript from reading the session token, mitigating XSS-based session theft.
 
 **`sensitive` field on `ToolDescriptor`:** `crates/core/src/tool.rs` — `ToolDescriptor` gains a `pub sensitive: bool` field. When `true`, the control plane omits that tool from the `has_sensitive_tools` check in `chats.rs` that gates certain policy decisions. All existing tools default to `sensitive: false`. Plugin authors can mark tools that access credential stores, personal data, or external APIs with `sensitive: true` in their manifest.
 
@@ -1410,7 +1462,7 @@ Valid transitions:
 | [`crates/server/src/approvals.rs`](../crates/server/src/approvals.rs) | `POST /api/admin/approvals/:id/respond` (Phase 3) |
 | [`crates/server/src/plugins.rs`](../crates/server/src/plugins.rs) | `POST /api/admin/plugins/install` + lifecycle (Phase 2) |
 | [`crates/server/src/tool_dispatch.rs`](../crates/server/src/tool_dispatch.rs) | `ChainedToolDispatch` — built-ins → plugins with capability check |
-| [`crates/server/src/capability.rs`](../crates/server/src/capability.rs) | Per-turn capability token issue + verify |
+| [`crates/policy/src/token.rs`](../crates/policy/src/token.rs) | Per-turn capability token claims, issue, and verification |
 | [`crates/runner-local/src/turn.rs`](../crates/runner-local/src/turn.rs) | TurnExecutor — full tool-loop turn path |
 | [`crates/core/src/builtin_tools.rs`](../crates/core/src/builtin_tools.rs) | Built-in tool implementations including `read_memory` / `write_memory` / `list_memory` |
 | [`crates/core/src/tool_apis.rs`](../crates/core/src/tool_apis.rs) | `DbMemoryApi` — trust-class read-down cascade enforced at the storage shim |
@@ -1536,14 +1588,14 @@ Last refreshed: 2026-06-06. The phase tags below reflect implementation mileston
 
 **Phase 1 — Agent core with one transport (web chat).** Complete.
 - Event-log primitives with pairing-invariant enforcement
-- HMAC-signed event log (§7.8): migration 0002 + sign-on-append + verify-on-replay
+- HMAC-signed event log (§7.8): baseline schema + sign-on-append + verify-on-replay
 - TurnExecutor wired into `POST /api/chats/:id/messages`
 - Policy + per-turn capability token on the turn path
 - Streaming SSE (`chat_completions_stream`) + `ChatTokenDelta` on the WS bus
 - Crash-safety tests (kill mid-turn, replay-after-restart, post-commit tamper)
 
 **Phase 2 — Plugin framework.** Complete and exercised in production by 12 in-tree plugins.
-- `PluginHost` lifecycle (install/enable/disable/uninstall/hydrate) with SQLite persistence via migration 0003
+- `PluginHost` lifecycle (install/enable/disable/uninstall/hydrate) with SQLite persistence in the baseline schema
 - `POST /api/admin/plugins/install` + list / enable / disable / uninstall / tools routes
 - Manifest schema: `[plugin]`, `[runtime]` (script + subprocess tiers), `[[tools]]` (with `host_internal`, `trust_floor`, `latency`), `[transport]`, `[identity_provider]`, `[[services]]` + `[services.sidecar]`, `[[admin_routes]]`, `[[webhook_routes]]` (unauthenticated, plugin validates), `[[oauth_accounts]]`, `[[ui_panels]]`, `[[skills]]`, `[[health_checks]]`, `[[event_subscriptions]]`, `[[alert_sources]]`
 - Capability-enforced `ChainedToolDispatch` — built-ins → plugins → MCP → error
@@ -1594,7 +1646,7 @@ Last refreshed: 2026-06-06. The phase tags below reflect implementation mileston
 - ≤1.1 s EoS → first-audio latency acceptance: can be measured once the real backends plug in (the `t_ms` field on every voice event exists precisely for this measurement).
 
 **Phase 5 — Observability, evaluation, replay CLI (infra only).** Complete.
-- Migration 0004: `eval_flagged` table for tagging regression-target event ranges
+- Baseline `eval_flagged` table for tagging regression-target event ranges
 - `EvalFlaggedStore` (insert / list_all / list_by_label) with adversarial test (inverted range rejected)
 - `LogStore::query` with level / plugin_id / conversation_id / since_ms filters + limit
 - `SqliteLogLayer` — `tracing_subscriber::Layer` impl that mirrors every tracing event into `log_entries`. Best-effort writes (DB lock failures don't break the process).
@@ -1682,7 +1734,7 @@ stateDiagram-v2
 - **Skills learning loop on by default** (migration 0011): `auto_capture_enabled=1`, `reuse_update_enabled=1` enabled for existing installs.
 - **Model adapter layer**: `crates/model-adapter/` isolates per-family LLM quirks (Qwen3 thinking tokens, DeepSeekR1 reasoning blocks, Llama3/Mistral/Gemma normalization). Every inference call site uses `adapter_for(ModelFamily::detect(&model_id))`.
 - **BackendPurpose routing**: `InferenceResolver` resolves per-call from `config_backends`; `BackendPurpose::Small` used for skill summarization; `BackendPurpose::Vision` for automation `AskAgent` image nodes.
-- **Graphiti built-in tool**: `graphiti` tool registered host-side; supports `status`, `ingest_episode`, `search`, `raw_request` against a Graphiti-compatible HTTP endpoint; admin validation routes at `/api/admin/graphiti/`.
+- **Graphiti built-in tool**: Controller-only `graphiti` tool registered host-side; supports typed `status`, `ingest`, `search`, `retract`, and `reconcile`, with host-derived scope/evidence, SQLite/vault configuration, shared local-endpoint enforcement, and durable ingest/reconcile jobs.
 - **Cards primitive** (§4.11): event-sourced `CardOpened/Progressed/Closed` lifecycle surfaced in SPA for long-running tasks; channel-capability-aware text downgrade on non-rich transports.
 - **Deep research pipeline** (§4.10): `crates/server/src/research/` — plan/gather/synthesize phases; `ResearchWorkspace`; `AttachmentRow` report delivery.
 - **Streamable HTTP MCP client**: `crates/server/src/mcp_http_client.rs` complements stdio MCP client; bearer token auth; protocol version `2025-06-18`.

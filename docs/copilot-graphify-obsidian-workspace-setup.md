@@ -11,7 +11,10 @@ This guide mirrors the Graphify and Obsidian workflow integrated in this repo.
 Optional env vars:
 
 - `EXECLAW_GRAPHIFY_BIN` to override the Graphify executable path
-- `EXECLAW_GRAPHITI_BASE_URL` and `EXECLAW_GRAPHITI_API_KEY` for Graphiti tool/admin routes
+
+Graphiti endpoint and credential settings are managed through
+`/api/admin/graphiti/config`; the endpoint is stored in SQLite and the
+credential value in the vault.
 
 ## 2) Obsidian Vault Structure
 

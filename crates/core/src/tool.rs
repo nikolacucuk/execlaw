@@ -46,6 +46,7 @@ use crate::ids::ConversationId;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 // -----------------------------------------------------------------
@@ -257,6 +258,77 @@ pub struct ToolDescriptor {
     pub sensitive: bool,
 }
 
+/// Compile a tool schema using Draft 2020-12 after enforcing the host's
+/// fail-closed constraints. Network references are forbidden because schema
+/// validation must never perform I/O or depend on mutable remote content.
+pub fn compile_tool_schema(schema: &Value, label: &str) -> Result<jsonschema::Validator, String> {
+    if !schema.is_object() {
+        return Err(format!("{label} must be a JSON object"));
+    }
+    if let Some(reference) = find_network_ref(schema) {
+        return Err(format!(
+            "{label} contains forbidden network reference '{reference}'"
+        ));
+    }
+    jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .build(schema)
+        .map_err(|error| format!("{label} is not valid Draft 2020-12: {error}"))
+}
+
+/// SHA-256 over a canonical JSON encoding with recursively sorted object keys.
+pub fn tool_schema_hash(schema: &Value) -> String {
+    let mut bytes = Vec::new();
+    write_canonical_json(schema, &mut bytes);
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn find_network_ref(value: &Value) -> Option<&str> {
+    match value {
+        Value::Object(fields) => fields.iter().find_map(|(key, value)| {
+            if matches!(key.as_str(), "$ref" | "$dynamicRef")
+                && let Some(reference) = value.as_str()
+                && (reference.starts_with("http://") || reference.starts_with("https://"))
+            {
+                return Some(reference);
+            }
+            find_network_ref(value)
+        }),
+        Value::Array(values) => values.iter().find_map(find_network_ref),
+        _ => None,
+    }
+}
+
+fn write_canonical_json(value: &Value, output: &mut Vec<u8>) {
+    match value {
+        Value::Object(fields) => {
+            output.push(b'{');
+            let mut entries: Vec<_> = fields.iter().collect();
+            entries.sort_unstable_by(|(left, _), (right, _)| left.cmp(right));
+            for (index, (key, value)) in entries.into_iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                output.extend_from_slice(serde_json::to_string(key).expect("JSON key").as_bytes());
+                output.push(b':');
+                write_canonical_json(value, output);
+            }
+            output.push(b'}');
+        }
+        Value::Array(values) => {
+            output.push(b'[');
+            for (index, value) in values.iter().enumerate() {
+                if index > 0 {
+                    output.push(b',');
+                }
+                write_canonical_json(value, output);
+            }
+            output.push(b']');
+        }
+        _ => output.extend_from_slice(serde_json::to_string(value).expect("JSON value").as_bytes()),
+    }
+}
+
 /// Outcome of a `ToolImpl::invoke` call. `Denied` is distinct from
 /// `Err` so the dispatch layer can surface "the tool exists but the
 /// runtime/capability layer refused the call" without conflating it
@@ -273,6 +345,113 @@ pub enum ToolOutcome {
     /// approval rejection). Bubbles to the model as a structured
     /// `tool_result` with `denied = true` so it can self-correct.
     Denied { reason: String },
+}
+
+/// Stable failure categories shared by tool runtimes, runners, and traces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolFailureKind {
+    Validation,
+    PolicyDenied,
+    ApprovalDenied,
+    Transient,
+    Timeout,
+    Cancelled,
+    Permanent,
+}
+
+impl ToolFailureKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Validation => "validation",
+            Self::PolicyDenied => "policy_denied",
+            Self::ApprovalDenied => "approval_denied",
+            Self::Transient => "transient",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::Permanent => "permanent",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "validation" => Some(Self::Validation),
+            "policy_denied" => Some(Self::PolicyDenied),
+            "approval_denied" => Some(Self::ApprovalDenied),
+            "transient" => Some(Self::Transient),
+            "timeout" => Some(Self::Timeout),
+            "cancelled" => Some(Self::Cancelled),
+            "permanent" => Some(Self::Permanent),
+            _ => None,
+        }
+    }
+
+    /// Policy and approval decisions are terminal regardless of hints supplied
+    /// by a plugin or remote tool.
+    pub fn may_retry(self) -> bool {
+        matches!(self, Self::Transient | Self::Timeout)
+    }
+}
+
+/// Serializable failure details returned to a runner and persisted in traces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolFailure {
+    pub kind: ToolFailureKind,
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_ms: Option<u64>,
+    #[serde(default)]
+    pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guidance: Option<String>,
+}
+
+impl ToolFailure {
+    pub fn new(kind: ToolFailureKind, code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            code: code.into(),
+            message: message.into(),
+            retryable: kind.may_retry(),
+            retry_after_ms: None,
+            attempt: 0,
+            guidance: None,
+        }
+    }
+
+    /// Normalize untrusted retry metadata so terminal decisions never retry.
+    pub fn normalized(mut self) -> Self {
+        if !self.kind.may_retry() {
+            self.retryable = false;
+            self.retry_after_ms = None;
+        }
+        self
+    }
+}
+
+/// Version-stable envelope for tool success and failure. `ToolOutcome` remains
+/// unchanged so existing in-process implementations keep source compatibility.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ToolResultEnvelope {
+    Ok { value: Value },
+    Err { failure: ToolFailure },
+}
+
+impl ToolResultEnvelope {
+    pub fn from_outcome(outcome: ToolOutcome) -> Self {
+        match outcome {
+            ToolOutcome::Ok(value) => Self::Ok { value },
+            ToolOutcome::Err { code, message } => Self::Err {
+                failure: ToolFailure::new(ToolFailureKind::Permanent, code, message),
+            },
+            ToolOutcome::Denied { reason } => Self::Err {
+                failure: ToolFailure::new(ToolFailureKind::PolicyDenied, "denied", reason),
+            },
+        }
+    }
 }
 
 impl ToolOutcome {
@@ -300,6 +479,12 @@ pub trait ToolImpl: Send + Sync + 'static {
     /// catalog is built from it; the access gate compares the caller's
     /// trust class against `default_allowed_classes` (on first install).
     fn descriptor(&self) -> &ToolDescriptor;
+
+    /// Optional JSON Schema for a successful structured result. Existing tools
+    /// default to no result validation, preserving source compatibility.
+    fn result_schema(&self) -> Option<&Value> {
+        None
+    }
 
     /// Run the tool. The `ctx` carries only the capability APIs the
     /// descriptor declared; the args are the raw JSON the LLM sent.
@@ -437,6 +622,68 @@ impl ApiError {
                 message: s,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod failure_envelope_tests {
+    use super::*;
+
+    #[test]
+    fn failure_envelope_has_stable_serialized_shape() {
+        let mut failure = ToolFailure::new(ToolFailureKind::Transient, "busy", "try later");
+        failure.retry_after_ms = Some(250);
+        failure.attempt = 2;
+        failure.guidance = Some("retry once".into());
+        let value = serde_json::to_value(ToolResultEnvelope::Err { failure }).unwrap();
+        assert_eq!(value["status"], "err");
+        assert_eq!(value["failure"]["kind"], "transient");
+        assert_eq!(value["failure"]["retryable"], true);
+        assert_eq!(value["failure"]["retry_after_ms"], 250);
+        assert_eq!(value["failure"]["attempt"], 2);
+    }
+
+    #[test]
+    fn denial_kinds_cannot_be_marked_retryable() {
+        for kind in [
+            ToolFailureKind::PolicyDenied,
+            ToolFailureKind::ApprovalDenied,
+        ] {
+            let mut failure = ToolFailure::new(kind, "denied", "no");
+            failure.retryable = true;
+            failure.retry_after_ms = Some(100);
+            let failure = failure.normalized();
+            assert!(!failure.retryable);
+            assert_eq!(failure.retry_after_ms, None);
+        }
+    }
+
+    #[test]
+    fn legacy_outcome_maps_without_changing_legacy_enum() {
+        let envelope = ToolResultEnvelope::from_outcome(ToolOutcome::denied("blocked"));
+        let ToolResultEnvelope::Err { failure } = envelope else {
+            panic!("expected failure")
+        };
+        assert_eq!(failure.kind, ToolFailureKind::PolicyDenied);
+        assert!(!failure.retryable);
+    }
+
+    #[test]
+    fn schema_hash_is_independent_of_object_key_order() {
+        let left = serde_json::json!({"type":"object","properties":{"b":{},"a":{}}});
+        let right = serde_json::json!({"properties":{"a":{},"b":{}},"type":"object"});
+        assert_eq!(tool_schema_hash(&left), tool_schema_hash(&right));
+    }
+
+    #[test]
+    fn schema_compilation_rejects_non_objects_and_network_refs() {
+        assert!(compile_tool_schema(&serde_json::json!(true), "input schema").is_err());
+        let error = compile_tool_schema(
+            &serde_json::json!({"type":"object","$ref":"https://example.invalid/x"}),
+            "input schema",
+        )
+        .unwrap_err();
+        assert!(error.contains("forbidden network reference"));
     }
 }
 

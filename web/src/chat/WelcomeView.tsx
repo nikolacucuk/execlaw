@@ -9,8 +9,11 @@
 import { useAuth } from "../auth/AuthContext";
 import { useT } from "../i18n";
 import { Composer } from "./Composer";
+import { GraphifyPreview } from "./GraphifyPreview";
 import { MascotGreeting } from "./MascotGreeting";
 import { useVoiceReadiness } from "./useVoiceReadiness";
+
+const GRAPHIFY_PREVIEW_STORAGE_KEY = "execlaw.chat.graphify_welcome_visible";
 
 interface SuggestionDef {
     key: string;
@@ -134,6 +137,8 @@ export function WelcomeView({
     // here keeps the contract right at the call site.
     const getToken = auth.getAccessToken;
     const voiceReadiness = useVoiceReadiness(getToken);
+    const showGraphifyPreview =
+        localStorage.getItem(GRAPHIFY_PREVIEW_STORAGE_KEY) === "1";
     return (
         <div className="execlaw-welcome" data-testid="welcome-view">
             {/*
@@ -181,6 +186,7 @@ export function WelcomeView({
                     <i className="bi bi-incognito" aria-hidden />
                 </button>
             )}
+            {showGraphifyPreview && <GraphifyPreview />}
             <div className="execlaw-welcome__brand">
                 <MascotGreeting
                     size={216}

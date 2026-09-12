@@ -129,13 +129,15 @@ echo "==> Step 4b: package plugin ZIPs + stage them into the bundle"
 # `package-plugins.sh` on its own so the resulting `dist/*.zip`
 # files attach to the GitHub Release for Linux / Windows operators
 # who'd otherwise have no way to grab them.
-./scripts/package-plugins.sh
+if [[ "${EXECLAW_PREPACKAGED_PLUGINS:-0}" != "1" ]]; then
+    ./scripts/package-plugins.sh
+fi
 PLUGIN_STAGE_DIR="$TAURI_DIR/resources/plugins"
 rm -rf "$PLUGIN_STAGE_DIR"
 mkdir -p "$PLUGIN_STAGE_DIR"
-# Only the ZIPs themselves ship inside the .app; the .sha256
-# sidecars stay in dist/ for the release attachments.
-cp dist/*.zip "$PLUGIN_STAGE_DIR/"
+# Runtime provenance verification consumes all detached verification files.
+cp dist/*.zip dist/*.zip.sha256 dist/*.zip.spdx.json \
+    dist/*.zip.sigstore.json dist/*.zip.provenance.json "$PLUGIN_STAGE_DIR/"
 echo "  staged $(ls "$PLUGIN_STAGE_DIR" | wc -l | tr -d ' ') ZIPs into $PLUGIN_STAGE_DIR"
 
 echo "==> Step 5: tauri build"

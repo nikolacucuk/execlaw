@@ -105,6 +105,9 @@ pub struct ToolDecl {
     /// the tool's arguments.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+    /// Optional path to a JSON Schema describing successful structured output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_schema: Option<String>,
     /// `low` | `medium` | `high` — voice runner only exposes tools with
     /// `low`.
     #[serde(default)]

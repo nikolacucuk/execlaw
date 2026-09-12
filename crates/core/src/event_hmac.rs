@@ -1,17 +1,15 @@
 //! HMAC-signed event-log records (§7.8 security-defense port from
 //! `selfhosted-claw/src/control-store.ts`).
 //!
-//! Every `state_events` row gets an HMAC-SHA256 tag computed over its
-//! canonical bytes. Tampering with any committed row — changing the
-//! `kind`, the `payload`, the `actor`, the `committed_at` — invalidates
-//! the tag, so post-hoc event-log modification is detectable at replay.
+//! Legacy v1 `state_events` rows carry independent HMAC-SHA256 tags over
+//! [`canonical_bytes`]. V2 rows use a domain-separated encoding that also
+//! commits to the previous chain tag and key id. A separately signed durable
+//! conversation head commits to the terminal sequence and tag.
 //!
 //! The HMAC key lives in the vault (`vault_secrets` table, key name
-//! `event_log_hmac_key`). Rotating the key re-signs nothing — old
-//! events remain verifiable under the key in effect when they were
-//! written; we track which key version signed each row via a small
-//! key-id column added by a later migration. For Phase 1, we ship
-//! a single-key scheme; key rotation is a Phase 2 hardening.
+//! `event_log_hmac_key`). Rotating the key re-signs nothing: each event and
+//! checkpoint records its key id, and old keys remain verification-only
+//! members of the key ring.
 //!
 //! **No cloud dependencies.** `hmac` + `sha2` crates, pure Rust.
 
@@ -68,6 +66,60 @@ pub fn verify_event(key: &[u8], canonical: &[u8], tag: &[u8; 32]) -> bool {
     let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(canonical);
     mac.verify_slice(tag).is_ok()
+}
+
+/// Canonical bytes for a chained v2 event. The v1 canonical event bytes are
+/// embedded unchanged, then bound to the signing key id and predecessor tag.
+pub fn canonical_chain_event(v1_canonical: &[u8], key_id: i64, prev_tag: &[u8; 32]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(v1_canonical.len() + 64);
+    buf.extend_from_slice(b"execlaw/event-chain/v2\0");
+    buf.extend_from_slice(&key_id.to_le_bytes());
+    buf.extend_from_slice(prev_tag);
+    buf.extend_from_slice(v1_canonical);
+    buf
+}
+
+/// Canonical bytes for the genesis anchor over the frozen legacy-v1 prefix.
+/// Length prefixes make the encoding unambiguous even for binary row fields.
+pub fn canonical_genesis(
+    conversation_id: &str,
+    chain_start_seq: i64,
+    legacy_rows: &[Vec<u8>],
+) -> Vec<u8> {
+    let payload_len: usize = legacy_rows.iter().map(|row| row.len() + 8).sum();
+    let mut buf = Vec::with_capacity(conversation_id.len() + payload_len + 48);
+    buf.extend_from_slice(b"execlaw/event-chain-genesis/v2\0");
+    buf.extend_from_slice(&(conversation_id.len() as u64).to_le_bytes());
+    buf.extend_from_slice(conversation_id.as_bytes());
+    buf.extend_from_slice(&chain_start_seq.to_le_bytes());
+    buf.extend_from_slice(&(legacy_rows.len() as u64).to_le_bytes());
+    for row in legacy_rows {
+        buf.extend_from_slice(&(row.len() as u64).to_le_bytes());
+        buf.extend_from_slice(row);
+    }
+    buf
+}
+
+/// Canonical bytes for the durable terminal checkpoint. The checkpoint is a
+/// separate MAC so a stored head cannot be moved or replaced independently.
+pub fn canonical_checkpoint(
+    conversation_id: &str,
+    chain_start_seq: i64,
+    head_seq: i64,
+    head_tag: &[u8; 32],
+    genesis_key_id: i64,
+    key_id: i64,
+) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(conversation_id.len() + 96);
+    buf.extend_from_slice(b"execlaw/event-checkpoint/v2\0");
+    buf.extend_from_slice(&(conversation_id.len() as u64).to_le_bytes());
+    buf.extend_from_slice(conversation_id.as_bytes());
+    buf.extend_from_slice(&chain_start_seq.to_le_bytes());
+    buf.extend_from_slice(&head_seq.to_le_bytes());
+    buf.extend_from_slice(head_tag);
+    buf.extend_from_slice(&genesis_key_id.to_le_bytes());
+    buf.extend_from_slice(&key_id.to_le_bytes());
+    buf
 }
 
 #[cfg(test)]
@@ -183,5 +235,25 @@ mod tests {
         assert_eq!(none_canon, empty_canon);
         let tag = sign_event(key, &none_canon);
         assert!(verify_event(key, &empty_canon, &tag));
+    }
+
+    #[test]
+    fn v2_chain_binds_predecessor_and_key_id_without_changing_v1() {
+        let v1 = canonical_bytes("c", 2, "user_msg", 3, None, b"p");
+        let original = v1.clone();
+        let prev = [7u8; 32];
+        let chained = canonical_chain_event(&v1, 4, &prev);
+        assert_eq!(v1, original);
+        assert_ne!(chained, canonical_chain_event(&v1, 5, &prev));
+        assert_ne!(chained, canonical_chain_event(&v1, 4, &[8u8; 32]));
+    }
+
+    #[test]
+    fn checkpoint_binds_terminal_state() {
+        let head = [9u8; 32];
+        let canonical = canonical_checkpoint("c", 4, 7, &head, 1, 2);
+        assert_ne!(canonical, canonical_checkpoint("c", 4, 6, &head, 1, 2));
+        assert_ne!(canonical, canonical_checkpoint("other", 4, 7, &head, 1, 2));
+        assert_ne!(canonical, canonical_checkpoint("c", 4, 7, &head, 9, 2));
     }
 }

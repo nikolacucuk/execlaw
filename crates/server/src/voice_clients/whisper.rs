@@ -33,13 +33,27 @@ pub struct WhisperClient {
     /// id and downloads it on first use.
     model: String,
     request_timeout: Duration,
+    endpoint_policy_error: Option<String>,
 }
 
 impl WhisperClient {
     /// `base_url` is e.g. `http://127.0.0.1:8001` — the supervisor-
     /// resolved endpoint for the VoiceSTT backend row.
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_client(base_url, reqwest::Client::new())
+        let base_url = base_url.into();
+        let policy = execlaw_local_endpoint_policy::LocalEndpointPolicy::loopback_only();
+        match policy.validate(&base_url).and_then(|resolution| {
+            policy.reqwest_client(&resolution, |builder| {
+                builder.redirect(reqwest::redirect::Policy::none())
+            })
+        }) {
+            Ok(client) => Self::with_client(base_url, client),
+            Err(error) => {
+                let mut client = Self::with_client(base_url, reqwest::Client::new());
+                client.endpoint_policy_error = Some(error.to_string());
+                client
+            }
+        }
     }
 
     /// Test-friendly constructor: lets callers pass a pre-configured
@@ -57,6 +71,7 @@ impl WhisperClient {
             // upload + decode is plenty for the VAD-segmented chunks
             // the pipeline produces (typically <10s).
             request_timeout: Duration::from_secs(30),
+            endpoint_policy_error: None,
         }
     }
 
@@ -105,6 +120,11 @@ impl WhisperClient {
     /// POST the buffered samples to the Whisper endpoint and parse
     /// the resulting transcript.
     async fn post_transcribe(&self, samples: &[i16]) -> Result<String, String> {
+        if let Some(error) = &self.endpoint_policy_error {
+            return Err(format!(
+                "local endpoint policy denied Whisper endpoint: {error}"
+            ));
+        }
         if samples.is_empty() {
             return Ok(String::new());
         }

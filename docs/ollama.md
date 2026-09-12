@@ -155,30 +155,23 @@ instances by default. If you want per-instance isolation, set the
 plist / SCM service environment / systemd `--user` unit) to a
 distinct directory per instance.
 
-## Pulling models — the known gap
+## Pulling models
 
 Ollama's daemon spawns instantly and reports `Healthy` against
-`/api/tags` long before any model is in its cache. execlaw's vLLM
-path runs a pre-spawn HuggingFace download with progress surfaced
-in the SPA ("Downloading qwen2.5-7b · 47%…"); the Ollama path
-doesn't have an equivalent yet.
+`/api/tags` even when the selected model is not in its cache. The
+backend supervisor checks the returned model list, starts a streamed
+`POST /api/pull` when needed, and keeps the backend in
+`DownloadingModel` while reporting byte progress in the SPA. It then
+continues through `LoadingModel` to `Healthy`.
 
-**Workaround until the active-pull supervisor integration ships:**
-run `ollama pull <model>` once from a terminal before submitting
-the wizard, e.g.:
+For troubleshooting a failed automatic pull, the equivalent manual
+command is:
 
 ```bash
 ollama pull qwen2.5:32b-instruct-q4_K_M
 ```
 
-…substituting whichever model you picked. Otherwise the first chat
-completion 404s with `model 'X' not found`.
-
-This is a deliberate v1 punt — the follow-up wires `POST /api/pull`'s
-streaming response into the existing `download_task` state machine so
-the same `DownloadingModel → LoadingModel → Healthy` transitions
-surface in the SPA. Tracked in the audit gap inside
-`fancy-launching-lecun.md` (the plan file).
+Substitute whichever model you selected in the wizard.
 
 ## Troubleshooting
 
@@ -193,8 +186,9 @@ The well-known-locations probe usually covers this; set
 Typo in the env var. The discovery error names the offending path
 so you can copy/paste it into a shell to debug.
 
-**Chat 404s with "model 'X' not found"** — Run `ollama pull <model>`
-manually. See "Pulling models — the known gap" above.
+**Chat 404s with "model 'X' not found"** — Inspect the backend pull
+status and logs. Retry with `ollama pull <model>` if the automatic pull
+failed.
 
 **Dropdown only shows the Docker engines, no Ollama option** —
 The preflight probe didn't find Ollama. Install it (or set

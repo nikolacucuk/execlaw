@@ -34,7 +34,8 @@ use crate::backends::{
 };
 use crate::graphify_api::GraphPageResponse;
 use crate::graphiti_admin::{
-    GraphitiHealthResponse, GraphitiTestCallRequest, GraphitiTestCallResponse,
+    GraphitiConfigRequest, GraphitiConfigResponse, GraphitiHealthResponse, GraphitiTestCallRequest,
+    GraphitiTestCallResponse,
 };
 use crate::inference_metrics::{ConsumerSnapshot, InferenceConsumer, MetricsSnapshot};
 use crate::mcp_admin::{McpServerListResponse, McpServerView, McpServerWriteRequest};
@@ -172,6 +173,8 @@ impl Modify for SecurityAddon {
         // graphify graph browser API (paged + filtered)
         crate::graphify_api::graph_page_handler,
         // graphiti admin connectivity helpers
+        crate::graphiti_admin::get_config_handler,
+        crate::graphiti_admin::put_config_handler,
         crate::graphiti_admin::health_handler,
         crate::graphiti_admin::test_call_handler,
         // mcp (Phase 8c MCP server CRUD)
@@ -285,6 +288,8 @@ impl Modify for SecurityAddon {
         ResetPasswordRequest,
         ToolView,
         GraphPageResponse,
+        GraphitiConfigRequest,
+        GraphitiConfigResponse,
         GraphitiHealthResponse,
         GraphitiTestCallRequest,
         GraphitiTestCallResponse,

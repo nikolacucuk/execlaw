@@ -13,8 +13,9 @@
 
 #![forbid(unsafe_code)]
 
-use execlaw_inference_api::{ChatMessage, ToolDeclaration};
-use serde::{Deserialize, Serialize};
+pub use execlaw_core::tool::{ToolFailure, ToolFailureKind};
+use execlaw_inference_api::{ChatMessage, ToolCall, ToolDeclaration};
+use serde::{Deserialize, Deserializer, Serialize};
 
 /// Bumped whenever the wire protocol changes incompatibly. Both
 /// sides verify on registration. Bump rules:
@@ -31,7 +32,7 @@ use serde::{Deserialize, Serialize};
 /// mismatch at handshake time and surfaces a clear error in the
 /// supervisor's spawn log instead. If you ship a new runner image,
 /// rebuild `execlaw/runner:dev` from the matching source tree.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 pub fn current_version() -> u32 {
     PROTOCOL_VERSION
@@ -190,6 +191,13 @@ pub struct TurnRequest {
     /// (and any future test fixture that omits the field) working.
     #[serde(default = "default_max_tool_rounds")]
     pub max_tool_rounds: u32,
+    /// Resume from server-reconstructed model/tool messages without appending
+    /// the original user input a second time.
+    #[serde(default)]
+    pub resume: bool,
+    /// Global model-round ordinal retained across runner restarts.
+    #[serde(default)]
+    pub round_offset: u32,
 }
 
 /// Conservative default mirroring `crate::server::state::ServerConfig`'s
@@ -208,11 +216,56 @@ pub struct ToolCallResult {
     pub outcome: ToolOutcome,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ToolOutcome {
     Ok { value: serde_json::Value },
-    Err { message: String },
+    Err { failure: ToolFailure },
+}
+
+impl<'de> Deserialize<'de> for ToolOutcome {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let status = value
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| serde::de::Error::missing_field("status"))?;
+        match status {
+            "ok" => {
+                let value = value
+                    .get("value")
+                    .cloned()
+                    .ok_or_else(|| serde::de::Error::missing_field("value"))?;
+                Ok(Self::Ok { value })
+            }
+            "err" | "error" => {
+                if let Some(failure) = value.get("failure") {
+                    let failure = serde_json::from_value::<ToolFailure>(failure.clone())
+                        .map_err(serde::de::Error::custom)?
+                        .normalized();
+                    return Ok(Self::Err { failure });
+                }
+                let message = value
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| serde::de::Error::missing_field("failure"))?;
+                Ok(Self::Err {
+                    failure: ToolFailure::new(
+                        ToolFailureKind::Permanent,
+                        "legacy_tool_error",
+                        message,
+                    ),
+                })
+            }
+            other => Err(serde::de::Error::unknown_variant(
+                other,
+                &["ok", "err", "error"],
+            )),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +293,13 @@ pub enum RunnerToServer {
         turn_id: String,
         conversation_id: String,
         phase: String,
+    },
+
+    /// One model request finished and can be checkpointed before effects run.
+    ModelRoundCheckpoint {
+        turn_id: String,
+        conversation_id: String,
+        checkpoint: ModelRoundCheckpoint,
     },
 
     /// Runner wants to call a tool. Supervisor dispatches via the
@@ -303,6 +363,16 @@ pub enum RunnerToServer {
     HeartbeatAck { nonce: u64 },
 }
 
+/// Replayable output of one completed model request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelRoundCheckpoint {
+    pub round: u32,
+    pub model: String,
+    pub text: String,
+    pub finish_reason: Option<String>,
+    pub tool_calls: Vec<ToolCall>,
+}
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -328,7 +398,7 @@ mod tests {
         // workspace pin it as a tripwire — if you bump it,
         // double-check both sides handle the bump AND rebuild
         // the runner Docker image from the matching source tree.
-        assert_eq!(PROTOCOL_VERSION, 2);
+        assert_eq!(PROTOCOL_VERSION, 3);
     }
 
     #[test]
@@ -357,6 +427,8 @@ mod tests {
             spotlight: None,
             user_image_urls: Vec::new(),
             max_tool_rounds: 8,
+            resume: false,
+            round_offset: 0,
         };
         let s1 = serde_json::to_string(&req).unwrap();
         let back: TurnRequest = serde_json::from_str(&s1).unwrap();
@@ -427,14 +499,32 @@ mod tests {
         let ok = ToolOutcome::Ok {
             value: serde_json::json!({"ok": true}),
         };
-        let err = ToolOutcome::Err {
-            message: "boom".into(),
-        };
+        let mut failure = ToolFailure::new(ToolFailureKind::Transient, "upstream_busy", "boom");
+        failure.retry_after_ms = Some(250);
+        failure.attempt = 2;
+        failure.guidance = Some("wait".into());
+        let err = ToolOutcome::Err { failure };
         for v in [ok, err] {
             let s1 = serde_json::to_string(&v).unwrap();
             let back: ToolOutcome = serde_json::from_str(&s1).unwrap();
             let s2 = serde_json::to_string(&back).unwrap();
             assert_eq!(s1, s2);
+        }
+    }
+
+    #[test]
+    fn legacy_string_error_deserializes_as_terminal_typed_failure() {
+        for status in ["err", "error"] {
+            let json = serde_json::json!({"status": status, "message": "legacy boom"});
+            let outcome: ToolOutcome = serde_json::from_value(json).unwrap();
+            let ToolOutcome::Err { failure } = outcome else {
+                panic!("legacy error decoded as success");
+            };
+            assert_eq!(failure.kind, ToolFailureKind::Permanent);
+            assert_eq!(failure.code, "legacy_tool_error");
+            assert_eq!(failure.message, "legacy boom");
+            assert!(!failure.retryable);
+            assert_eq!(failure.attempt, 0);
         }
     }
 

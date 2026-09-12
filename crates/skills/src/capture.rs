@@ -4,12 +4,13 @@
 //!
 //! ```text
 //!  chat handler           AutoCaptureSink         AutoCaptureWorker
-//!  (turn complete) ──enqueue(conv,seq)──▶ mpsc ──▶ drains ──▶ pipeline
+//!  (turn complete) ──enqueue(event range)──▶ SQLite ──lease──▶ pipeline
 //! ```
 //!
-//! The chat handler calls `sink.enqueue(...)` at turn completion
-//! (cheap, non-blocking — just a channel send). The worker runs as
-//! a tokio task that pulls each request, replays the conversation's
+//! The chat handler calls `sink.enqueue(...)` at turn completion.
+//! The committed event range is inserted idempotently into SQLite
+//! before the call returns. The worker runs as a tokio task that
+//! leases each request, replays the conversation's
 //! event log up to `until_seq`, extracts the (tool_use, tool_result)
 //! pairs since the last user message, runs the sanitizer, fires the
 //! summarizer, and (if not in dry-run mode) writes the resulting
@@ -32,11 +33,19 @@ use crate::store::SkillStore;
 use crate::summarizer::{DraftSkillProposal, SkillSummarizer, SummarizerOutput, SummarizerPrompt};
 use execlaw_core::events::{EventKind, EventLog, EventRecord, ToolResultPayload, ToolUsePayload};
 use execlaw_core::ids::{ConversationId, EventSeq};
+use execlaw_core::memory_assertions::{MemoryJobKind, MemoryJobStore, NewMemoryJob};
 use execlaw_core::skills_config::{SkillsConfig, SkillsConfigStore};
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::Notify;
+
+const CAPTURE_LEASE_SECS: i64 = 60;
+const CAPTURE_MAX_ATTEMPTS: i64 = 5;
+const CAPTURE_MAX_BACKOFF_SECS: i64 = 300;
+const CAPTURE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// What the chat handler enqueues at turn completion. `until_seq`
 /// is the latest event seq committed for the conversation; the
@@ -53,29 +62,71 @@ pub struct CaptureRequest {
     pub run_id: String,
 }
 
-/// Cheap, clonable handle the chat handler uses. Wraps an
-/// `mpsc::UnboundedSender`. When the worker isn't installed (e.g.
-/// in tests), use [`AutoCaptureSink::noop`] to get a sink that
-/// silently drops every enqueue.
+/// Cheap, clonable handle the chat handler uses. SQLite is the queue;
+/// `Notify` only reduces pickup latency and carries no durable state.
 #[derive(Clone)]
 pub struct AutoCaptureSink {
-    tx: Option<mpsc::UnboundedSender<CaptureRequest>>,
+    db: Option<execlaw_core::Database>,
+    wake: Option<Arc<Notify>>,
 }
 
 impl AutoCaptureSink {
     pub fn noop() -> Self {
-        Self { tx: None }
+        Self {
+            db: None,
+            wake: None,
+        }
     }
 
-    /// Try to enqueue a capture request. Never blocks. Returns
-    /// `false` when the worker isn't installed OR the channel is
-    /// closed (worker died); the chat handler can ignore the result
-    /// — auto-capture failure is intentionally non-fatal.
+    /// Durably insert a deduplicated event-range job. Returns false
+    /// when the worker isn't installed or persistence fails.
     pub fn enqueue(&self, req: CaptureRequest) -> bool {
-        match &self.tx {
-            None => false,
-            Some(tx) => tx.send(req).is_ok(),
+        let Some(db) = &self.db else {
+            return false;
+        };
+        let start_seq = match db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT MAX(seq) FROM state_events \
+                 WHERE conversation_id = ?1 AND seq <= ?2 AND kind = 'user_msg'",
+                rusqlite::params![req.conversation_id.as_str(), req.until_seq.0],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .map_err(execlaw_core::DbError::from)
+        }) {
+            Ok(Some(seq)) => EventSeq(seq),
+            _ => return false,
+        };
+        let config = match SkillsConfigStore::new(db).get() {
+            Ok(config) => config,
+            Err(_) => return false,
+        };
+        let policy_material = format!(
+            "skill-capture-v1:{}:{}:{}",
+            config.auto_capture_enabled,
+            config.auto_capture_min_tool_calls,
+            config.auto_capture_dry_run
+        );
+        let policy_hash = hex::encode(Sha256::digest(policy_material.as_bytes()));
+        let model_hash = hex::encode(Sha256::digest(b"backend-purpose:small"));
+        let now = chrono::Utc::now().timestamp();
+        let inserted = MemoryJobStore::new(db).enqueue(&NewMemoryJob {
+            kind: MemoryJobKind::SkillCapture,
+            conversation_id: req.conversation_id,
+            event_start_seq: start_seq,
+            event_end_seq: req.until_seq,
+            run_id: req.run_id,
+            policy_hash,
+            model_hash,
+            max_attempts: CAPTURE_MAX_ATTEMPTS,
+            now,
+        });
+        if inserted.is_err() {
+            return false;
         }
+        if let Some(wake) = &self.wake {
+            wake.notify_one();
+        }
+        true
     }
 }
 
@@ -144,28 +195,89 @@ impl AutoCaptureWorker {
     /// input) only kills that one request — the worker loop keeps
     /// pulling subsequent requests. Audit fix 2026-05-03.
     pub fn spawn(self: Arc<Self>) -> (AutoCaptureSink, tokio::task::JoinHandle<()>) {
-        let (tx, mut rx) = mpsc::unbounded_channel::<CaptureRequest>();
+        let wake = Arc::new(Notify::new());
+        let sink = AutoCaptureSink {
+            db: Some(self.db.clone()),
+            wake: Some(wake.clone()),
+        };
         let me = self.clone();
         let handle = tokio::spawn(async move {
-            while let Some(req) = rx.recv().await {
+            let worker_id = format!("skill-capture-{}", uuid::Uuid::new_v4());
+            loop {
+                let now = chrono::Utc::now().timestamp();
+                let claimed = MemoryJobStore::new(&me.db).claim_next(
+                    MemoryJobKind::SkillCapture,
+                    &worker_id,
+                    now,
+                    now + CAPTURE_LEASE_SECS,
+                );
+                let job = match claimed {
+                    Ok(Some(job)) => job,
+                    Ok(None) => {
+                        tokio::select! {
+                            _ = wake.notified() => {},
+                            _ = tokio::time::sleep(CAPTURE_POLL_INTERVAL) => {},
+                        }
+                        continue;
+                    }
+                    Err(error) => {
+                        tracing::warn!(error = %error, "auto-capture job claim failed");
+                        tokio::time::sleep(CAPTURE_POLL_INTERVAL).await;
+                        continue;
+                    }
+                };
+                let req = CaptureRequest {
+                    conversation_id: job.conversation_id.clone(),
+                    until_seq: job.event_end_seq,
+                    run_id: job.run_id.clone(),
+                };
                 let me_inner = me.clone();
                 let req_inner = req.clone();
-                let task = tokio::spawn(async move {
-                    let outcome = me_inner.process_request(req_inner.clone()).await;
-                    log_outcome(&req_inner, &outcome);
-                });
-                if let Err(e) = task.await {
-                    if e.is_panic() {
-                        tracing::error!(
-                            conversation_id = %req.conversation_id.as_str(),
-                            run_id = %req.run_id,
-                            "auto-capture pipeline PANICKED; worker continues"
+                let task = tokio::spawn(async move { me_inner.process_request(req_inner).await });
+                match task.await {
+                    Ok(outcome) => {
+                        log_outcome(&req, &outcome);
+                        let store = MemoryJobStore::new(&me.db);
+                        if let CaptureOutcome::Error { message } = outcome {
+                            let backoff = 2_i64
+                                .saturating_pow(job.attempt.saturating_sub(1) as u32)
+                                .min(CAPTURE_MAX_BACKOFF_SECS);
+                            let _ = store.retry(
+                                &job.job_id,
+                                &worker_id,
+                                &message,
+                                chrono::Utc::now().timestamp() + backoff,
+                            );
+                        } else {
+                            let _ = store.complete(
+                                &job.job_id,
+                                &worker_id,
+                                chrono::Utc::now().timestamp(),
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        let backoff = 2_i64
+                            .saturating_pow(job.attempt.saturating_sub(1) as u32)
+                            .min(CAPTURE_MAX_BACKOFF_SECS);
+                        let _ = MemoryJobStore::new(&me.db).retry(
+                            &job.job_id,
+                            &worker_id,
+                            &format!("pipeline task failed: {error}"),
+                            chrono::Utc::now().timestamp() + backoff,
                         );
+                        if error.is_panic() {
+                            tracing::error!(
+                                conversation_id = %req.conversation_id.as_str(),
+                                run_id = %req.run_id,
+                                "auto-capture pipeline PANICKED; worker continues"
+                            );
+                        }
                     }
                 }
             }
         });
-        (AutoCaptureSink { tx: Some(tx) }, handle)
+        (sink, handle)
     }
 
     /// Run the full pipeline once for a single request. Public so
@@ -1104,7 +1216,7 @@ mod tests {
             }),
         });
         let worker = Arc::new(AutoCaptureWorker::new(db.clone(), store.clone(), summ));
-        let (sink, _handle) = worker.spawn();
+        let (sink, handle) = worker.spawn();
 
         // Enqueue both turns.
         sink.enqueue(CaptureRequest {
@@ -1117,21 +1229,16 @@ mod tests {
             until_seq: EventSeq(6),
             run_id: "r2".into(),
         });
-        // Drop the sink so the receiver eventually sees no more
-        // senders and the worker loop can exit cleanly.
-        drop(sink);
-        // Wait for the worker to finish processing.
-        // The handle is the OUTER loop; it exits once rx.recv()
-        // returns None. Use a small bounded wait since the panic
-        // scenario could otherwise hang the test.
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), _handle).await;
-
-        // The post-panic skill MUST have been written, proving the
-        // worker survived the panic and processed the second turn.
-        assert!(
-            store.get("post/panic").unwrap().is_some(),
-            "worker did not survive panic in earlier request"
-        );
+        let mut created = false;
+        for _ in 0..100 {
+            if store.get("post/panic").unwrap().is_some() {
+                created = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        handle.abort();
+        assert!(created, "worker did not survive panic in earlier request");
     }
 
     #[tokio::test]
@@ -1156,13 +1263,71 @@ mod tests {
         let (sink, handle) = worker.spawn();
         sink.enqueue(CaptureRequest {
             conversation_id: cid.clone(),
-            until_seq: EventSeq(100),
+            until_seq: EventSeq(3),
             run_id: "r".into(),
         });
-        // Drop the sink so the receiver closes after draining.
-        drop(sink);
-        // Wait for the spawned task to finish processing.
-        handle.await.unwrap();
-        assert!(store.get("spawn/test").unwrap().is_some());
+        let mut created = false;
+        for _ in 0..100 {
+            if store.get("spawn/test").unwrap().is_some() {
+                created = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        handle.abort();
+        assert!(created);
+    }
+
+    #[test]
+    fn sink_enqueue_is_durable_deduplicated_and_visible_after_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("capture.db");
+        let config = DbConfig { path, key: None };
+        let conversation_id = ConversationId::from("durable-capture");
+        {
+            let db = Database::open(&config).unwrap();
+            MigrationRunner::new(&db).apply_all().unwrap();
+            enable_capture(&db, 1);
+            let log = EventLog::new(&db);
+            append_user(&log, &conversation_id, 1, "do");
+            append_tool_use(&log, &conversation_id, 2, 0, "t", json!({}));
+            append_tool_result(&log, &conversation_id, 3, 0, Ok(json!({})));
+            let sink = AutoCaptureSink {
+                db: Some(db),
+                wake: Some(Arc::new(Notify::new())),
+            };
+            let request = CaptureRequest {
+                conversation_id: conversation_id.clone(),
+                until_seq: EventSeq(3),
+                run_id: "durable-run".into(),
+            };
+            assert!(sink.enqueue(request.clone()));
+            assert!(sink.enqueue(request));
+        }
+
+        let db = Database::open(&config).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let claimed = MemoryJobStore::new(&db)
+            .claim_next(
+                MemoryJobKind::SkillCapture,
+                "after-restart",
+                i64::MAX - 2,
+                i64::MAX - 1,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.conversation_id, conversation_id);
+        assert_eq!(claimed.event_start_seq, EventSeq(1));
+        assert_eq!(claimed.event_end_seq, EventSeq(3));
+        assert_eq!(claimed.run_id, "durable-run");
+        let duplicate = MemoryJobStore::new(&db)
+            .claim_next(
+                MemoryJobKind::SkillCapture,
+                "other",
+                i64::MAX - 2,
+                i64::MAX - 1,
+            )
+            .unwrap();
+        assert!(duplicate.is_none());
     }
 }

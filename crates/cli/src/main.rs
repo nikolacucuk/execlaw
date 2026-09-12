@@ -103,6 +103,10 @@ enum Command {
         /// If set, open the DB plaintext (dev only).
         #[arg(long, default_value_t = false)]
         no_encrypt: bool,
+        /// Permit unsigned local artifacts for this run. This is persisted as
+        /// Controller policy and every use emits an audit record.
+        #[arg(long, default_value_t = false)]
+        allow_unsigned_local_development: bool,
     },
     /// Replay a turn — reconstructs the exact prompt the model saw,
     /// the policy decision (capabilities, planner_executor, etc.),
@@ -1267,9 +1271,19 @@ fn resolve_bind(cli: Option<String>, db: Option<String>) -> (String, &'static st
     ("127.0.0.1:3031".to_string(), "default")
 }
 
-async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> anyhow::Result<()> {
+async fn cmd_serve(
+    bind: Option<String>,
+    db_path: PathBuf,
+    no_encrypt: bool,
+    allow_unsigned_local_development: bool,
+) -> anyhow::Result<()> {
     let (db, db_config) = open_db_with_config(&db_path, no_encrypt)?;
     execlaw_core::MigrationRunner::new(&db).apply_all()?;
+    let provenance_store =
+        execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(db.clone());
+    let mut artifact_policy = provenance_store.policy()?;
+    artifact_policy.allow_unsigned_local_development = allow_unsigned_local_development;
+    provenance_store.configure("Controller", "execlaw serve", &artifact_policy)?;
 
     // Resolve the data directory once at boot so downstream code
     // (bundled-plugins mirror, settings paths, etc.) doesn't have
@@ -1397,6 +1411,9 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
         execlaw_plugin_host::HookRegistry::new(),
         stage_root,
     );
+    let _ = plugin_host.attach_attestation_verifier(std::sync::Arc::new(
+        execlaw_core::artifact_provenance::CosignCliVerifier::new("cosign"),
+    ));
     // Re-hydrate installed plugins from the DB so they survive restart.
     plugin_host
         .hydrate()
@@ -1512,19 +1529,14 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
     // executable surface.
     {
         let now = chrono::Utc::now().timestamp();
-        let tools = execlaw_server::graphiti_tool::graphiti_tools();
+        let tools = execlaw_server::graphiti_tool::graphiti_tools(db.clone());
         match execlaw_plugin_host::register_builtins(plugin_host.registry(), &db, now, tools) {
             Ok(landed) => tracing::info!(count = landed.len(), "graphiti tool registered"),
             Err(e) => return Err(anyhow::anyhow!("register graphiti tool failed: {e}")),
         }
         {
             let store = execlaw_core::tool_access::ToolAccessStore::new(&db);
-            let allowed = vec![
-                "Controller".to_owned(),
-                "Delegated".to_owned(),
-                "KnownTrusted".to_owned(),
-                "KnownLimited".to_owned(),
-            ];
+            let allowed = vec!["Controller".to_owned()];
             match store.set_policy("graphiti", true, &allowed) {
                 Ok(true) => tracing::info!("graphiti tool policy ensured"),
                 Ok(false) => {
@@ -1633,7 +1645,9 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
     // each supervisor below independently checks + degrades to
     // disabled mode rather than failing the whole boot.
     let docker_ctrl: Option<std::sync::Arc<dyn execlaw_container_manager::ServiceController>> =
-        match execlaw_container_manager::BollardServiceController::connect() {
+        match execlaw_container_manager::BollardServiceController::connect_with_provenance(
+            db.clone(),
+        ) {
             Ok(ctrl) => Some(std::sync::Arc::new(ctrl)),
             Err(e) => {
                 tracing::warn!("container supervisors disabled — Docker daemon unreachable: {e}");
@@ -1766,7 +1780,7 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
         // resolves; the inherent method we want lives behind the
         // trait, not on `BollardRunnerLauncher` directly.
         use execlaw_server::runner_spawn::RunnerLauncher as _;
-        match execlaw_server::runner_spawn::BollardRunnerLauncher::new() {
+        match execlaw_server::runner_spawn::BollardRunnerLauncher::new_with_provenance(db.clone()) {
             Ok(launcher) => {
                 // 2026-05-02 — autobuild the runner image when the
                 // current control-plane binary is newer than the
@@ -1983,6 +1997,11 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
             skill_store.clone(),
             inference.clone(),
         );
+    let (memory_extract_sink, _memory_extract_handle) =
+        execlaw_server::memory_extract_runtime::spawn_memory_extraction_worker(
+            db.clone(),
+            inference.clone(),
+        );
     // Phase D.3 — reuse-update worker. Same shape; gates on
     // `config_skills.reuse_update_enabled` (default OFF).
     let (reuse_update_sink, _reuse_update_handle) =
@@ -2066,6 +2085,7 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
         turn_cancel: execlaw_server::turn_cancel::TurnCancellationRegistry::new(),
         runner_supervisor: runner_supervisor.clone(),
         research_supervisor: Some(research_supervisor.clone()),
+        memory_extract: memory_extract_sink,
         skill_capture: skill_capture_sink,
         reuse_update: reuse_update_sink,
         optimizer_worker,
@@ -2106,6 +2126,11 @@ async fn cmd_serve(bind: Option<String>, db_path: PathBuf, no_encrypt: bool) -> 
     // process. The sweepers carry their own intervals; the server
     // owns the stop signal so a SIGTERM can drain everything.
     let sweep_stop = std::sync::Arc::new(tokio::sync::Notify::new());
+    let graphiti_worker = execlaw_server::graphiti_worker::GraphitiWorker::new(db.clone());
+    {
+        let stop = sweep_stop.clone();
+        tokio::spawn(async move { graphiti_worker.run(stop).await });
+    }
     let log_sweeper = execlaw_core::log_retention::LogRetentionSweeper::new(db.clone());
     {
         let stop = sweep_stop.clone();
@@ -2559,6 +2584,7 @@ fn main() -> ExitCode {
                         bind,
                         db.unwrap_or_else(default_db_path),
                         no_encrypt,
+                        false,
                     ))
                 }
             }
@@ -2582,6 +2608,7 @@ fn main() -> ExitCode {
             bind,
             db,
             no_encrypt,
+            allow_unsigned_local_development,
         } => {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
@@ -2590,6 +2617,7 @@ fn main() -> ExitCode {
                 bind,
                 db.unwrap_or_else(default_db_path),
                 no_encrypt,
+                allow_unsigned_local_development,
             ))
         }
         Command::Replay {

@@ -190,6 +190,7 @@ mod tests {
             ChatMessage {
                 role: Role::Assistant,
                 content: Some(MessageContent::Text("It is sunny today.".to_owned())),
+                reasoning_content: None,
                 tool_call_id: None,
                 name: None,
                 tool_calls: vec![],

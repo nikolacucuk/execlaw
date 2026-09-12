@@ -81,6 +81,18 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
     let db_config = DbConfig::in_memory_unencrypted();
     let db = Database::open(&db_config).unwrap();
     MigrationRunner::new(&db).apply_all().unwrap();
+    execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(db.clone())
+        .configure(
+            "Controller",
+            "test",
+            &execlaw_core::artifact_provenance::ArtifactVerificationPolicy {
+                allow_unsigned_local_development: true,
+                allowed_publishers: Vec::new(),
+                allowed_source_repositories: Vec::new(),
+                allowed_workflows: Vec::new(),
+            },
+        )
+        .unwrap();
     let events = EventBus::new();
     let state = AppState {
         db: db.clone(),
@@ -122,6 +134,7 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
         turn_cancel: execlaw_server::turn_cancel::TurnCancellationRegistry::new(),
         runner_supervisor: None,
         research_supervisor: None,
+        memory_extract: execlaw_server::memory_extract_runtime::MemoryExtractionSink::noop(),
         sidecar_supervisor: None,
         host_transports: execlaw_server::transport_registry::HostTransportRegistry::new(),
         skill_capture: execlaw_skills::AutoCaptureSink::noop(),
@@ -143,7 +156,7 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
 async fn post_zip(app: axum::Router, bytes: Vec<u8>) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/api/admin/plugins/install")
+        .uri("/api/admin/plugins/install?allow_unsigned_local_development=true")
         .header(header::CONTENT_TYPE, "application/zip")
         .body(Body::from(bytes))
         .unwrap();

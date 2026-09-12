@@ -204,6 +204,8 @@ pub struct McpTool {
     pub description: Option<String>,
     #[serde(default, rename = "inputSchema")]
     pub input_schema: Option<Value>,
+    #[serde(default, rename = "outputSchema")]
+    pub output_schema: Option<Value>,
 }
 
 /// `tools/call` request params.
@@ -221,8 +223,32 @@ pub struct CallToolParams<'a> {
 pub struct CallToolResult {
     #[serde(default)]
     pub content: Vec<Value>,
+    #[serde(default, rename = "structuredContent")]
+    pub structured_content: Option<Value>,
     #[serde(default, rename = "isError")]
     pub is_error: bool,
+}
+
+impl CallToolResult {
+    /// Validate the MCP-standard result envelope before exposing it to a model.
+    pub fn validate_standard_shape(&self) -> Result<(), String> {
+        for (index, part) in self.content.iter().enumerate() {
+            let object = part
+                .as_object()
+                .ok_or_else(|| format!("content[{index}] must be an object"))?;
+            let kind = object
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or_else(|| format!("content[{index}] must contain a string type"))?;
+            if !matches!(
+                kind,
+                "text" | "image" | "audio" | "resource" | "resource_link"
+            ) {
+                return Err(format!("content[{index}] has unsupported type '{kind}'"));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// `resources/list` result.
@@ -346,6 +372,19 @@ mod tests {
             serde_json::from_str(r#"{"content":[{"type":"text","text":"ok"}]}"#).unwrap();
         assert!(!r.is_error);
         assert_eq!(r.content.len(), 1);
+        assert!(r.structured_content.is_none());
+        assert!(r.validate_standard_shape().is_ok());
+    }
+
+    #[test]
+    fn call_tool_result_rejects_nonstandard_content_parts() {
+        let missing_type: CallToolResult =
+            serde_json::from_str(r#"{"content":[{"text":"hello"}]}"#).unwrap();
+        assert!(missing_type.validate_standard_shape().is_err());
+
+        let unsupported: CallToolResult =
+            serde_json::from_str(r#"{"content":[{"type":"custom"}]}"#).unwrap();
+        assert!(unsupported.validate_standard_shape().is_err());
     }
 
     #[test]

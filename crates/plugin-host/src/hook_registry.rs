@@ -14,13 +14,234 @@
 //! registers every hook the manifest declares; disabling removes them
 //! all at once.
 
-use execlaw_core::tool::ToolImpl;
+use execlaw_core::tool::{ToolImpl, compile_tool_schema, tool_schema_hash};
 use execlaw_plugin_sdk::PluginManifest;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+fn schema_references(
+    value: &serde_json::Value,
+    references: &mut Vec<String>,
+) -> Result<(), String> {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if matches!(key.as_str(), "$ref" | "$dynamicRef")
+                    && let Some(reference) = value.as_str()
+                {
+                    if reference.starts_with("http://") || reference.starts_with("https://") {
+                        return Err(format!(
+                            "contains forbidden network reference '{reference}'"
+                        ));
+                    }
+                    if !reference.starts_with('#') {
+                        references.push(reference.to_owned());
+                    }
+                }
+                schema_references(value, references)?;
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                schema_references(value, references)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn load_tool_schemas(
+    manifest: &PluginManifest,
+    stage_path: Option<&Path>,
+) -> Result<HashMap<String, LoadedToolSchemas>, String> {
+    let Some(stage) = stage_path else {
+        if manifest
+            .tools
+            .iter()
+            .any(|tool| tool.schema.is_some() || tool.result_schema.is_some())
+        {
+            return Err("plugin tool schemas require an on-disk stage path".into());
+        }
+        return Ok(HashMap::new());
+    };
+    let stage_root = stage
+        .canonicalize()
+        .map_err(|error| format!("plugin stage '{}' is unreadable: {error}", stage.display()))?;
+    let mut schemas = HashMap::new();
+    for tool in &manifest.tools {
+        let input = tool
+            .schema
+            .as_deref()
+            .map(|path| load_schema_bundle(&manifest.plugin.id, &tool.name, &stage_root, path))
+            .transpose()?;
+        let result = tool
+            .result_schema
+            .as_deref()
+            .map(|path| load_schema_bundle(&manifest.plugin.id, &tool.name, &stage_root, path))
+            .transpose()?;
+        if input.is_none() && result.is_none() {
+            continue;
+        }
+        schemas.insert(tool.name.clone(), LoadedToolSchemas { input, result });
+    }
+    Ok(schemas)
+}
+
+fn load_schema_bundle(
+    plugin_id: &str,
+    tool_name: &str,
+    stage_root: &Path,
+    relative_path: &str,
+) -> Result<LoadedToolSchema, String> {
+    let requested = Path::new(relative_path);
+    if requested.is_absolute()
+        || requested.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!(
+            "tool '{tool_name}' schema path '{relative_path}' escapes the plugin stage"
+        ));
+    }
+
+    let root_path = checked_schema_path(stage_root, &stage_root.join(requested), tool_name)?;
+    let mut pending = VecDeque::from([root_path.clone()]);
+    let mut documents = BTreeMap::<PathBuf, serde_json::Value>::new();
+    while let Some(path) = pending.pop_front() {
+        if documents.contains_key(&path) {
+            continue;
+        }
+        if documents.len() >= 64 {
+            return Err(format!(
+                "tool '{tool_name}' schema bundle exceeds 64 documents"
+            ));
+        }
+        let text = std::fs::read_to_string(&path).map_err(|error| {
+            format!(
+                "tool '{tool_name}' schema '{}' is unreadable: {error}",
+                path.display()
+            )
+        })?;
+        if text.len() > 1024 * 1024 {
+            return Err(format!(
+                "tool '{tool_name}' schema '{}' exceeds 1 MiB",
+                path.display()
+            ));
+        }
+        let document: serde_json::Value = serde_json::from_str(&text).map_err(|error| {
+            format!(
+                "tool '{tool_name}' schema '{}' is not valid JSON: {error}",
+                path.display()
+            )
+        })?;
+        if !document.is_object() {
+            return Err(format!(
+                "tool '{tool_name}' schema '{}' must be a JSON object",
+                path.display()
+            ));
+        }
+        let mut references = Vec::new();
+        schema_references(&document, &mut references)
+            .map_err(|error| format!("tool '{tool_name}' schema '{}': {error}", path.display()))?;
+        for reference in references {
+            let path_part = reference.split('#').next().unwrap_or_default();
+            if path_part.is_empty() || path_part.contains(':') || path_part.starts_with('/') {
+                return Err(format!(
+                    "tool '{tool_name}' schema '{}' contains unsupported external reference '{reference}'",
+                    path.display()
+                ));
+            }
+            let referenced = path.parent().unwrap_or(stage_root).join(path_part);
+            pending.push_back(checked_schema_path(stage_root, &referenced, tool_name)?);
+        }
+        documents.insert(path, document);
+    }
+
+    let root_schema = documents
+        .get(&root_path)
+        .cloned()
+        .expect("root schema was loaded");
+    let root_uri = schema_uri(plugin_id, stage_root, &root_path)?;
+    let resources = documents
+        .iter()
+        .filter(|(path, _)| *path != &root_path)
+        .map(|(path, value)| {
+            let uri = schema_uri(plugin_id, stage_root, path)?;
+            let resource = jsonschema::Resource::from_contents(value.clone())
+                .map_err(|error| format!("tool '{tool_name}' schema resource: {error}"))?;
+            Ok((uri, resource))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let validator = jsonschema::options()
+        .with_draft(jsonschema::Draft::Draft202012)
+        .with_base_uri(root_uri)
+        .with_resources(resources.into_iter())
+        .build(&root_schema)
+        .map_err(|error| {
+            format!("tool '{tool_name}' schema is not valid Draft 2020-12: {error}")
+        })?;
+    let hash_material = serde_json::Value::Object(
+        documents
+            .iter()
+            .map(|(path, value)| {
+                let relative = path.strip_prefix(stage_root).expect("checked stage path");
+                (relative.to_string_lossy().replace('\\', "/"), value.clone())
+            })
+            .collect(),
+    );
+    Ok(LoadedToolSchema {
+        schema: root_schema,
+        validator: Arc::new(validator),
+        hash: tool_schema_hash(&hash_material),
+    })
+}
+
+fn checked_schema_path(stage_root: &Path, path: &Path, tool_name: &str) -> Result<PathBuf, String> {
+    let canonical = path.canonicalize().map_err(|error| {
+        format!(
+            "tool '{tool_name}' schema '{}' is unreadable: {error}",
+            path.display()
+        )
+    })?;
+    if !canonical.starts_with(stage_root) {
+        return Err(format!(
+            "tool '{tool_name}' schema path '{}' escapes the plugin stage",
+            path.display()
+        ));
+    }
+    Ok(canonical)
+}
+
+fn schema_uri(plugin_id: &str, stage_root: &Path, path: &Path) -> Result<String, String> {
+    let relative = path
+        .strip_prefix(stage_root)
+        .map_err(|_| format!("schema '{}' escapes the plugin stage", path.display()))?;
+    Ok(format!(
+        "execlaw://plugin/{plugin_id}/{}",
+        relative.to_string_lossy().replace('\\', "/")
+    ))
+}
+
+struct LoadedToolSchema {
+    schema: serde_json::Value,
+    validator: Arc<jsonschema::Validator>,
+    hash: String,
+}
+
+struct LoadedToolSchemas {
+    input: Option<LoadedToolSchema>,
+    result: Option<LoadedToolSchema>,
+}
+
 /// A tool handler resolved to its owning plugin.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct RegisteredTool {
     pub plugin_id: String,
     pub tool_name: String,
@@ -42,6 +263,15 @@ pub struct RegisteredTool {
     /// schema file, or when load failed (logged warn, falls back to
     /// `{"type":"object"}` at dispatch time).
     pub schema_json: Option<serde_json::Value>,
+    /// Draft 2020-12 validator compiled alongside `schema_json`.
+    /// Dispatch uses this before OAuth lookup or plugin execution.
+    pub schema_validator: Option<Arc<jsonschema::Validator>>,
+    /// Content hash of the root input schema and all bundled local references.
+    pub schema_hash: Option<String>,
+    pub result_schema_path: Option<String>,
+    pub result_schema_json: Option<serde_json::Value>,
+    pub result_schema_validator: Option<Arc<jsonschema::Validator>>,
+    pub result_schema_hash: Option<String>,
     /// Manifest's `[[tools]].trust_floor` (optional). Stored as the
     /// raw string so `plugin-host` doesn't have to depend on
     /// `execlaw-policy`; the dispatch layer parses + ranks it. Tools
@@ -59,6 +289,23 @@ pub struct RegisteredTool {
     pub host_internal: bool,
 }
 
+impl std::fmt::Debug for RegisteredTool {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RegisteredTool")
+            .field("plugin_id", &self.plugin_id)
+            .field("tool_name", &self.tool_name)
+            .field("schema_path", &self.schema_path)
+            .field("has_schema_validator", &self.schema_validator.is_some())
+            .field("schema_hash", &self.schema_hash)
+            .field(
+                "has_result_schema_validator",
+                &self.result_schema_validator.is_some(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
 /// A built-in tool registered via [`HookRegistry::register_builtin`].
 /// Distinct from `RegisteredTool` because built-ins are first-class
 /// `ToolImpl` instances — they ship with a live executable handle, an
@@ -69,6 +316,9 @@ pub struct RegisteredBuiltin {
     /// Owning impl. The dispatch layer pulls this out and calls
     /// `invoke(ctx, args)` directly.
     pub tool: Arc<dyn ToolImpl>,
+    pub schema_hash: String,
+    input_validator: Arc<jsonschema::Validator>,
+    result_validator: Option<Arc<jsonschema::Validator>>,
 }
 
 impl std::fmt::Debug for RegisteredBuiltin {
@@ -321,6 +571,52 @@ impl HookRegistry {
         Self::default()
     }
 
+    /// Validate every declared tool schema without mutating the registry.
+    /// Upgrade uses this before tearing down the currently working version.
+    pub fn validate_schemas_with_stage(
+        &self,
+        manifest: &PluginManifest,
+        stage_path: &Path,
+    ) -> Result<(), String> {
+        load_tool_schemas(manifest, Some(stage_path)).map(|_| ())
+    }
+
+    /// Reject upgrades that change an existing tool contract. Exact bundle
+    /// hash equality is intentionally conservative until a complete JSON
+    /// Schema subsumption checker is available.
+    pub fn validate_upgrade_schemas_with_stage(
+        &self,
+        manifest: &PluginManifest,
+        stage_path: &Path,
+    ) -> Result<(), String> {
+        let schemas = load_tool_schemas(manifest, Some(stage_path))?;
+        let r = self.inner.read().unwrap();
+        for tool in &manifest.tools {
+            let Some(existing) = r.tools_by_name.get(&tool.name) else {
+                continue;
+            };
+            if existing.plugin_id != manifest.plugin.id {
+                continue;
+            }
+            let replacement = schemas.get(&tool.name);
+            let replacement_input = replacement
+                .and_then(|loaded| loaded.input.as_ref())
+                .map(|loaded| loaded.hash.as_str());
+            let replacement_result = replacement
+                .and_then(|loaded| loaded.result.as_ref())
+                .map(|loaded| loaded.hash.as_str());
+            if existing.schema_hash.as_deref() != replacement_input
+                || existing.result_schema_hash.as_deref() != replacement_result
+            {
+                return Err(format!(
+                    "tool '{}' schema changed incompatibly; publish a new tool name or retain the prior schema",
+                    tool.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Enable a plugin: register every hook declared by its manifest.
     ///
     /// Returns `Err` with a conflict description if a tool name / ui
@@ -340,6 +636,9 @@ impl HookRegistry {
         manifest: &PluginManifest,
         stage_path: Option<&std::path::Path>,
     ) -> Result<(), String> {
+        // Compile every declared schema before taking the registry lock or
+        // inserting any hook, preserving enable's all-or-nothing contract.
+        let mut tool_schemas = load_tool_schemas(manifest, stage_path)?;
         let mut w = self.inner.write().unwrap();
         let plugin_id = &manifest.plugin.id;
 
@@ -424,43 +723,13 @@ impl HookRegistry {
                 execlaw_plugin_sdk::manifest::ToolLatency::Medium => "medium",
                 execlaw_plugin_sdk::manifest::ToolLatency::High => "high",
             };
-            // Best-effort schema load. Resolution rules:
-            //   * Manifest didn't declare a schema → None.
-            //   * No stage_path provided (test path) → None.
-            //   * File missing or unparseable → log warn, store None
-            //     so the catalogue falls back to {"type":"object"}
-            //     rather than failing the whole install.
-            let schema_json = match (stage_path, t.schema.as_deref()) {
-                (Some(stage), Some(rel)) => {
-                    let abs = stage.join(rel);
-                    match std::fs::read_to_string(&abs) {
-                        Ok(s) => match serde_json::from_str::<serde_json::Value>(&s) {
-                            Ok(v) => Some(v),
-                            Err(e) => {
-                                tracing::warn!(
-                                    plugin_id = %plugin_id,
-                                    tool = %t.name,
-                                    schema = %abs.display(),
-                                    error = %e,
-                                    "tool schema is not valid JSON; falling back to empty object",
-                                );
-                                None
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!(
-                                plugin_id = %plugin_id,
-                                tool = %t.name,
-                                schema = %abs.display(),
-                                error = %e,
-                                "tool schema file unreadable; falling back to empty object",
-                            );
-                            None
-                        }
-                    }
-                }
-                _ => None,
-            };
+            let loaded_schemas = tool_schemas.remove(&t.name);
+            let input_schema = loaded_schemas
+                .as_ref()
+                .and_then(|loaded| loaded.input.as_ref());
+            let result_schema = loaded_schemas
+                .as_ref()
+                .and_then(|loaded| loaded.result.as_ref());
             w.tools_by_name.insert(
                 t.name.clone(),
                 Arc::new(RegisteredTool {
@@ -470,7 +739,13 @@ impl HookRegistry {
                     required_capabilities: t.required_capabilities.clone(),
                     schema_path: t.schema.clone(),
                     description: t.description.clone(),
-                    schema_json,
+                    schema_json: input_schema.map(|loaded| loaded.schema.clone()),
+                    schema_validator: input_schema.map(|loaded| loaded.validator.clone()),
+                    schema_hash: input_schema.map(|loaded| loaded.hash.clone()),
+                    result_schema_path: t.result_schema.clone(),
+                    result_schema_json: result_schema.map(|loaded| loaded.schema.clone()),
+                    result_schema_validator: result_schema.map(|loaded| loaded.validator.clone()),
+                    result_schema_hash: result_schema.map(|loaded| loaded.hash.clone()),
                     trust_floor: t.trust_floor.clone(),
                     host_internal: t.host_internal,
                 }),
@@ -689,8 +964,23 @@ impl HookRegistry {
     /// the operator sees a clear error rather than a half-populated
     /// registry.
     pub fn register_builtin(&self, tool: Arc<dyn ToolImpl>) -> Result<(), String> {
+        let descriptor = tool.descriptor();
+        let input_validator = compile_tool_schema(
+            &descriptor.schema,
+            &format!("built-in tool '{}' input schema", descriptor.name),
+        )?;
+        let result_validator = tool
+            .result_schema()
+            .map(|schema| {
+                compile_tool_schema(
+                    schema,
+                    &format!("built-in tool '{}' result schema", descriptor.name),
+                )
+                .map(Arc::new)
+            })
+            .transpose()?;
         let mut w = self.inner.write().unwrap();
-        let name = tool.descriptor().name.clone();
+        let name = descriptor.name.clone();
         if let Some(existing) = w.tools_by_name.get(&name) {
             return Err(format!(
                 "built-in tool '{name}' would shadow plugin '{}'",
@@ -700,8 +990,61 @@ impl HookRegistry {
         if w.builtins_by_name.contains_key(&name) {
             return Err(format!("built-in tool '{name}' is already registered"));
         }
-        w.builtins_by_name.insert(name, RegisteredBuiltin { tool });
+        w.builtins_by_name.insert(
+            name,
+            RegisteredBuiltin {
+                schema_hash: tool_schema_hash(&descriptor.schema),
+                tool,
+                input_validator: Arc::new(input_validator),
+                result_validator,
+            },
+        );
         Ok(())
+    }
+
+    /// Validate a built-in invocation before constructing its capability
+    /// context. Unknown names return `Ok(())` so callers can continue routing.
+    pub fn validate_builtin_input(
+        &self,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<(), String> {
+        let r = self.inner.read().unwrap();
+        let Some(builtin) = r.builtins_by_name.get(name) else {
+            return Ok(());
+        };
+        builtin.input_validator.validate(args).map_err(|error| {
+            format!("tool '{name}' arguments do not match its JSON Schema: {error}")
+        })
+    }
+
+    /// Validate a successful built-in result when the implementation declares
+    /// a result schema.
+    pub fn validate_builtin_result(
+        &self,
+        name: &str,
+        value: &serde_json::Value,
+    ) -> Result<(), String> {
+        let r = self.inner.read().unwrap();
+        let Some(validator) = r
+            .builtins_by_name
+            .get(name)
+            .and_then(|builtin| builtin.result_validator.as_ref())
+        else {
+            return Ok(());
+        };
+        validator.validate(value).map_err(|error| {
+            format!("tool '{name}' result does not match its JSON Schema: {error}")
+        })
+    }
+
+    pub fn builtin_schema_hash(&self, name: &str) -> Option<String> {
+        self.inner
+            .read()
+            .unwrap()
+            .builtins_by_name
+            .get(name)
+            .map(|builtin| builtin.schema_hash.clone())
     }
 
     /// Look up a built-in by name. `None` if no built-in owns this
@@ -952,13 +1295,48 @@ latency = "low"
         assert_eq!(schema["type"], "object");
         assert_eq!(schema["properties"]["q"]["type"], "string");
         assert_eq!(schema["required"][0], "q");
+        assert_eq!(t.schema_hash.as_deref().map(str::len), Some(64));
     }
 
     #[test]
-    fn enable_with_stage_falls_back_when_schema_file_missing() {
-        // A manifest pointing at a non-existent schema path must NOT
-        // fail the install — it logs and falls through to None so
-        // chats.rs can use the {"type":"object"} fallback.
+    fn enable_with_stage_compiles_bundled_local_refs() {
+        let stage = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(stage.path().join("schemas/defs")).unwrap();
+        std::fs::write(
+            stage.path().join("schemas/input.json"),
+            r#"{"type":"object","properties":{"q":{"$ref":"defs/query.json"}},"required":["q"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            stage.path().join("schemas/defs/query.json"),
+            r#"{"type":"string","minLength":1}"#,
+        )
+        .unwrap();
+        let manifest = PluginManifest::parse(
+            r#"
+[plugin]
+id = "local-ref"
+name = "Local Ref"
+version = "1.0.0"
+
+[[tools]]
+name = "search"
+schema = "schemas/input.json"
+"#,
+        )
+        .unwrap();
+        let reg = HookRegistry::new();
+        reg.enable_with_stage(&manifest, Some(stage.path()))
+            .unwrap();
+        let tool = reg.tool("search").unwrap();
+        let validator = tool.schema_validator.as_ref().unwrap();
+        assert!(validator.is_valid(&serde_json::json!({"q": "rust"})));
+        assert!(!validator.is_valid(&serde_json::json!({"q": ""})));
+        assert_eq!(tool.schema_hash.as_deref().map(str::len), Some(64));
+    }
+
+    #[test]
+    fn enable_with_stage_rejects_missing_schema_file_atomically() {
         let stage = tempfile::tempdir().unwrap();
         let manifest = PluginManifest::parse(
             r#"
@@ -976,15 +1354,81 @@ latency = "low"
         )
         .unwrap();
         let reg = HookRegistry::new();
-        reg.enable_with_stage(&manifest, Some(stage.path()))
-            .expect("enable must succeed even when a schema file is missing");
-        let t = reg.tool("x").expect("tool still registered");
-        assert!(t.schema_json.is_none(), "missing file → schema_json None");
-        // schema_path is preserved for diagnostics.
-        assert_eq!(
-            t.schema_path.as_deref(),
-            Some("schemas/does_not_exist.json")
+        let error = reg
+            .enable_with_stage(&manifest, Some(stage.path()))
+            .expect_err("missing declared schemas must reject registration");
+        assert!(error.contains("is unreadable"), "unexpected error: {error}");
+        assert!(!reg.is_enabled("missing-schema"));
+        assert!(reg.tool("x").is_none());
+    }
+
+    #[test]
+    fn enable_with_stage_rejects_remote_schema_ref() {
+        let stage = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(stage.path().join("schemas")).unwrap();
+        std::fs::write(
+            stage.path().join("schemas/x.json"),
+            r#"{"type":"object","properties":{"x":{"$ref":"https://example.invalid/x.json"}}}"#,
+        )
+        .unwrap();
+        let manifest = manifest_with_tools("remote-ref", &["x"]);
+        let reg = HookRegistry::new();
+        let error = reg
+            .enable_with_stage(&manifest, Some(stage.path()))
+            .expect_err("network schema references must be rejected");
+        assert!(
+            error.contains("forbidden network reference"),
+            "unexpected error: {error}"
         );
+        assert!(!reg.is_enabled("remote-ref"));
+    }
+
+    #[test]
+    fn enable_with_stage_rejects_external_dynamic_ref() {
+        let stage = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(stage.path().join("schemas")).unwrap();
+        std::fs::write(
+            stage.path().join("schemas/x.json"),
+            r#"{"type":"object","$dynamicRef":"https:example.invalid/x.json"}"#,
+        )
+        .unwrap();
+        let manifest = manifest_with_tools("dynamic-ref", &["x"]);
+        let reg = HookRegistry::new();
+        let error = reg
+            .enable_with_stage(&manifest, Some(stage.path()))
+            .expect_err("external dynamic references must be rejected");
+        assert!(
+            error.contains("external reference"),
+            "unexpected error: {error}"
+        );
+        assert!(!reg.is_enabled("dynamic-ref"));
+    }
+
+    #[test]
+    fn enable_with_stage_rejects_schema_path_traversal() {
+        let parent = tempfile::tempdir().unwrap();
+        let stage = parent.path().join("plugin");
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::write(parent.path().join("outside.json"), r#"{"type":"object"}"#).unwrap();
+        let manifest = PluginManifest::parse(
+            r#"
+[plugin]
+id = "path-escape"
+name = "Path Escape"
+version = "1.0.0"
+
+[[tools]]
+name = "x"
+schema = "../outside.json"
+"#,
+        )
+        .unwrap();
+        let reg = HookRegistry::new();
+        let error = reg
+            .enable_with_stage(&manifest, Some(&stage))
+            .expect_err("schema paths must remain inside the plugin stage");
+        assert!(error.contains("escapes the plugin stage"));
+        assert!(!reg.is_enabled("path-escape"));
     }
 
     #[test]
@@ -1401,6 +1845,46 @@ trust_hint_default = "Contact"
         reg.register_builtin(arc_dummy("foo")).unwrap();
         let err = reg.register_builtin(arc_dummy("foo")).unwrap_err();
         assert!(err.contains("already registered"));
+    }
+
+    #[test]
+    fn register_builtin_rejects_invalid_or_networked_schema() {
+        let reg = HookRegistry::new();
+        let mut descriptor = dummy_descriptor("bad");
+        descriptor.schema = serde_json::json!({"type": 7});
+        let error = reg
+            .register_builtin(Arc::new(DummyTool { d: descriptor }))
+            .unwrap_err();
+        assert!(error.contains("Draft 2020-12"));
+
+        let mut descriptor = dummy_descriptor("networked");
+        descriptor.schema = serde_json::json!({"$ref": "https://example.invalid/schema"});
+        let error = reg
+            .register_builtin(Arc::new(DummyTool { d: descriptor }))
+            .unwrap_err();
+        assert!(error.contains("forbidden network reference"));
+    }
+
+    #[test]
+    fn builtins_validate_input_before_invoke() {
+        let reg = HookRegistry::new();
+        let mut descriptor = dummy_descriptor("typed");
+        descriptor.schema = serde_json::json!({
+            "type": "object",
+            "properties": {"count": {"type": "integer"}},
+            "required": ["count"]
+        });
+        reg.register_builtin(Arc::new(DummyTool { d: descriptor }))
+            .unwrap();
+        assert!(
+            reg.validate_builtin_input("typed", &serde_json::json!({"count": 1}))
+                .is_ok()
+        );
+        assert!(
+            reg.validate_builtin_input("typed", &serde_json::json!({"count": "one"}))
+                .is_err()
+        );
+        assert_eq!(reg.builtin_schema_hash("typed").unwrap().len(), 64);
     }
 
     /// Critical: a plugin must NOT be able to shadow a built-in by

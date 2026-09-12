@@ -14,6 +14,7 @@ execlaw-vault = { path = "../vault" }
 execlaw-policy = { path = "../policy" }
 execlaw-plugin-sdk = { path = "../plugin-sdk" }
 execlaw-inference-api = { path = "../inference-api" }
+execlaw-local-endpoint-policy = { path = "../local-endpoint-policy" }
 execlaw-runner-local = { path = "../runner-local" }
 execlaw-runner-protocol = { path = "../runner-protocol" }
 bollard = { workspace = true }
@@ -38,6 +39,7 @@ tokio-util.workspace = true
 notify.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+jsonschema.workspace = true
 serde_urlencoded = "0.7"
 jsonwebtoken.workspace = true
 ed25519-dalek = { workspace = true, features = ["rand_core", "pkcs8", "pem"] }

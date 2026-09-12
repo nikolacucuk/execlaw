@@ -71,19 +71,14 @@ pub struct Band {
     pub color: Option<[u8; 3]>,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ChartKind {
+    #[default]
     Line,
     Bar,
     Area,
     Scatter,
-}
-
-impl Default for ChartKind {
-    fn default() -> Self {
-        ChartKind::Line
-    }
 }
 
 /// One chart, fully declarative. Plugins construct this via a Rhai
@@ -136,7 +131,7 @@ pub fn render_to_svg(spec: &ChartSpec, width: u32, height: u32) -> Result<String
     let mut buffer = String::new();
     {
         let root = SVGBackend::with_string(&mut buffer, (width, height)).into_drawing_area();
-        draw(&spec, &root)?;
+        draw(spec, &root)?;
         root.present()
             .map_err(|e| ChartError::Render(format!("svg present: {e}")))?;
     }
@@ -152,7 +147,7 @@ pub fn render_to_png(spec: &ChartSpec, width: u32, height: u32) -> Result<Vec<u8
     let mut buf = vec![0u8; (width * height * 3) as usize];
     {
         let root = BitMapBackend::with_buffer(&mut buf, (width, height)).into_drawing_area();
-        draw(&spec, &root)?;
+        draw(spec, &root)?;
         root.present()
             .map_err(|e| ChartError::Render(format!("bitmap present: {e}")))?;
     }
@@ -310,12 +305,10 @@ where
         match spec.kind {
             ChartKind::Line => {
                 chart
-                    .draw_series(LineSeries::new(points, style.clone()))
+                    .draw_series(LineSeries::new(points, style))
                     .map_err(|e| ChartError::Render(format!("line series '{}': {e}", s.name)))?
                     .label(&s.name)
-                    .legend(move |(x, y)| {
-                        PathElement::new(vec![(x, y), (x + 18, y)], style.clone())
-                    });
+                    .legend(move |(x, y)| PathElement::new(vec![(x, y), (x + 18, y)], style));
             }
             ChartKind::Scatter => {
                 chart
@@ -365,8 +358,8 @@ where
     if spec.series.len() > 1 {
         chart
             .configure_series_labels()
-            .background_style(&WHITE.mix(0.85))
-            .border_style(&BLACK.mix(0.3))
+            .background_style(WHITE.mix(0.85))
+            .border_style(BLACK.mix(0.3))
             .label_font(("sans-serif", 12))
             .draw()
             .map_err(|e| ChartError::Render(format!("legend: {e}")))?;

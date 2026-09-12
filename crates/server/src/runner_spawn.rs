@@ -111,17 +111,31 @@ pub fn volume_name_for(group_id: &str) -> String {
 /// Real bollard-backed launcher. Production wiring.
 pub struct BollardRunnerLauncher {
     docker: bollard::Docker,
+    provenance: Option<execlaw_core::artifact_provenance::ArtifactProvenanceStore>,
 }
 
 impl BollardRunnerLauncher {
     pub fn new() -> Result<Self, LauncherError> {
         let docker = bollard::Docker::connect_with_local_defaults()
             .map_err(|e| LauncherError::Docker(format!("connect: {e}")))?;
-        Ok(Self { docker })
+        Ok(Self {
+            docker,
+            provenance: None,
+        })
+    }
+
+    pub fn new_with_provenance(db: execlaw_core::Database) -> Result<Self, LauncherError> {
+        let mut launcher = Self::new()?;
+        launcher.provenance =
+            Some(execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(db));
+        Ok(launcher)
     }
 
     pub fn with_docker(docker: bollard::Docker) -> Self {
-        Self { docker }
+        Self {
+            docker,
+            provenance: None,
+        }
     }
 }
 
@@ -130,6 +144,21 @@ impl RunnerLauncher for BollardRunnerLauncher {
     async fn spawn(&self, spec: &RunnerSpec) -> Result<RunnerHandleId, LauncherError> {
         use bollard::container::{Config, CreateContainerOptions, StartContainerOptions};
         use bollard::secret::HostConfig;
+
+        self.provenance
+            .as_ref()
+            .ok_or_else(|| {
+                LauncherError::Docker(
+                    "artifact provenance store is not configured for runner launch".into(),
+                )
+            })?
+            .authorize_oci_reference(
+                "runner:image",
+                execlaw_core::artifact_provenance::ArtifactType::RunnerImage,
+                &spec.image,
+                "runner-launcher",
+            )
+            .map_err(|error| LauncherError::Docker(error.to_string()))?;
 
         let volume = volume_name_for(&spec.group_id);
         let container_name = format!("execlaw-runner-{}", &spec.group_id);

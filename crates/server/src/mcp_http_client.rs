@@ -84,8 +84,17 @@ impl HttpMcpClient {
         let http = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)
             .user_agent(concat!("execlaw/", env!("CARGO_PKG_VERSION"), "/mcp-http"))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| McpError::Protocol(format!("http client build: {e}")))?;
+        Self::connect_with_client(url, bearer, http).await
+    }
+
+    pub async fn connect_with_client(
+        url: &str,
+        bearer: Option<&str>,
+        http: reqwest::Client,
+    ) -> McpResult<Self> {
         let me = Self {
             http,
             url: url.to_owned(),

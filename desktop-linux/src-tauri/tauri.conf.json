@@ -31,7 +31,7 @@
       "icons/icon.png"
     ],
     "externalBin": ["bin/execlaw"],
-    "resources": ["resources/plugins/*.zip"],
+    "resources": ["resources/plugins/*"],
     "linux": {
       "deb": {
         "depends": [

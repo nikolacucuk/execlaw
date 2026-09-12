@@ -9,6 +9,7 @@ authors.workspace = true
 description = "OpenAI-compatible inference client. The single internal LLM contract. No cloud SDKs."
 
 [dependencies]
+execlaw-local-endpoint-policy = { path = "../local-endpoint-policy" }
 tokio.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true

@@ -9,7 +9,7 @@
 use crate::db::{Database, DbError};
 use crate::ids::{ConversationId, EventSeq};
 use rmp_serde as rmps;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -277,17 +277,18 @@ pub struct ToolResultPayload {
 
 /// The event log facade.
 ///
-/// Every `state_events` INSERT is signed with an HMAC-SHA256 tag over
-/// the canonical bytes of the row (§7.8). When an HMAC key is attached
-/// via [`EventLog::with_hmac_key`], `append` / `commit_turn` populate
-/// the `tag` column and `replay_since` / `hydrate` verify every row on
-/// read — returning `DbError::TamperDetected` if any tag doesn't match.
+/// Legacy v1 rows retain their independent HMAC-SHA256 interpretation.
+/// When a key is attached, new writes are v2: each tag authenticates the
+/// unchanged v1 canonical row plus its key id and predecessor tag. Append and
+/// commit update a separately signed terminal checkpoint in the same SQLite
+/// transaction. Replay verifies the complete conversation chain before
+/// returning any requested suffix.
 ///
 /// When no key is attached (tests, first-run before vault is ready),
 /// rows are written with `tag = NULL` and verification is skipped.
 /// Production always attaches a key at server startup.
 ///
-/// **Key rotation (Phase 7).** `EventLog` accepts a [`KeyRing`] of
+/// **Key rotation.** `EventLog` accepts a [`KeyRing`] of
 /// `(key_id, bytes)` pairs. Append writes the ring's `current_id` into
 /// the `state_events.key_id` column; replay reads that id and verifies
 /// each row under the corresponding key. To rotate, register the new
@@ -319,6 +320,25 @@ pub struct BackfillReport {
 /// payload, committed_at, actor). Aliased so clippy doesn't trip on
 /// the tuple width and so the SELECT + the destructure stay in sync.
 type NullTagRow = (String, i64, String, Vec<u8>, i64, Option<String>);
+
+#[derive(Debug, Clone)]
+struct IntegrityRow {
+    event: EventRecord,
+    tag: Option<Vec<u8>>,
+    key_id: i64,
+    integrity_version: i64,
+    prev_tag: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct IntegrityHead {
+    chain_start_seq: i64,
+    head_seq: i64,
+    head_tag: Vec<u8>,
+    genesis_key_id: i64,
+    key_id: i64,
+    checkpoint_tag: Vec<u8>,
+}
 
 /// Multi-key HMAC ring used by `EventLog` for signing + verifying.
 ///
@@ -407,20 +427,392 @@ impl<'db> EventLog<'db> {
         self
     }
 
-    /// Sign an event under the current ring key, returning
-    /// `(tag, key_id)`. `None` when no ring is attached (→ NULL tag).
-    fn sign(&self, ev: &EventRecord) -> Option<([u8; 32], i64)> {
-        let ring = self.key_ring.as_ref()?;
-        let key = ring.current_key()?;
-        let canon = crate::event_hmac::canonical_bytes(
+    fn fixed_tag(bytes: &[u8], context: &str) -> Result<[u8; 32], DbError> {
+        bytes.try_into().map_err(|_| {
+            DbError::TamperDetected(format!("{context} has malformed tag (len {})", bytes.len()))
+        })
+    }
+
+    fn v1_canonical(ev: &EventRecord) -> Vec<u8> {
+        crate::event_hmac::canonical_bytes(
             ev.conversation_id.as_str(),
             ev.seq.0,
             ev.kind.as_str(),
             ev.committed_at,
             ev.actor.as_deref(),
             &ev.payload,
+        )
+    }
+
+    fn legacy_genesis_canonical(
+        conversation_id: &ConversationId,
+        chain_start_seq: i64,
+        rows: &[IntegrityRow],
+    ) -> Vec<u8> {
+        let legacy_rows = rows
+            .iter()
+            .filter(|row| row.integrity_version == 1)
+            .map(|row| {
+                let mut canonical = Self::v1_canonical(&row.event);
+                canonical.extend_from_slice(&row.key_id.to_le_bytes());
+                match row.tag.as_deref() {
+                    Some(tag) => {
+                        canonical.extend_from_slice(&(tag.len() as u64).to_le_bytes());
+                        canonical.extend_from_slice(tag);
+                    }
+                    None => canonical.extend_from_slice(&0u64.to_le_bytes()),
+                }
+                canonical
+            })
+            .collect::<Vec<_>>();
+        crate::event_hmac::canonical_genesis(
+            conversation_id.as_str(),
+            chain_start_seq,
+            &legacy_rows,
+        )
+    }
+
+    fn load_integrity_rows(
+        conn: &rusqlite::Connection,
+        conversation_id: &ConversationId,
+    ) -> Result<Vec<IntegrityRow>, DbError> {
+        let mut stmt = conn.prepare_cached(
+            "SELECT seq, kind, payload, committed_at, actor, tag, key_id, \
+                    integrity_version, prev_tag \
+             FROM state_events WHERE conversation_id = ?1 ORDER BY seq ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![conversation_id.as_str()], |row| {
+                let kind: String = row.get(1)?;
+                Ok(IntegrityRow {
+                    event: EventRecord {
+                        conversation_id: conversation_id.clone(),
+                        seq: EventSeq(row.get(0)?),
+                        kind: EventKind::parse(&kind),
+                        payload: row.get(2)?,
+                        committed_at: row.get(3)?,
+                        actor: row.get(4)?,
+                    },
+                    tag: row.get(5)?,
+                    key_id: row.get(6)?,
+                    integrity_version: row.get(7)?,
+                    prev_tag: row.get(8)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    fn load_integrity_head(
+        conn: &rusqlite::Connection,
+        conversation_id: &ConversationId,
+    ) -> Result<Option<IntegrityHead>, DbError> {
+        let head = conn
+            .query_row(
+                "SELECT chain_start_seq, head_seq, head_tag, genesis_key_id, key_id, checkpoint_tag \
+                 FROM state_event_integrity_heads WHERE conversation_id = ?1",
+                params![conversation_id.as_str()],
+                |row| {
+                    Ok(IntegrityHead {
+                        chain_start_seq: row.get(0)?,
+                        head_seq: row.get(1)?,
+                        head_tag: row.get(2)?,
+                        genesis_key_id: row.get(3)?,
+                        key_id: row.get(4)?,
+                        checkpoint_tag: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+        Ok(head)
+    }
+
+    fn verify_integrity(
+        &self,
+        conversation_id: &ConversationId,
+        rows: &[IntegrityRow],
+        head: Option<&IntegrityHead>,
+    ) -> Result<(), DbError> {
+        let Some(ring) = self.key_ring.as_ref() else {
+            return Ok(());
+        };
+
+        for row in rows.iter().filter(|row| row.integrity_version == 1) {
+            self.verify(&row.event, row.tag.clone(), row.key_id)?;
+        }
+
+        let v2_rows = rows
+            .iter()
+            .filter(|row| row.integrity_version == 2)
+            .collect::<Vec<_>>();
+        let Some(head) = head else {
+            if v2_rows.is_empty() {
+                return Ok(());
+            }
+            return Err(DbError::TamperDetected(format!(
+                "conversation {} has v2 events but no integrity checkpoint",
+                conversation_id.as_str()
+            )));
+        };
+
+        if head.chain_start_seq < 1 {
+            return Err(DbError::TamperDetected(format!(
+                "conversation {} has invalid chain start {}",
+                conversation_id.as_str(),
+                head.chain_start_seq
+            )));
+        }
+        let genesis_key = ring.key_for(head.genesis_key_id).ok_or_else(|| {
+            DbError::TamperDetected(format!(
+                "conversation {} genesis uses unknown key_id {}",
+                conversation_id.as_str(),
+                head.genesis_key_id
+            ))
+        })?;
+        let genesis = crate::event_hmac::sign_event(
+            genesis_key,
+            &Self::legacy_genesis_canonical(conversation_id, head.chain_start_seq, rows),
         );
-        Some((crate::event_hmac::sign_event(key, &canon), ring.current_id))
+
+        let mut expected_prev = genesis;
+        let mut expected_seq = head.chain_start_seq;
+        for row in v2_rows {
+            if row.event.seq.0 != expected_seq {
+                return Err(DbError::TamperDetected(format!(
+                    "conversation {} v2 sequence expected {expected_seq}, found {}",
+                    conversation_id.as_str(),
+                    row.event.seq.0
+                )));
+            }
+            let stored_prev = row.prev_tag.as_deref().ok_or_else(|| {
+                DbError::TamperDetected(format!(
+                    "event {}:{} is v2 but has no prev_tag",
+                    conversation_id.as_str(),
+                    row.event.seq.0
+                ))
+            })?;
+            let stored_prev = Self::fixed_tag(stored_prev, "event prev_tag")?;
+            if stored_prev != expected_prev {
+                return Err(DbError::TamperDetected(format!(
+                    "event {}:{} breaks the v2 predecessor chain",
+                    conversation_id.as_str(),
+                    row.event.seq.0
+                )));
+            }
+            let tag = row.tag.as_deref().ok_or_else(|| {
+                DbError::TamperDetected(format!(
+                    "event {}:{} is v2 but has no tag",
+                    conversation_id.as_str(),
+                    row.event.seq.0
+                ))
+            })?;
+            let tag = Self::fixed_tag(tag, "event tag")?;
+            let key = ring.key_for(row.key_id).ok_or_else(|| {
+                DbError::TamperDetected(format!(
+                    "event {}:{} signed with unknown key_id {}",
+                    conversation_id.as_str(),
+                    row.event.seq.0,
+                    row.key_id
+                ))
+            })?;
+            let canonical = crate::event_hmac::canonical_chain_event(
+                &Self::v1_canonical(&row.event),
+                row.key_id,
+                &stored_prev,
+            );
+            if !crate::event_hmac::verify_event(key, &canonical, &tag) {
+                return Err(DbError::TamperDetected(format!(
+                    "event {}:{} failed v2 HMAC verification",
+                    conversation_id.as_str(),
+                    row.event.seq.0
+                )));
+            }
+            expected_prev = tag;
+            expected_seq += 1;
+        }
+
+        let expected_head_seq = expected_seq - 1;
+        let stored_head = Self::fixed_tag(&head.head_tag, "integrity head")?;
+        if head.head_seq != expected_head_seq || stored_head != expected_prev {
+            return Err(DbError::TamperDetected(format!(
+                "conversation {} terminal checkpoint does not match event tail",
+                conversation_id.as_str()
+            )));
+        }
+        let checkpoint_key = ring.key_for(head.key_id).ok_or_else(|| {
+            DbError::TamperDetected(format!(
+                "conversation {} checkpoint uses unknown key_id {}",
+                conversation_id.as_str(),
+                head.key_id
+            ))
+        })?;
+        let checkpoint = Self::fixed_tag(&head.checkpoint_tag, "checkpoint tag")?;
+        let canonical = crate::event_hmac::canonical_checkpoint(
+            conversation_id.as_str(),
+            head.chain_start_seq,
+            head.head_seq,
+            &stored_head,
+            head.genesis_key_id,
+            head.key_id,
+        );
+        if !crate::event_hmac::verify_event(checkpoint_key, &canonical, &checkpoint) {
+            return Err(DbError::TamperDetected(format!(
+                "conversation {} checkpoint signature is invalid",
+                conversation_id.as_str()
+            )));
+        }
+        Ok(())
+    }
+
+    fn initial_integrity_head(
+        &self,
+        conversation_id: &ConversationId,
+        rows: &[IntegrityRow],
+    ) -> Result<IntegrityHead, DbError> {
+        let ring = self
+            .key_ring
+            .as_ref()
+            .ok_or_else(|| DbError::Config("v2 integrity checkpoints require a KeyRing".into()))?;
+        let key = ring
+            .current_key()
+            .ok_or_else(|| DbError::Config("KeyRing has no current key".into()))?;
+        if rows.iter().any(|row| row.integrity_version != 1) {
+            return Err(DbError::TamperDetected(format!(
+                "conversation {} has v2 rows without a checkpoint",
+                conversation_id.as_str()
+            )));
+        }
+        let legacy_max = rows.last().map(|row| row.event.seq.0).unwrap_or(0);
+        let chain_start_seq = legacy_max + 1;
+        let head_tag = crate::event_hmac::sign_event(
+            key,
+            &Self::legacy_genesis_canonical(conversation_id, chain_start_seq, rows),
+        );
+        let checkpoint_tag = crate::event_hmac::sign_event(
+            key,
+            &crate::event_hmac::canonical_checkpoint(
+                conversation_id.as_str(),
+                chain_start_seq,
+                legacy_max,
+                &head_tag,
+                ring.current_id,
+                ring.current_id,
+            ),
+        );
+        Ok(IntegrityHead {
+            chain_start_seq,
+            head_seq: legacy_max,
+            head_tag: head_tag.to_vec(),
+            genesis_key_id: ring.current_id,
+            key_id: ring.current_id,
+            checkpoint_tag: checkpoint_tag.to_vec(),
+        })
+    }
+
+    fn write_integrity_head(
+        conn: &rusqlite::Connection,
+        conversation_id: &ConversationId,
+        head: &IntegrityHead,
+    ) -> Result<(), DbError> {
+        conn.execute(
+            "INSERT INTO state_event_integrity_heads \
+             (conversation_id, integrity_version, chain_start_seq, head_seq, head_tag, \
+              genesis_key_id, key_id, checkpoint_tag, updated_at) \
+             VALUES (?1, 2, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
+             ON CONFLICT(conversation_id) DO UPDATE SET \
+               chain_start_seq = excluded.chain_start_seq, \
+               head_seq = excluded.head_seq, head_tag = excluded.head_tag, \
+               genesis_key_id = excluded.genesis_key_id, key_id = excluded.key_id, \
+               checkpoint_tag = excluded.checkpoint_tag, \
+               updated_at = excluded.updated_at",
+            params![
+                conversation_id.as_str(),
+                head.chain_start_seq,
+                head.head_seq,
+                head.head_tag,
+                head.genesis_key_id,
+                head.key_id,
+                head.checkpoint_tag,
+                chrono::Utc::now().timestamp(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn advance_integrity_head(
+        &self,
+        conversation_id: &ConversationId,
+        chain_start_seq: i64,
+        genesis_key_id: i64,
+        head_seq: i64,
+        head_tag: [u8; 32],
+    ) -> Result<IntegrityHead, DbError> {
+        let ring = self
+            .key_ring
+            .as_ref()
+            .ok_or_else(|| DbError::Config("v2 integrity checkpoints require a KeyRing".into()))?;
+        let key = ring
+            .current_key()
+            .ok_or_else(|| DbError::Config("KeyRing has no current key".into()))?;
+        let checkpoint_tag = crate::event_hmac::sign_event(
+            key,
+            &crate::event_hmac::canonical_checkpoint(
+                conversation_id.as_str(),
+                chain_start_seq,
+                head_seq,
+                &head_tag,
+                genesis_key_id,
+                ring.current_id,
+            ),
+        );
+        Ok(IntegrityHead {
+            chain_start_seq,
+            head_seq,
+            head_tag: head_tag.to_vec(),
+            genesis_key_id,
+            key_id: ring.current_id,
+            checkpoint_tag: checkpoint_tag.to_vec(),
+        })
+    }
+
+    /// Establish a signed v2 genesis/checkpoint over the current legacy
+    /// prefix without rewriting any existing event tag.
+    pub fn establish_v2_checkpoint(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Result<bool, DbError> {
+        self.db.transaction(|tx| {
+            let rows = Self::load_integrity_rows(tx, conversation_id)?;
+            if let Some(head) = Self::load_integrity_head(tx, conversation_id)? {
+                self.verify_integrity(conversation_id, &rows, Some(&head))?;
+                return Ok(false);
+            }
+            let head = self.initial_integrity_head(conversation_id, &rows)?;
+            Self::write_integrity_head(tx, conversation_id, &head)?;
+            Ok(true)
+        })
+    }
+
+    /// Establish v2 genesis checkpoints for every conversation that has event
+    /// rows. Existing v1 tags are only committed into the genesis anchor; they
+    /// are never re-signed or reinterpreted.
+    pub fn backfill_v2_checkpoints(&self) -> Result<usize, DbError> {
+        let conversation_ids = self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT conversation_id FROM state_events ORDER BY conversation_id",
+            )?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(ids)
+        })?;
+        let mut established = 0;
+        for id in conversation_ids {
+            if self.establish_v2_checkpoint(&ConversationId::from(id))? {
+                established += 1;
+            }
+        }
+        Ok(established)
     }
 
     /// Verify a loaded event row. No-op (returns Ok) when no ring is
@@ -487,6 +879,19 @@ impl<'db> EventLog<'db> {
             DbError::Config("KeyRing has no key registered for current_id".into())
         })?;
         let key_id = ring.current_id;
+
+        let checkpoint_count: i64 = self.db.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM state_event_integrity_heads",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        if checkpoint_count > 0 {
+            return Err(DbError::Invariant(
+                "cannot rewrite legacy tags after v2 checkpoints exist".into(),
+            ));
+        }
 
         // Pull the rows that still need signatures. Linear scan is
         // fine — back-fill runs at most once per fleet, before the
@@ -584,6 +989,20 @@ impl<'db> EventLog<'db> {
         })?;
         let key_id = ring.current_id;
 
+        let checkpoint_count: i64 = self.db.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM state_event_integrity_heads",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        if checkpoint_count > 0 {
+            return Err(DbError::Invariant(
+                "destructive re-signing is disabled after v2 checkpoints exist; retain old keys"
+                    .into(),
+            ));
+        }
+
         let rows: Vec<NullTagRow> = self.db.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT conversation_id, seq, kind, payload, committed_at, actor \
@@ -635,14 +1054,58 @@ impl<'db> EventLog<'db> {
     /// Append one event. Enforces `(conversation_id, seq)` uniqueness via
     /// the primary key — returns an error if the caller passed a stale seq.
     pub fn append(&self, ev: &EventRecord) -> Result<(), DbError> {
-        let signed = self.sign(ev);
-        let tag: Option<Vec<u8>> = signed.as_ref().map(|(t, _)| t.to_vec());
-        let key_id: i64 = signed.as_ref().map(|(_, id)| *id).unwrap_or(0);
-        self.db.with_conn(|c| {
-            c.execute(
+        if self.key_ring.is_none() {
+            return self.db.with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO state_events \
+                     (conversation_id, seq, kind, payload, committed_at, actor, tag, key_id) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 0)",
+                    params![
+                        ev.conversation_id.as_str(),
+                        ev.seq.0,
+                        ev.kind.as_str(),
+                        ev.payload,
+                        ev.committed_at,
+                        ev.actor,
+                    ],
+                )?;
+                Ok(())
+            });
+        }
+
+        self.db.transaction(|tx| {
+            let rows = Self::load_integrity_rows(tx, &ev.conversation_id)?;
+            let mut head = match Self::load_integrity_head(tx, &ev.conversation_id)? {
+                Some(head) => {
+                    self.verify_integrity(&ev.conversation_id, &rows, Some(&head))?;
+                    head
+                }
+                None => self.initial_integrity_head(&ev.conversation_id, &rows)?,
+            };
+            if ev.seq.0 != head.head_seq + 1 {
+                return Err(DbError::Invariant(format!(
+                    "v2 append for {} expected seq {}, got {}",
+                    ev.conversation_id.as_str(),
+                    head.head_seq + 1,
+                    ev.seq.0
+                )));
+            }
+            let ring = self.key_ring.as_ref().expect("checked above");
+            let key = ring.current_key().ok_or_else(|| {
+                DbError::Config("KeyRing has no key registered for current_id".into())
+            })?;
+            let prev_tag = Self::fixed_tag(&head.head_tag, "integrity head")?;
+            let canonical = crate::event_hmac::canonical_chain_event(
+                &Self::v1_canonical(ev),
+                ring.current_id,
+                &prev_tag,
+            );
+            let tag = crate::event_hmac::sign_event(key, &canonical);
+            tx.execute(
                 "INSERT INTO state_events \
-                 (conversation_id, seq, kind, payload, committed_at, actor, tag, key_id) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 (conversation_id, seq, kind, payload, committed_at, actor, tag, key_id, \
+                  integrity_version, prev_tag) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9)",
                 params![
                     ev.conversation_id.as_str(),
                     ev.seq.0,
@@ -650,10 +1113,19 @@ impl<'db> EventLog<'db> {
                     ev.payload,
                     ev.committed_at,
                     ev.actor,
-                    tag,
-                    key_id,
+                    tag.to_vec(),
+                    ring.current_id,
+                    prev_tag.to_vec(),
                 ],
             )?;
+            head = self.advance_integrity_head(
+                &ev.conversation_id,
+                head.chain_start_seq,
+                head.genesis_key_id,
+                ev.seq.0,
+                tag,
+            )?;
+            Self::write_integrity_head(tx, &ev.conversation_id, &head)?;
             Ok(())
         })
     }
@@ -666,45 +1138,18 @@ impl<'db> EventLog<'db> {
         conversation_id: &ConversationId,
         after_seq: EventSeq,
     ) -> Result<Vec<EventRecord>, DbError> {
-        let rows: Vec<(EventRecord, Option<Vec<u8>>, i64)> = self.db.with_conn(|c| {
-            let mut stmt = c.prepare_cached(
-                "SELECT seq, kind, payload, committed_at, actor, tag, key_id \
-                 FROM state_events \
-                 WHERE conversation_id = ?1 AND seq > ?2 \
-                 ORDER BY seq ASC",
-            )?;
-            let rows = stmt
-                .query_map(params![conversation_id.as_str(), after_seq.0], |row| {
-                    let seq: i64 = row.get(0)?;
-                    let kind: String = row.get(1)?;
-                    let payload: Vec<u8> = row.get(2)?;
-                    let committed_at: i64 = row.get(3)?;
-                    let actor: Option<String> = row.get(4)?;
-                    let tag: Option<Vec<u8>> = row.get(5)?;
-                    let key_id: i64 = row.get(6)?;
-                    Ok((
-                        EventRecord {
-                            conversation_id: conversation_id.clone(),
-                            seq: EventSeq(seq),
-                            kind: EventKind::parse(&kind),
-                            payload,
-                            committed_at,
-                            actor,
-                        },
-                        tag,
-                        key_id,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(rows)
+        let (rows, head) = self.db.with_conn(|conn| {
+            Ok((
+                Self::load_integrity_rows(conn, conversation_id)?,
+                Self::load_integrity_head(conn, conversation_id)?,
+            ))
         })?;
-
-        let mut out = Vec::with_capacity(rows.len());
-        for (ev, tag, key_id) in rows {
-            self.verify(&ev, tag, key_id)?;
-            out.push(ev);
-        }
-        Ok(out)
+        self.verify_integrity(conversation_id, &rows, head.as_ref())?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| row.event.seq.0 > after_seq.0)
+            .map(|row| row.event)
+            .collect())
     }
 
     /// Current last_seq for a conversation (0 if none yet).
@@ -750,30 +1195,66 @@ impl<'db> EventLog<'db> {
         // second commit picks up the first's writes here, shifts its
         // seqs, re-signs, and lands cleanly.
         self.db.transaction(|tx| {
-            let actual_max: i64 = tx
-                .query_row(
-                    "SELECT COALESCE(MAX(seq), 0) FROM state_events WHERE conversation_id = ?1",
-                    params![conversation_id.as_str()],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
+            let existing_rows = Self::load_integrity_rows(tx, conversation_id)?;
+            let actual_max = existing_rows.last().map(|row| row.event.seq.0).unwrap_or(0);
             let delta = actual_max - base_seq.0;
             if delta > 0 {
                 for ev in materialized.iter_mut() {
                     ev.seq = EventSeq(ev.seq.0 + delta);
                 }
             }
-            // Sign INSIDE the transaction — the canonical bytes
-            // include `seq`, so a delta-shift requires re-signing.
+
+            if self.key_ring.is_none() {
+                for ev in materialized.iter() {
+                    tx.execute(
+                        "INSERT INTO state_events \
+                         (conversation_id, seq, kind, payload, committed_at, actor, tag, key_id) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 0)",
+                        params![
+                            ev.conversation_id.as_str(),
+                            ev.seq.0,
+                            ev.kind.as_str(),
+                            ev.payload,
+                            ev.committed_at,
+                            ev.actor,
+                        ],
+                    )?;
+                }
+                return Ok(());
+            }
+
+            let mut head = match Self::load_integrity_head(tx, conversation_id)? {
+                Some(head) => {
+                    self.verify_integrity(conversation_id, &existing_rows, Some(&head))?;
+                    head
+                }
+                None => self.initial_integrity_head(conversation_id, &existing_rows)?,
+            };
+            let ring = self.key_ring.as_ref().expect("checked above");
+            let key = ring.current_key().ok_or_else(|| {
+                DbError::Config("KeyRing has no key registered for current_id".into())
+            })?;
             for ev in materialized.iter() {
-                let (tag, key_id) = match self.sign(ev) {
-                    Some((t, id)) => (Some(t.to_vec()), id),
-                    None => (None, 0),
-                };
+                if ev.seq.0 != head.head_seq + 1 {
+                    return Err(DbError::Invariant(format!(
+                        "v2 commit for {} expected seq {}, got {}",
+                        conversation_id.as_str(),
+                        head.head_seq + 1,
+                        ev.seq.0
+                    )));
+                }
+                let prev_tag = Self::fixed_tag(&head.head_tag, "integrity head")?;
+                let canonical = crate::event_hmac::canonical_chain_event(
+                    &Self::v1_canonical(ev),
+                    ring.current_id,
+                    &prev_tag,
+                );
+                let tag = crate::event_hmac::sign_event(key, &canonical);
                 tx.execute(
                     "INSERT INTO state_events \
-                     (conversation_id, seq, kind, payload, committed_at, actor, tag, key_id) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                     (conversation_id, seq, kind, payload, committed_at, actor, tag, key_id, \
+                      integrity_version, prev_tag) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 2, ?9)",
                     params![
                         ev.conversation_id.as_str(),
                         ev.seq.0,
@@ -781,11 +1262,20 @@ impl<'db> EventLog<'db> {
                         ev.payload,
                         ev.committed_at,
                         ev.actor,
-                        tag,
-                        key_id,
+                        tag.to_vec(),
+                        ring.current_id,
+                        prev_tag.to_vec(),
                     ],
                 )?;
+                head = self.advance_integrity_head(
+                    conversation_id,
+                    head.chain_start_seq,
+                    head.genesis_key_id,
+                    ev.seq.0,
+                    tag,
+                )?;
             }
+            Self::write_integrity_head(tx, conversation_id, &head)?;
             Ok(())
         })?;
 
@@ -836,47 +1326,11 @@ impl<'db> EventLog<'db> {
         conversation_id: &ConversationId,
         up_to_seq: EventSeq,
     ) -> Result<Snapshot, DbError> {
-        // Pull rows + tags, then verify via the shared helper before
-        // materializing the snapshot. A snapshot built from tampered
-        // rows would propagate the tamper into every future hydrate.
-        let raw: Vec<(EventRecord, Option<Vec<u8>>, i64)> = self.db.with_conn(|c| {
-            let mut stmt = c.prepare_cached(
-                "SELECT seq, kind, payload, committed_at, actor, tag, key_id \
-                 FROM state_events \
-                 WHERE conversation_id = ?1 AND seq <= ?2 \
-                 ORDER BY seq ASC",
-            )?;
-            let rows = stmt
-                .query_map(params![conversation_id.as_str(), up_to_seq.0], |row| {
-                    let seq: i64 = row.get(0)?;
-                    let kind: String = row.get(1)?;
-                    let payload: Vec<u8> = row.get(2)?;
-                    let committed_at: i64 = row.get(3)?;
-                    let actor: Option<String> = row.get(4)?;
-                    let tag: Option<Vec<u8>> = row.get(5)?;
-                    let key_id: i64 = row.get(6)?;
-                    Ok((
-                        EventRecord {
-                            conversation_id: conversation_id.clone(),
-                            seq: EventSeq(seq),
-                            kind: EventKind::parse(&kind),
-                            payload,
-                            committed_at,
-                            actor,
-                        },
-                        tag,
-                        key_id,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok::<_, DbError>(rows)
-        })?;
-
-        let mut events = Vec::with_capacity(raw.len());
-        for (ev, tag, key_id) in raw {
-            self.verify(&ev, tag, key_id)?;
-            events.push(ev);
-        }
+        let events = self
+            .replay_since(conversation_id, EventSeq(0))?
+            .into_iter()
+            .filter(|event| event.seq.0 <= up_to_seq.0)
+            .collect();
 
         Ok(Snapshot {
             conversation_id: conversation_id.clone(),
@@ -910,6 +1364,9 @@ impl<'db> EventLog<'db> {
         snapshot_blob: Option<&[u8]>,
         snapshot_seq: Option<EventSeq>,
     ) -> Result<Vec<EventRecord>, DbError> {
+        if self.key_ring.is_some() {
+            return self.replay_since(conversation_id, EventSeq(0));
+        }
         let (mut events, after) = match (snapshot_blob, snapshot_seq) {
             (Some(blob), Some(seq)) => match Snapshot::decode(blob) {
                 Ok(snap) if snap.conversation_id == *conversation_id && snap.up_to_seq == seq => {
@@ -1556,6 +2013,45 @@ mod tests {
         assert_eq!(got[1].seq, EventSeq(2));
     }
 
+    #[test]
+    fn key_rotation_after_legacy_checkpoint_keeps_genesis_verifiable() {
+        let db = fresh_db();
+        let cid = ConversationId::from("conv-rotate-after-checkpoint");
+        EventLog::new(&db)
+            .append(
+                &EventRecord::new(
+                    cid.clone(),
+                    EventSeq(1),
+                    EventKind::UserMsg,
+                    &serde_json::json!({"legacy": true}),
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let mut ring = KeyRing::single(1, b"key-one".to_vec());
+        EventLog::new(&db)
+            .with_key_ring(ring.clone())
+            .establish_v2_checkpoint(&cid)
+            .unwrap();
+        ring.rotate(2, b"key-two".to_vec());
+        let log = EventLog::new(&db).with_key_ring(ring);
+        log.append(
+            &EventRecord::new(
+                cid.clone(),
+                EventSeq(2),
+                EventKind::ModelTurn,
+                &serde_json::json!({"v2": true}),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        assert_eq!(log.replay_since(&cid, EventSeq(0)).unwrap().len(), 2);
+    }
+
     /// Adversarial: a row whose stored key_id isn't registered in the
     /// ring fails verification with TamperDetected — operators
     /// cannot "lose" a key and silently accept rows that would have
@@ -1584,7 +2080,7 @@ mod tests {
         ring = KeyRing::single(99, b"different-32-bytes-long!!!!!!!!!".to_vec());
         let log = EventLog::new(&db).with_key_ring(ring);
         let err = log.replay_since(&cid, EventSeq(0)).unwrap_err();
-        assert!(matches!(err, DbError::TamperDetected(msg) if msg.contains("isn't in the ring")),);
+        assert!(matches!(err, DbError::TamperDetected(msg) if msg.contains("unknown key_id")),);
     }
 
     /// set_current() refuses an id that hasn't been registered first —
@@ -1747,9 +2243,9 @@ mod tests {
         let db = fresh_db();
         let cid = ConversationId::from("conv-bf-skip");
         let ring = KeyRing::single(1, b"k1-32-bytes-long!!!!!!!!!!!!!!!!".to_vec());
-        // Sign one row immediately.
+        // Backfill one legacy row first so it is signed without creating a v2
+        // checkpoint, then append another unsigned legacy row.
         EventLog::new(&db)
-            .with_key_ring(ring.clone())
             .append(
                 &EventRecord::new(
                     cid.clone(),
@@ -1761,7 +2257,10 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
-        // Append another one keyless (NULL tag).
+        EventLog::new(&db)
+            .with_key_ring(ring.clone())
+            .backfill_null_tags()
+            .unwrap();
         EventLog::new(&db)
             .append(
                 &EventRecord::new(
@@ -1781,6 +2280,299 @@ mod tests {
         assert_eq!(report.signed, 1);
         assert_eq!(report.skipped, 1);
         assert_eq!(report.null_remaining, 0);
+    }
+
+    fn append_three_v2(db: &Database, cid: &ConversationId, key: &[u8]) {
+        let log = EventLog::new(db).with_hmac_key(key.to_vec());
+        for seq in 1..=3 {
+            log.append(
+                &EventRecord::new(
+                    cid.clone(),
+                    EventSeq(seq),
+                    EventKind::UserMsg,
+                    &serde_json::json!({"seq": seq}),
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn v2_detects_middle_deletion() {
+        let db = fresh_db();
+        let cid = ConversationId::from("conv-delete");
+        append_three_v2(&db, &cid, b"chain-key");
+        db.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM state_events WHERE conversation_id = ?1 AND seq = 2",
+                params![cid.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(matches!(
+            EventLog::new(&db)
+                .with_hmac_key(b"chain-key".to_vec())
+                .replay_since(&cid, EventSeq(0)),
+            Err(DbError::TamperDetected(_))
+        ));
+    }
+
+    #[test]
+    fn v2_detects_tail_truncation_against_checkpoint() {
+        let db = fresh_db();
+        let cid = ConversationId::from("conv-truncate");
+        append_three_v2(&db, &cid, b"chain-key");
+        db.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM state_events WHERE conversation_id = ?1 AND seq = 3",
+                params![cid.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let error = EventLog::new(&db)
+            .with_hmac_key(b"chain-key".to_vec())
+            .replay_since(&cid, EventSeq(0))
+            .unwrap_err();
+        assert!(
+            matches!(error, DbError::TamperDetected(message) if message.contains("terminal checkpoint"))
+        );
+    }
+
+    #[test]
+    fn v2_detects_forged_insertion_without_checkpoint_update() {
+        let db = fresh_db();
+        let cid = ConversationId::from("conv-insert");
+        append_three_v2(&db, &cid, b"chain-key");
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO state_events \
+                 (conversation_id, seq, kind, payload, committed_at, actor, tag, key_id, \
+                  integrity_version, prev_tag) \
+                 SELECT conversation_id, 4, kind, payload, committed_at, actor, tag, key_id, \
+                        integrity_version, prev_tag \
+                 FROM state_events WHERE conversation_id = ?1 AND seq = 3",
+                params![cid.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(matches!(
+            EventLog::new(&db)
+                .with_hmac_key(b"chain-key".to_vec())
+                .replay_since(&cid, EventSeq(0)),
+            Err(DbError::TamperDetected(_))
+        ));
+    }
+
+    #[test]
+    fn v2_detects_reordering() {
+        let db = fresh_db();
+        let cid = ConversationId::from("conv-reorder");
+        append_three_v2(&db, &cid, b"chain-key");
+        db.with_conn(|conn| {
+            conn.execute_batch(&format!(
+                "UPDATE state_events SET seq = 99 WHERE conversation_id = '{}' AND seq = 1; \
+                 UPDATE state_events SET seq = 1 WHERE conversation_id = '{}' AND seq = 2; \
+                 UPDATE state_events SET seq = 2 WHERE conversation_id = '{}' AND seq = 99;",
+                cid.as_str(),
+                cid.as_str(),
+                cid.as_str()
+            ))?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(matches!(
+            EventLog::new(&db)
+                .with_hmac_key(b"chain-key".to_vec())
+                .replay_since(&cid, EventSeq(0)),
+            Err(DbError::TamperDetected(_))
+        ));
+    }
+
+    #[test]
+    fn v2_genesis_checkpoints_legacy_rows_without_resigning() {
+        let db = fresh_db();
+        let cid = ConversationId::from("conv-genesis");
+        for seq in 1..=2 {
+            EventLog::new(&db)
+                .append(
+                    &EventRecord::new(
+                        cid.clone(),
+                        EventSeq(seq),
+                        EventKind::UserMsg,
+                        &serde_json::json!({"legacy": seq}),
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let log = EventLog::new(&db).with_hmac_key(b"chain-key".to_vec());
+        assert!(log.establish_v2_checkpoint(&cid).unwrap());
+        assert!(!log.establish_v2_checkpoint(&cid).unwrap());
+        log.append(
+            &EventRecord::new(
+                cid.clone(),
+                EventSeq(3),
+                EventKind::ModelTurn,
+                &serde_json::json!({"v2": true}),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let versions: Vec<(i64, Option<Vec<u8>>)> = db
+            .with_conn(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT integrity_version, tag FROM state_events \
+                     WHERE conversation_id = ?1 ORDER BY seq",
+                )?;
+                Ok(stmt
+                    .query_map(params![cid.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(versions[0], (1, None));
+        assert_eq!(versions[1], (1, None));
+        assert_eq!(versions[2].0, 2);
+        assert!(versions[2].1.is_some());
+
+        db.with_conn(|conn| {
+            conn.execute(
+                "UPDATE state_events SET payload = X'00' \
+                 WHERE conversation_id = ?1 AND seq = 1",
+                params![cid.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(matches!(
+            log.replay_since(&cid, EventSeq(0)),
+            Err(DbError::TamperDetected(_))
+        ));
+    }
+
+    #[test]
+    fn v2_tamper_is_isolated_to_its_conversation() {
+        let db = fresh_db();
+        let first = ConversationId::from("conv-isolated-a");
+        let second = ConversationId::from("conv-isolated-b");
+        append_three_v2(&db, &first, b"chain-key");
+        append_three_v2(&db, &second, b"chain-key");
+        db.with_conn(|conn| {
+            conn.execute(
+                "DELETE FROM state_events WHERE conversation_id = ?1 AND seq = 3",
+                params![first.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let log = EventLog::new(&db).with_hmac_key(b"chain-key".to_vec());
+        assert!(matches!(
+            log.replay_since(&first, EventSeq(0)),
+            Err(DbError::TamperDetected(_))
+        ));
+        assert_eq!(log.replay_since(&second, EventSeq(0)).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn v2_commit_and_checkpoint_update_roll_back_together() {
+        let db = fresh_db();
+        let cid = ConversationId::from("conv-atomic");
+        let log = EventLog::new(&db).with_hmac_key(b"chain-key".to_vec());
+        log.append(
+            &EventRecord::new(
+                cid.clone(),
+                EventSeq(1),
+                EventKind::UserMsg,
+                &serde_json::json!({"first": true}),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TRIGGER fail_integrity_head_update \
+                 BEFORE UPDATE ON state_event_integrity_heads \
+                 BEGIN SELECT RAISE(ABORT, 'simulated checkpoint write failure'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let result = log.commit_turn(
+            &cid,
+            EventSeq(1),
+            vec![
+                PendingEvent::encode(
+                    EventKind::ModelTurn,
+                    &serde_json::json!({"second": true}),
+                    None,
+                )
+                .unwrap(),
+            ],
+        );
+        assert!(result.is_err());
+        assert_eq!(log.replay_since(&cid, EventSeq(0)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn v2_backfill_establishes_each_legacy_conversation_once() {
+        let db = fresh_db();
+        for id in ["conv-backfill-a", "conv-backfill-b"] {
+            EventLog::new(&db)
+                .append(
+                    &EventRecord::new(
+                        ConversationId::from(id),
+                        EventSeq(1),
+                        EventKind::UserMsg,
+                        &serde_json::json!({"legacy": true}),
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        let log = EventLog::new(&db).with_hmac_key(b"chain-key".to_vec());
+        assert_eq!(log.backfill_v2_checkpoints().unwrap(), 2);
+        assert_eq!(log.backfill_v2_checkpoints().unwrap(), 0);
+        assert_eq!(
+            log.replay_since(&ConversationId::from("conv-backfill-a"), EventSeq(0))
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn v2_checkpoint_disables_destructive_resigning() {
+        let db = fresh_db();
+        let cid = ConversationId::from("conv-no-resign");
+        let log = EventLog::new(&db).with_hmac_key(b"chain-key".to_vec());
+        log.append(
+            &EventRecord::new(
+                cid,
+                EventSeq(1),
+                EventKind::UserMsg,
+                &serde_json::json!({}),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            log.resign_all_with_current_key(),
+            Err(DbError::Invariant(message)) if message.contains("disabled")
+        ));
+        assert!(matches!(
+            log.backfill_null_tags(),
+            Err(DbError::Invariant(message)) if message.contains("v2 checkpoints")
+        ));
     }
 
     // ---- end Phase 7 -----------------------------------------------

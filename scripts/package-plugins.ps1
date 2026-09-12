@@ -21,7 +21,7 @@
          excluding dev noise (.git, node_modules, __pycache__, *.pyc,
          .DS_Store, target/, dist/, *.log, the source ui\panel.tsx
          itself once we have ui\panel.js).
-      4. Emits a SHA-256 sidecar.
+    4. Emits SHA-256 and SPDX 2.3 JSON SBOM sidecars.
 
     Skips:
       * plugins\_shared\        — shared library, not a plugin
@@ -222,6 +222,38 @@ foreach ($dir in $pluginDirs) {
     # macOS is lowercase, so normalise to match.
     $hash = (Get-FileHash -LiteralPath $outPath -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath "$outPath.sha256" -Value "$hash  $zipName" -Encoding ascii -NoNewline
+
+    $sourceCommit = (& git rev-parse HEAD 2>$null)
+    if ([string]::IsNullOrWhiteSpace($sourceCommit)) { $sourceCommit = 'unknown' }
+    $sourceRepo = (& git config --get remote.origin.url 2>$null)
+    if ([string]::IsNullOrWhiteSpace($sourceRepo)) { $sourceRepo = 'local' }
+    $created = [DateTime]::UtcNow.ToString('yyyy-MM-ddTHH:mm:ssZ')
+    $sbom = [ordered]@{
+        spdxVersion = 'SPDX-2.3'
+        dataLicense = 'CC0-1.0'
+        SPDXID = 'SPDXRef-DOCUMENT'
+        name = "$id-$version"
+        documentNamespace = "https://execlaw.local/sbom/$id/$version/$hash"
+        creationInfo = [ordered]@{
+            created = $created
+            creators = @('Tool: execlaw-package-plugins', 'Organization: execlaw')
+        }
+        documentDescribes = @("SPDXRef-Package-$id")
+        packages = @([ordered]@{
+            name = $id
+            SPDXID = "SPDXRef-Package-$id"
+            versionInfo = $version
+            downloadLocation = 'NOASSERTION'
+            filesAnalyzed = $false
+            checksums = @([ordered]@{ algorithm = 'SHA256'; checksumValue = $hash })
+            externalRefs = @([ordered]@{
+                referenceCategory = 'OTHER'
+                referenceType = 'execlaw-source'
+                referenceLocator = "$sourceRepo@$sourceCommit"
+            })
+        })
+    }
+    $sbom | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$outPath.spdx.json" -Encoding utf8
 
     $size = (Get-Item -LiteralPath $outPath).Length
     $sizeKb = [int]($size / 1024)

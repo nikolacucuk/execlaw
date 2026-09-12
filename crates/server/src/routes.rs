@@ -1084,6 +1084,7 @@ pub fn test_app_state() -> AppState {
         // tests that exercise the cancel-token registry construct
         // a mock supervisor and inject it manually.
         research_supervisor: None,
+        memory_extract: crate::memory_extract_runtime::MemoryExtractionSink::noop(),
         // Phase C — tests use a no-op sink so chat-handler hooks are
         // safe to call but no auto-capture pipeline runs. Tests that
         // exercise capture construct an AutoCaptureWorker manually

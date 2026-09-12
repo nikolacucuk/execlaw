@@ -21,7 +21,7 @@ hardware.
 | [`docs/agent-model.md`](docs/agent-model.md) | TurnExecutor, memory layers, reflection loop, planner/executor split — the **how** of one turn. |
 | [`docs/plugins.md`](docs/plugins.md) | Plugin manifest schema, runtime tiers, sidecar model, Rhai primitives, and a step-by-step guide for writing a custom plugin. |
 | [`docs/operator-decision-rubric.md`](docs/operator-decision-rubric.md) | Structured rubric for placing features in plugins vs MCP vs host core, plus tool-chaining and learning-loop guidance. |
-| [`docs/hermes-porting-todo.md`](docs/hermes-porting-todo.md) | Implementation checklist for Hermes-originated capabilities ported into execlaw. |
+| [`docs/hermes-porting-todo.md`](docs/hermes-porting-todo.md) | Historical completion checklist for Hermes-originated capabilities ported into execlaw. |
 | [`docs/setup-walkthroughs.md`](docs/setup-walkthroughs.md) | Operator-facing pairing flows for Signal QR, WhatsApp wuzapi, Slack OAuth, Google OAuth + API-key. |
 | [`docs/desktop-installations.md`](docs/desktop-installations.md) | Cross-OS reference for the three desktop bundles — `.app`/`.dmg`, NSIS `.exe`, `.deb`. Tray architecture, service-manager mapping, install + uninstall flows, build scripts. |
 | [`docs/ollama.md`](docs/ollama.md) | Pre-installed Ollama support across macOS / Linux / Windows. How discovery works, when to pick Ollama over Docker, the wizard's serving dropdown. |
@@ -587,10 +587,10 @@ warm dev box). If `cargo-watch` rebuilds start failing with
 
 ## Graphify integration
 
-execlaw now supports a local Graphify knowledge-graph preview in the
-chat welcome screen (above the mascot / New chat animation). The preview
-is interactive (mouse-reactive, moving nodes) and is derived from
-`graphify-out/graph.json`.
+execlaw includes a local Graphify knowledge-graph pipeline. The sync script
+derives `web/src/generated/graphifyPreview.json` from
+`graphify-out/graph.json`, but the current SPA does not import or render that
+preview artifact.
 
 For Docker/TrueNAS installation, including Python/Graphify image setup,
 bind-mount permissions, Ollama connectivity, and the optional SPA preview
@@ -677,16 +677,19 @@ Optional override for executable location:
 ### Built-in Graphiti tool + admin API
 
 execlaw now exposes a built-in model tool named `graphiti` for temporal-memory
-query/ingest via a Graphiti-compatible HTTP service.
+search and durable ingestion via a Graphiti-compatible HTTP service.
 
 - Visible at `Settings -> Tools` as `graphiti`
 - Registered at server boot and synced into tool-access policy
-- Default allowed trust classes: Controller, Delegated, KnownTrusted, KnownLimited
+- Default allowed trust class: Controller
 
-Config env vars:
+Configuration is stored in SQLite and the credential value is stored in the
+core vault. There is no production environment-variable fallback.
 
-- `EXECLAW_GRAPHITI_BASE_URL` (default `http://127.0.0.1:8000`)
-- `EXECLAW_GRAPHITI_API_KEY` (optional bearer token)
+- `PUT /api/admin/graphiti/config` accepts `base_url`, optional
+   `api_key_vault_ref`, and a write-only optional `api_key`
+- `GET /api/admin/graphiti/config` returns the endpoint, credential reference,
+   and whether the referenced secret exists; it never returns the secret value
 
 Admin validation endpoints (auth required):
 
@@ -699,7 +702,6 @@ Example test-call body:
 {
    "args": {
       "action": "search",
-      "group_id": "demo",
       "query": "find policy",
       "top_k": 5
    }

@@ -7,7 +7,7 @@ Relationship to other docs:
 - [`architecture.md`](architecture.md) — full system topology + the design principles (esp. #6 _"Plugins, not hardcoded built-ins"_) that this doc operationalises.
 - [`sidecar-supervisor-design.md`](sidecar-supervisor-design.md) — deep dive on the supervised-container layer plugins compose against via `[[services]]`.
 - [`operator-decision-rubric.md`](operator-decision-rubric.md) — structured scorecard for deciding plugin vs MCP vs host-core placement.
-- [`MIGRATION_PLAN.md`](../MIGRATION_PLAN.md) — design rationale and trade-off discussion.
+- [`architecture.md`](architecture.md) — system design principles, topology, and trade-offs.
 
 ---
 
@@ -109,6 +109,7 @@ Subprocess tier resolves `secret://name` env values from the per-plugin vault at
 name        = "myplugin.do_thing"
 description = "..."
 schema      = "schemas/myplugin.do_thing.json"   # optional but strongly encouraged
+result_schema = "schemas/myplugin.do_thing.result.json" # optional success-result contract
 latency     = "low"                               # "low" | "medium" | "high"
 trust_floor = "Controller"                        # see §6
 required_capabilities = ["tools.safe"]            # capability gate
@@ -118,7 +119,15 @@ host_internal = false                             # if true, registered but hidd
 - `latency = "low"` is the only tier the **voice runner** exposes (sub-second-budget turns). `medium`/`high` are still callable from the chat runner.
 - `trust_floor` rejects the call before dispatch when the principal's trust class ranks below the floor.
 - `host_internal = true` registers the tool for host-side dispatch (e.g. the auto-bridge calling `whatsapp.send_message`, or `signal.set_typing` driven by the typing-indicator guard) without offering it to the model.
-- `schema` is a path to a JSON Schema file inside the bundle. The host validates `args` against it _before_ invoking the plugin. Highly recommended — it doubles as model-facing documentation.
+- `schema` and `result_schema` are paths to JSON Schema files inside the bundle.
+  At install or enable time the host path-checks and compiles the root plus
+  path-safe local `$ref` documents as Draft 2020-12; network references,
+  traversal, malformed documents, and bundles over the document/size limits
+  reject registration atomically. The host hashes the complete local schema
+  bundle canonically, validates `args` before OAuth lookup/dispatch, and
+  validates successful results before exposing them to the model. An in-place
+  upgrade must retain the prior input and result hashes; publish a new tool name
+  for an incompatible contract. Schemas remain optional for compatibility.
 
 ### `[transport]` (at most one — declares this plugin as a transport)
 
@@ -159,9 +168,9 @@ description = "Pairing + sidecar status."
 
 Handler signature: `fn admin_status(args)` where `args = #{ method, path, query, body, headers }`. Return value is JSON-encoded to the client.
 
-### `[[webhook_routes]]` (UNAUTHENTICATED, mounted at `/api/webhooks/{plugin_id}{path}`)
+### `[[webhook_routes]]` (public route, mounted at `/api/webhooks/{plugin_id}{path}`)
 
-Same shape as admin routes. The HTTP layer skips auth — the handler **must** verify the caller, typically by matching a `?token=` query param against a vault-stored shared secret with constant-time comparison. See `crates/server/src/plugin_webhook_routes.rs` and the WhatsApp plugin for the pattern.
+Webhook routes do not use execlaw session JWTs. Declare the route's `auth` mode so the host verifies a query token or HMAC-SHA256 header before publishing or dispatching the request. Routes that omit `auth` retain the legacy handler-validation fallback and must verify the caller themselves. See `crates/server/src/plugin_webhook_routes.rs` and the WhatsApp manifest for the supported pattern.
 
 ### `[[oauth_accounts]]`, `[[ui_panels]]`, `[[event_subscriptions]]`, `[[alert_sources]]`, `[[health_checks]]`, `[[skills]]`, `[[chat_components]]`
 
@@ -201,7 +210,7 @@ Plugins that need a long-running helper (a Go HTTP wrapper, a Java daemon, a dat
 ```toml
 [[services]]
 name  = "wuzapi"
-image = "asternic/wuzapi:latest"
+image = "asternic/wuzapi@sha256:<64-hex-digest>"
 
 [services.env]
 WUZAPI_ADMIN_TOKEN = "execlaw-wuzapi-admin"
@@ -224,6 +233,10 @@ rpc_health_path = "/"
 
 **Supervisor lifecycle:**
 
+- Production sidecar launch requires a digest-pinned OCI reference with a
+  matching verified provenance row. Floating tags fail closed. An unsigned
+  local image is accepted only when the Controller has enabled the persisted
+  development override; each use appends an audit event.
 - 5 s reconcile tick: compares desired state (registry's `all_sidecars()`) to running containers via `bollard` (Docker socket).
 - Health probe: `GET http://127.0.0.1:<host_port><rpc_health_path>` every 5 s. Default `/healthz`.
 - Crash-loop guard: 5 consecutive restart-without-Healthy events parks the sidecar in `CrashLooping`. An alert fires; operator must `kick` it via the SPA. Counter resets on a successful `Healthy` transition.
@@ -341,7 +354,9 @@ Flow inside `PluginHost::call_tool` (`crates/plugin-host/src/host.rs`):
 3. **Trust-floor gate** — caller's `trust_level.class_tag()` ranked against `trust_floor`. Ranks (`crates/core/src/principal.rs`):
    - `Controller = 5`, `Delegated = 4`, `KnownTrusted = 3`, `KnownLimited = 2`, `UnknownPending = 1`, `Blocked = 0`.
    - Reject when caller_rank < floor_rank.
-4. **JSON-Schema validation** — args validated against the tool's `schema` file (if declared) before dispatch.
+4. **JSON-Schema validation** — args are validated against `schema` before
+  dispatch; successful values are validated against `result_schema` when
+  declared. The registry retains canonical input/result hashes.
 5. **OAuth injection** — for each `[[oauth_accounts]]` declared by the owning plugin, lookup token in `state_oauth_tokens` and merge into `args._oauth.<account_name>`.
 6. **Dispatch** — script tier calls the plugin's `tool_call(name, args, oauth)`; subprocess tier sends a JSON-RPC `tool_call` request over stdio.
 
@@ -359,6 +374,10 @@ ZIP upload                           if_existing=reject  → 409 already_install
   ▼
 stage_zip()  →  <stage_root>/<plugin_id>-<version>/      manifest + source files
   │
+  ├─ bundled: verify ZIP digest + detached SPDX/CycloneDX digest
+  │           + offline cosign SLSA attestation against SQLite allowlists
+  ├─ local: require persisted Controller development override + audit event
+  │
   ▼
 PluginHost::install / upgrade
   │
@@ -371,6 +390,19 @@ PluginHost::install / upgrade
   ├─ register skills with SkillStore
   └─ fire on_enable() (script tier)
 ```
+
+Bundled installation is fail-closed: the mirrored ZIP must have a detached
+provenance statement, offline sigstore bundle, and matching SBOM sidecar before
+`authorize_verified_plugin_archive` permits installation. The verified ZIP
+also anchors the staged subprocess executable's digest; every subprocess spawn
+rechecks the bytes. The ordinary upload endpoint is the explicit local
+development path and calls `authorize_local_plugin_archive`, which is disabled
+by default and records each Controller-approved override.
+
+Packaging scripts emit `.zip.sha256` and SPDX 2.3 `.zip.spdx.json` sidecars,
+and platform release workflows create GitHub SLSA build attestations. The
+remaining release gap is exporting the detached `.provenance.json` and
+`.sigstore.json` files in the exact offline format consumed by bundled install.
 
 `state_plugins` row layout:
 
@@ -868,7 +900,7 @@ ship tests inside your plugin ZIP.
 
 ---
 
-## 12. Reference plugins in tree
+## 12. Selected reference plugins in tree
 
 Browse these for working examples. Each lives under `plugins/<id>/`.
 
@@ -883,7 +915,7 @@ Browse these for working examples. Each lives under `plugins/<id>/`.
 | `open-meteo`                   | script     | —             | —            | —       | —                 | Free, key-less weather/marine/air-quality/seasonal/ensemble/flood/climate/geocoding/elevation tools + chart renderer. |
 | `pushover`                     | script     | —             | —            | —       | —                 | One-way outbound notification.                                                              |
 | `identity-local-address-book` | subprocess | —             | —            | —       | yes               | Resolves identifiers from an operator-curated address book.                                 |
-| `hello`                        | subprocess | —             | —            | —       | —                 | Reference subprocess plugin. Used by integration tests.                                     |
+| `plugin-hello`                 | subprocess | —             | —            | —       | —                 | Reference subprocess plugin in `plugins/hello/`. Used by integration tests.                 |
 
 When you start a new plugin, the closest cognate is your fastest path to a working bundle:
 
@@ -898,7 +930,7 @@ When you start a new plugin, the closest cognate is your fastest path to a worki
 ## 13. Common pitfalls
 
 - **Module-level `const` is invisible inside `fn` bodies.** Rhai scopes constants to the file's top-level evaluation, not into function scopes. Inline literals at the call site or pass through args.
-- **Webhook handlers must validate caller identity.** `[[webhook_routes]]` are unauthenticated. Always compare a `?token=…` URL param against a vault-stored secret with constant-time comparison. See WhatsApp's `on_webhook_event` for the canonical pattern.
+- **Webhook routes must declare or implement caller authentication.** Prefer a manifest `auth` mode so the host verifies a query token or HMAC-SHA256 header before dispatch. A legacy route without `auth` must validate the caller in its handler.
 - **Webhook handlers must return fast.** Third-party services (wuzapi @ 30 s, Slack Events @ 3 s) treat slow acks as failures and retry. If your handler routes to the agent, use `host_route_inbound_spawn` not `host_route_inbound`. Add idempotency on the upstream message ID — even one retry causes user-visible duplicates.
 - **`sidecar_url(name)` returns `()` until the sidecar is `Healthy`.** Always handle Unit. In `on_enable`, prefer `sidecar_url_blocking(name, 60000)` so the plugin waits for first spawn.
 - **OAuth refresh tokens are never visible to plugin code.** You get the access token in `args._oauth.<account_name>`. The host owns refresh.

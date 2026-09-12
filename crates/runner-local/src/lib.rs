@@ -19,6 +19,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod durable;
 pub mod history_summarizer;
 pub mod turn;
 

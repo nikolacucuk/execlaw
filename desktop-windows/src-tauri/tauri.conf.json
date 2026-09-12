@@ -26,7 +26,7 @@
     "longDescription": "execlaw is a self-hosted agent platform with persistent memory, hook-based plugins, and per-conversation runner containers. The Windows tray app supervises the local control plane (registered as a Windows service) and opens the chat UI.",
     "icon": ["icons/icon.ico"],
     "externalBin": ["bin/execlaw"],
-    "resources": ["resources/plugins/*.zip"],
+    "resources": ["resources/plugins/*"],
     "windows": {
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

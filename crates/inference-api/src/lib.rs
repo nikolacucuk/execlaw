@@ -14,6 +14,7 @@
 
 mod ollama;
 
+use execlaw_local_endpoint_policy::{EndpointResolution, LocalEndpointPolicy, PolicyError};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -26,21 +27,16 @@ use thiserror::Error;
 /// `content` text like `(web_search "…")` instead of a structured
 /// call. See `crates/inference-api/src/ollama.rs` for the
 /// translation layer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum InferenceEngine {
     /// vLLM, llama-server, OpenArc, or anything else that speaks
     /// OpenAI's `/v1/chat/completions`. Default.
+    #[default]
     OpenAICompat,
     /// Native Ollama daemon. Same URL, different path
     /// (`/api/chat` instead of `/v1/chat/completions`); the
     /// translation happens inside the client.
     Ollama,
-}
-
-impl Default for InferenceEngine {
-    fn default() -> Self {
-        Self::OpenAICompat
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -433,13 +429,15 @@ pub enum InferenceError {
     BadStatus { status: u16, body: String },
     #[error("request timed out")]
     Timeout,
+    #[error("local endpoint policy rejected the inference endpoint: {0}")]
+    EndpointPolicy(String),
 }
 
 /// Construct the reqwest client every `InferenceClient::new` uses.
 /// Centralised so the timeout / pool / keepalive knobs that bit
 /// operators in production stay in one obvious place.
-fn base_inference_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
+fn configure_inference_http_client(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    builder
         .connect_timeout(std::time::Duration::from_secs(10))
         .pool_idle_timeout(std::time::Duration::from_secs(15))
         .read_timeout(std::time::Duration::from_secs(120))
@@ -461,8 +459,6 @@ fn base_inference_http_client() -> reqwest::Client {
         // a different port), that backend should construct its
         // own client; the LLM streaming path stays on 1.1.
         .http1_only()
-        .build()
-        .expect("reqwest client build")
 }
 
 // ---------------------------------------------------------------------------
@@ -486,45 +482,57 @@ pub struct InferenceClient {
     /// unreliable.
     pub engine: InferenceEngine,
     http: reqwest::Client,
+    endpoint_resolution: Option<EndpointResolution>,
+    endpoint_policy_error: Option<String>,
 }
 
 impl InferenceClient {
     pub fn new(base_url: impl Into<String>) -> Self {
-        Self::with_client(
-            base_url,
-            // 2026-05-02 — reqwest's plain `.timeout()` covers
-            // request-build + send + complete-response-read. For
-            // streaming chat that's far too coarse: a long
-            // multi-round agent conversation can exceed 120s on the
-            // wire. Worse, the OLD client config bit operators
-            // staring at a ~49s stall before a 500: reqwest's
-            // connection pool would hand back a half-open keep-alive
-            // socket vLLM had already closed during a backend
-            // restart, and the client waited for the OS-level TCP
-            // retransmit window before bailing. Now:
-            //
-            //   * `connect_timeout(10s)` → a half-open / unreachable
-            //     vLLM fails in ~10s, not ~50s.
-            //   * `pool_idle_timeout(15s)` → stale sockets are
-            //     dropped from the pool 15s after their last use,
-            //     well under the typical interval between turns,
-            //     so the next turn opens a fresh connection.
-            //   * `read_timeout(120s)` → guards against vLLM going
-            //     silent mid-stream without holding the socket
-            //     forever.
-            //   * `tcp_keepalive(30s)` → kernel-side keepalive on
-            //     long-lived agent turns surfaces a dead remote as
-            //     a transport error rather than a hang.
-            base_inference_http_client(),
-        )
+        let base_url = base_url.into();
+        match Self::new_with_policy(base_url.clone(), &LocalEndpointPolicy::loopback_only()) {
+            Ok(client) => client,
+            Err(error) => Self {
+                base_url,
+                api_key: None,
+                engine: InferenceEngine::default(),
+                http: configure_inference_http_client(reqwest::Client::builder())
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .expect("reqwest client build"),
+                endpoint_resolution: None,
+                endpoint_policy_error: Some(error.to_string()),
+            },
+        }
     }
 
-    pub fn with_client(base_url: impl Into<String>, http: reqwest::Client) -> Self {
-        Self {
-            base_url: base_url.into(),
+    /// Construct an inference client under an operator-loaded local endpoint
+    /// policy. DNS answers are validated once and pinned into reqwest so a
+    /// later DNS response cannot rebind an established client to a public IP.
+    pub fn new_with_policy(
+        base_url: impl Into<String>,
+        policy: &LocalEndpointPolicy,
+    ) -> Result<Self, PolicyError> {
+        let base_url = base_url.into();
+        let resolution = policy.validate(&base_url)?;
+        let http = policy.reqwest_client(&resolution, configure_inference_http_client)?;
+        Ok(Self {
+            base_url,
             api_key: None,
             engine: InferenceEngine::default(),
             http,
+            endpoint_resolution: Some(resolution),
+            endpoint_policy_error: None,
+        })
+    }
+
+    pub fn endpoint_resolution(&self) -> Option<&EndpointResolution> {
+        self.endpoint_resolution.as_ref()
+    }
+
+    fn enforce_endpoint_policy(&self) -> Result<(), InferenceError> {
+        match &self.endpoint_policy_error {
+            Some(error) => Err(InferenceError::EndpointPolicy(error.clone())),
+            None => Ok(()),
         }
     }
 
@@ -549,6 +557,7 @@ impl InferenceClient {
         &self,
         req: &ChatRequest,
     ) -> Result<ChatResponse, InferenceError> {
+        self.enforce_endpoint_policy()?;
         if self.engine == InferenceEngine::Ollama {
             // Route to the native /api/chat endpoint. Ollama's
             // OpenAI shim has been observed to drop tool_calls on
@@ -622,6 +631,7 @@ impl InferenceClient {
     /// raw JSON so future probes (e.g. context length) can read it
     /// without a second round-trip.
     pub async fn list_models(&self) -> Result<ModelListResponse, InferenceError> {
+        self.enforce_endpoint_policy()?;
         let url = format!("{}/models", self.base_url.trim_end_matches('/'));
         let mut r = self.http.get(&url);
         if let Some(key) = &self.api_key {
@@ -663,6 +673,8 @@ impl InferenceClient {
         InferenceError,
     > {
         use futures::StreamExt;
+
+        self.enforce_endpoint_policy()?;
 
         if self.engine == InferenceEngine::Ollama {
             // Native NDJSON stream from /api/chat. The translation

@@ -48,6 +48,11 @@ pub enum IfExisting {
 pub struct InstallQuery {
     #[serde(default)]
     pub if_existing: IfExisting,
+    /// Explicit per-request acknowledgement that this is an unsigned local
+    /// development artifact. The persisted Controller policy must also allow
+    /// it; setting this query flag alone never bypasses verification.
+    #[serde(default)]
+    pub allow_unsigned_local_development: bool,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -223,6 +228,22 @@ pub async fn install_handler(
             );
         }
         let _ = std::fs::remove_dir_all(&released);
+    }
+
+    if !q.allow_unsigned_local_development {
+        let _ = std::fs::remove_dir_all(&target);
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "provenance_required",
+            "raw plugin uploads require verified detached provenance; for local development, explicitly request allow_unsigned_local_development after enabling the Controller policy",
+        );
+    }
+    if let Err(error) = state
+        .plugin_host
+        .authorize_local_plugin_archive(&staged.manifest, &target)
+    {
+        let _ = std::fs::remove_dir_all(&target);
+        return plugin_error_response(error);
     }
 
     // Drive install vs upgrade based on the operator's choice.

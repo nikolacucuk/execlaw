@@ -12,6 +12,7 @@ description = "Wire types shared between the control plane and runner containers
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+execlaw-core = { path = "../core" }
 execlaw-inference-api = { path = "../inference-api" }
 
 [dev-dependencies]

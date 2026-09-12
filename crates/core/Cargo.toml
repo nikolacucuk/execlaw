@@ -43,6 +43,7 @@ hex.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 schemars.workspace = true
+jsonschema.workspace = true
 # 2026-05-17 — utoipa derives let core types (AutomationDef, NodeDef,
 # BusEventKind, AutomationRunStatus, ...) self-describe in the
 # server's OpenAPI spec at `/api/openapi.json`. Derive-only usage,

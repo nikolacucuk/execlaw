@@ -1,6 +1,8 @@
-# Hermes Porting TODO (execlaw)
+# Hermes Porting Status (execlaw)
 
-Status of requested carry-over work and next implementation steps.
+Historical status of requested carry-over work. The implementation items below
+have shipped; this file remains as a provenance checklist rather than an active
+roadmap.
 
 ## Completed in this change set
 
@@ -9,13 +11,17 @@ Status of requested carry-over work and next implementation steps.
 - Added programmatic tool-chaining plugin scaffold.
 - Added operator-facing rubric and security approval semantics docs.
 
-## TODOs (implementation phase)
+## Completed implementation phase
 
-- Wire chain.plan to deterministic planner output with persisted plan IDs.
-- Add chain.execute runtime with per-step audit events and budget enforcement.
-- Require approval token for plans containing external effects.
-- Add host-side storage for chain plans/runs (new migration + store).
-- Add integration tests for approval halt/resume and replay-safe execution.
+- `chain.plan` produces deterministic persisted plans.
+- `chain.execute` and `chain.resume` record per-step audit state and enforce budgets.
+- Plans containing external effects halt for approval before execution continues.
+- Migration `0012_chain_plans_runs.sql` and the core chain store persist plans, runs, and steps.
+- Host integration tests cover approval halt/resume and replay-safe execution.
+
+The host implements the live `chain.*` tools in
+`crates/server/src/tool_chain_tool.rs`. The `plugins/tool-chain/main.rhai`
+handlers are an obsolete scaffold and are not the implementation authority.
 
 ## File checklist
 

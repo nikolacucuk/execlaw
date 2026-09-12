@@ -39,6 +39,7 @@ import {
 /// in sync with `factory_reset::CONFIRM_TOKEN` server-side; if these
 /// drift the server returns 400 and the SPA surfaces the error.
 const FACTORY_RESET_CONFIRM = "RESET";
+const GRAPHIFY_PREVIEW_STORAGE_KEY = "execlaw.chat.graphify_welcome_visible";
 
 export function GeneralPage() {
     const auth = useAuth();
@@ -50,6 +51,9 @@ export function GeneralPage() {
     const [bindAddress, setBindAddress] = useState("");
     const [startOnBoot, setStartOnBoot] = useState(true);
     const [retentionDays, setRetentionDays] = useState(30);
+    const [showGraphifyPreview, setShowGraphifyPreview] = useState(
+        () => localStorage.getItem(GRAPHIFY_PREVIEW_STORAGE_KEY) === "1",
+    );
     /// Tracks whether the operator has changed bind_address since
     /// the last load — drives the "service restart required" hint.
     const [bindDirty, setBindDirty] = useState(false);
@@ -173,6 +177,32 @@ export function GeneralPage() {
                 </div>
             ) : (
                 <div className="execlaw-card" data-testid="general-form">
+                    <Form.Group className="mb-3">
+                        <Form.Check
+                            type="switch"
+                            id="general-graphify-preview-toggle"
+                            label={t(
+                                "general.graphifyPreview",
+                                "Show Graphify preview on New chat",
+                            )}
+                            checked={showGraphifyPreview}
+                            onChange={(event) => {
+                                const visible = event.target.checked;
+                                setShowGraphifyPreview(visible);
+                                localStorage.setItem(
+                                    GRAPHIFY_PREVIEW_STORAGE_KEY,
+                                    visible ? "1" : "0",
+                                );
+                            }}
+                            data-testid="general-graphify-preview-toggle"
+                        />
+                        <Form.Text className="execlaw-muted">
+                            {t(
+                                "general.graphifyPreviewHelp",
+                                "Display the locally generated repository graph above the New chat composer.",
+                            )}
+                        </Form.Text>
+                    </Form.Group>
                     <Form.Group className="mb-3">
                         <Form.Check
                             type="switch"

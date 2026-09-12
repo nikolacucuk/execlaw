@@ -478,12 +478,19 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
         // them to. Fall through (return None) so the legacy
         // `BuiltinTools` impl (if any) gets a chance.
         self.conversation_id.as_ref()?;
+        if let Err(error) = self.host.registry().validate_builtin_input(tool_name, args) {
+            return Some(Err(error));
+        }
         let ctx = match self.build_ctx_for(&tool) {
             Ok(c) => c,
             Err(e) => return Some(Err(e)),
         };
         Some(match tool.invoke(ctx, args.clone()).await {
-            ToolOutcome::Ok(v) => Ok(v),
+            ToolOutcome::Ok(v) => self
+                .host
+                .registry()
+                .validate_builtin_result(tool_name, &v)
+                .map(|()| v),
             ToolOutcome::Err { code, message } => Err(format!("{code}: {message}")),
             ToolOutcome::Denied { reason } => Err(format!("denied: {reason}")),
         })

@@ -166,15 +166,33 @@ impl InferenceResolver {
                     InferenceEngine::OpenAICompat
                 };
                 match endpoint {
-                    Some(url) => Some(ResolvedInference {
-                        client: Arc::new(InferenceClient::new(url.clone()).with_engine(engine)),
-                        model_id: row_model
-                            .or_else(|| self.bootstrap_model.clone())
-                            .unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_owned()),
-                        endpoint: url,
-                        reasoning_enabled,
-                        source: "db",
-                    }),
+                    Some(url) => {
+                        let endpoint_key = format!("inference:{}", purpose.as_str());
+                        match crate::local_endpoint_policy::checked_inference_client(
+                            db,
+                            &endpoint_key,
+                            &url,
+                        ) {
+                            Ok(client) => Some(ResolvedInference {
+                                client: Arc::new(client.with_engine(engine)),
+                                model_id: row_model
+                                    .or_else(|| self.bootstrap_model.clone())
+                                    .unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_owned()),
+                                endpoint: url,
+                                reasoning_enabled,
+                                source: "db",
+                            }),
+                            Err(error) => {
+                                tracing::warn!(
+                                    target: "inference_resolver",
+                                    purpose = ?purpose,
+                                    %error,
+                                    "configured inference endpoint denied by local-only policy"
+                                );
+                                None
+                            }
+                        }
+                    }
                     None => {
                         if r.mode == BackendMode::Managed {
                             tracing::debug!(

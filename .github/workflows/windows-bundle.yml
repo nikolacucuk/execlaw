@@ -97,10 +97,6 @@ jobs:
         # ship Chocolatey by default, so a one-line install works.
         run: choco install -y --no-progress imagemagick.app
 
-      - name: Build bundle
-        shell: pwsh
-        run: ./scripts/build-windows.ps1
-
       - name: Package plugin ZIPs
         # Every plugin under `plugins\*\` with a parseable
         # `plugin.toml` gets a `dist\<id>-<version>.zip` plus a
@@ -110,6 +106,19 @@ jobs:
         # and gives us a clean `dist\` to attach to the Release.
         shell: pwsh
         run: ./scripts/package-plugins.ps1
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Prepare offline plugin provenance
+        shell: pwsh
+        run: python scripts/prepare-release-provenance.py (Get-ChildItem dist -Filter '*.zip' | ForEach-Object FullName)
+
+      - name: Build bundle
+        shell: pwsh
+        env:
+          EXECLAW_PREPACKAGED_PLUGINS: "1"
+        run: ./scripts/build-windows.ps1
 
       - name: Locate bundle outputs
         id: outputs
@@ -147,6 +156,9 @@ jobs:
           path: |
             dist/*.zip
             dist/*.zip.sha256
+            dist/*.zip.spdx.json
+            dist/*.zip.sigstore.json
+            dist/*.zip.provenance.json
           if-no-files-found: warn
           retention-days: 90
 
@@ -210,4 +222,7 @@ jobs:
             ${{ steps.checksum.outputs.sha_file }}
             dist/*.zip
             dist/*.zip.sha256
+            dist/*.zip.spdx.json
+            dist/*.zip.sigstore.json
+            dist/*.zip.provenance.json
           fail_on_unmatched_files: true

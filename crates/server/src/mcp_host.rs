@@ -26,10 +26,12 @@ use crate::tool_sync::default_mcp_classes_for;
 use dashmap::DashMap;
 use execlaw_core::Database;
 use execlaw_core::mcp_servers::{McpServerRow, McpServerStatus, McpServerStore, McpTransport};
+use execlaw_core::tool::{compile_tool_schema, tool_schema_hash};
 use execlaw_core::tool_access::{ToolAccessSeed, ToolAccessStore, ToolSource};
 use execlaw_core::vault_row::VaultRowStore;
 use execlaw_mcp_client::{McpClient, McpError, McpNotification, McpResult, McpTool, StdioSpec};
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, Notify};
@@ -75,7 +77,13 @@ const RECONNECT_MAX: Duration = Duration::from_secs(60);
 /// One running MCP server actor's handle.
 struct ServerHandle {
     client: Mutex<Option<ConnectedClient>>,
+    tool_schemas: Mutex<HashMap<String, RegisteredMcpSchema>>,
     shutdown: Arc<Notify>,
+}
+
+struct RegisteredMcpSchema {
+    validator: Arc<jsonschema::Validator>,
+    hash: String,
 }
 
 #[derive(Clone)]
@@ -187,6 +195,15 @@ impl McpHost {
             handle.client.lock().await.clone().ok_or_else(|| {
                 format!("MCP server '{server_id}' has no live connection right now")
             })?;
+        let schemas = handle.tool_schemas.lock().await;
+        let schema = schemas
+            .get(remote_name)
+            .ok_or_else(|| format!("MCP tool '{prefixed}' has no validated input schema"))?;
+        schema.validator.validate(&args).map_err(|error| {
+            format!("MCP tool '{prefixed}' arguments do not match its JSON Schema: {error}")
+        })?;
+        debug!(tool = prefixed, schema_hash = %schema.hash, "dispatching validated MCP tool");
+        drop(schemas);
         let r = client
             .call_tool(remote_name, args)
             .await
@@ -201,6 +218,7 @@ impl McpHost {
         let shutdown = Arc::new(Notify::new());
         let handle = Arc::new(ServerHandle {
             client: Mutex::new(None),
+            tool_schemas: Mutex::new(HashMap::new()),
             shutdown: shutdown.clone(),
         });
         self.inner.servers.insert(row.id.clone(), handle.clone());
@@ -252,9 +270,9 @@ async fn stdio_actor_loop(
                     now,
                 );
                 info!(server = %row.id, "MCP server connected");
-                if let Err(e) = sync_tools(&db, &row, &ConnectedClient::Stdio(client.clone())).await
-                {
-                    warn!(server = %row.id, error = %e, "initial tool sync failed");
+                match sync_tools(&db, &row, &ConnectedClient::Stdio(client.clone())).await {
+                    Ok(schemas) => *handle.tool_schemas.lock().await = schemas,
+                    Err(e) => warn!(server = %row.id, error = %e, "initial tool sync failed"),
                 }
 
                 // Watch for notifications + shutdown.
@@ -265,6 +283,7 @@ async fn stdio_actor_loop(
                 let client_for_loop = client.clone();
                 let row_for_loop = row.clone();
                 let db_for_loop = db.clone();
+                let handle_for_loop = handle.clone();
                 let exit = tokio::spawn(async move {
                     loop {
                         tokio::select! {
@@ -283,8 +302,9 @@ async fn stdio_actor_loop(
                                 match recv {
                                     Ok(McpNotification::ToolsListChanged) => {
                                         let cc = ConnectedClient::Stdio(client_for_loop.clone());
-                                        if let Err(e) = sync_tools(&db_for_loop, &row_for_loop, &cc).await {
-                                            warn!(server = %row_for_loop.id, error = %e, "list_changed re-sync failed");
+                                        match sync_tools(&db_for_loop, &row_for_loop, &cc).await {
+                                            Ok(schemas) => *handle_for_loop.tool_schemas.lock().await = schemas,
+                                            Err(e) => warn!(server = %row_for_loop.id, error = %e, "list_changed re-sync failed"),
                                         }
                                     }
                                     Ok(McpNotification::ResourcesListChanged) => {
@@ -398,7 +418,34 @@ async fn http_actor_loop(
             None
         };
 
-        match HttpMcpClient::connect(&url, bearer.as_deref()).await {
+        let endpoint_key = format!("mcp:{}", row.id);
+        let http = match crate::local_endpoint_policy::checked_client(
+            &db,
+            &endpoint_key,
+            &url,
+            |builder| {
+                builder.timeout(Duration::from_secs(60)).user_agent(concat!(
+                    "execlaw/",
+                    env!("CARGO_PKG_VERSION"),
+                    "/mcp-http"
+                ))
+            },
+        ) {
+            Ok((client, _)) => client,
+            Err(error) => {
+                warn!(server = %row.id, %error, "MCP HTTP endpoint denied by local-only policy");
+                let now = chrono::Utc::now().timestamp();
+                let _ = McpServerStore::new(&db).set_status(
+                    &row.id,
+                    McpServerStatus::Error,
+                    Some(&error),
+                    now,
+                );
+                return;
+            }
+        };
+
+        match HttpMcpClient::connect_with_client(&url, bearer.as_deref(), http).await {
             Ok(client) => {
                 let cc = ConnectedClient::Http(client);
                 *handle.client.lock().await = Some(cc.clone());
@@ -410,8 +457,9 @@ async fn http_actor_loop(
                     now,
                 );
                 info!(server = %row.id, url = %url, "MCP server connected (http)");
-                if let Err(e) = sync_tools(&db, &row, &cc).await {
-                    warn!(server = %row.id, error = %e, "initial tool sync failed");
+                match sync_tools(&db, &row, &cc).await {
+                    Ok(schemas) => *handle.tool_schemas.lock().await = schemas,
+                    Err(e) => warn!(server = %row.id, error = %e, "initial tool sync failed"),
                 }
                 // No notification stream in v1 — just wait for
                 // shutdown. Re-syncs happen on `reconcile()`.
@@ -467,8 +515,9 @@ async fn sync_tools(
     db: &Database,
     row: &McpServerRow,
     client: &ConnectedClient,
-) -> McpResult<usize> {
+) -> McpResult<HashMap<String, RegisteredMcpSchema>> {
     let tools: Vec<McpTool> = client.list_tools().await?;
+    let schemas = compile_mcp_tool_schemas(&tools)?;
     let store = ToolAccessStore::new(db);
     let now = chrono::Utc::now().timestamp();
     let mut n = 0;
@@ -514,7 +563,27 @@ async fn sync_tools(
         }
     }
     info!(server = %row.id, tools = n, "MCP tool sync complete");
-    Ok(n)
+    Ok(schemas)
+}
+
+fn compile_mcp_tool_schemas(tools: &[McpTool]) -> McpResult<HashMap<String, RegisteredMcpSchema>> {
+    let mut schemas = HashMap::with_capacity(tools.len());
+    for tool in tools {
+        let schema = tool.input_schema.as_ref().ok_or_else(|| {
+            McpError::Protocol(format!("MCP tool '{}' omitted inputSchema", tool.name))
+        })?;
+        let validator =
+            compile_tool_schema(schema, &format!("MCP tool '{}' input schema", tool.name))
+                .map_err(McpError::Protocol)?;
+        schemas.insert(
+            tool.name.clone(),
+            RegisteredMcpSchema {
+                validator: Arc::new(validator),
+                hash: tool_schema_hash(schema),
+            },
+        );
+    }
+    Ok(schemas)
 }
 
 /// Split a prefixed tool name into `(server_id, remote_name)`. Returns
@@ -545,5 +614,47 @@ mod tests {
         assert!(parse_prefixed_tool_name("mcp:").is_none());
         assert!(parse_prefixed_tool_name("mcp:srv:").is_none());
         assert!(parse_prefixed_tool_name("mcp::tool").is_none());
+    }
+
+    #[test]
+    fn mcp_discovery_requires_valid_object_input_schema() {
+        let missing = McpTool {
+            name: "missing".into(),
+            description: None,
+            input_schema: None,
+        };
+        assert!(compile_mcp_tool_schemas(&[missing]).is_err());
+
+        let malformed = McpTool {
+            name: "malformed".into(),
+            description: None,
+            input_schema: Some(serde_json::json!({"type": 7})),
+        };
+        assert!(compile_mcp_tool_schemas(&[malformed]).is_err());
+
+        let networked = McpTool {
+            name: "networked".into(),
+            description: None,
+            input_schema: Some(serde_json::json!({"$ref": "https://example.invalid/schema"})),
+        };
+        assert!(compile_mcp_tool_schemas(&[networked]).is_err());
+    }
+
+    #[test]
+    fn mcp_discovery_compiles_and_hashes_valid_schema() {
+        let tool = McpTool {
+            name: "lookup".into(),
+            description: None,
+            input_schema: Some(serde_json::json!({
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"]
+            })),
+        };
+        let schemas = compile_mcp_tool_schemas(&[tool]).unwrap();
+        let schema = schemas.get("lookup").unwrap();
+        assert!(schema.validator.is_valid(&serde_json::json!({"q": "x"})));
+        assert!(!schema.validator.is_valid(&serde_json::json!({"q": 1})));
+        assert_eq!(schema.hash.len(), 64);
     }
 }

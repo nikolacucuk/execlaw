@@ -44,11 +44,12 @@ use execlaw_inference_api::{ChatMessage, Role};
 /// `context_window_policy` as a JSON-serialised string. The server falls
 /// back to `FullReplay` when the key is absent so existing deployments
 /// are unaffected.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ContextWindowPolicy {
     /// Send the complete conversation history on every turn.
     /// Simple and correct; fails for conversations that exceed the
     /// model's context length.
+    #[default]
     FullReplay,
 
     /// Keep at most `max_turns` user+assistant exchange pairs,
@@ -82,12 +83,6 @@ pub enum ContextWindowPolicy {
         /// length.
         reserve_for_reply: usize,
     },
-}
-
-impl Default for ContextWindowPolicy {
-    fn default() -> Self {
-        Self::FullReplay
-    }
 }
 
 // -----------------------------------------------------------------------
@@ -294,6 +289,7 @@ mod tests {
         ChatMessage {
             role: Role::User,
             content: Some(MessageContent::Text(format!("user message {n}"))),
+            reasoning_content: None,
             tool_call_id: None,
             name: None,
             tool_calls: Vec::new(),
@@ -304,6 +300,7 @@ mod tests {
         ChatMessage {
             role: Role::Assistant,
             content: Some(MessageContent::Text(format!("assistant reply {n}"))),
+            reasoning_content: None,
             tool_call_id: None,
             name: None,
             tool_calls: Vec::new(),

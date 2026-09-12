@@ -38,8 +38,8 @@ Why plugin namespaces:
 
 ## Files added in this repo
 
-- [scripts/build-superpowers-skill-plugins.ps1](scripts/build-superpowers-skill-plugins.ps1)
-- [scripts/build-superpowers-skill-plugins.sh](scripts/build-superpowers-skill-plugins.sh)
+- [scripts/build-superpowers-skill-plugins.ps1](../scripts/build-superpowers-skill-plugins.ps1)
+- [scripts/build-superpowers-skill-plugins.sh](../scripts/build-superpowers-skill-plugins.sh)
 
 These scripts generate installable plugin ZIPs from Superpowers skill directories.
 

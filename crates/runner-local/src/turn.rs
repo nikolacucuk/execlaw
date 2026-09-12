@@ -26,11 +26,15 @@ use execlaw_core::events::{
     EventKind, EventLog, EventRecord, PendingEvent, ToolResultPayload, ToolUsePayload,
 };
 use execlaw_core::ids::{ConversationId, EventSeq};
+use execlaw_core::runs::{RunStepKind, RunStoreError};
+use execlaw_core::tool::{ToolFailure, ToolFailureKind, ToolResultEnvelope, tool_schema_hash};
+use execlaw_core::tool_execution::{CircuitPermit, ToolExecutionStore, ToolInvocationDefinition};
 use execlaw_inference_api::{
-    ChatMessage, ChatRequest, InferenceClient, InferenceError, ModelId, Role, ToolCall,
-    ToolDeclaration,
+    ChatMessage, ChatRequest, ChatResponse, InferenceClient, InferenceError, ModelId, Role,
+    ToolCall, ToolDeclaration,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use thiserror::Error;
 
@@ -71,6 +75,51 @@ pub trait ToolDispatch: Send + Sync {
         tool_name: &str,
         args_json: &serde_json::Value,
     ) -> Result<serde_json::Value, String>;
+
+    /// Typed dispatch surface. Existing implementations inherit a stable
+    /// classification of their legacy string errors.
+    async fn call_typed(
+        &self,
+        tool_name: &str,
+        args_json: &serde_json::Value,
+    ) -> ToolResultEnvelope {
+        match self.call(tool_name, args_json).await {
+            Ok(value) => ToolResultEnvelope::Ok { value },
+            Err(message) => ToolResultEnvelope::Err {
+                failure: classify_legacy_tool_error(message),
+            },
+        }
+    }
+
+    /// Canonical input/result schema hashes used for durable invocation traces.
+    async fn schema_hashes(&self, _tool_name: &str) -> (Option<String>, Option<String>) {
+        (None, None)
+    }
+}
+
+fn classify_legacy_tool_error(message: String) -> ToolFailure {
+    let lower = message.to_ascii_lowercase();
+    let (kind, code) = if lower.contains("approval") && lower.contains("denied") {
+        (ToolFailureKind::ApprovalDenied, "approval_denied")
+    } else if lower.contains("not authorized") || lower.starts_with("denied:") {
+        (ToolFailureKind::PolicyDenied, "policy_denied")
+    } else if lower.contains("invalid tool arguments")
+        || lower.contains("do not match its json schema")
+    {
+        (ToolFailureKind::Validation, "validation")
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        (ToolFailureKind::Timeout, "timeout")
+    } else if lower.contains("cancelled") || lower.contains("canceled") {
+        (ToolFailureKind::Cancelled, "cancelled")
+    } else if lower.contains("temporar")
+        || lower.contains("unavailable")
+        || lower.contains("no live connection")
+    {
+        (ToolFailureKind::Transient, "transient")
+    } else {
+        (ToolFailureKind::Permanent, "tool_error")
+    };
+    ToolFailure::new(kind, code, message)
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +253,10 @@ pub enum TurnError {
     Inference(#[from] InferenceError),
     #[error("db: {0}")]
     Db(#[from] execlaw_core::db::DbError),
+    #[error("durable run: {0}")]
+    Durable(#[from] RunStoreError),
+    #[error("durable step '{step_id}' is unavailable: {state}")]
+    DurableStepUnavailable { step_id: String, state: String },
     #[error("turn exceeded max_tool_rounds ({0})")]
     MaxRounds(u32),
 }
@@ -226,12 +279,158 @@ pub struct TurnExecutor {
     pub tool_dispatch: Arc<dyn ToolDispatch>,
 }
 
+const MAX_IDENTICAL_CALLS: u32 = 2;
+const MAX_SCHEMA_CORRECTIONS: u32 = 2;
+const MAX_DISPATCH_ATTEMPTS: u32 = 3;
+const CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
+const CIRCUIT_COOLDOWN_MS: u64 = 30_000;
+
 impl TurnExecutor {
     pub fn new(inference: InferenceClient, tool_dispatch: Arc<dyn ToolDispatch>) -> Self {
         Self {
             inference,
             tool_dispatch,
         }
+    }
+
+    async fn dispatch_with_retry(
+        &self,
+        db: &Database,
+        run_id: &str,
+        step_id: &str,
+        tool_name: &str,
+        args: &serde_json::Value,
+        input_schema_hash: Option<String>,
+        result_schema_hash: Option<String>,
+        run_retry_budget: u32,
+    ) -> Result<ToolResultEnvelope, execlaw_core::db::DbError> {
+        let store = ToolExecutionStore::new(db);
+        let integration = tool_integration(tool_name);
+        let call_fingerprint = tool_schema_hash(&serde_json::json!({
+            "tool": tool_name,
+            "args": args,
+        }));
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        store.ensure_run_retry_budget(run_id, run_retry_budget, now_ms)?;
+        let mut trace = store.define_invocation(&ToolInvocationDefinition {
+            run_id: run_id.to_owned(),
+            step_id: step_id.to_owned(),
+            tool_name: tool_name.to_owned(),
+            integration_id: integration.clone(),
+            call_fingerprint,
+            input_schema_hash,
+            result_schema_hash,
+            retry_budget_total: MAX_DISPATCH_ATTEMPTS,
+            now_ms,
+        })?;
+        if trace.repeated_call_count > MAX_IDENTICAL_CALLS {
+            let mut failure = ToolFailure::new(
+                ToolFailureKind::Permanent,
+                "repeated_identical_call",
+                "identical tool call repeated beyond the allowed limit",
+            );
+            failure.guidance = Some("change the arguments or choose another tool".into());
+            store.complete_failure(run_id, step_id, &failure, now_ms)?;
+            return Ok(ToolResultEnvelope::Err { failure });
+        }
+
+        match store.acquire_circuit(&integration, run_id, step_id, now_ms)? {
+            CircuitPermit::Closed | CircuitPermit::HalfOpen => {}
+            CircuitPermit::Open { retry_after_ms } => {
+                let mut failure = ToolFailure::new(
+                    ToolFailureKind::Transient,
+                    "circuit_open",
+                    format!("integration '{integration}' circuit is open"),
+                );
+                failure.retry_after_ms = Some(retry_after_ms);
+                failure.guidance = Some("use a different integration or wait".into());
+                store.complete_failure(run_id, step_id, &failure, now_ms)?;
+                return Ok(ToolResultEnvelope::Err { failure });
+            }
+            CircuitPermit::HalfOpenBusy => {
+                let mut failure = ToolFailure::new(
+                    ToolFailureKind::Transient,
+                    "circuit_half_open_busy",
+                    format!("integration '{integration}' is testing recovery"),
+                );
+                failure.retry_after_ms = Some(100);
+                failure.guidance = Some("use a different integration or wait".into());
+                store.complete_failure(run_id, step_id, &failure, now_ms)?;
+                return Ok(ToolResultEnvelope::Err { failure });
+            }
+        }
+
+        while trace.attempts_used < trace.retry_budget_total {
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            if let Some(next_retry_at_ms) = trace.next_retry_at_ms
+                && next_retry_at_ms > now_ms
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(
+                    u64::try_from(next_retry_at_ms - now_ms).unwrap_or(u64::MAX),
+                ))
+                .await;
+            }
+            trace = store.begin_attempt(run_id, step_id, chrono::Utc::now().timestamp_millis())?;
+            let outcome = self.tool_dispatch.call_typed(tool_name, args).await;
+            match outcome {
+                ToolResultEnvelope::Ok { value } => {
+                    let now_ms = chrono::Utc::now().timestamp_millis();
+                    store.complete_success(run_id, step_id, now_ms)?;
+                    store.record_circuit_success(&integration, now_ms)?;
+                    return Ok(ToolResultEnvelope::Ok { value });
+                }
+                ToolResultEnvelope::Err { mut failure } => {
+                    failure.attempt = trace.attempts_used;
+                    failure = failure.normalized();
+                    let retry = failure.retryable
+                        && trace.attempts_used < trace.retry_budget_total
+                        && store
+                            .consume_run_retry(run_id, chrono::Utc::now().timestamp_millis())?;
+                    if !retry {
+                        if matches!(
+                            failure.kind,
+                            ToolFailureKind::Transient | ToolFailureKind::Timeout
+                        ) {
+                            store.record_circuit_failure(
+                                &integration,
+                                CIRCUIT_FAILURE_THRESHOLD,
+                                CIRCUIT_COOLDOWN_MS,
+                                chrono::Utc::now().timestamp_millis(),
+                            )?;
+                        }
+                        store.complete_failure(
+                            run_id,
+                            step_id,
+                            &failure,
+                            chrono::Utc::now().timestamp_millis(),
+                        )?;
+                        return Ok(ToolResultEnvelope::Err { failure });
+                    }
+                    let delay_ms = failure
+                        .retry_after_ms
+                        .unwrap_or(100_u64.saturating_mul(1 << (trace.attempts_used - 1)))
+                        .min(5_000);
+                    let next_retry_at_ms = chrono::Utc::now()
+                        .timestamp_millis()
+                        .saturating_add(i64::try_from(delay_ms).unwrap_or(i64::MAX));
+                    store.schedule_retry(
+                        run_id,
+                        step_id,
+                        &failure,
+                        next_retry_at_ms,
+                        delay_ms,
+                        chrono::Utc::now().timestamp_millis(),
+                    )?;
+                    trace = store.get_invocation(run_id, step_id)?.ok_or_else(|| {
+                        execlaw_core::db::DbError::Invariant(format!(
+                            "tool invocation '{run_id}:{step_id}' disappeared"
+                        ))
+                    })?;
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+        unreachable!("bounded dispatch loop always returns")
     }
 
     /// Execute one turn:
@@ -313,6 +512,45 @@ impl TurnExecutor {
             sender_principal_id,
         )?;
         log.append(&user_event)?;
+
+        self.resume_turn_from_event(db, conversation_id, user_seq, cfg, user_image_urls)
+            .await
+    }
+
+    /// Execute or resume the turn triggered by an already-persisted user event.
+    /// The `(conversation_id, input_event_seq)` pair is the stable run identity.
+    pub async fn resume_turn_from_event(
+        &self,
+        db: &Database,
+        conversation_id: &ConversationId,
+        input_event_seq: EventSeq,
+        cfg: &TurnConfig,
+        user_image_urls: Vec<String>,
+    ) -> Result<TurnSummary, TurnError> {
+        use crate::durable::{DurableRun, StepDecision};
+
+        let log = match &cfg.event_log_hmac_key {
+            Some(k) => EventLog::new(db).with_hmac_key(k.clone()),
+            None => EventLog::new(db),
+        };
+        let run_id = format!("turn:{}:{}", conversation_id.as_str(), input_event_seq.0);
+        let worker_id = format!(
+            "in-process:{}:{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        );
+        let durable = DurableRun::open(
+            db,
+            run_id,
+            worker_id,
+            conversation_id.clone(),
+            input_event_seq,
+            None,
+            chrono::Utc::now().timestamp(),
+        )?;
+        if durable.is_completed()? {
+            return replay_completed_turn(&log, conversation_id, input_event_seq);
+        }
 
         // § new-3: drive Session FSM → Active.
         if let Some(sess) = cfg.session.as_ref() {
@@ -404,7 +642,12 @@ impl TurnExecutor {
                     messages.pop();
                     text
                 }
-                _ => user_text.to_owned(),
+                _ => history
+                    .iter()
+                    .find(|event| event.seq == input_event_seq)
+                    .and_then(|event| event.decode_payload::<UserMessagePayload>().ok())
+                    .map(|payload| payload.text)
+                    .unwrap_or_default(),
             };
             messages.push(ChatMessage::user_with_images(
                 last_user_text,
@@ -419,6 +662,8 @@ impl TurnExecutor {
         let mut last_text: String = String::new();
         let mut prompt_tokens: Option<u32> = None;
         let mut completion_tokens: Option<u32> = None;
+        let mut schema_failures: HashMap<String, u32> = HashMap::new();
+        let mut durable_ordinal = 0_i64;
         // 2026-05-12 — turn-timing instrumentation. Routed to the
         // dedicated `agent::turn_timing` target so it stays OFF by
         // default (enable with RUST_LOG=agent::turn_timing=debug)
@@ -437,20 +682,6 @@ impl TurnExecutor {
         );
 
         loop {
-            if rounds >= cfg.max_tool_rounds {
-                // Record a cancelled model turn with a clear reason so the
-                // transcript isn't a dangling prompt.
-                pending.push(PendingEvent::encode(
-                    EventKind::LlmCancelled,
-                    &serde_json::json!({
-                        "reason": "max_tool_rounds_exceeded",
-                        "rounds": rounds,
-                    }),
-                    Some("system".into()),
-                )?);
-                return Err(TurnError::MaxRounds(cfg.max_tool_rounds));
-            }
-
             let req = ChatRequest {
                 model: cfg.model.clone(),
                 messages: messages.clone(),
@@ -476,7 +707,30 @@ impl TurnExecutor {
             let inference_started_at = std::time::Instant::now();
             let inference_messages_count = messages.len();
             let inference_tools_count = cfg.tools.len();
-            let resp = self.inference.chat_completions(&req).await?;
+            let model_step_id = format!("model:{rounds}");
+            let now = chrono::Utc::now().timestamp();
+            let resp: ChatResponse = match durable.begin(
+                model_step_id.clone(),
+                durable_ordinal,
+                RunStepKind::ModelRequest,
+                &req,
+                None,
+                None,
+                now,
+            )? {
+                StepDecision::Replay(response) => response,
+                StepDecision::Execute(_) => {
+                    let response = self.inference.chat_completions(&req).await?;
+                    durable.complete(&model_step_id, &response, chrono::Utc::now().timestamp())?;
+                    response
+                }
+                decision => {
+                    return Err(TurnError::DurableStepUnavailable {
+                        step_id: model_step_id,
+                        state: format!("{decision:?}"),
+                    });
+                }
+            };
             let inference_elapsed_ms = inference_started_at.elapsed().as_millis() as u64;
             let choice = match resp.choices.first() {
                 Some(c) => c.clone(),
@@ -485,6 +739,8 @@ impl TurnExecutor {
                     break;
                 }
             };
+            durable.advance(durable_ordinal, chrono::Utc::now().timestamp())?;
+            durable_ordinal += 1;
 
             let finish_reason = choice.finish_reason.clone();
             if let Some(u) = &resp.usage {
@@ -545,6 +801,25 @@ impl TurnExecutor {
                 break;
             }
 
+            if rounds >= cfg.max_tool_rounds {
+                // The cap applies to tool dispatches, not inference calls.
+                // This placement allows a terminal text response after the
+                // final permitted tool round and keeps max_tool_rounds=0
+                // usable for text-only turns.
+                pending.push(PendingEvent::encode(
+                    EventKind::LlmCancelled,
+                    &serde_json::json!({
+                        "reason": "max_tool_rounds_exceeded",
+                        "rounds": rounds,
+                    }),
+                    Some("system".into()),
+                )?);
+                let base_seq = log.last_seq(conversation_id)?;
+                log.commit_turn(conversation_id, base_seq, pending)?;
+                durable.finish(durable_ordinal, chrono::Utc::now().timestamp())?;
+                return Err(TurnError::MaxRounds(cfg.max_tool_rounds));
+            }
+
             // Phase 11.A — signal that the agent is now in a tool
             // round. Transports use this to keep the typing
             // indicator on through dispatch even though the LLM is
@@ -562,9 +837,12 @@ impl TurnExecutor {
             // "the tool itself took 4 minutes" (research_start vs
             // open_meteo.ensemble are wildly different latencies).
             let mut round_tool_dispatch_ms: u64 = 0;
-            for tc in &choice.message.tool_calls {
-                let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
-                    .unwrap_or_else(|_| serde_json::json!({}));
+            for (call_index, tc) in choice.message.tool_calls.iter().enumerate() {
+                let parsed_args = parse_tool_arguments(&tc.function.arguments);
+                let args = parsed_args
+                    .as_ref()
+                    .cloned()
+                    .unwrap_or_else(|_| serde_json::Value::String(tc.function.arguments.clone()));
 
                 pending.push(PendingEvent::encode(
                     EventKind::ToolUse,
@@ -584,7 +862,93 @@ impl TurnExecutor {
                     "agent dispatching tool",
                 );
                 let tool_started_at = std::time::Instant::now();
-                let outcome = self.tool_dispatch.call(&tc.function.name, &args).await;
+                let tool_step_id = format!("tool:{rounds}:{call_index}");
+                let tool_step_input = serde_json::json!({
+                    "round": rounds,
+                    "call_index": call_index,
+                    "tool_name": tc.function.name,
+                    "args": args,
+                });
+                let outcome: ToolResultEnvelope = match durable.begin(
+                    tool_step_id.clone(),
+                    durable_ordinal,
+                    RunStepKind::ToolDispatch,
+                    &tool_step_input,
+                    None,
+                    None,
+                    chrono::Utc::now().timestamp(),
+                )? {
+                    StepDecision::Replay(outcome) => outcome,
+                    StepDecision::Execute(_) => {
+                        let outcome = match parsed_args {
+                            Ok(args) => {
+                                if schema_failures
+                                    .get(&tc.function.name)
+                                    .copied()
+                                    .unwrap_or_default()
+                                    >= MAX_SCHEMA_CORRECTIONS
+                                {
+                                    let mut failure = ToolFailure::new(
+                                        ToolFailureKind::Permanent,
+                                        "schema_correction_exhausted",
+                                        "tool arguments remained invalid after bounded correction attempts",
+                                    );
+                                    failure.guidance =
+                                        Some("choose another tool or answer without a tool".into());
+                                    ToolResultEnvelope::Err { failure }
+                                } else {
+                                    let (dispatch_input_hash, result_schema_hash) =
+                                        self.tool_dispatch.schema_hashes(&tc.function.name).await;
+                                    let input_schema_hash = dispatch_input_hash.or_else(|| {
+                                        cfg.tools
+                                            .iter()
+                                            .find(|tool| tool.function.name == tc.function.name)
+                                            .map(|tool| tool_schema_hash(&tool.function.parameters))
+                                    });
+                                    self.dispatch_with_retry(
+                                        db,
+                                        durable.run_id(),
+                                        &tool_step_id,
+                                        &tc.function.name,
+                                        &args,
+                                        input_schema_hash,
+                                        result_schema_hash,
+                                        cfg.max_tool_rounds.saturating_mul(
+                                            MAX_DISPATCH_ATTEMPTS.saturating_sub(1),
+                                        ),
+                                    )
+                                    .await?
+                                }
+                            }
+                            Err(error) => ToolResultEnvelope::Err {
+                                failure: ToolFailure::new(
+                                    ToolFailureKind::Validation,
+                                    "invalid_json",
+                                    error,
+                                ),
+                            },
+                        };
+                        durable.complete(
+                            &tool_step_id,
+                            &outcome,
+                            chrono::Utc::now().timestamp(),
+                        )?;
+                        outcome
+                    }
+                    decision => {
+                        return Err(TurnError::DurableStepUnavailable {
+                            step_id: tool_step_id,
+                            state: format!("{decision:?}"),
+                        });
+                    }
+                };
+                durable.advance(durable_ordinal, chrono::Utc::now().timestamp())?;
+                durable_ordinal += 1;
+                if let ToolResultEnvelope::Err { failure } = &outcome
+                    && failure.kind == ToolFailureKind::Validation
+                {
+                    *schema_failures.entry(tc.function.name.clone()).or_default() += 1;
+                }
                 let tool_elapsed_ms = tool_started_at.elapsed().as_millis() as u64;
                 round_tool_dispatch_ms = round_tool_dispatch_ms.saturating_add(tool_elapsed_ms);
                 tracing::debug!(
@@ -594,32 +958,35 @@ impl TurnExecutor {
                     ordinal = tool_ordinal,
                     tool = %tc.function.name,
                     tool_ms = tool_elapsed_ms,
-                    ok = outcome.is_ok(),
+                    ok = matches!(outcome, ToolResultEnvelope::Ok { .. }),
                     "tool dispatch complete"
                 );
                 match &outcome {
-                    Ok(_) => tracing::info!(
+                    ToolResultEnvelope::Ok { .. } => tracing::info!(
                         target: "executor::tool_dispatch",
                         round = rounds,
                         ordinal = tool_ordinal,
                         tool = %tc.function.name,
                         "tool ok",
                     ),
-                    Err(e) => tracing::warn!(
+                    ToolResultEnvelope::Err { failure } => tracing::warn!(
                         target: "executor::tool_dispatch",
                         round = rounds,
                         ordinal = tool_ordinal,
                         tool = %tc.function.name,
-                        error = %e,
+                        error = %failure.message,
+                        failure_kind = ?failure.kind,
+                        attempt = failure.attempt,
                         "tool failed",
                     ),
                 }
 
                 let result_payload = ToolResultPayload {
                     ordinal: tool_ordinal,
-                    outcome: match outcome {
-                        Ok(v) => Ok(v.clone()),
-                        Err(e) => Err(e),
+                    outcome: match &outcome {
+                        ToolResultEnvelope::Ok { value } => Ok(value.clone()),
+                        ToolResultEnvelope::Err { failure } => Err(serde_json::to_string(failure)
+                            .unwrap_or_else(|_| failure.message.clone())),
                     },
                 };
                 pending.push(PendingEvent::encode(
@@ -630,8 +997,8 @@ impl TurnExecutor {
 
                 // Feed the tool result back into the chat history for the
                 // next round.
-                let feedback = serde_json::to_string(&result_payload.outcome)
-                    .unwrap_or_else(|_| "{\"outcome\":\"encoding_failed\"}".into());
+                let feedback = serde_json::to_string(&outcome)
+                    .unwrap_or_else(|_| "{\"status\":\"err\"}".into());
                 messages.push(ChatMessage::tool_result(&tc.id, feedback));
 
                 tool_ordinal += 1;
@@ -669,6 +1036,7 @@ impl TurnExecutor {
         //    tool_use/tool_result pairing invariant for us.
         let base_seq = log.last_seq(conversation_id)?;
         let written = log.commit_turn(conversation_id, base_seq, pending)?;
+        durable.finish(durable_ordinal, chrono::Utc::now().timestamp())?;
 
         // Kick the conversation row so UI observers see the new last_seq.
         // (Phase 1 could also update phase → idle here.)
@@ -706,6 +1074,57 @@ impl TurnExecutor {
             tool_rounds: rounds,
         })
     }
+}
+
+fn replay_completed_turn(
+    log: &EventLog<'_>,
+    conversation_id: &ConversationId,
+    input_event_seq: EventSeq,
+) -> Result<TurnSummary, TurnError> {
+    let events_written: Vec<EventRecord> = log
+        .replay_since(conversation_id, input_event_seq)?
+        .into_iter()
+        .take_while(|event| event.kind != EventKind::UserMsg)
+        .collect();
+    let assistant_text = events_written
+        .iter()
+        .rev()
+        .find(|event| event.kind == EventKind::ModelTurn)
+        .and_then(|event| event.decode_payload::<ModelTurnPayload>().ok())
+        .map(|payload| payload.text)
+        .unwrap_or_default();
+    let tool_rounds = u32::from(
+        events_written
+            .iter()
+            .any(|event| event.kind == EventKind::ToolUse),
+    );
+    Ok(TurnSummary {
+        events_written,
+        assistant_text,
+        tool_rounds,
+    })
+}
+
+fn tool_integration(tool_name: &str) -> String {
+    if let Some(rest) = tool_name.strip_prefix("mcp:")
+        && let Some((server, _)) = rest.split_once(':')
+    {
+        return format!("mcp:{server}");
+    }
+    tool_name
+        .split_once('.')
+        .map(|(integration, _)| integration)
+        .unwrap_or("builtin")
+        .to_owned()
+}
+
+fn parse_tool_arguments(raw: &str) -> Result<serde_json::Value, String> {
+    let value: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| format!("invalid tool arguments JSON: {error}"))?;
+    if !value.is_object() {
+        return Err("invalid tool arguments JSON: expected an object".into());
+    }
+    Ok(value)
 }
 
 /// Convert a span of event-log records into chat messages for the next
@@ -799,6 +1218,9 @@ fn hydrate_messages(events: &[EventRecord], spotlight_delim: Option<&str>) -> Ve
 #[cfg(test)]
 mod tests {
     use super::*;
+    use execlaw_core::conversation::{
+        ConversationKind, ConversationRow, ConversationStore, Modality,
+    };
     use execlaw_core::db::{Database, DbConfig};
     use execlaw_core::migrations::MigrationRunner;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -807,6 +1229,155 @@ mod tests {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
         db
+    }
+
+    fn seed_conversation(db: &Database, conversation_id: &ConversationId) {
+        ConversationStore::new(db)
+            .upsert(&ConversationRow {
+                conversation_id: conversation_id.clone(),
+                kind: ConversationKind::ControllerDM,
+                last_seq: EventSeq(0),
+                phase: Phase::Idle,
+                controller_id: None,
+                trust_class: "Controller".into(),
+                snapshot_blob: None,
+                snapshot_seq: None,
+                lease_owner: None,
+                lease_expires: None,
+                modality: Modality::Text,
+                display_name: None,
+                display_name_source: "auto".into(),
+                is_pinned: false,
+                is_ephemeral: false,
+                ephemeral_expires_at: None,
+                last_activity_at: 0,
+                context_window_policy: None,
+            })
+            .unwrap();
+    }
+
+    fn seed_tool_step(db: &Database, run_id: &str, step_id: &str) {
+        let conversation_id = ConversationId::from("retry-test");
+        seed_conversation(db, &conversation_id);
+        EventLog::new(db)
+            .append(
+                &EventRecord::new(
+                    conversation_id.clone(),
+                    EventSeq(1),
+                    EventKind::UserMsg,
+                    &serde_json::json!({"text": "test"}),
+                    Some("operator".into()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let durable = crate::durable::DurableRun::open(
+            db,
+            run_id,
+            "test-worker",
+            conversation_id,
+            EventSeq(1),
+            None,
+            1,
+        )
+        .unwrap();
+        durable
+            .define(
+                step_id,
+                0,
+                RunStepKind::ToolDispatch,
+                &serde_json::json!({"tool": "test"}),
+                None,
+                None,
+            )
+            .unwrap();
+    }
+
+    struct RetryProbe {
+        calls: AtomicUsize,
+        failures_before_success: usize,
+        message: &'static str,
+    }
+
+    #[async_trait]
+    impl ToolDispatch for RetryProbe {
+        async fn call(
+            &self,
+            _name: &str,
+            _args: &serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            if call < self.failures_before_success {
+                Err(self.message.into())
+            } else {
+                Ok(serde_json::json!({"ok": true}))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn transient_tool_failures_retry_with_a_hard_bound() {
+        let db = fresh_db();
+        seed_tool_step(&db, "retry-run", "tool:0");
+        let probe = Arc::new(RetryProbe {
+            calls: AtomicUsize::new(0),
+            failures_before_success: 2,
+            message: "temporarily unavailable",
+        });
+        let executor = TurnExecutor::new(InferenceClient::new("http://127.0.0.1:1"), probe.clone());
+        let result = executor
+            .dispatch_with_retry(
+                &db,
+                "retry-run",
+                "tool:0",
+                "calendar.lookup",
+                &serde_json::json!({}),
+                Some("a".repeat(64)),
+                Some("b".repeat(64)),
+                4,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(result, ToolResultEnvelope::Ok { .. }));
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn policy_denial_never_retries() {
+        let db = fresh_db();
+        seed_tool_step(&db, "denial-run", "tool:0");
+        let probe = Arc::new(RetryProbe {
+            calls: AtomicUsize::new(0),
+            failures_before_success: usize::MAX,
+            message: "not authorized: denied by policy",
+        });
+        let executor = TurnExecutor::new(InferenceClient::new("http://127.0.0.1:1"), probe.clone());
+        let result = executor
+            .dispatch_with_retry(
+                &db,
+                "denial-run",
+                "tool:0",
+                "calendar.delete",
+                &serde_json::json!({}),
+                Some("a".repeat(64)),
+                None,
+                4,
+            )
+            .await
+            .unwrap();
+        let ToolResultEnvelope::Err { failure } = result else {
+            panic!("expected failure")
+        };
+        assert_eq!(failure.kind, ToolFailureKind::PolicyDenied);
+        assert!(!failure.retryable);
+        assert_eq!(failure.attempt, 1);
+        assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+        let trace = ToolExecutionStore::new(&db)
+            .get_invocation("denial-run", "tool:0")
+            .unwrap()
+            .unwrap();
+        assert_eq!(trace.status, "denied");
+        assert_eq!(trace.attempts_used, 1);
     }
 
     struct NullTools;
@@ -916,6 +1487,57 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].kind, EventKind::UserMsg);
         assert_eq!(events[1].kind, EventKind::ModelTurn);
+    }
+
+    #[tokio::test]
+    async fn zero_tool_round_budget_still_allows_text_response() {
+        let db = fresh_db();
+        let response = r#"{
+            "id":"r1","model":"m","choices":[{
+                "index":0,
+                "message":{"role":"assistant","content":"text only"},
+                "finish_reason":"stop"
+            }]
+        }"#
+        .to_owned();
+        let server = Arc::new(ChainedMockServer {
+            responses: vec![response],
+            served: AtomicUsize::new(0),
+        });
+        let addr = run_mock_server(server).await;
+        let exec = TurnExecutor::new(
+            InferenceClient::new(format!("http://{addr}/v1")),
+            Arc::new(NullTools),
+        );
+        let cfg = TurnConfig {
+            model: ModelId("m".into()),
+            system_prompt: "test".into(),
+            temperature: None,
+            max_tokens: None,
+            max_tool_rounds: 0,
+            tools: vec![],
+            event_log_hmac_key: None,
+            phase_observer: None,
+            reasoning_enabled: false,
+            inbound_channel_origin: None,
+            spotlight_delim: None,
+            context_window_policy: String::new(),
+            summarizer_client: None,
+            session: None,
+        };
+
+        let summary = exec
+            .run_turn(
+                &db,
+                &ConversationId::from("conv-zero-tool-budget"),
+                "hello",
+                None,
+                &cfg,
+            )
+            .await
+            .unwrap();
+        assert_eq!(summary.assistant_text, "text only");
+        assert_eq!(summary.tool_rounds, 0);
     }
 
     #[tokio::test]
@@ -1078,6 +1700,192 @@ mod tests {
         assert!(res_ord.outcome.is_ok());
     }
 
+    #[tokio::test]
+    async fn same_input_event_replays_completed_turn_without_inference_or_dispatch_after_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turn-reopen.db");
+        let db = Database::open(&DbConfig {
+            path: path.clone(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let cid = ConversationId::from("conv-durable-replay");
+        seed_conversation(&db, &cid);
+
+        let server = Arc::new(ChainedMockServer {
+            responses: vec![
+                r#"{"id":"r1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"tc1","type":"function","function":{"name":"echo","arguments":"{\"msg\":\"ping\"}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned(),
+                r#"{"id":"r2","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"done"},"finish_reason":"stop"}]}"#.to_owned(),
+            ],
+            served: AtomicUsize::new(0),
+        });
+        let addr = run_mock_server(server.clone()).await;
+        let tools = Arc::new(RetryProbe {
+            calls: AtomicUsize::new(0),
+            failures_before_success: 0,
+            message: "unused",
+        });
+        let executor = TurnExecutor::new(
+            InferenceClient::new(format!("http://{addr}/v1")),
+            tools.clone(),
+        );
+        let cfg = TurnConfig {
+            model: ModelId("m".into()),
+            system_prompt: "test".into(),
+            temperature: None,
+            max_tokens: None,
+            max_tool_rounds: 3,
+            tools: vec![ToolDeclaration::function(
+                "echo",
+                "echo",
+                serde_json::json!({"type":"object"}),
+            )],
+            event_log_hmac_key: None,
+            phase_observer: None,
+            reasoning_enabled: false,
+            inbound_channel_origin: None,
+            spotlight_delim: None,
+            context_window_policy: String::new(),
+            summarizer_client: None,
+            session: None,
+        };
+
+        let first = executor
+            .run_turn(&db, &cid, "go", None, &cfg)
+            .await
+            .unwrap();
+        assert_eq!(first.assistant_text, "done");
+        assert_eq!(server.served.load(Ordering::SeqCst), 2);
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
+        drop(db);
+
+        let reopened = Database::open(&DbConfig { path, key: None }).unwrap();
+        MigrationRunner::new(&reopened).apply_all().unwrap();
+        let replay = executor
+            .resume_turn_from_event(&reopened, &cid, EventSeq(1), &cfg, Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(replay.assistant_text, "done");
+        assert_eq!(server.served.load(Ordering::SeqCst), 2);
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
+        let events = EventLog::new(&reopened)
+            .replay_since(&cid, EventSeq(0))
+            .unwrap();
+        assert_eq!(events.len(), 4);
+        assert_eq!(
+            events.iter().map(|event| event.kind).collect::<Vec<_>>(),
+            vec![
+                EventKind::UserMsg,
+                EventKind::ToolUse,
+                EventKind::ToolResult,
+                EventKind::ModelTurn,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn reopen_replays_completed_steps_and_retries_only_interrupted_model_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turn-interrupted.db");
+        let db = Database::open(&DbConfig {
+            path: path.clone(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let cid = ConversationId::from("conv-durable-interrupted");
+        seed_conversation(&db, &cid);
+
+        let first_server = Arc::new(ChainedMockServer {
+            responses: vec![
+                r#"{"id":"r1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"tc1","type":"function","function":{"name":"echo","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#.to_owned(),
+                "not-json".to_owned(),
+            ],
+            served: AtomicUsize::new(0),
+        });
+        let first_addr = run_mock_server(first_server.clone()).await;
+        let tools = Arc::new(RetryProbe {
+            calls: AtomicUsize::new(0),
+            failures_before_success: 0,
+            message: "unused",
+        });
+        let cfg = TurnConfig {
+            model: ModelId("m".into()),
+            system_prompt: "test".into(),
+            temperature: None,
+            max_tokens: None,
+            max_tool_rounds: 3,
+            tools: vec![ToolDeclaration::function(
+                "echo",
+                "echo",
+                serde_json::json!({"type":"object"}),
+            )],
+            event_log_hmac_key: None,
+            phase_observer: None,
+            reasoning_enabled: false,
+            inbound_channel_origin: None,
+            spotlight_delim: None,
+            context_window_policy: String::new(),
+            summarizer_client: None,
+            session: None,
+        };
+        let first_executor = TurnExecutor::new(
+            InferenceClient::new(format!("http://{first_addr}/v1")),
+            tools.clone(),
+        );
+        assert!(
+            first_executor
+                .run_turn(&db, &cid, "go", None, &cfg)
+                .await
+                .is_err()
+        );
+        assert_eq!(first_server.served.load(Ordering::SeqCst), 2);
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
+        drop(db);
+
+        let reopened = Database::open(&DbConfig {
+            path: path.clone(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&reopened).apply_all().unwrap();
+        reopened
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE state_run_steps SET lease_expires_at = 0 \
+                     WHERE run_id = 'turn:conv-durable-interrupted:1' \
+                       AND step_id = 'model:1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let recovery_server = Arc::new(ChainedMockServer {
+            responses: vec![
+                r#"{"id":"r2","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}"#.to_owned(),
+            ],
+            served: AtomicUsize::new(0),
+        });
+        let recovery_addr = run_mock_server(recovery_server.clone()).await;
+        let recovery_executor = TurnExecutor::new(
+            InferenceClient::new(format!("http://{recovery_addr}/v1")),
+            tools.clone(),
+        );
+        let summary = recovery_executor
+            .resume_turn_from_event(&reopened, &cid, EventSeq(1), &cfg, Vec::new())
+            .await
+            .unwrap();
+
+        assert_eq!(summary.assistant_text, "recovered");
+        assert_eq!(recovery_server.served.load(Ordering::SeqCst), 1);
+        assert_eq!(tools.calls.load(Ordering::SeqCst), 1);
+        let events = EventLog::new(&reopened)
+            .replay_since(&cid, EventSeq(0))
+            .unwrap();
+        assert_eq!(events.len(), 4);
+    }
+
     /// Adversarial: a tool handler that returns `Err` must still produce
     /// a paired `tool_result` event whose outcome is the Err message.
     /// This is the tool_use/tool_result pairing invariant under failure.
@@ -1233,6 +2041,118 @@ mod tests {
             TurnError::MaxRounds(n) => assert_eq!(n, 2),
             other => panic!("wrong error: {other:?}"),
         }
+
+        let events = EventLog::new(&db).replay_since(&cid, EventSeq(0)).unwrap();
+        let kinds: Vec<EventKind> = events.iter().map(|event| event.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                EventKind::UserMsg,
+                EventKind::ToolUse,
+                EventKind::ToolResult,
+                EventKind::ToolUse,
+                EventKind::ToolResult,
+                EventKind::LlmCancelled,
+            ],
+            "a capped turn must retain every executed tool pair and its cancellation",
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_tool_arguments_are_rejected_without_dispatch() {
+        let db = fresh_db();
+        let malformed_call = r#"{
+            "id":"r1","model":"m","choices":[{
+                "index":0,
+                "message":{"role":"assistant","content":null,
+                    "tool_calls":[{"id":"tc1","type":"function",
+                        "function":{"name":"write_memory","arguments":"{\"key\":"}}]},
+                "finish_reason":"tool_calls"
+            }]
+        }"#
+        .to_owned();
+        let final_response = r#"{
+            "id":"r2","model":"m","choices":[{
+                "index":0,
+                "message":{"role":"assistant","content":"I could not execute that call."},
+                "finish_reason":"stop"
+            }]
+        }"#
+        .to_owned();
+        let server = Arc::new(ChainedMockServer {
+            responses: vec![malformed_call, final_response],
+            served: AtomicUsize::new(0),
+        });
+        let addr = run_mock_server(server).await;
+
+        struct CountingTool(AtomicUsize);
+        #[async_trait]
+        impl ToolDispatch for CountingTool {
+            async fn call(
+                &self,
+                _name: &str,
+                _args: &serde_json::Value,
+            ) -> Result<serde_json::Value, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(serde_json::json!({"unexpected": true}))
+            }
+        }
+
+        let tools = Arc::new(CountingTool(AtomicUsize::new(0)));
+        let exec = TurnExecutor::new(
+            InferenceClient::new(format!("http://{addr}/v1")),
+            tools.clone(),
+        );
+        let cid = ConversationId::from("conv-malformed-tool-args");
+        let cfg = TurnConfig {
+            model: ModelId("m".into()),
+            system_prompt: "test".into(),
+            temperature: None,
+            max_tokens: None,
+            max_tool_rounds: 3,
+            tools: vec![ToolDeclaration::function(
+                "write_memory",
+                "write a value",
+                serde_json::json!({"type":"object"}),
+            )],
+            event_log_hmac_key: None,
+            phase_observer: None,
+            reasoning_enabled: false,
+            inbound_channel_origin: None,
+            spotlight_delim: None,
+            context_window_policy: String::new(),
+            summarizer_client: None,
+            session: None,
+        };
+
+        let summary = exec
+            .run_turn(&db, &cid, "remember this", None, &cfg)
+            .await
+            .unwrap();
+        assert_eq!(summary.assistant_text, "I could not execute that call.");
+        assert_eq!(tools.0.load(Ordering::SeqCst), 0);
+
+        let events = EventLog::new(&db).replay_since(&cid, EventSeq(0)).unwrap();
+        let use_payload: ToolUsePayload = events
+            .iter()
+            .find(|event| event.kind == EventKind::ToolUse)
+            .unwrap()
+            .decode_payload()
+            .unwrap();
+        assert!(
+            use_payload.args_json.is_string(),
+            "raw malformed input is retained"
+        );
+        let result_payload: ToolResultPayload = events
+            .iter()
+            .find(|event| event.kind == EventKind::ToolResult)
+            .unwrap()
+            .decode_payload()
+            .unwrap();
+        assert!(
+            matches!(result_payload.outcome, Err(ref error) if error.contains("invalid tool arguments JSON")),
+            "the model must receive a structured parse failure",
+        );
     }
 
     /// 2026-05-16 — fix #P1a (Codex review): `hydrate_messages` must

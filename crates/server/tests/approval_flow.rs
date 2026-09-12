@@ -55,6 +55,7 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
         turn_cancel: execlaw_server::turn_cancel::TurnCancellationRegistry::new(),
         runner_supervisor: None,
         research_supervisor: None,
+        memory_extract: execlaw_server::memory_extract_runtime::MemoryExtractionSink::noop(),
         sidecar_supervisor: None,
         host_transports: execlaw_server::transport_registry::HostTransportRegistry::new(),
         skill_capture: execlaw_skills::AutoCaptureSink::noop(),

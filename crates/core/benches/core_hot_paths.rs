@@ -481,7 +481,7 @@ fn fresh_conv_row(id: &str) -> ConversationRow {
         is_pinned: false,
         is_ephemeral: false,
         ephemeral_expires_at: None,
-
+    }
 }
 
 fn bench_conversation_resolver(c: &mut Criterion) {

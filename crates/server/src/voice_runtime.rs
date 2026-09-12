@@ -99,7 +99,7 @@ impl VoiceRuntime {
     pub fn build_with_db(events: EventBus, db: execlaw_core::Database) -> Self {
         let db_for_whisper = db.clone();
         let db_for_kokoro = db.clone();
-        let db_for_voice = db;
+        let db_for_voice = db.clone();
         Self::with_http_clients(
             events,
             Arc::new(move || {
@@ -175,6 +175,7 @@ impl VoiceRuntime {
                     }
                 }
             }),
+            Some(db),
         )
     }
 
@@ -187,7 +188,9 @@ impl VoiceRuntime {
         whisper_url: Arc<dyn Fn() -> Option<String> + Send + Sync>,
         kokoro_url: Arc<dyn Fn() -> Option<String> + Send + Sync>,
         voice_id: Arc<dyn Fn() -> String + Send + Sync>,
+        policy_db: Option<execlaw_core::Database>,
     ) -> Self {
+        let stt_policy_db = policy_db.clone();
         let stt_factory: SttFactory = Arc::new(move || {
             // If no URL is configured the runtime falls back to a
             // null Whisper that returns empty Finals — this keeps
@@ -195,12 +198,32 @@ impl VoiceRuntime {
             // (e.g. operator only set up VoiceTTS for one-way
             // narration). The empty-final path is logged.
             let url = (whisper_url)().unwrap_or_default();
-            Box::new(WhisperClient::new(url)) as Box<dyn SttClient>
+            let client = match stt_policy_db.as_ref() {
+                Some(db) => {
+                    crate::local_endpoint_policy::checked_client(db, "voice:stt", &url, |builder| {
+                        builder
+                    })
+                    .map(|(http, _)| WhisperClient::with_client(url.clone(), http))
+                    .unwrap_or_else(|_| WhisperClient::new(url))
+                }
+                None => WhisperClient::new(url),
+            };
+            Box::new(client) as Box<dyn SttClient>
         });
+        let tts_policy_db = policy_db;
         let tts_factory: TtsFactory = Arc::new(move || {
             let url = (kokoro_url)().unwrap_or_default();
             let voice = (voice_id)();
-            let client = KokoroClient::new(url, voice);
+            let client = match tts_policy_db.as_ref() {
+                Some(db) => {
+                    crate::local_endpoint_policy::checked_client(db, "voice:tts", &url, |builder| {
+                        builder
+                    })
+                    .map(|(http, _)| KokoroClient::with_client(url.clone(), voice.clone(), http))
+                    .unwrap_or_else(|_| KokoroClient::new(url, voice))
+                }
+                None => KokoroClient::new(url, voice),
+            };
             let handle = client.interrupt_handle();
             (Box::new(client) as Box<dyn TtsClient>, Some(handle))
         });

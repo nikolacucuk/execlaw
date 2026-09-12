@@ -203,6 +203,10 @@ pub struct AppState {
     /// `None` only in test fixtures that don't construct the
     /// supervisor (production cmd_serve always wires this up).
     pub research_supervisor: Option<crate::research::ResearchSupervisor>,
+    /// Durable evidence-backed memory extraction producer. Production
+    /// bootstrap starts the leased worker before accepting traffic; tests
+    /// default to a no-op sink.
+    pub memory_extract: crate::memory_extract_runtime::MemoryExtractionSink,
     /// Phase C — sink the chat handler enqueues into at successful
     /// turn completion. Never blocks; auto-capture is best-effort
     /// and gated by `config_skills.auto_capture_enabled`. Defaults

@@ -278,6 +278,7 @@ pub trait ServiceController: Send + Sync {
 pub struct BollardServiceController {
     docker: bollard::Docker,
     health_timeout: Duration,
+    provenance: Option<execlaw_core::artifact_provenance::ArtifactProvenanceStore>,
     /// Reqwest client kept around so each health probe doesn't
     /// allocate a new TLS pool. Loopback only in v1; rustls is
     /// pulled in via the workspace feature on `reqwest` but never
@@ -295,6 +296,16 @@ impl BollardServiceController {
         Self::with_docker(docker)
     }
 
+    /// Production constructor. Docker launches fail closed unless the image
+    /// has verified persisted provenance or the Controller enabled the
+    /// audited local-development override.
+    pub fn connect_with_provenance(db: execlaw_core::Database) -> Result<Self, ServiceError> {
+        let mut controller = Self::connect()?;
+        controller.provenance =
+            Some(execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(db));
+        Ok(controller)
+    }
+
     pub fn with_docker(docker: bollard::Docker) -> Result<Self, ServiceError> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(2))
@@ -303,6 +314,7 @@ impl BollardServiceController {
         Ok(Self {
             docker,
             health_timeout: Duration::from_secs(2),
+            provenance: None,
             http,
         })
     }
@@ -400,6 +412,20 @@ impl ServiceController for BollardServiceController {
         if spec.image.trim().is_empty() {
             return Err(ServiceError::Invalid("image must not be empty".into()));
         }
+        self.provenance
+            .as_ref()
+            .ok_or_else(|| {
+                ServiceError::Invalid(
+                    "artifact provenance store is not configured for Docker launch".into(),
+                )
+            })?
+            .authorize_oci_reference(
+                &format!("sidecar:{}", spec.name),
+                execlaw_core::artifact_provenance::ArtifactType::Sidecar,
+                &spec.image,
+                "service-controller",
+            )
+            .map_err(|error| ServiceError::Invalid(error.to_string()))?;
         if spec.runtime != ServiceRuntime::Docker {
             return Err(ServiceError::Invalid(format!(
                 "BollardServiceController cannot spawn ServiceRuntime::{:?} — \
@@ -1003,14 +1029,7 @@ impl ServiceController for NativeServiceController {
         // at the supervisor-picked port and isolate the model cache
         // per-execlaw so multiple instances on one host (dev + prod
         // shadow, etc.) don't fight. Spec env wins on conflict.
-        let mut env: Vec<(String, String)> = Vec::new();
-        if spec.binary_hint == "ollama" {
-            env.push((
-                "OLLAMA_HOST".into(),
-                format!("127.0.0.1:{}", spec.host_port),
-            ));
-        }
-        env.extend(spec.env.iter().cloned());
+        let env = native_service_env(spec);
 
         let mut cmd = tokio::process::Command::new(&binary);
         cmd.args(&spec.args);
@@ -1170,6 +1189,22 @@ impl ServiceController for NativeServiceController {
         // append-only model store keep the cost minimal.
         Ok(None)
     }
+}
+
+fn native_service_env(spec: &ServiceSpec) -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+    if spec.binary_hint == "ollama" {
+        env.push((
+            "OLLAMA_HOST".into(),
+            format!("127.0.0.1:{}", spec.host_port),
+        ));
+    }
+    env.extend(spec.env.iter().cloned());
+    if spec.binary_hint == "ollama" {
+        env.retain(|(key, _)| key != "OLLAMA_NO_CLOUD");
+        env.push(("OLLAMA_NO_CLOUD".into(), "1".into()));
+    }
+    env
 }
 
 /// Drain a child stdout/stderr stream into the ring buffer + tracing.
@@ -1611,6 +1646,19 @@ mod tests {
             args: vec!["serve".into()],
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn managed_ollama_forces_cloud_features_off() {
+        let mut spec = apple_spec("ollama");
+        spec.env.push(("OLLAMA_NO_CLOUD".into(), "0".into()));
+        let env = native_service_env(&spec);
+        let cloud_values = env
+            .iter()
+            .filter(|(key, _)| key == "OLLAMA_NO_CLOUD")
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(cloud_values, ["1"]);
     }
 
     #[test]

@@ -22,7 +22,10 @@ thiserror.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 
-# dev-dependencies were Criterion-only for the legacy thread_tool /
+[dev-dependencies]
+tempfile.workspace = true
+
+# Criterion was used only by the legacy thread_tool /
 # memory_tool benchmarks; both modules moved to
 # `execlaw_core::builtin_tools` and are now exercised by the
 # `plugin_host_hot_paths` Criterion harness.

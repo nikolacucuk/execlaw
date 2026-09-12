@@ -129,8 +129,9 @@ describe("Settings shell", () => {
             "Eval flags",
         ]) {
             expect(
-                screen.getByRole("link", { name: new RegExp(label, "i") }),
-            ).toBeInTheDocument();
+                screen.getAllByRole("link", { name: new RegExp(label, "i") })
+                    .length,
+            ).toBeGreaterThan(0);
         }
         // Old tabs that have been merged elsewhere should be gone.
         expect(

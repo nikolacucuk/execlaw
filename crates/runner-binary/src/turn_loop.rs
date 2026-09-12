@@ -22,7 +22,9 @@ use execlaw_inference_api::{
     ChatMessage, ChatRequest, ChatStreamChoice, InferenceClient, ModelId, Role, ToolCall,
     ToolCallDelta, ToolCallFunction,
 };
-use execlaw_runner_protocol::{RunnerToServer, ToolCallResult, ToolOutcome, TurnRequest};
+use execlaw_runner_protocol::{
+    ModelRoundCheckpoint, RunnerToServer, ToolCallResult, ToolOutcome, TurnRequest,
+};
 use futures::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -97,7 +99,10 @@ pub async fn run_turn(
     // array via `ChatMessage::user_with_images`. Otherwise fall
     // through to the text-only path (the historical shape; every
     // text-only turn keeps an identical wire encoding).
-    if req.user_image_urls.is_empty() {
+    if req.resume {
+        // The server reconstructed all completed model/tool messages from
+        // durable checkpoints; appending the trigger again would replay it.
+    } else if req.user_image_urls.is_empty() {
         messages.push(ChatMessage {
             role: Role::User,
             content: Some(execlaw_inference_api::MessageContent::Text(user_text)),
@@ -494,14 +499,27 @@ pub async fn run_turn(
             );
         }
 
+        let checkpoint_calls: Vec<ToolCall> =
+            tool_calls.iter().map(ToolCallAcc::finalize).collect();
+        tx.send(RunnerToServer::ModelRoundCheckpoint {
+            turn_id: req.turn_id.clone(),
+            conversation_id: req.conversation_id.clone(),
+            checkpoint: ModelRoundCheckpoint {
+                round: req.round_offset.saturating_add(round - 1),
+                model: model_id.clone(),
+                text: text_acc.clone(),
+                finish_reason: finish_reason.clone(),
+                tool_calls: checkpoint_calls.clone(),
+            },
+        })?;
+
         if finish == "tool_calls" && !tool_calls.is_empty() {
             // Append the assistant's tool_calls turn to the
             // history. content stays Some(text_acc) so the model
             // remembers any reasoning it emitted alongside the
             // call. tool_calls carries the structured calls the
             // model produced.
-            let assistant_calls: Vec<ToolCall> =
-                tool_calls.iter().map(ToolCallAcc::finalize).collect();
+            let assistant_calls = checkpoint_calls;
             // 2026-05-16 — sanitize tool_call.arguments before
             // echoing the assistant turn back into the round-N+1
             // request. Models (Qwen3.5-AWQ in particular, and only
@@ -639,11 +657,9 @@ pub async fn run_turn(
                         let content = match &result.outcome {
                             ToolOutcome::Ok { value } => serde_json::to_string(value)
                                 .unwrap_or_else(|_| "\"<unrepresentable result>\"".into()),
-                            ToolOutcome::Err { message } => {
+                            ToolOutcome::Err { .. } => {
                                 errored_this_round.insert(result.call_id.clone());
-                                serde_json::to_string(
-                                    &serde_json::json!({"error": message}),
-                                )
+                                serde_json::to_string(&result.outcome)
                                 .unwrap_or_else(|_| "{\"error\":\"<unrepresentable\"}".into())
                             }
                         };

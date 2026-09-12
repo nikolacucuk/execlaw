@@ -83,11 +83,14 @@ user.
   cross-conversation memory, cross-conversation state, or any tool
   outside the capability set the policy engine granted for that
   turn.
-- **Tampered event log** — every `state_events` row carries an
-  HMAC-SHA256 tag in a chain (`tag_n = HMAC(key, prev_tag ||
-  payload)`). Replay verifies the chain; tampering surfaces as
-  `DbError::TamperDetected`. The HMAC key lives in the SQLCipher-
-  encrypted vault.
+- **Tampered event log** — legacy integrity-v1 rows retain their independent
+  HMAC-SHA256 interpretation. Integrity-v2 rows form a per-conversation chain
+  over the complete canonical row, key id, and predecessor tag. A separately
+  signed durable head records the terminal sequence and tag. Replay verifies
+  the complete chain and head without invoking model or plugin code;
+  mutation, deletion, insertion, reordering, or truncation before that head
+  surfaces as `DbError::TamperDetected`. Keys live in the SQLCipher-encrypted
+  vault.
 - **Encrypted state at rest** — production builds enable the
   `sqlcipher` Cargo feature; the SQLite database is encrypted with
   a key derived from a master key held in the OS keyring (Keychain
@@ -114,6 +117,23 @@ user.
   Inference is local-only against an OpenAI-compatible endpoint
   (vLLM / OpenArc / Whisper / Kokoro). Removing the rule is not a
   configuration option; it requires editing source.
+- **Local-service SSRF and DNS rebinding** — the shared endpoint policy accepts
+  loopback plus only Controller-approved CIDRs and DNS names from SQLite. Every
+  DNS answer must be local/approved, accepted answers are pinned into the HTTP
+  client, redirects are disabled, and userinfo plus alternate numeric hosts are
+  rejected. Resolution classifications, addresses, and failures are persisted
+  for operator inspection. Configured inference, HTTP MCP, Graphiti, and voice
+  STT/TTS use this path.
+- **Untraceable injected memory** — current memory projection accepts only an
+  approved assertion with at least one append-only evidence row. Evidence binds
+  the assertion to a conversation event, payload path, and quote hash; trust is
+  filtered in SQL before ranking.
+- **Artifact substitution** — bundled plugin ZIPs require an allowlisted
+  identity/repository/workflow, matching ZIP and SBOM digests, and offline
+  cosign verification of SLSA provenance. Subprocess bytes are checked at
+  spawn, and sidecar/runner OCI references must be digest-pinned and have a
+  verified provenance row. The only bypass is a persisted Controller-enabled
+  local-development override, and every use is audited.
 
 ### What we explicitly do NOT defend against
 
@@ -158,7 +178,9 @@ user.
 | At-rest DB encryption | SQLCipher (AES-256-CBC + PBKDF2-HMAC-SHA512 KDF) | `crates/core` with `sqlcipher` feature |
 | Vault master-key storage | OS keyring + file fallback at `~/.execlaw/master.key` | `crates/vault/src/keyring_key.rs` |
 | Admin password | Argon2id (default params) | `crates/server/src/routes.rs` (`verify_password`) |
-| Event-log tamper-evidence | HMAC-SHA256 chain | `crates/core/src/event_hmac.rs` |
+| Event-log integrity | Versioned HMAC-SHA256: independent v1 rows, chained v2 rows, signed terminal heads | `crates/core/src/event_hmac.rs`, `crates/core/src/events.rs` |
+| Artifact content identity | SHA-256 for ZIPs, subprocesses, OCI references, and SBOM sidecars | `crates/core/src/artifact_provenance.rs` |
+| Build provenance | Offline cosign verification of SLSA provenance against SQLite allowlists | `crates/core/src/artifact_provenance.rs`, `crates/server/src/bundled_plugins.rs` |
 | Capability tokens (runner) | Ed25519 (EdDSA), short-lived JWTs | `crates/server/src/auth.rs` |
 | Session tokens (SPA) | Ed25519 access JWT (15 min) + refresh JWT (7 d) | `crates/server/src/auth.rs` |
 | Approval tokens (cold contact) | Ed25519 JWT with `jti = approval_id` | `crates/server/src/approvals.rs` |
@@ -166,10 +188,10 @@ user.
 | TLS to local inference | rustls (no system CA dep) | `crates/inference-api` |
 | TLS to plugin endpoints | rustls | per-plugin via `reqwest` |
 
-Keys are generated per-install. Rotation playbooks for the HMAC key
-(`execlaw resign-events`) and the JWT signing key (replace the
-keyring entry + restart) are described in `crates/cli/src/main.rs --help`
-output; a polished operator doc lands with the 1.0 release.
+Keys are generated per-install. Event-integrity rotation adds a new key id for
+future rows and checkpoints while retaining old keys for verification; it does
+not re-sign prior ranges. Destructive event re-signing is rejected after any
+v2 checkpoint exists. JWT signing-key rotation remains a separate operation.
 
 There is no cloud HSM, no remote KMS, no key escrow. Keys are local;
 the vault export bundle (`execlaw backup`) is encrypted with a
@@ -208,9 +230,11 @@ implications:
    tier (Rhai) runs in the host process; the subprocess tier runs as
    the same OS user. There is no sandbox.
 2. **Plugin manifest validation is structural, not behavioural.**
-   The host parses the TOML, registers declared hooks, validates the
-   JSON Schema for tool args. It does not analyze plugin code for
-   intent.
+  The host parses the TOML and compiles declared tool schemas as JSON
+  Schema Draft 2020-12 before registering any hooks. Missing, malformed,
+  or externally referencing declared schemas reject registration; compiled
+  schemas validate arguments before credential lookup and dispatch. The
+  host does not analyze plugin code for intent.
 3. **Plugin updates are operator-approved**. The install API
    refuses to overwrite an installed plugin without
    `if_existing=upgrade`, and the operator must explicitly enable
@@ -270,6 +294,18 @@ time of writing — pending merge of `.github/workflows/ci.yml`).
 There is none. See §4. The roadmap discusses a possible WASM-tier
 plugin runtime that would offer real isolation; until then, the
 trust model is "operator-curated set of audited plugin sources."
+Artifact verification establishes which reviewed source/workflow produced an
+artifact and detects byte substitution; it does not make that plugin safe.
+
+### Release provenance handoff
+
+Platform workflows generate GitHub SLSA attestations and packaging scripts
+generate SPDX 2.3 sidecars. Bundled installation, however, consumes detached
+`.provenance.json` and offline `.sigstore.json` files. The current release file
+lists do not publish those two runtime-consumed files, so a release is not yet
+end-to-end installable through the verified bundled path without an additional
+export step. Do not treat the existence of a GitHub-hosted attestation alone as
+proof that this handoff is complete.
 
 ### CI absence (until first push of `.github/workflows/ci.yml`)
 
@@ -288,15 +324,15 @@ made this backup" and "the install that restores it." A leaked
 backup file plus its passphrase fully discloses the install's state.
 Treat backup files as you would treat the SQLite database itself.
 
-### Webhook routes are public
+### Webhook routes are public endpoints
 
 `[[webhook_routes]]` mounts at `/api/webhooks/{plugin_id}{path}`
-without HTTP-layer auth. The plugin handler must validate caller
-identity, typically with `?token=<secret>` against a vault-stored
-secret. **This is a per-plugin contract**; a plugin that doesn't
-validate is a security bug in *that plugin*. The host cannot force
-correct validation. Audit any plugin's webhook handler before
-relying on it.
+without execlaw session JWT authentication. The host enforces a
+manifest-declared query-token or HMAC-SHA256-header mode before
+publishing or dispatching the request. A legacy route that omits an
+`auth` declaration must validate caller identity in its plugin handler.
+Audit both the route declaration and any handler fallback before
+relying on a plugin webhook.
 
 ### Logs may contain sensitive data
 
@@ -367,8 +403,9 @@ If you're deploying execlaw on a machine that's network-reachable:
    process / your user account. The signal-cli, wuzapi, and similar
    sidecars are similarly trusted — pin to known-good image
    digests, not `:latest`, in production.
-6. Rotate the HMAC key on a schedule; `execlaw resign-events`
-   re-signs the historical event log under the new key.
+6. Rotate event-integrity keys by adding a new key id and retaining prior keys
+  for verification. Do not re-sign historical v2 ranges; the core rejects
+  destructive re-signing after a v2 checkpoint exists.
 7. Back up `~/.execlaw/execlaw.db` (and the file-fallback master
    key, if you're using it) on the same cadence as any other
    operator-critical state. `execlaw backup` produces an encrypted

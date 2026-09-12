@@ -53,7 +53,7 @@ How a conversation in execlaw turns into model calls, tool calls, and durable st
 
 Two shapes worth memorising:
 
-1. **The event log is canonical.** Everything the runner does is replayable from `state_events`. If the runner crashes mid-turn, it dies; the supervisor respawns a fresh container; the new runner reads the log and resumes.
+1. **The event log is canonical.** Everything committed by the runner is replayable from `state_events`. If the runner crashes, the supervisor respawns a fresh container and rehydrates the last committed turn. Migration 0017 adds finer run/step recovery primitives, but normal chat turns do not yet execute through that store.
 2. **The LLM does not commit anything directly.** Every tool call goes through dispatch; every effect goes through the outbox; every persistence write goes through `EventLog::commit_turn`. The model proposes; the framework disposes.
 
 ---
@@ -63,7 +63,7 @@ Two shapes worth memorising:
 | Term | Meaning |
 |---|---|
 | **Conversation** | A `state_conversations` row with a unique `conversation_id`. The unit of isolation: one runner container per active conversation. |
-| **Event** | An append-only `state_events` row. Every event has `(conversation_id, seq, kind, payload, hmac_tag)`. Seq is monotonic per conversation. |
+| **Event** | An append-only `state_events` row. Every event has `(conversation_id, seq, kind, payload, tag, key_id, integrity_version, prev_tag)`. Seq is monotonic per conversation. |
 | **Turn** | One round of `user_msg → ... → model_turn` committed atomically. May contain N tool-call rounds in between. |
 | **Tool round** | One `model → tool_calls → tool_results → model` bounce inside a turn. `max_tool_rounds` caps runaway loops. |
 | **Trust class** | The conversation's classification: `Controller \| Delegated \| KnownTrusted \| KnownLimited \| UnknownPending \| Blocked`. Drives capability gating. |
@@ -140,9 +140,46 @@ Key invariants the executor enforces (`crates/runner-local/src/turn.rs`):
 - **OpenAI tool-message order on replay.** When `hydrate_messages` (in-process) or `build_runner_history_messages` (runner-mediated) reconstruct chat history from the event log, every `tool` role message is preceded by an `assistant` message bearing a `tool_calls` array with the matching `tool_call_id`. One synthetic `assistant(content="", tool_calls=[call])` is emitted per `ToolUse` event; the terminal `ModelTurn` becomes a plain `assistant(text=final, tool_calls=[])`. Pre-2026-05-16 the swap-into-final-ModelTurn pattern produced `[user, tool, assistant(tool_calls)]` which vLLM with `--enable-auto-tool-choice` may reject outright and confuses the model into reading past calls as future. `[shipped]`
 - **Bounded tool rounds.** `max_tool_rounds` (default 16, configurable per turn via `TurnRequest.max_tool_rounds`) caps the loop. The runner clamps the requested cap to `min(req, RUNNER_MAX_TOOL_ROUNDS = 24)` as a belt-and-suspenders ceiling. Exceeding it commits an `LlmCancelled` event and returns `TurnError::MaxRounds`. `[shipped]`
 - **Phase observer.** `AwaitingTool` / `Thinking` transitions are signalled to a phase observer the server wires to the WebSocket bus, so transports can keep typing-indicators on through tool calls. `[shipped]`
-- **HMAC chaining.** Every event the executor writes is signed with the server's HMAC key. The chain is `tag_n = HMAC(key, prev_tag || payload)`, making the log tamper-evident. `[shipped]`
+- **Versioned HMAC integrity.** Legacy v1 rows retain independent row HMACs. A signed genesis checkpoint commits to that frozen prefix; subsequent v2 rows bind the full canonical row, signing key id, and previous tag. The terminal head is updated in the same transaction and replay verifies the complete chain before returning a suffix. Key rotation retains old verification keys rather than rewriting history. `[shipped]`
 
-### 3.1 Why a per-conversation runner
+### 3.1 Durable step boundaries `[shipped for chat turns]`
+
+Migration 0017 and `crates/core/src/runs.rs` add a generic `RunStore` beneath
+the turn model. `state_runs` holds status, parent, cursor, input event, and
+deadline; `state_run_steps` holds stable `(step_id, ordinal, kind, input_hash)`
+definitions plus attempts, leases, output references, approval IDs, and outbox
+idempotency keys.
+
+The store enforces transitions and exposes `next_safe_action`: claim pending,
+reclaim an expired lease, wait for a live lease or approval, advance a
+completed cursor, or report a terminal run. `TurnExecutor` opens a stable run
+from `(conversation_id, input_event_seq)`, checkpoints `model:<round>` and
+`tool:<round>:<call_index>` outputs, and rebuilds the original same-commit event
+batch from replayed outputs after restart. Runner-mediated turns checkpoint the
+same boundaries in the server before host dispatch. Effectful steps can insert
+an outbox row and complete the step in one transaction, and a repeated enqueue
+must match the already-reserved idempotency key and payload. Reopen tests cover
+lease recovery, completed-step replay, and approval waits. Remaining recovery
+work includes caller-provided HTTP request idempotency and the full process-kill
+matrix for child-run joins.
+
+### 3.2 Typed tool outcomes `[shipped in-process]`
+
+`ToolResultEnvelope` carries either a JSON value or `ToolFailure` with stable
+`kind`, `code`, sanitized `message`, `retryable`, optional `retry_after_ms`,
+`attempt`, and correction `guidance`. Policy/approval/validation/cancellation
+failures normalize to non-retryable. The in-process `TurnExecutor` retries only
+transient/timeout failures up to three attempts with bounded exponential
+backoff, stops a third identical canonical `(tool, args)` call, bounds schema
+corrections, and opens a 30-second per-integration circuit after repeated
+terminal transient failures.
+
+These retry counters and circuits are process memory, not `RunStore` state.
+The persisted `ToolResultPayload` and container `runner-protocol` still carry
+legacy string errors, so durable retry budgets and protocol-wide typed failures
+remain P0 follow-up work.
+
+### 3.3 Why a per-conversation runner
 
 The runner is a separate container — **not** a thread inside the control plane. Two reasons:
 
@@ -190,9 +227,9 @@ The runner is **stateless against the event log**. Memorise this — it's the pr
 
 The novel part is **trust-class scoping on long-term memory**. The composite primary key `(scope, trust_class, key)` lets the same key carry different values at different trust levels. A `Controller`-class secret is invisible to a `KnownTrusted` caller even when scope+key match — the row simply doesn't exist at their trust level.
 
-### 4.2 Lifecycle (migration 0035) `[schema-ready]`
+### 4.2 Lifecycle `[schema-ready]`
 
-The four-layer model describes *kinds* of memory. Migration 0035 adds **lifecycle dynamics** — recency, frequency, promotion, demotion. The columns added to `memory_entries`:
+The four-layer model describes *kinds* of memory. The baseline schema includes **lifecycle dynamics** — recency, frequency, promotion, demotion. The relevant columns on `memory_entries` are:
 
 ```sql
 ALTER TABLE memory_entries ADD COLUMN tier         TEXT    NOT NULL DEFAULT 'warm';
@@ -278,6 +315,27 @@ This is the same Rule-of-Two posture used elsewhere: the agent can *propose* a s
               │ created_at                                │
               └───────────────────────────────────────────┘
 ```
+
+### 4.3 Evidence-backed assertions `[shipped]`
+
+Migration 0020 adds append-only `memory_assertions` and `memory_evidence`.
+Assertions carry scope, trust class, kind, confidence, observed and validity
+windows, a supersession link, extraction run, and creation event. Evidence
+points to an exact conversation event and payload path and stores a SHA-256
+quote hash. SQLite triggers reject assertion/evidence updates and deletes, and
+the current projection accepts only approved assertions with evidence.
+
+`MemoryStore` consults `memory_current_projection` before legacy
+`memory_entries`; trust filtering happens in SQL before confidence ranking, and
+superseded assertions remain queryable as history. `memory_jobs` provides
+deduplicated leased `memory_extract` and `skill_capture` work with retry and
+expired-lease reclaim. Successful committed turns enqueue their exact event
+range. Migration 0024 pins host-derived scope and trust to the extraction job;
+the worker pins its extraction policy and local model configuration, bounds the
+prompt and result count, and validates each evidence path, quote, and hash
+against replay before insertion. Assertions remain pending unless an explicit
+conservative policy approves them, and procedural candidates are never
+projected as ordinary facts.
 
 ---
 
@@ -572,14 +630,22 @@ Mapping the patterns from §6 of the project memory (proactive-agent / self-impr
 
 ---
 
-## 12. What's actually wired today (2026-05-16)
+## 12. What's actually wired today (2026-09-12)
 
 A precise read of the codebase, not a status report:
 
 **Shipped:**
 - TurnExecutor with tool-use/result pairing, max-rounds cap, phase observer, HMAC chaining (`crates/runner-local/src/turn.rs`)
 - Event log with HMAC chain, atomic commit_turn (`crates/core/src/events.rs`)
-- MemoryStore with trust-class composite PK, read-down cascade in `DbMemoryApi`, write-at-caller-class only, tier/hits/last_used_at columns from migration 0035
+- Versioned event integrity: legacy-v1 verification, v2 genesis/checkpoint,
+     chained appends, full-chain replay verification, and retained-key rotation
+- Generic `RunStore` with leased step transitions and recovery decisions
+     (`schema-ready`; normal chat turns are not yet driven by it)
+- Typed in-process tool failures, bounded transient retry, repeated-call guard,
+     schema-correction cap, and in-memory integration circuit breaker
+- Evidence-backed memory assertions and projection; durable memory extraction
+     and skill-capture jobs
+- MemoryStore with trust-class composite PK, read-down cascade in `DbMemoryApi`, write-at-caller-class only, and baseline tier/hits/last_used_at columns
 - `read_memory` / `write_memory` / `list_memory` as built-in tools; `list_memory` performs real prefix scans (post-0035) and excludes COLD
 - `read_memory` bumps `hits` and stamps `last_used_at` on the row that matched in the read-down cascade
 - `PromotionStore` with idempotent propose, approve flips target tier, reject leaves tier alone
@@ -626,12 +692,15 @@ Want to verify a claim in this doc? Here's where to look:
 |---|---|
 | Turn loop, tool pairing | `crates/runner-local/src/turn.rs` |
 | Event log + HMAC | `crates/core/src/events.rs`, `event_hmac.rs` |
+| Durable run/step recovery | `crates/core/src/runs.rs`, migration 0017 |
+| Typed tool outcomes and retry guards | `crates/core/src/tool.rs`, `crates/runner-local/src/turn.rs` |
 | Memory storage + lifecycle | `crates/core/src/memory.rs` |
+| Memory assertions/evidence/jobs | `crates/core/src/memory_assertions.rs`, migration 0020 |
 | Promotion + reflection stores | `crates/core/src/memory_lifecycle.rs` |
 | Memory tools | `crates/core/src/builtin_tools.rs` |
 | MemoryApi + trust cascade | `crates/core/src/tool_apis.rs` |
 | System prompt assembly | `crates/server/src/chats.rs::assemble_system_prompt` |
-| Migration 0035 schema | `crates/core/migrations/0035_memory_lifecycle.sql` |
+| Memory lifecycle schema | `crates/core/migrations/0001_baseline.sql` |
 | Trust policy ladder | `crates/policy/src/lib.rs` |
 | Outbox | `crates/outbox/`, `crates/server/src/outbox_relay.rs` |
 | Container lifecycle | `crates/container-manager/`, `crates/server/src/runner_supervisor.rs` |

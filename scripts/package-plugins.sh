@@ -15,7 +15,7 @@
 #      excluding dev noise (.git, node_modules, __pycache__, *.pyc,
 #      .DS_Store, target/, dist/, *.log, the source ui/panel.tsx
 #      itself once we have ui/panel.js).
-#   4. Emits a sha256 sidecar.
+#   4. Emits SHA-256 and SPDX 2.3 JSON SBOM sidecars.
 #
 # Skips:
 #   * plugins/_shared/        — shared library, not a plugin
@@ -133,6 +133,7 @@ for plugin_dir in plugins/*/ ; do
 
     out="$DIST_DIR/${id}-${version}.zip"
     sha_out="${out}.sha256"
+    sbom_out="${out}.spdx.json"
 
     # Zip from INSIDE the plugin directory so the archive's
     # internal paths land at `plugin.toml`, `main.rhai`, etc. at
@@ -154,6 +155,38 @@ for plugin_dir in plugins/*/ ; do
         cd "$DIST_DIR"
         shasum -a 256 "$(basename "$out")" > "$(basename "$sha_out")"
     )
+
+        sha256="$(awk '{print $1}' "$sha_out")"
+        source_commit="$(git rev-parse HEAD 2>/dev/null || printf 'unknown')"
+        source_repo="$(git config --get remote.origin.url 2>/dev/null || printf 'local')"
+        created="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+        cat > "$sbom_out" <<EOF
+{
+    "spdxVersion": "SPDX-2.3",
+    "dataLicense": "CC0-1.0",
+    "SPDXID": "SPDXRef-DOCUMENT",
+    "name": "${id}-${version}",
+    "documentNamespace": "https://execlaw.local/sbom/${id}/${version}/${sha256}",
+    "creationInfo": {
+        "created": "${created}",
+        "creators": ["Tool: execlaw-package-plugins", "Organization: execlaw"]
+    },
+    "documentDescribes": ["SPDXRef-Package-${id}"],
+    "packages": [{
+        "name": "${id}",
+        "SPDXID": "SPDXRef-Package-${id}",
+        "versionInfo": "${version}",
+        "downloadLocation": "NOASSERTION",
+        "filesAnalyzed": false,
+        "checksums": [{"algorithm": "SHA256", "checksumValue": "${sha256}"}],
+        "externalRefs": [{
+            "referenceCategory": "OTHER",
+            "referenceType": "execlaw-source",
+            "referenceLocator": "${source_repo}@${source_commit}"
+        }]
+    }]
+}
+EOF
 
     size=$(stat -f%z "$out" 2>/dev/null || stat -c%s "$out")
     echo "  $name: $(basename "$out") ($((size / 1024)) KB)"

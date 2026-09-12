@@ -282,15 +282,23 @@ Write-Host '==> Step 4b: package plugin ZIPs + stage them into the installer'
 # install button. The Windows CI workflow also runs
 # `package-plugins.ps1` on its own so the resulting `dist\*.zip`
 # files attach to the GitHub Release for Linux operators.
-& (Join-Path $PSScriptRoot 'package-plugins.ps1')
-if ($LASTEXITCODE -ne 0) { throw "package-plugins.ps1 failed ($LASTEXITCODE)" }
+if ($env:EXECLAW_PREPACKAGED_PLUGINS -ne '1') {
+    & (Join-Path $PSScriptRoot 'package-plugins.ps1')
+    if ($LASTEXITCODE -ne 0) { throw "package-plugins.ps1 failed ($LASTEXITCODE)" }
+}
 if (Test-Path -LiteralPath $PluginStageDir) {
     Remove-Item -LiteralPath $PluginStageDir -Recurse -Force -ErrorAction Stop
 }
 New-Item -ItemType Directory -Force -Path $PluginStageDir -ErrorAction Stop | Out-Null
-# Only the ZIPs themselves ship inside the installer; the .sha256
-# sidecars stay in dist\ for the release attachments.
-Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'dist') -Filter '*.zip' |
+# Runtime provenance verification consumes the ZIP and detached SPDX SBOM.
+Get-ChildItem -LiteralPath (Join-Path $RepoRoot 'dist') -File |
+    Where-Object {
+        $_.Name -like '*.zip' -or
+        $_.Name -like '*.zip.sha256' -or
+        $_.Name -like '*.zip.spdx.json' -or
+        $_.Name -like '*.zip.sigstore.json' -or
+        $_.Name -like '*.zip.provenance.json'
+    } |
     ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $PluginStageDir -ErrorAction Stop }
 $stagedCount = (Get-ChildItem -LiteralPath $PluginStageDir -Filter '*.zip').Count
 Write-Host "  staged $stagedCount ZIPs into resources\plugins\"

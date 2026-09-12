@@ -36,18 +36,12 @@ So on Apple Silicon, execlaw's control plane spawns **Ollama as a native macOS s
 1. Install + start execlaw (`execlaw install` then the launchd plist starts automatically).
 2. Open the SPA. The wizard detects the M-series GPU and pre-selects the **Ollama (Apple Silicon)** preset for the Standard backend.
 3. Pick the model that fits your machine.
-4. **Pull the model.** Until the active-pull supervisor integration ships (tracked as a known gap, see below), run this once from a terminal:
-   ```bash
-   ollama pull qwen2.5:32b-instruct-q4_K_M
-   ```
-   …substituting whichever model you chose in the wizard. This downloads the GGUF weights into Ollama's cache so the first chat completion finds them locally.
-5. Submit the wizard. The supervisor launches `ollama serve` as a subprocess; once `GET /api/tags` returns 200, the SPA writes `http://127.0.0.1:8101/v1` to the backend row and the chat path goes live.
+4. Submit the wizard. The supervisor launches `ollama serve`, checks `/api/tags`, and automatically pulls the selected model when it is absent. Pull progress appears in the SPA while the backend is in `DownloadingModel`.
+5. Once the pull and load complete, the backend transitions to `Healthy` and the chat path goes live.
 
-## Known gap: active model pull
+## Active model pull
 
-The supervisor's vLLM path runs a pre-spawn HF download with progress reported into the SPA ("Downloading qwen2.5-7b · 47%…"). The Ollama path doesn't have an equivalent yet — the daemon spawns instantly and reports `Healthy` against `/api/tags` long before any model is in the cache, so the first chat completion will 404 with `model 'X' not found` if you skip step 4 above.
-
-This is a deliberate v1 punt; the follow-up wires `POST /api/pull`'s streaming response into the existing `download_task` machinery so the same `DownloadingModel` → `LoadingModel` → `Healthy` transitions surface in the SPA's status pill. See the corresponding audit gap in `fancy-launching-lecun.md` (the plan file).
+The supervisor polls `/api/tags`, streams a missing model through `POST /api/pull`, and reports byte progress through the existing `DownloadingModel` → `LoadingModel` → `Healthy` lifecycle. A manual `ollama pull <model>` remains useful only when diagnosing an automatic pull failure.
 
 ## Troubleshooting
 
@@ -55,7 +49,7 @@ This is a deliberate v1 punt; the follow-up wires `POST /api/pull`'s streaming r
 
 **"OLLAMA_BINARY points to '…' but that file does not exist"** — typo in the env var; the discovery error names the offending path so you can copy/paste into a `ls` to debug.
 
-**Chat 404s with "model 'qwen2.5:…' not found"** — run `ollama pull <model>` manually. This is the known-gap workaround above.
+**Chat 404s with "model 'qwen2.5:…' not found"** — inspect the backend pull status and logs, then run `ollama pull <model>` manually if the automatic pull failed.
 
 **Brand indicator pulsing blue** — at least one backend is in the install / warm-up phase. Click the icon to jump to `/settings/backends` and see the per-row status.
 
