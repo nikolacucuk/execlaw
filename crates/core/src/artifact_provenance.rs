@@ -386,6 +386,9 @@ impl ArtifactProvenanceStore {
         {
             return Ok(());
         }
+        if self.has_local_override(artifact_type, reference)? {
+            return Ok(());
+        }
         if self.policy()?.allow_unsigned_local_development {
             return self.use_local_development_override(
                 artifact_id,
@@ -403,6 +406,79 @@ impl ArtifactProvenanceStore {
         Err(ArtifactVerificationError::Attestation(format!(
             "no verified provenance record for OCI reference '{reference}'"
         )))
+    }
+
+    /// Record a narrowly scoped compatibility override for a sidecar that was
+    /// already operator-installed before provenance migration 0022 landed.
+    /// Newer plugin installs are never grandfathered.
+    pub fn grandfather_legacy_sidecar(
+        &self,
+        plugin_id: &str,
+        service_name: &str,
+        reference: &str,
+    ) -> Result<bool, ArtifactVerificationError> {
+        let eligible = self.db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_plugins p, schema_version m \
+                 WHERE p.plugin_id = ?1 AND m.id = 22 AND p.installed_at <= m.applied_at)",
+                [plugin_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|value| value != 0)
+            .map_err(DbError::from)
+        })?;
+        if !eligible || self.has_local_override(ArtifactType::Sidecar, reference)? {
+            return Ok(false);
+        }
+
+        let artifact_id = format!("sidecar:{plugin_id}:{service_name}");
+        let now = chrono::Utc::now().timestamp();
+        let statement = ProvenanceStatement {
+            artifact_id: artifact_id.clone(),
+            artifact_type: ArtifactType::Sidecar,
+            artifact_locator: reference.to_owned(),
+            sha256: sha256_bytes(reference.as_bytes()),
+            publisher_identity: "legacy-install-override".into(),
+            source_repository: "legacy-install-override".into(),
+            source_commit: "legacy-install-override".into(),
+            workflow_identity: "legacy-install-override".into(),
+            signature_reference: "legacy-install-override".into(),
+            attestation_result: "grandfathered pre-migration sidecar".into(),
+            sbom_format: "spdx".into(),
+            sbom_location: "legacy-install-override".into(),
+            sbom_sha256: "0".repeat(64),
+        };
+        self.record(&statement, "local_development_override", "migration-0022")?;
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO state_artifact_verification_events \
+                 (artifact_id,event_type,status,actor,detail_json,created_at) \
+                 VALUES(?1,'legacy_upgrade_override','recorded','migration-0022',?2,?3)",
+                params![artifact_id, serde_json::json!({"plugin_id": plugin_id, "service_name": service_name, "reference": reference}).to_string(), now],
+            )?;
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
+    fn has_local_override(
+        &self,
+        artifact_type: ArtifactType,
+        reference: &str,
+    ) -> Result<bool, ArtifactVerificationError> {
+        self.db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_artifact_provenance \
+                     WHERE artifact_type=?1 AND artifact_locator=?2 \
+                       AND verification_status='local_development_override')",
+                    params![artifact_type.as_str(), reference],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|value| value != 0)
+                .map_err(DbError::from)
+            })
+            .map_err(Into::into)
     }
 
     fn record(
@@ -516,6 +592,12 @@ mod tests {
         ArtifactProvenanceStore::new(db)
     }
 
+    fn set_local_override(store: &ArtifactProvenanceStore, enabled: bool) {
+        let mut policy = store.policy().unwrap();
+        policy.allow_unsigned_local_development = enabled;
+        store.configure("Controller", "test", &policy).unwrap();
+    }
+
     fn statement(bytes: &[u8]) -> ProvenanceStatement {
         ProvenanceStatement {
             artifact_id: "plugin:hello:1".into(),
@@ -532,6 +614,85 @@ mod tests {
             sbom_location: "hello.cdx.json".into(),
             sbom_sha256: "a".repeat(64),
         }
+    }
+
+    #[test]
+    fn audited_oci_override_survives_policy_being_disabled() {
+        let store = store();
+        let reference = "asternic/wuzapi:latest";
+        set_local_override(&store, true);
+        store
+            .authorize_oci_reference(
+                "sidecar:whatsapp:wuzapi",
+                ArtifactType::Sidecar,
+                reference,
+                "test",
+            )
+            .unwrap();
+
+        set_local_override(&store, false);
+        store
+            .authorize_oci_reference(
+                "sidecar:whatsapp:wuzapi",
+                ArtifactType::Sidecar,
+                reference,
+                "test",
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn only_plugins_installed_before_provenance_migration_are_grandfathered() {
+        let store = store();
+        let migration_time: i64 = store
+            .db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT applied_at FROM schema_version WHERE id = 22",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)
+            })
+            .unwrap();
+        store
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO state_plugins \
+                     (plugin_id,version,manifest_toml,stage_path,enabled,installed_at,updated_at) \
+                     VALUES('whatsapp','0.2.14','','/tmp/whatsapp',1,?1,?1)",
+                    [migration_time - 1],
+                )?;
+                conn.execute(
+                    "INSERT INTO state_plugins \
+                     (plugin_id,version,manifest_toml,stage_path,enabled,installed_at,updated_at) \
+                     VALUES('new-plugin','1','','/tmp/new',1,?1,?1)",
+                    [migration_time + 1],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let reference = "asternic/wuzapi:latest";
+        assert!(
+            store
+                .grandfather_legacy_sidecar("whatsapp", "wuzapi", reference)
+                .unwrap()
+        );
+        store
+            .authorize_oci_reference(
+                "sidecar:whatsapp:wuzapi",
+                ArtifactType::Sidecar,
+                reference,
+                "test",
+            )
+            .unwrap();
+        assert!(
+            !store
+                .grandfather_legacy_sidecar("new-plugin", "new", "example/new:latest")
+                .unwrap()
+        );
     }
 
     fn allow(store: &ArtifactProvenanceStore, local: bool) {

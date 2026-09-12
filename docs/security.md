@@ -297,6 +297,12 @@ trust model is "operator-curated set of audited plugin sources."
 Artifact verification establishes which reviewed source/workflow produced an
 artifact and detects byte substitution; it does not make that plugin safe.
 
+Pre-0022 installed sidecars receive a one-time, reference-scoped
+`legacy_upgrade_override` during plugin hydration. Eligibility is determined
+from `state_plugins.installed_at` and migration 0022's `applied_at`; later
+installs are never grandfathered. The override is durable and audited, so a
+normal restart does not require enabling the global development policy.
+
 ### Release provenance handoff
 
 Packaging scripts generate SPDX 2.3 sidecars. Platform workflows then keylessly

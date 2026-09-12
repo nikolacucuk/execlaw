@@ -1077,6 +1077,30 @@ impl PluginHost {
                     continue;
                 }
             };
+            let provenance = ArtifactProvenanceStore::new(self.inner.db.clone());
+            for service in &manifest.services {
+                if service.sidecar.is_some() {
+                    match provenance.grandfather_legacy_sidecar(
+                        &row.plugin_id,
+                        &service.name,
+                        &service.image,
+                    ) {
+                        Ok(true) => info!(
+                            plugin_id = %row.plugin_id,
+                            service = %service.name,
+                            image = %service.image,
+                            "grandfathered pre-provenance sidecar with audited override"
+                        ),
+                        Ok(false) => {}
+                        Err(error) => warn!(
+                            plugin_id = %row.plugin_id,
+                            service = %service.name,
+                            error = %error,
+                            "could not evaluate legacy sidecar provenance override"
+                        ),
+                    }
+                }
+            }
             if let Err(e) = self
                 .inner
                 .registry

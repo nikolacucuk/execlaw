@@ -1281,9 +1281,13 @@ async fn cmd_serve(
     execlaw_core::MigrationRunner::new(&db).apply_all()?;
     let provenance_store =
         execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(db.clone());
-    let mut artifact_policy = provenance_store.policy()?;
-    artifact_policy.allow_unsigned_local_development = allow_unsigned_local_development;
-    provenance_store.configure("Controller", "execlaw serve", &artifact_policy)?;
+    if allow_unsigned_local_development {
+        let mut artifact_policy = provenance_store.policy()?;
+        if !artifact_policy.allow_unsigned_local_development {
+            artifact_policy.allow_unsigned_local_development = true;
+            provenance_store.configure("Controller", "execlaw serve", &artifact_policy)?;
+        }
+    }
 
     // Resolve the data directory once at boot so downstream code
     // (bundled-plugins mirror, settings paths, etc.) doesn't have

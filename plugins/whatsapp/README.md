@@ -95,6 +95,13 @@ in documentation examples, or replace the token check with an open webhook.
 The WuzAPI user token is also vault-backed. Pairing state persists in the
 supervised sidecar volume at `state://data` mounted as `/app/dbdata`.
 
+Installations paired before artifact-provenance migration 0022 are
+grandfathered during plugin hydration with a per-image audit record. This does
+not widen the global unsigned-artifact policy or recreate `/app/dbdata`; the
+existing linked-device session is reused when the sidecar restarts. Plugins
+installed after migration 0022 still require verified sidecar provenance or an
+explicit Controller development override.
+
 ## Current features
 
 The current plugin provides:
