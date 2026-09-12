@@ -72,5 +72,5 @@ default = []
 tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 
 [dependencies.console-subscriber]
-version = "0.4"
+version = "0.5"
 optional = true
