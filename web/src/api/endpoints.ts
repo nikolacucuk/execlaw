@@ -695,6 +695,11 @@ export interface InstallPluginResponse {
  * `application/zip` bytes — the backend handler accepts that
  * directly while multipart support lands later.
  *
+ * Raw uploads are explicitly marked as local-development artifacts. The
+ * backend still requires the persisted Controller artifact policy to allow
+ * unsigned development artifacts; this flag is only the per-request
+ * acknowledgement and does not bypass that policy.
+ *
  * `ifExisting`:
  *   * `"reject"` (default) — server returns 409 if a plugin with
  *     the same id is already installed. The SPA catches it and
@@ -714,10 +719,11 @@ export async function installPlugin(
     };
     const token = tokenAccessor();
     if (token) headers.authorization = `Bearer ${token}`;
-    const url =
-        ifExisting === "upgrade"
-            ? "/api/admin/plugins/install?if_existing=upgrade"
-            : "/api/admin/plugins/install";
+    const params = new URLSearchParams({
+        allow_unsigned_local_development: "true",
+    });
+    if (ifExisting === "upgrade") params.set("if_existing", "upgrade");
+    const url = `/api/admin/plugins/install?${params.toString()}`;
     const resp = await fetch(url, {
         method: "POST",
         headers,

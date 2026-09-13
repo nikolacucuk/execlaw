@@ -132,7 +132,9 @@ describe("endpoints", () => {
             const r = await installPlugin(file, () => "tok");
             expect(r.plugin_id).toBe("alpha");
             const [url, init] = fetchMock.mock.calls[0];
-            expect(url).toBe("/api/admin/plugins/install");
+            expect(url).toBe(
+                "/api/admin/plugins/install?allow_unsigned_local_development=true",
+            );
             const headers = (init as RequestInit).headers as Record<
                 string,
                 string
@@ -188,7 +190,7 @@ describe("endpoints", () => {
             await installPlugin(file, () => "tok", "upgrade");
             const [url] = fetchMock.mock.calls[0];
             expect(url).toBe(
-                "/api/admin/plugins/install?if_existing=upgrade",
+                "/api/admin/plugins/install?allow_unsigned_local_development=true&if_existing=upgrade",
             );
         });
 
@@ -202,7 +204,9 @@ describe("endpoints", () => {
             const file = fakeFile([0x50]);
             await installPlugin(file, () => "tok");
             const [url] = fetchMock.mock.calls[0];
-            expect(url).toBe("/api/admin/plugins/install");
+            expect(url).toBe(
+                "/api/admin/plugins/install?allow_unsigned_local_development=true",
+            );
         });
     });
 });

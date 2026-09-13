@@ -541,10 +541,15 @@ fn admin_status(req) {
 powershell -Command "Compress-Archive -Path main.rhai,plugin.toml,schemas \
   -DestinationPath ../../dist/weather-0.1.0.zip -Force"
 
-# With a controller JWT in $JWT:
-curl -X POST "http://127.0.0.1:3031/api/admin/plugins/install" \
+# For local development, start execlaw once with the Controller override
+# (this persists the policy and records each later local-plugin use):
+execlaw serve --allow-unsigned-local-development
+
+# With a Controller JWT in $JWT:
+curl -X POST "http://127.0.0.1:3031/api/admin/plugins/install?allow_unsigned_local_development=true" \
   -H "Authorization: Bearer $JWT" \
-  -F "file=@dist/weather-0.1.0.zip"
+  -H "Content-Type: application/zip" \
+  --data-binary "@dist/weather-0.1.0.zip"
 
 curl -X POST "http://127.0.0.1:3031/api/admin/plugins/weather/enable" \
   -H "Authorization: Bearer $JWT"
