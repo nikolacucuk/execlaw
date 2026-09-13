@@ -1266,7 +1266,18 @@ fn resolve_mounts(
                     m.source
                 )
             })?;
-            let p = stage.join(rel);
+            // Docker requires bind-mount source paths to be absolute. The
+            // local development server may store a relative stage root
+            // (for example `target-local-execlaw/...`), which works for
+            // Rust file reads but Docker rejects on Windows.
+            let stage_root = if stage.is_absolute() {
+                stage.clone()
+            } else {
+                std::env::current_dir()
+                    .map_err(|e| format!("resolve relative stage path {}: {e}", stage.display()))?
+                    .join(stage)
+            };
+            let p = stage_root.join(rel);
             (p, true)
         } else if let Some(name) = m.source.strip_prefix("state://") {
             let base = state_dir_for(&sidecar.plugin_id, &sidecar.name);

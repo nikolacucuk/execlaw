@@ -477,7 +477,12 @@ mod windows_runtime {
             .context("build tokio runtime for service")?;
         let result: anyhow::Result<()> = rt.block_on(async move {
             tokio::select! {
-                r = crate::cmd_serve(args.bind.clone(), args.db.clone(), args.no_encrypt) => r,
+                r = crate::cmd_serve(
+                    args.bind.clone(),
+                    args.db.clone(),
+                    args.no_encrypt,
+                    false,
+                ) => r,
                 _ = shutdown_rx => Ok(()),
             }
         });
@@ -525,6 +530,7 @@ mod windows_runtime {
                     args.bind.clone(),
                     args.db.clone(),
                     args.no_encrypt,
+                    false,
                 ))
             }
         }

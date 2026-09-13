@@ -133,11 +133,11 @@ services:
       EXECLAW_RUNNER_NETWORK: execlaw-net
       EXECLAW_RPC_URL: ws://execlaw:3031
       # Sidecars are published by the Docker host. The control plane must
-      # not use its own loopback address to reach them. This exposes the
-      # dynamically allocated sidecar ports on the host; restrict access
-      # with the TrueNAS firewall if the host has an untrusted interface.
+      # not use its own loopback address to reach them. This deployment uses
+      # the TrueNAS LAN address explicitly so the Signal panel reports URLs
+      # such as http://192.168.1.76:8501 rather than 127.0.0.1.
       EXECLAW_SIDECAR_BIND_HOST: 0.0.0.0
-      EXECLAW_SIDECAR_CONNECT_HOST: host.docker.internal
+      EXECLAW_SIDECAR_CONNECT_HOST: 192.168.1.76
       # Boot-time fallback; the backend record below becomes the per-turn source.
       EXECLAW_INFERENCE_URL: ${OLLAMA_OPENAI_URL}
       RUST_LOG: info
@@ -174,6 +174,36 @@ sudo docker compose build execlaw runner-image
 sudo docker compose up -d execlaw
 sudo docker compose logs -f execlaw
 ```
+
+### Installing a locally built plugin ZIP
+
+The repository-generated `dist/*.zip` files have a checksum and SPDX SBOM,
+but they are not signed Sigstore release artifacts. TrueNAS therefore rejects
+them unless the Controller explicitly enables the persisted local-development
+override. Do this on the TrueNAS host before uploading a locally built Signal
+ZIP:
+
+```bash
+sudo docker compose stop execlaw
+sudo docker compose run --rm execlaw \
+  serve --db /var/lib/execlaw/execlaw.db \
+  --bind 127.0.0.1:3032 \
+  --allow-unsigned-local-development
+```
+
+Leave that command running until the control plane reports that it is serving,
+then stop it with `Ctrl-C` and start the normal service again:
+
+```bash
+sudo docker compose up -d execlaw
+```
+
+Upload the ZIP from **Settings -> Plugins -> From file**. The current SPA sends
+the required `allow_unsigned_local_development=true` acknowledgement. If the
+old Signal row is marked quarantined, uninstall it and upload the new ZIP
+again. Do not copy only the `.zip` into `bundled-plugins/`: the verified
+bundled path also requires matching `.provenance.json` and `.sigstore.json`
+files from the release workflow.
 
 Use the Compose service name for inspection rather than assuming the
 container is literally named `execlaw`. Compose commonly generates a name
