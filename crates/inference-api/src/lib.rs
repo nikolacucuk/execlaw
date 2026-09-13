@@ -505,6 +505,31 @@ impl InferenceClient {
         }
     }
 
+    /// Construct a client inside a runner container.
+    ///
+    /// The control plane validates and pins the endpoint before placing it
+    /// in the authenticated [`TurnRequest`]. Runner containers do not mount
+    /// the control-plane database, so re-applying the host's SQLite endpoint
+    /// approvals here would reject valid Docker-host endpoints such as
+    /// `host.docker.internal`. The supervisor boundary is the authorization
+    /// boundary for this constructor; callers must never expose it directly
+    /// to untrusted input.
+    pub fn new_for_trusted_runner(base_url: impl Into<String>) -> Self {
+        let base_url = base_url.into();
+        Self {
+            base_url,
+            api_key: None,
+            engine: InferenceEngine::default(),
+            http: configure_inference_http_client(
+                reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()),
+            )
+            .build()
+            .expect("reqwest client build"),
+            endpoint_resolution: None,
+            endpoint_policy_error: None,
+        }
+    }
+
     /// Construct an inference client under an operator-loaded local endpoint
     /// policy. DNS answers are validated once and pinned into reqwest so a
     /// later DNS response cannot rebind an established client to a public IP.

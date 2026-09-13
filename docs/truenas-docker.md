@@ -100,7 +100,7 @@ command:
 ```text
 DOCKER_GID=568
 EXECLAW_DATA_DIR=/mnt/AI_Pool/execlaw
-OLLAMA_OPENAI_URL=http://192.168.1.76:30068/v1
+OLLAMA_OPENAI_URL=http://host.docker.internal:30068/v1
 ```
 
 For example:
@@ -138,16 +138,24 @@ services:
       # such as http://192.168.1.76:8501 rather than 127.0.0.1.
       EXECLAW_SIDECAR_BIND_HOST: 0.0.0.0
       EXECLAW_SIDECAR_CONNECT_HOST: 192.168.1.76
-      # Boot-time fallback; the backend record below becomes the per-turn source.
-      EXECLAW_INFERENCE_URL: ${OLLAMA_OPENAI_URL}
+      # Boot-time fallback; Settings -> Backends -> Standard is the per-turn source.
+      EXECLAW_INFERENCE_URL: http://host.docker.internal:30068/v1
       RUST_LOG: info
+      # Graphify runtime configuration.
+      EXECLAW_GRAPHIFY_BIN: /usr/local/bin/graphify
+      EXECLAW_GRAPHIFY_GRAPH_JSON: /workspace/execlaw-source/graphify-out/graph.json
+      OLLAMA_HOST: http://host.docker.internal:30068
+      OLLAMA_API_KEY: local
+      OLLAMA_MODEL: qwen3.5:9b
     group_add:
       - "${DOCKER_GID}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
       - ${EXECLAW_DATA_DIR}:/var/lib/execlaw
+      - /mnt/AI_Pool/execlaw-source:/workspace/execlaw-source
       - /var/run/docker.sock:/var/run/docker.sock
+    working_dir: /workspace/execlaw-source
     networks:
       - execlaw-net
 
@@ -164,6 +172,35 @@ networks:
     name: execlaw-net
     driver: bridge
 ```
+
+The database-backed **Settings -> Backends -> Standard** endpoint must match
+the container-resolvable host URL:
+
+```text
+http://host.docker.internal:30068/v1
+```
+
+Do not use `localhost` or `127.0.0.1` from inside the control-plane container.
+Because the local endpoint policy validates the resolved Docker gateway, add
+the hostname and its resolved gateway to the persistent approvals. Confirm the
+gateway first:
+
+```bash
+sudo docker compose exec execlaw getent hosts host.docker.internal
+```
+
+Then approve the returned address, commonly `172.16.0.1`:
+
+```bash
+sudo sqlite3 /mnt/AI_Pool/execlaw/execlaw.db \
+  "INSERT OR REPLACE INTO config_local_endpoint_approvals(kind, value, created_at) VALUES ('dns_name', 'host.docker.internal', strftime('%s','now'));"
+sudo sqlite3 /mnt/AI_Pool/execlaw/execlaw.db \
+  "INSERT OR REPLACE INTO config_local_endpoint_approvals(kind, value, created_at) VALUES ('cidr', '172.16.0.1/32', strftime('%s','now'));"
+```
+
+Replace `172.16.0.1/32` with the address returned by `getent` when needed.
+The Compose variable `OLLAMA_OPENAI_URL` is retained for compatibility with
+older setups, but the canonical current value uses `host.docker.internal`.
 
 Build both images, then start only the control plane. On a default TrueNAS
 installation, Docker's socket is root-owned, so use `sudo` consistently unless
@@ -238,6 +275,32 @@ control-plane container, and calls Ollama through the reachable LAN endpoint.
 The initial setup wizard detects the mounted Docker socket directly, so it
 should report Docker as available even though the minimal control-plane image
 does not include the Docker CLI.
+
+#### Runner inference endpoint policy
+
+The control plane validates the Standard backend endpoint against the
+operator-approved local endpoint policy before it sends an authenticated
+`TurnRequest` to a runner. Runner containers do not mount the control-plane
+SQLite database. They therefore must not re-run the loopback-only client
+constructor or they will reject valid `host.docker.internal` endpoints with
+an error such as:
+
+```text
+DNS name "host.docker.internal" is not operator-approved
+```
+
+The runner image must be rebuilt after changes to
+`crates/inference-api/src/lib.rs` or
+`crates/runner-binary/src/turn_loop.rs`, so the runner uses the endpoint
+already authorized by the control plane:
+
+```bash
+sudo docker compose build --no-cache execlaw runner-image
+sudo docker compose up -d --force-recreate execlaw
+```
+
+Approving additional host CIDRs in the control-plane database cannot fix an
+old runner image, because the old runner has no access to those approvals.
 
 ### Graphify on TrueNAS
 

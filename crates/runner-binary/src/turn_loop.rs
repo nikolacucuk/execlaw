@@ -79,7 +79,12 @@ pub async fn run_turn(
     mut tool_result_rx: mpsc::UnboundedReceiver<ToolCallResult>,
     req: TurnRequest,
 ) -> Result<()> {
-    let client = InferenceClient::new(req.inference_url.clone());
+    // The control plane has already validated this endpoint under its
+    // operator-approved local endpoint policy before sending the authenticated
+    // TurnRequest. The runner does not mount the control-plane DB, so using
+    // the normal loopback-only constructor here would reject host-gateway
+    // endpoints even after the supervisor approved them.
+    let client = InferenceClient::new_for_trusted_runner(req.inference_url.clone());
 
     // Compose chat messages: system prompt + history + new user
     // text. (The supervisor passes the spotlight delimiter in

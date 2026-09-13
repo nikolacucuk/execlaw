@@ -7,7 +7,11 @@ This guide gives you a full, repeatable setup for running:
 - NVIDIA GPU acceleration for Ollama
 - Docker-backed execlaw runners and plugin sidecars
 
-It is written to match this repository's current runtime model:
+It is written to match this repository's current runtime model. For the
+complete current control-plane Compose file, use
+[`docs/truenas-docker.md`](truenas-docker.md). The older standalone Compose
+example in this document is historical and should not be mixed with the
+current database-backed backend and local endpoint policy configuration.
 
 - The repository includes [Dockerfile.runner](../Dockerfile.runner) for runner containers.
 - The control-plane Docker image is not shipped as a ready-made production image, so you build one locally.
