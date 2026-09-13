@@ -207,7 +207,7 @@ impl<'db> MemoryAssetStore<'db> {
 
     pub fn get(&self, asset_id: &str) -> Result<Option<MemoryAsset>, MemoryAssetError> {
         Ok(self.db.with_conn(|c| {
-            c.query_row(
+            Ok(c.query_row(
                 "SELECT asset_id, asset_type, name, description, owner_scope,
                         visibility, trust_floor, status, version, source_ref,
                         content_ref, source_hash, expires_at, last_used_at,
@@ -216,7 +216,7 @@ impl<'db> MemoryAssetStore<'db> {
                 params![asset_id],
                 row_to_asset,
             )
-            .optional()
+            .optional()?)
         })?)
     }
 
