@@ -85,6 +85,25 @@ result rejection, retry/circuit behavior, DNS rebinding resistance, memory
 evidence/supersession/trust filtering, v2 chain tampering/key rotation, and
 artifact allowlist/digest/override checks.
 
+For migration-only validation, use the repository helper:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\test-migrations.ps1
+```
+
+PowerShell 7 can use `pwsh -File scripts/test-migrations.ps1` instead. If
+PowerShell reports that `powershell.exe` or `pwsh` is not recognized, the
+launcher is missing from the current process `PATH`; the test script has not
+run yet. On Windows, verify the inbox launcher with
+`Get-Command powershell.exe`, or invoke
+`$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe` directly.
+
+It invokes `cargo test -p execlaw-core --lib migrations`. The `--lib` flag is
+intentional: without it, Cargo also runs helper binaries and integration-test
+targets in the package. Those targets may correctly report `0 tests` (or
+`1 filtered out`) even when all migration tests pass, which can make the
+focused result look misleading.
+
 On this Windows host, Application Control may block execution of locally built
 Rust test binaries. It can also block the PowerShell harness itself; a
 `PSSecurityException` is an environment limitation, not a passing test. Run the

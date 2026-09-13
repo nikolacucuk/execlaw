@@ -19,6 +19,7 @@ hardware.
 |---|---|
 | [`docs/architecture.md`](docs/architecture.md) | System topology, design principles, FSM, data model, recovery, observability — the **what**. |
 | [`docs/agent-model.md`](docs/agent-model.md) | TurnExecutor, memory layers, reflection loop, planner/executor split — the **how** of one turn. |
+| [`docs/memory-roadmap.md`](docs/memory-roadmap.md) | Governed memory assets, task/agent loadouts, hybrid retrieval, local Wiki, and CodeGraph implementation checklist. |
 | [`docs/plugins.md`](docs/plugins.md) | Plugin manifest schema, runtime tiers, sidecar model, Rhai primitives, and a step-by-step guide for writing a custom plugin. |
 | [`docs/operator-decision-rubric.md`](docs/operator-decision-rubric.md) | Structured rubric for placing features in plugins vs MCP vs host core, plus tool-chaining and learning-loop guidance. |
 | [`docs/hermes-porting-todo.md`](docs/hermes-porting-todo.md) | Historical completion checklist for Hermes-originated capabilities ported into execlaw. |

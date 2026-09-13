@@ -146,6 +146,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "memory_job_authority",
         sql: include_str!("../migrations/0024_memory_job_authority.sql"),
     },
+    Migration {
+        id: 25,
+        name: "memory_assets_knowledge",
+        sql: include_str!("../migrations/0025_memory_assets_knowledge.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -326,24 +331,8 @@ mod tests {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         let runner = MigrationRunner::new(&db);
         let applied = runner.apply_all().unwrap();
-        // 2026-05-15: migration 5 adds plugin health columns.
-        // 2026-05-18: migration 6 adds state_attachments.filename.
-        // 2026-05-17: migration 7 adds state_bus_events (M1 of
-        // Automations: the durable event-bus substrate).
-        // 2026-05-17: migration 8 adds state_automations +
-        // state_automation_runs (M2 of Automations: persistent
-        // automation defs + run history).
-        // 2026-05-17: migration 9 adds state_automation_suggestions
-        // + state_automation_muted_patterns (M4 of Automations: the
-        // discovery surface on the /automations landing page).
-        // Update this list whenever a new migration is added to
-        // MIGRATIONS.
-        assert_eq!(
-            applied,
-            vec![
-                1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
-            ]
-        );
+        let expected_ids: Vec<u32> = MIGRATIONS.iter().map(|migration| migration.id).collect();
+        assert_eq!(applied, expected_ids);
 
         // Spot-check: every documented table exists.
         let tables = vec![
@@ -408,6 +397,20 @@ mod tests {
             "config_local_endpoint_approvals",
             "state_local_endpoint_resolutions",
             "state_graphiti_jobs",
+            "state_artifact_provenance",
+            "state_artifact_verification_events",
+            "state_tool_invocations",
+            "state_tool_retry_budgets",
+            "state_tool_circuits",
+            "memory_jobs",
+            "memory_assets",
+            "memory_asset_bindings",
+            "memory_asset_embeddings",
+            "knowledge_wikis",
+            "knowledge_wiki_pages",
+            "knowledge_code_graphs",
+            "knowledge_code_nodes",
+            "knowledge_code_edges",
         ];
         db.with_conn(|c| {
             for t in &tables {
@@ -431,12 +434,8 @@ mod tests {
         let runner = MigrationRunner::new(&db);
         let first = runner.apply_all().unwrap();
         let second = runner.apply_all().unwrap();
-        assert_eq!(
-            first,
-            vec![
-                1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
-            ]
-        );
+        let expected_ids: Vec<u32> = MIGRATIONS.iter().map(|migration| migration.id).collect();
+        assert_eq!(first, expected_ids);
         assert!(
             second.is_empty(),
             "rerun must not re-apply already-applied migrations"

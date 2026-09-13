@@ -28,7 +28,11 @@ BUNDLE_BIN_DIR="$TAURI_DIR/bin"
 PLIST_SRC="$TAURI_DIR/macos/LaunchAgents/com.execlaw.agent.plist"
 
 echo "==> Step 1: build SPA bundle (web/dist/)"
-npm --prefix web ci
+if [[ "${EXECLAW_REUSE_NODE_MODULES:-0}" != "1" || ! -d web/node_modules ]]; then
+    npm --prefix web ci
+else
+    echo "    reusing cached web/node_modules"
+fi
 npm --prefix web run build
 
 echo "==> Step 2: build server binary for $TARGET"

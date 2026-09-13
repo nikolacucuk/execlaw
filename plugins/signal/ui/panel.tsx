@@ -59,6 +59,10 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     const [status, setStatus] = useState<SignalStatusResponse | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    const [replyMode, setReplyMode] = useState<"review" | "automatic">("review");
+    const [chatImportEnabled, setChatImportEnabled] = useState(true);
+    const [agentHandlingEnabled, setAgentHandlingEnabled] = useState(true);
+    const [dedicatedChatEnabled, setDedicatedChatEnabled] = useState(false);
 
     const refresh = useCallback(async () => {
         try {
@@ -73,13 +77,51 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
         }
     }, [bridge]);
 
+    const refreshSettings = useCallback(async () => {
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>(
+                "GET", "/api/admin/plugins/signal/settings/inbound_reply_mode",
+            );
+            setReplyMode(setting.value === "automatic" ? "automatic" : "review");
+        } catch { setReplyMode("review"); }
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>(
+                "GET", "/api/admin/plugins/signal/settings/inbound_import_enabled",
+            );
+            setChatImportEnabled(setting.value !== "false");
+        } catch { setChatImportEnabled(true); }
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>(
+                "GET", "/api/admin/plugins/signal/settings/inbound_agent_handling_enabled",
+            );
+            setAgentHandlingEnabled(setting.value !== "false");
+        } catch { setAgentHandlingEnabled(true); }
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>(
+                "GET", "/api/admin/plugins/signal/settings/dedicated_chat_enabled",
+            );
+            setDedicatedChatEnabled(setting.value === "true");
+        } catch { setDedicatedChatEnabled(false); }
+    }, [bridge]);
+
+    const saveSetting = useCallback(async (key: string, value: string) => {
+        setBusy(true);
+        try {
+            await bridge.fetchJson("PUT", `/api/admin/plugins/signal/settings/${key}`, { value });
+            setError(null);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        } finally { setBusy(false); }
+    }, [bridge]);
+
     useEffect(() => {
         void refresh();
+        void refreshSettings();
         const id = window.setInterval(() => {
             void refresh();
         }, POLL_INTERVAL_MS);
         return () => window.clearInterval(id);
-    }, [refresh]);
+    }, [refresh, refreshSettings]);
 
     const onUnregister = useCallback(
         async (number: string) => {
@@ -109,7 +151,10 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     );
 
     return (
-        <div data-testid="signal-config-page">
+        <div
+            data-testid="signal-config-page"
+            style={{ background: "#0b2a4a", borderRadius: "0.5rem", padding: "1rem" }}
+        >
             <ErrorBanner
                 message={error}
                 onDismiss={() => setError(null)}
@@ -141,6 +186,42 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                             Button={Button}
                         />
                     )}
+                    <div className="execlaw-card mb-3" data-testid="signal-inbound-settings">
+                        <div className="execlaw-card__title mb-2">Signal inbound handling</div>
+                        <label className="d-flex gap-2 align-items-center small mb-2">
+                            <input type="checkbox" checked={chatImportEnabled} disabled={busy}
+                                onChange={(event) => { setChatImportEnabled(event.target.checked); void saveSetting("inbound_import_enabled", event.target.checked ? "true" : "false"); }}
+                                data-testid="signal-chat-import-toggle" />
+                            <span>Show new Signal messages in execlaw chats</span>
+                        </label>
+                        <label className="d-flex gap-2 align-items-center small mb-2">
+                            <input type="checkbox" checked={agentHandlingEnabled} disabled={busy}
+                                onChange={(event) => { setAgentHandlingEnabled(event.target.checked); void saveSetting("inbound_agent_handling_enabled", event.target.checked ? "true" : "false"); }}
+                                data-testid="signal-agent-handling-toggle" />
+                            <span>Enable agent handling of new Signal messages</span>
+                        </label>
+                        <label className="d-flex gap-2 align-items-center small">
+                            <input type="checkbox" checked={dedicatedChatEnabled} disabled={busy}
+                                onChange={(event) => { setDedicatedChatEnabled(event.target.checked); void saveSetting("dedicated_chat_enabled", event.target.checked ? "true" : "false"); }}
+                                data-testid="signal-dedicated-chat-toggle" />
+                            <span>Show Signal messages in a dedicated Signal chat</span>
+                        </label>
+                    </div>
+                    <div className="execlaw-card mb-3" data-testid="signal-reply-settings">
+                        <div className="execlaw-card__title mb-2">Inbound reply suggestions</div>
+                        <p className="execlaw-muted small mb-3">
+                            New Signal messages appear in their execlaw chat. In review mode, the agent proposes a reply there and waits for you to send it.
+                        </p>
+                        <div className="d-flex gap-2 align-items-center flex-wrap">
+                            <Button variant={replyMode === "review" ? "primary" : "outline-primary"} size="sm" disabled={busy}
+                                onClick={() => { setReplyMode("review"); void saveSetting("inbound_reply_mode", "review"); }}
+                                data-testid="signal-reply-review">Review before sending</Button>
+                            <Button variant={replyMode === "automatic" ? "warning" : "outline-warning"} size="sm" disabled={busy}
+                                onClick={() => { if (window.confirm("Automatically send agent replies to new Signal messages?")) { setReplyMode("automatic"); void saveSetting("inbound_reply_mode", "automatic"); } }}
+                                data-testid="signal-reply-automatic">Send automatically</Button>
+                            <span className="small execlaw-muted">Current mode: {replyMode}</span>
+                        </div>
+                    </div>
                 </>
             )}
         </div>

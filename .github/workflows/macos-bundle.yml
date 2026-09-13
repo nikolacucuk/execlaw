@@ -76,11 +76,27 @@ jobs:
           cache: "npm"
           cache-dependency-path: web/package-lock.json
 
+      - name: Cache JavaScript dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            node_modules
+            web/node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json', 'web/package-lock.json') }}
+
       - name: Install Tauri CLI
-        # Pin the CLI to Tauri 2.x. We pull from crates.io rather
-        # than the standalone tauri-cli npm package so the version
-        # is reproducible and doesn't drift on a Node minor bump.
-        run: cargo install tauri-cli --version "^2.0" --locked
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-tauri
+          key: ${{ runner.os }}-tauri-cli-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install Tauri CLI when cache misses
+        run: |
+          if ! command -v cargo-tauri >/dev/null 2>&1; then
+            cargo install tauri-cli --version "^2.0" --locked
+          else
+            echo "reusing cached cargo-tauri"
+          fi
 
       - name: Package plugin ZIPs
         # Every plugin under `plugins/*/` with a parseable
@@ -101,6 +117,7 @@ jobs:
       - name: Build bundle
         env:
           EXECLAW_PREPACKAGED_PLUGINS: "1"
+          EXECLAW_REUSE_NODE_MODULES: "1"
         run: ./scripts/build-mac.sh
 
       - name: Locate bundle outputs

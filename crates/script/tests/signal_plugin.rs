@@ -95,6 +95,9 @@ async fn decode_canonical_text_frame() {
     }"#;
     let r = invoke_one(&plugin, "decode_frame", raw).await;
     assert_eq!(r["channel"], "signal");
+    assert_eq!(r["reuse_conversation"], true);
+    assert_eq!(r["conversation_scope"], "signal");
+    assert_eq!(r["agent_handling_enabled"], true);
     assert_eq!(r["native_id"], "+15559998888");
     assert_eq!(r["display_name"], "Alice");
     assert_eq!(r["text"], "hello");

@@ -632,6 +632,29 @@ Mapping the patterns from §6 of the project memory (proactive-agent / self-impr
 
 ## 12. What's actually wired today (2026-09-12)
 
+### TencentDB-inspired memory assets `[partially shipped]`
+
+Execlaw now has a metadata-only memory-asset registry in
+`crates/core/src/memory_assets.rs`. It treats durable memory, skills, local
+Wiki indexes, code graphs, and research outputs as governed assets while
+leaving their authoritative content in the existing event log and stores.
+Assets carry owner scope, visibility, trust floor, status, version, source
+hash, expiry, and usage metadata. Controller-managed bindings provide bounded
+`hot`, `discoverable`, and `tool_only` loadout modes for future role/task
+assignment.
+
+The same module provides SQLite FTS5 asset search and optional local embedding
+storage with reciprocal-rank fusion. Embeddings are derived data only: access
+control must be applied before ranking results, and source/model hashes are
+stored for invalidation. Migration `0025_memory_assets_knowledge.sql` adds
+the registry, bindings, Wiki page index, and CodeGraph node/edge index.
+
+This is deliberately not a second MemoryCore service. The follow-up runtime
+work is tracked in [`memory-roadmap.md`](memory-roadmap.md): wire asset
+registration and loadout resolution into turns, add assertion/conversation
+FTS, and expose read-only Wiki/CodeGraph tools behind the existing capability
+and trust gates.
+
 A precise read of the codebase, not a status report:
 
 **Shipped:**

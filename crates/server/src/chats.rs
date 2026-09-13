@@ -3630,19 +3630,19 @@ async fn bridge_text_reply_to_originating_transport(
     let channel = &resolved.channel;
     let foreign_id = &resolved.foreign_id;
 
-    // WhatsApp suggestions are review-only by default. The inbound message
-    // and the model's proposed reply are already committed to the chat; the
-    // plugin setting controls only whether this final external side effect is
-    // performed automatically.
-    if channel == "whatsapp" {
+    // Transport plugins may opt into automatic external replies through
+    // their own setting. Missing settings preserve the legacy behavior for
+    // transports that do not expose reply-mode controls.
+    {
         use execlaw_core::vault_row::VaultRowStore;
         let mode = VaultRowStore::new(&state.db)
-            .get(Some("whatsapp"), "inbound_reply_mode")
-            .map_err(|e| format!("read WhatsApp reply mode: {e}"))?
-            .and_then(|raw| String::from_utf8(raw).ok())
-            .unwrap_or_else(|| "review".to_owned());
-        if mode != "automatic" {
-            return Ok(());
+            .get(Some(channel), "inbound_reply_mode")
+            .map_err(|e| format!("read {channel} reply mode: {e}"))?
+            .and_then(|raw| String::from_utf8(raw).ok());
+        if let Some(mode) = mode {
+            if mode != "automatic" {
+                return Ok(());
+            }
         }
     }
 

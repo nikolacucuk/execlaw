@@ -126,9 +126,62 @@ pub struct PromotionStore<'db> {
     db: &'db Database,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SweepReport {
+    pub promotion_proposals: u32,
+    pub demotion_proposals: u32,
+}
+
 impl<'db> PromotionStore<'db> {
     pub fn new(db: &'db Database) -> Self {
         Self { db }
+    }
+
+    /// Propose bounded lifecycle transitions without applying them. This is
+    /// intentionally side-effect-limited: the caller may run it periodically,
+    /// while only `approve` can change a memory tier.
+    pub fn sweep(
+        &self,
+        now_unix: i64,
+        min_hits: u64,
+        promotion_since_unix: i64,
+        demotion_idle_before_unix: i64,
+        limit: u32,
+    ) -> Result<SweepReport, LifecycleError> {
+        let memory = MemoryStore::new(self.db);
+        let promotions = memory.promotion_candidates(min_hits, promotion_since_unix, limit)?;
+        let demotions = memory.demotion_candidates(demotion_idle_before_unix, limit)?;
+        let mut report = SweepReport {
+            promotion_proposals: 0,
+            demotion_proposals: 0,
+        };
+        for row in promotions {
+            self.propose(
+                &row.scope,
+                &row.trust_class,
+                &row.key,
+                MemoryTier::Warm,
+                MemoryTier::Hot,
+                PromotionReason::Frequency,
+                ProposedBy::Sweeper,
+                now_unix,
+            )?;
+            report.promotion_proposals += 1;
+        }
+        for row in demotions {
+            self.propose(
+                &row.scope,
+                &row.trust_class,
+                &row.key,
+                MemoryTier::Hot,
+                MemoryTier::Warm,
+                PromotionReason::Recency,
+                ProposedBy::Sweeper,
+                now_unix,
+            )?;
+            report.demotion_proposals += 1;
+        }
+        Ok(report)
     }
 
     /// Insert a fresh proposal. Idempotent against `(scope, trust, key, to_tier)`
@@ -494,6 +547,21 @@ mod tests {
             .unwrap();
         assert_eq!(id1, id2);
         assert_eq!(store.list_pending(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sweep_only_creates_approval_proposals() {
+        let db = fresh();
+        warm_row(&db, "global", "Controller", "promote-me");
+        let memory = MemoryStore::new(&db);
+        memory.bump_hit("global", "Controller", "promote-me", 90).unwrap();
+        memory.bump_hit("global", "Controller", "promote-me", 91).unwrap();
+        memory.bump_hit("global", "Controller", "promote-me", 92).unwrap();
+        let store = PromotionStore::new(&db);
+        let report = store.sweep(100, 3, 80, 0, 10).unwrap();
+        assert_eq!(report.promotion_proposals, 1);
+        assert_eq!(store.list_pending(10).unwrap().len(), 1);
+        assert_eq!(memory.get("global", "Controller", "promote-me").unwrap().unwrap().tier, MemoryTier::Warm);
     }
 
     #[test]

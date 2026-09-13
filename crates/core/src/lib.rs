@@ -46,6 +46,7 @@ pub mod logs;
 pub mod mcp_servers;
 pub mod memory;
 pub mod memory_assertions;
+pub mod memory_assets;
 pub mod memory_lifecycle;
 pub mod migrations;
 pub mod oauth;

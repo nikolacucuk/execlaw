@@ -60,7 +60,11 @@ if ! rustup target list --installed 2>/dev/null | grep -q "^$TARGET$"; then
 fi
 
 echo "==> Step 1: build SPA bundle (web/dist/)"
-npm --prefix web ci
+if [[ "${EXECLAW_REUSE_NODE_MODULES:-0}" != "1" || ! -d web/node_modules ]]; then
+    npm --prefix web ci
+else
+    echo "    reusing cached web/node_modules"
+fi
 npm --prefix web run build
 
 echo "==> Step 2: build server binary for $TARGET"

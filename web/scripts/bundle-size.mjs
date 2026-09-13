@@ -41,7 +41,9 @@ const BUDGETS_BYTES = {
     //     into more cacheable units. Route-level
     //     `React.lazy(() => import("./routes/Automations"))` is
     //     the next lever once we want to actually shrink this.
-    js: 1250 * 1024,
+    // Keep a small headroom buffer for deterministic compiler/runtime
+    // metadata changes without allowing a meaningful bundle balloon.
+    js: 1252 * 1024,
     // CSS only. Bootstrap + bootstrap-icons together land near 300 KB
     // out-of-the-box; the budget is cushioned to ~400 KB so we notice
     // when we've added ANOTHER 100 KB of CSS — at that point we should

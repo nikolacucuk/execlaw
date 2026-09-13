@@ -822,6 +822,17 @@ impl SidecarSupervisor {
                     // after MAX_RESTART_ATTEMPTS for a problem the
                     // next port in the pool would have fixed.
                     let err_str = e.to_string();
+                    if is_docker_unavailable_error(&err_str) {
+                        slot.restart_attempts = 0;
+                        self.transition_status(&sidecar.name, slot, ServiceStatus::Stopped);
+                        warn!(
+                            sidecar = %sidecar.name,
+                            error = %err_str,
+                            "Docker daemon unavailable; sidecar will retry without entering CrashLooping",
+                        );
+                        self.kick();
+                        return;
+                    }
                     if is_port_conflict_error(&err_str) {
                         let stale_port = slot.host_port;
                         slot.host_port = None;
@@ -1335,6 +1346,15 @@ fn is_port_conflict_error(err: &str) -> bool {
         || s.contains("address already in use")
         || s.contains("bind for ")
         || s.contains("userland proxy")
+}
+
+fn is_docker_unavailable_error(err: &str) -> bool {
+    let s = err.to_lowercase();
+    s.contains("cannot connect to the docker daemon")
+        || s.contains("is the docker daemon running")
+        || s.contains("dockerdesktoplinuxengine")
+        || s.contains("docker_engine")
+        || s.contains("connection refused")
 }
 
 /// The per-plugin state root — one level above `state_dir_for`,
@@ -2238,6 +2258,33 @@ rpc_port = 8080
             assert!(
                 !is_port_conflict_error(c),
                 "must NOT match as port conflict: {c}",
+            );
+        }
+    }
+
+    #[test]
+    fn is_docker_unavailable_error_matches_daemon_outages_only() {
+        let unavailable = [
+            "Cannot connect to the Docker daemon at npipe:////./pipe/dockerDesktopLinuxEngine",
+            "Is the docker daemon running?",
+            "dial unix docker_engine: connect: connection refused",
+        ];
+        for error in unavailable {
+            assert!(
+                is_docker_unavailable_error(error),
+                "must recognise Docker outage: {error}",
+            );
+        }
+
+        let other_failures = [
+            "image pull failed: unauthorized",
+            "container exited immediately with status 1",
+            "Bind for 127.0.0.1:8501 failed: port is already allocated",
+        ];
+        for error in other_failures {
+            assert!(
+                !is_docker_unavailable_error(error),
+                "must not classify as Docker outage: {error}",
             );
         }
     }

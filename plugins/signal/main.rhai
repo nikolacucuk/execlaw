@@ -23,6 +23,7 @@ const SELF_NUMBER_TTL = 300; // 5-min cache for /v1/accounts.
 // =====================================================================
 
 fn on_enable() {
+    ensure_default_settings();
     // Spawn the WS inbound consumer. The host's ws_subscribe owns
     // the reconnect + backoff loop; we just hand it the URL + the
     // name of the per-frame Rhai function.
@@ -109,6 +110,7 @@ fn on_disable() {
 // =====================================================================
 
 fn on_frame(raw) {
+    if !inbound_chat_import_enabled() { return; }
     // Decode + handoff. Decode is split out into a pure `decode_frame`
     // function that the script-tier test suite calls directly with
     // no host_caps wiring — keeps the JSON-shape contract under
@@ -170,6 +172,9 @@ fn decode_frame(raw) {
 
         return #{
             "channel": "signal",
+            "reuse_conversation": true,
+            "conversation_scope": inbound_conversation_scope(),
+            "agent_handling_enabled": inbound_agent_handling_enabled(),
             "native_id": if env.sourceNumber != () { env.sourceNumber } else { env.source },
             "display_name": env.sourceName,
             "group_id": group_id,
@@ -182,6 +187,35 @@ fn decode_frame(raw) {
         log_warn("signal: undecodable frame: " + e);
         return ();
     }
+}
+
+fn ensure_default_settings() {
+    let defaults = [
+        ["inbound_reply_mode", "review"],
+        ["inbound_import_enabled", "true"],
+        ["inbound_agent_handling_enabled", "true"],
+        ["dedicated_chat_enabled", "false"],
+    ];
+    for entry in defaults {
+        if vault_get(entry[0]) == () { vault_put(entry[0], entry[1]); }
+    }
+}
+
+fn inbound_chat_import_enabled() {
+    try { vault_get("inbound_import_enabled") != "false" } catch (e) { true }
+}
+
+fn inbound_agent_handling_enabled() {
+    try { vault_get("inbound_agent_handling_enabled") != "false" } catch (e) { true }
+}
+
+fn inbound_conversation_scope() {
+    try {
+        if vault_get("dedicated_chat_enabled") == "true" {
+            return "signal-dedicated";
+        }
+    } catch (e) { }
+    "signal"
 }
 
 fn map_attachments(arr) {

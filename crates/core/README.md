@@ -11,6 +11,8 @@ Owns:
 - Work-queue leases
 - SQLite connection pool, WAL mode, SQLCipher pragmas, migration runner
 - Per-connection `foreign_keys = ON` enforcement
+- Governed memory-asset metadata, agent loadouts, local Wiki/CodeGraph derived
+  indexes, FTS5 retrieval, and optional local embedding/RRF retrieval
 
 Intentionally has **zero** knowledge of:
 

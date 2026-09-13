@@ -177,8 +177,13 @@ $env:CXX_x86_64_pc_windows_msvc = 'cl.exe'
 $env:AR_x86_64_pc_windows_msvc  = 'lib.exe'
 
 Write-Host '==> Step 1: build SPA bundle (web\dist\)'
-& npm --prefix (Join-Path $RepoRoot 'web') ci
-if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" }
+$webNodeModules = Join-Path $RepoRoot 'web\node_modules'
+if ($env:EXECLAW_REUSE_NODE_MODULES -ne '1' -or -not (Test-Path -LiteralPath $webNodeModules)) {
+    & npm --prefix (Join-Path $RepoRoot 'web') ci
+    if ($LASTEXITCODE -ne 0) { throw "npm ci failed ($LASTEXITCODE)" }
+} else {
+    Write-Host '    reusing cached web\node_modules'
+}
 & npm --prefix (Join-Path $RepoRoot 'web') run build
 if ($LASTEXITCODE -ne 0) { throw "npm run build failed ($LASTEXITCODE)" }
 

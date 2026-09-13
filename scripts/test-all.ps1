@@ -139,6 +139,63 @@ try {
             if ($archives.Count -ne $manifests.Count) {
                 throw "Expected $($manifests.Count) plugin ZIPs, found $($archives.Count)"
             }
+
+            Add-Type -AssemblyName System.IO.Compression
+            $expectedArchives = [System.Collections.Generic.HashSet[string]]::new(
+                [System.StringComparer]::OrdinalIgnoreCase
+            )
+            foreach ($manifest in $manifests) {
+                $text = Get-Content $manifest.FullName -Raw
+                $id = [regex]::Match($text, '(?ms)^\[plugin\].*?^id\s*=\s*"([^"]+)"').Groups[1].Value
+                $version = [regex]::Match($text, '(?ms)^\[plugin\].*?^version\s*=\s*"([^"]+)"').Groups[1].Value
+                if (-not $id -or -not $version) {
+                    throw "Missing plugin id/version in $($manifest.FullName)"
+                }
+                [void]$expectedArchives.Add("$id-$version.zip")
+            }
+
+            foreach ($archive in $archives) {
+                if (-not $expectedArchives.Contains($archive.Name)) {
+                    throw "Unexpected plugin archive $($archive.Name)"
+                }
+
+                $digest = (Get-FileHash -LiteralPath $archive.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+                $checksumPath = "$($archive.FullName).sha256"
+                if (-not (Test-Path -LiteralPath $checksumPath)) {
+                    throw "Missing checksum sidecar for $($archive.Name)"
+                }
+                $checksum = (Get-Content -LiteralPath $checksumPath -Raw).Trim() -split '\s+' | Select-Object -First 1
+                if ($checksum.ToLowerInvariant() -ne $digest) {
+                    throw "Checksum mismatch for $($archive.Name)"
+                }
+
+                $sbomPath = "$($archive.FullName).spdx.json"
+                if (-not (Test-Path -LiteralPath $sbomPath)) {
+                    throw "Missing SPDX sidecar for $($archive.Name)"
+                }
+                $sbom = Get-Content -LiteralPath $sbomPath -Raw | ConvertFrom-Json
+                $sbomDigest = $sbom.packages[0].checksums[0].checksumValue
+                if ($sbomDigest.ToLowerInvariant() -ne $digest) {
+                    throw "SPDX checksum mismatch for $($archive.Name)"
+                }
+
+                $zip = [System.IO.Compression.ZipFile]::OpenRead($archive.FullName)
+                try {
+                    $entryNames = @($zip.Entries | ForEach-Object FullName)
+                    if ($entryNames -notcontains 'plugin.toml') {
+                        throw "$($archive.Name) does not contain root-level plugin.toml"
+                    }
+                    foreach ($entryName in $entryNames) {
+                        $normalized = $entryName.Replace('\', '/')
+                        if ($normalized.StartsWith('/') -or $normalized -match '(^|/)\.\.(?:/|$)') {
+                            throw "$($archive.Name) contains unsafe path '$entryName'"
+                        }
+                    }
+                } finally {
+                    $zip.Dispose()
+                }
+            }
+            Write-Host "Validated $($archives.Count) installable plugin archives, checksums, and SPDX sidecars"
         }
     } else {
         $skipped.Add("Plugin packaging (use -IncludePackaging)")
