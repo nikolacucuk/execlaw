@@ -1,7 +1,7 @@
 [plugin]
 id = "web-scraper"
 name = "Web Scraper"
-version = "0.1.0"
+version = "0.2.0"
 description = "Advanced webpage scraping via a supervised sidecar. Designed for JavaScript-rendered pages and selector-driven extraction while preserving execlaw trust gating and tool-level policy controls."
 author = "execlaw"
 license = "Apache-2.0"
@@ -11,7 +11,7 @@ license = "Apache-2.0"
 # scraping dependencies; the host/plugin keep policy + trust boundaries.
 [[services]]
 name = "scraper"
-image = "execlaw/web-scraper:0.1.0"
+image = "execlaw/web-scraper:0.2.0"
 ports = []
 
 [[services.mounts]]
@@ -38,6 +38,13 @@ latency = "medium"
 name = "scraper.extract"
 description = "Extract structured fields from a page using CSS/XPath selectors. Returns per-field values plus optional main-text extraction and links."
 schema = "schemas/extract.json"
+trust_floor = "Controller"
+latency = "high"
+
+[[tools]]
+name = "scraper.clip_page"
+description = "Capture a webpage as bounded Obsidian-compatible Markdown with YAML metadata and a source link. Returns content for review; it does not write to a vault."
+schema = "schemas/clip_page.json"
 trust_floor = "Controller"
 latency = "high"
 

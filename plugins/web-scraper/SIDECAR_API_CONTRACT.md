@@ -156,6 +156,39 @@ Request:
 }
 ```
 
+### POST /v1/clip
+
+Used by tool: scraper.clip_page. Fetches one page and returns a bounded
+Obsidian-compatible Markdown document. The sidecar does not write files.
+
+Request:
+
+```json
+{
+  "url": "https://example.com/article",
+  "mode": "dynamic",
+  "title": "Optional note title",
+  "tags": ["web", "reading"],
+  "include_source": true,
+  "timeout_ms": 30000,
+  "max_chars": 12000,
+  "allowed_domains": ["example.com"]
+}
+```
+
+Response:
+
+```json
+{
+  "final_url": "https://example.com/article",
+  "status": 200,
+  "title": "Example article",
+  "markdown": "---\ntitle: Example article\ntype: source\nai-first: true\ncapture_scope: bounded-local\nsource: https://example.com/article\n---\n\n...",
+  "truncated": false,
+  "timings_ms": { "fetch": 0, "render": 0, "extract": 0 }
+}
+```
+
 Response 200:
 
 ```json

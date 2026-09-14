@@ -1,0 +1,15 @@
+{
+    "type": "object",
+    "properties": {
+        "url": { "type": "string", "format": "uri", "description": "Absolute http(s) URL to capture." },
+        "mode": { "type": "string", "enum": ["static", "dynamic", "stealthy"], "description": "Rendering strategy before capture." },
+        "title": { "type": "string", "description": "Optional note title override." },
+        "tags": { "type": "array", "items": { "type": "string" }, "maxItems": 20, "description": "Optional Obsidian tags." },
+        "include_source": { "type": "boolean", "description": "Include the canonical source URL. Defaults to true." },
+        "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 180000 },
+        "max_chars": { "type": "integer", "minimum": 512, "maximum": 100000 },
+        "allowed_domains": { "type": "array", "items": { "type": "string" } }
+    },
+    "required": ["url"],
+    "additionalProperties": false
+}

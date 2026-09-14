@@ -258,7 +258,7 @@ export function MessageStream({
                                 key={`msg-${m.kind}-${m.seq}`}
                                 message={m}
                                 showTransportSend={
-                                    readChannelOrigin(m) === "whatsapp" &&
+                                    !!readChannelOrigin(m) &&
                                     m.kind === "model_turn" &&
                                     m.review_state !== "sent" &&
                                     m.review_state !== "cancelled" &&
@@ -287,7 +287,7 @@ export function MessageStream({
                                     await onSetTransportReviewDecision?.(m.seq, "cancelled");
                                 }}
                                 showReviewOverride={
-                                    readChannelOrigin(m) === "whatsapp" &&
+                                    !!readChannelOrigin(m) &&
                                     m.kind === "model_turn" &&
                                     (m.review_state === "sent" || m.review_state === "cancelled" ||
                                         !!optimisticReviewStates[m.seq]) &&
@@ -302,7 +302,7 @@ export function MessageStream({
                                     });
                                 }}
                                 showForceResponse={
-                                    readChannelOrigin(m) === "whatsapp" &&
+                                    !!readChannelOrigin(m) &&
                                     m.kind === "model_turn" &&
                                     isQuietAgentResponse(m.text) &&
                                     !!onForceTransportResponse
@@ -482,6 +482,12 @@ function MessageBubble({
     if (timestamp) {
         metaText = `${metaText} · ${timestamp}`;
     }
+    const transportMeta =
+        isUserMessage && channelOrigin !== "web" && message.transport_context
+            ? timestamp
+                ? `${message.transport_context} · ${timestamp}`
+                : message.transport_context
+            : metaText;
 
     // 2026-05-15 — image attachments. The server emits these on
     // user_msg events the operator submitted through the composer's
@@ -502,8 +508,10 @@ function MessageBubble({
                 {showOriginIcon && (
                     <ChannelOriginIcon origin={channelOrigin} />
                 )}
-                {metaText}
-                {message.transport_context && isWhatsAppMessage && (
+                {transportMeta}
+                {message.transport_context &&
+                    message.channel_origin &&
+                    transportMeta === metaText && (
                     <span className="execlaw-msg__transport-context">
                         {message.transport_context}
                     </span>
@@ -583,7 +591,9 @@ function MessageBubble({
                             data-testid="send-transport-reply"
                         >
                             <i className="bi bi-send me-1" aria-hidden />
-                            {transportSendBusy ? "Sending..." : "Send to WhatsApp"}
+                            {transportSendBusy
+                                ? "Sending..."
+                                : `Send to ${transportLabel(message.channel_origin)}`}
                         </button>
                         <button
                             type="button"
@@ -636,6 +646,14 @@ function isQuietAgentResponse(text: string | null): boolean {
     return /\b(stay quiet|not directed at me|no response needed|won't respond|will not respond)\b/i.test(
         normalized,
     );
+}
+
+function transportLabel(channel: MessageView["channel_origin"]): string {
+    if (channel === "signal") return "Signal";
+    if (channel === "whatsapp") return "WhatsApp";
+    if (channel === "sms") return "SMS";
+    if (channel === "email") return "email";
+    return "transport";
 }
 
 /// Strip the leading `<skill name="...">...</skill>` blocks the

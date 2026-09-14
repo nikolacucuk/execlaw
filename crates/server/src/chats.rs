@@ -4289,7 +4289,7 @@ pub struct ForceTransportResponseRequest {
 }
 
 /// `POST /api/chats/:id/force-transport-response` reruns the normal agent
-/// turn for a WhatsApp inbound message that was previously skipped.
+/// turn for a transport inbound message that was previously skipped.
 pub async fn force_transport_response(
     State(state): State<AppState>,
     Path(conversation_id): Path<String>,
@@ -4306,19 +4306,23 @@ pub async fn force_transport_response(
         .rev()
         .find_map(|event| {
             let payload = event.decode_payload::<UserMessagePayload>().ok()?;
-            (payload.channel_origin.as_deref() == Some("whatsapp")).then(|| (event, payload))
+            payload
+                .channel_origin
+                .as_deref()
+                .filter(|channel| !channel.is_empty())
+                .map(|_| (event, payload))
         })
     else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "no WhatsApp inbound message found"})),
+            Json(serde_json::json!({"error": "no transport inbound message found"})),
         )
             .into_response();
     };
     let Some(principal_id) = source.1.sender_principal_id.as_deref() else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "WhatsApp sender identity is unavailable"})),
+            Json(serde_json::json!({"error": "transport sender identity is unavailable"})),
         )
             .into_response();
     };
@@ -4327,14 +4331,14 @@ pub async fn force_transport_response(
         .ok()
         .flatten()
     else {
-        return err_500("WhatsApp sender principal is unavailable");
+        return err_500("transport sender principal is unavailable");
     };
     let trust =
         TrustLevel::parse(principal.trust_level.class_tag()).unwrap_or(TrustLevel::UnknownPending);
     if matches!(trust, TrustLevel::Blocked | TrustLevel::UnknownPending) {
         return (
             StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "WhatsApp sender is not routable"})),
+            Json(serde_json::json!({"error": "transport sender is not routable"})),
         )
             .into_response();
     }
@@ -4344,7 +4348,7 @@ pub async fn force_transport_response(
         &principal,
         trust,
         &source.1.text,
-        Some("whatsapp"),
+        source.1.channel_origin.as_deref(),
         source.1.transport_recipient.as_deref(),
         None,
         extract_attachment_ids(source.0),
@@ -4423,9 +4427,9 @@ async fn send_transport_text(
         .bindings_for_group_any_channel(&pg_id)
         .map_err(|e| format!("transport binding lookup: {e}"))?;
     // A transport-wide conversation can have one binding per contact or
-    // group. Use the most recently active WhatsApp binding so review mode
-    // replies go to the inbound source that most recently updated the thread.
-    let source_recipient = if let Some(seq) = source_seq {
+    // group. Use the binding matching the source event when available, then
+    // fall back to the most recently active binding for that channel.
+    let (source_channel, source_recipient) = if let Some(seq) = source_seq {
         let events = event_log(state)
             .replay_since(cid, EventSeq(0))
             .map_err(|e| format!("replay conversation: {e}"))?;
@@ -4437,16 +4441,28 @@ async fn send_transport_text(
                 event
                     .decode_payload::<UserMessagePayload>()
                     .ok()
-                    .filter(|payload| payload.channel_origin.as_deref() == Some("whatsapp"))
-                    .and_then(|payload| payload.transport_recipient)
+                    .and_then(|payload| {
+                        Some((payload.channel_origin?, payload.transport_recipient))
+                    })
             })
+            .ok_or_else(|| "source transport message not found".to_owned())?
     } else {
-        None
+        let channel = bindings
+            .iter()
+            .max_by_key(|binding| {
+                (
+                    binding.last_seen_at.unwrap_or(binding.created_at),
+                    binding.created_at,
+                )
+            })
+            .map(|binding| binding.channel.clone())
+            .ok_or_else(|| "conversation has no transport binding".to_owned())?;
+        (channel, None)
     };
-    let Some(latest_whatsapp) = bindings
+    let Some(latest_binding) = bindings
         .iter()
         .filter(|binding| {
-            binding.channel == "whatsapp"
+            binding.channel == source_channel
                 && source_recipient
                     .as_deref()
                     .is_none_or(|recipient| binding.foreign_id == recipient)
@@ -4458,11 +4474,11 @@ async fn send_transport_text(
             )
         })
     else {
-        return Err("conversation has no WhatsApp binding".to_owned());
+        return Err("conversation has no binding for the originating transport".to_owned());
     };
     let resolved = state
         .host_transports
-        .lookup_first_supported_binding(std::slice::from_ref(latest_whatsapp))
+        .lookup_first_supported_binding(std::slice::from_ref(latest_binding))
         .ok_or_else(|| "no installed transport can send this conversation".to_owned())?;
     let channel = resolved.channel.clone();
     let tool_name = format!("{channel}.send_message");
@@ -4565,13 +4581,12 @@ pub async fn list_messages(
             if inbound_context.is_some() {
                 latest_transport_context = inbound_context.clone();
             }
-            let transport_context = if e.kind == EventKind::ModelTurn
-                && extract_channel_origin(&e).as_deref() == Some("whatsapp")
-            {
-                latest_transport_context.clone()
-            } else {
-                inbound_context
-            };
+            let transport_context =
+                if e.kind == EventKind::ModelTurn && extract_channel_origin(&e).is_some() {
+                    latest_transport_context.clone()
+                } else {
+                    inbound_context
+                };
             MessageView {
                 seq: e.seq.0,
                 kind: e.kind.as_str().to_owned(),

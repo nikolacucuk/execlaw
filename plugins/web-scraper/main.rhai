@@ -8,6 +8,7 @@
 fn tool_call(name, args, oauth) {
     if name == "scraper.fetch_page" { return fetch_page_impl(args); }
     if name == "scraper.extract" { return extract_impl(args); }
+    if name == "scraper.clip_page" { return clip_page_impl(args); }
     if name == "scraper.follow_links" { return follow_links_impl(args); }
     if name == "scraper.session_close" { return session_close_impl(args); }
     throw "unknown tool '" + name + "'";
@@ -47,6 +48,22 @@ fn extract_impl(args) {
 
     let base = require_sidecar_url();
     sidecar_http_post(base + "/v1/extract", payload, #{});
+}
+
+fn clip_page_impl(args) {
+    let cfg = read_config();
+    let payload = #{};
+    payload["url"] = require_string(args["url"], "url");
+    payload["mode"] = pick_mode(args["mode"], "dynamic");
+    payload["timeout_ms"] = clamp_int(args["timeout_ms"], 1000, cfg.limits.extract_timeout_max_ms, cfg.limits.extract_timeout_default_ms);
+    payload["max_chars"] = clamp_int(args["max_chars"], 512, cfg.limits.extract_max_chars_max, cfg.limits.extract_max_chars_default);
+    payload["title"] = args["title"];
+    payload["tags"] = args["tags"];
+    payload["include_source"] = if args["include_source"] != () { args["include_source"] } else { true };
+    payload["allowed_domains"] = effective_allowed_domains(cfg, args["allowed_domains"]);
+
+    let base = require_sidecar_url();
+    sidecar_http_post(base + "/v1/clip", payload, #{});
 }
 
 fn follow_links_impl(args) {

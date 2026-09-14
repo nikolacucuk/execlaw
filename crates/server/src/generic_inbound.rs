@@ -27,6 +27,13 @@ use execlaw_core::transport_conversations::{ConversationResolver, ResolveInput};
 use execlaw_policy::trust::TrustLevel;
 use execlaw_script::{HostCapError, InboundMessage, RouteOutcome};
 
+fn is_generic_sender_name(name: &str) -> bool {
+    matches!(
+        name.trim().to_ascii_lowercase().as_str(),
+        "you" | "me" | "self"
+    )
+}
+
 /// Generic inbound routing — no Signal-specific code.
 pub async fn route_inbound(
     state: &AppState,
@@ -69,12 +76,18 @@ pub async fn route_inbound(
             if let Some(display_name) = msg
                 .display_name
                 .as_deref()
-                .filter(|name| !name.trim().is_empty())
+                .filter(|name| !name.trim().is_empty() && !is_generic_sender_name(name))
             {
-                metadata.insert(
-                    "display_name".to_owned(),
-                    serde_json::Value::String(display_name.to_owned()),
-                );
+                let current_is_generic = metadata
+                    .get("display_name")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(is_generic_sender_name);
+                if !metadata.contains_key("display_name") || current_is_generic {
+                    metadata.insert(
+                        "display_name".to_owned(),
+                        serde_json::Value::String(display_name.to_owned()),
+                    );
+                }
             }
         }
         let _ = PrincipalStore::new(&state.db).upsert(&updated);

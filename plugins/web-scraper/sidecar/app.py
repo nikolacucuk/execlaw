@@ -67,6 +67,17 @@ class ExtractRequest(BaseModel):
     allowed_domains: Optional[List[str]] = None
 
 
+class ClipRequest(BaseModel):
+    url: str
+    mode: Mode = "dynamic"
+    title: Optional[str] = None
+    tags: List[str] = Field(default_factory=list, max_length=20)
+    include_source: bool = True
+    timeout_ms: int = Field(default=30000, ge=1000, le=180000)
+    max_chars: int = Field(default=12000, ge=512, le=100000)
+    allowed_domains: Optional[List[str]] = None
+
+
 class CrawlExtract(BaseModel):
     main_text: bool = True
     fields: List[FieldRule] = Field(default_factory=list)
@@ -172,6 +183,36 @@ def _to_text(result: Any) -> str:
     if isinstance(result, str):
         return result
     return str(result)
+
+
+def _yaml_scalar(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
+    return f'"{escaped}"'
+
+
+def _clip_markdown(page: PageData, request: ClipRequest) -> str:
+    title = (request.title or page.title or "Clipped page").strip()
+    from datetime import datetime, timezone
+    captured = datetime.now(timezone.utc).isoformat()
+    lines = [
+        "---",
+        f"title: {_yaml_scalar(title)}",
+        "type: source",
+        "ai-first: true",
+        "capture_scope: bounded-local",
+        f"captured: {_yaml_scalar(captured)}",
+    ]
+    if request.include_source:
+        lines.append(f"source: {_yaml_scalar(page.final_url)}")
+    tags = [tag.strip().lstrip("#") for tag in request.tags if tag.strip()]
+    if tags:
+        lines.append("tags:")
+        lines.extend(f"  - {_yaml_scalar(tag)}" for tag in tags)
+    lines.extend(["---", "", f"# {title}", ""])
+    if request.include_source:
+        lines.extend([f"> Source: {page.final_url}", ""])
+    lines.append(page.text.strip())
+    return "\n".join(lines).strip() + "\n"
 
 
 def _fetch(url: str, mode: Mode, timeout_ms: int) -> Any:
@@ -326,6 +367,23 @@ def extract(req: ExtractRequest) -> Dict[str, Any]:
         "main_text": main_text,
         "links": links,
         "truncated": len(main_text) >= req.max_chars if req.main_text else False,
+        "timings_ms": {"fetch": 0, "render": 0, "extract": 0},
+    }
+
+
+@app.post("/v1/clip")
+def clip(req: ClipRequest) -> Dict[str, Any]:
+    _enforce_host_policy(req.url, req.allowed_domains)
+    page = _page_data(req.url, req.mode, req.timeout_ms, req.max_chars)
+    markdown = _clip_markdown(page, req)
+    markdown, truncated = _clip(markdown, req.max_chars)
+    return {
+        "final_url": page.final_url,
+        "status": page.status,
+        "content_type": page.content_type,
+        "title": req.title or page.title,
+        "markdown": markdown,
+        "truncated": truncated,
         "timings_ms": {"fetch": 0, "render": 0, "extract": 0},
     }
 

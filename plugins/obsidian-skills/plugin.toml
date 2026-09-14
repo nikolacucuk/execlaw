@@ -1,7 +1,7 @@
 [plugin]
 id = "obsidian-skills"
 name = "Obsidian Skills"
-version = "0.1.0"
+version = "0.3.0"
 
 [runtime]
 tier = "script"
@@ -16,3 +16,18 @@ description = "Draft notes and updates that fit an Obsidian vault workflow."
 name = "atomic-notes"
 entry = "skills/atomic-notes.md"
 description = "Split ideas into small, linked notes with clear titles and tags."
+
+[[skills]]
+name = "web-clipper"
+entry = "skills/web-clipper.md"
+description = "Turn web-scraper captures into reviewable, source-preserving Obsidian notes."
+
+[[skills]]
+name = "second-brain"
+entry = "skills/second-brain.md"
+description = "Archive, process, and retrieve Obsidian knowledge with provenance, freshness, and approval boundaries."
+
+[[skills]]
+name = "archive-operations"
+entry = "skills/archive-operations.md"
+description = "Create reproducible archive records and post-processing logs linked to execlaw runs and memory assets."

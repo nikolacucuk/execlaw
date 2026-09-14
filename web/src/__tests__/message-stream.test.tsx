@@ -173,25 +173,25 @@ describe("MessageStream", () => {
         expect(onSend).not.toHaveBeenCalled();
     });
 
-    it("does not offer WhatsApp actions for a non-WhatsApp latest reply", () => {
-        setMessages("conv-mixed-origins", [
+    it("offers review actions for a Signal-originated latest reply", () => {
+        setMessages("conv-signal-origin", [
             {
-                ...baseMsg(1, "WhatsApp inbound", "user_msg"),
-                channel_origin: "whatsapp",
+                ...baseMsg(1, "Signal inbound", "user_msg"),
+                channel_origin: "signal",
             },
             {
-                ...baseMsg(2, "web reply", "model_turn"),
-                channel_origin: null,
+                ...baseMsg(2, "Signal draft", "model_turn"),
+                channel_origin: "signal",
             },
         ] as never);
         render(
             <MessageStream
-                conversationId="conv-mixed-origins"
+                conversationId="conv-signal-origin"
                 onSendTransportReply={vi.fn().mockResolvedValue(undefined)}
             />,
         );
-        expect(screen.queryByTestId("send-transport-reply")).toBeNull();
-        expect(screen.queryByTestId("cancel-transport-reply")).toBeNull();
+        expect(screen.getByTestId("send-transport-reply")).toBeInTheDocument();
+        expect(screen.getByTestId("cancel-transport-reply")).toBeInTheDocument();
     });
 
     it("offers independent approval controls for multiple WhatsApp replies", () => {
