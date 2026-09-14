@@ -4306,11 +4306,12 @@ pub async fn force_transport_response(
         .rev()
         .find_map(|event| {
             let payload = event.decode_payload::<UserMessagePayload>().ok()?;
-            payload
+            let has_channel_origin = payload
                 .channel_origin
                 .as_deref()
                 .filter(|channel| !channel.is_empty())
-                .map(|_| (event, payload))
+                .is_some();
+            has_channel_origin.then_some((event, payload))
         })
     else {
         return (
