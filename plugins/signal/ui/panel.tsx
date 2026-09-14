@@ -63,6 +63,7 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     const [chatImportEnabled, setChatImportEnabled] = useState(true);
     const [agentHandlingEnabled, setAgentHandlingEnabled] = useState(true);
     const [dedicatedChatEnabled, setDedicatedChatEnabled] = useState(false);
+    const [selfMessageImportEnabled, setSelfMessageImportEnabled] = useState(true);
 
     const refresh = useCallback(async () => {
         try {
@@ -102,6 +103,12 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
             );
             setDedicatedChatEnabled(setting.value === "true");
         } catch { setDedicatedChatEnabled(false); }
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>(
+                "GET", "/api/admin/plugins/signal/settings/inbound_self_message_import_enabled",
+            );
+            setSelfMessageImportEnabled(setting.value !== "false");
+        } catch { setSelfMessageImportEnabled(true); }
     }, [bridge]);
 
     const saveSetting = useCallback(async (key: string, value: string) => {
@@ -199,6 +206,12 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                                 onChange={(event) => { setAgentHandlingEnabled(event.target.checked); void saveSetting("inbound_agent_handling_enabled", event.target.checked ? "true" : "false"); }}
                                 data-testid="signal-agent-handling-toggle" />
                             <span>Enable agent handling of new Signal messages</span>
+                        </label>
+                        <label className="d-flex gap-2 align-items-center small mb-2">
+                            <input type="checkbox" checked={selfMessageImportEnabled} disabled={busy}
+                                onChange={(event) => { setSelfMessageImportEnabled(event.target.checked); void saveSetting("inbound_self_message_import_enabled", event.target.checked ? "true" : "false"); }}
+                                data-testid="signal-self-message-import-toggle" />
+                            <span>Show my phone messages in execlaw chats</span>
                         </label>
                         <label className="d-flex gap-2 align-items-center small">
                             <input type="checkbox" checked={dedicatedChatEnabled} disabled={busy}

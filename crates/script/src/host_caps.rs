@@ -102,6 +102,10 @@ pub struct InboundMessage {
     /// Whether this inbound message may trigger matching agents or an LLM
     /// turn. Missing plugin fields default to true for compatibility.
     pub agent_handling_enabled: bool,
+    /// True when the linked operator account sent this message from the
+    /// phone. The host persists it for chat visibility but never dispatches
+    /// agent or LLM handling for it.
+    pub is_self_message: bool,
 }
 
 #[derive(Debug, Clone)]

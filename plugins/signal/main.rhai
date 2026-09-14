@@ -175,6 +175,7 @@ fn decode_frame(raw) {
             "reuse_conversation": true,
             "conversation_scope": inbound_conversation_scope(),
             "agent_handling_enabled": inbound_agent_handling_enabled(),
+            "is_self_message": inbound_self_message_import_enabled() && env.sourceNumber == self_number(),
             "native_id": if env.sourceNumber != () { env.sourceNumber } else { env.source },
             "display_name": env.sourceName,
             "group_id": group_id,
@@ -195,6 +196,7 @@ fn ensure_default_settings() {
         ["inbound_import_enabled", "true"],
         ["inbound_agent_handling_enabled", "true"],
         ["dedicated_chat_enabled", "false"],
+        ["inbound_self_message_import_enabled", "true"],
     ];
     for entry in defaults {
         if vault_get(entry[0]) == () { vault_put(entry[0], entry[1]); }
@@ -207,6 +209,10 @@ fn inbound_chat_import_enabled() {
 
 fn inbound_agent_handling_enabled() {
     try { vault_get("inbound_agent_handling_enabled") != "false" } catch (e) { true }
+}
+
+fn inbound_self_message_import_enabled() {
+    try { vault_get("inbound_self_message_import_enabled") != "false" } catch (e) { true }
 }
 
 fn inbound_conversation_scope() {

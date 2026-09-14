@@ -3703,11 +3703,37 @@ async fn bridge_text_reply_to_originating_transport(
     // lives in plugins/signal/main.rhai's `wire_recipient` fn).
     let tool_name = format!("{channel}.send_message");
     let args = serde_json::json!({"to": foreign_id, "text": model_text});
-    state
+    let archive_message_id = crate::message_archive::archive_outbound_generated(
+        state,
+        cid,
+        channel,
+        foreign_id,
+        resolved.is_group,
+        &model_text,
+    )?;
+    if let Err(error) = state
         .plugin_host
         .call_tool(&tool_name, args, &["*"], Some("Controller"))
         .await
-        .map_err(|e| format!("plugin tool {tool_name}: {e}"))?;
+    {
+        crate::message_archive::mark_outbound_status(
+            state,
+            cid,
+            channel,
+            foreign_id,
+            &archive_message_id,
+            "failed",
+        )?;
+        return Err(format!("plugin tool {tool_name}: {error}"));
+    }
+    crate::message_archive::mark_outbound_status(
+        state,
+        cid,
+        channel,
+        foreign_id,
+        &archive_message_id,
+        "delivered",
+    )?;
     let recipient = foreign_id;
     tracing::info!(
         target: "chats::dispatch_external_turn",

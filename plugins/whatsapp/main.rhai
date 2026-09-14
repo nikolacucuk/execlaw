@@ -423,6 +423,13 @@ fn inbound_agent_handling_enabled() {
     }
 }
 
+fn inbound_self_message_import_enabled() {
+    try {
+        let value = vault_get("inbound_self_message_import_enabled");
+        value != "false"
+    } catch (e) { true }
+}
+
 fn inbound_conversation_scope() {
     try {
         let value = vault_get("dedicated_chat_enabled");
@@ -585,41 +592,59 @@ fn decode_event_map(env) {
         // `Controller` and dispatches a turn — i.e. the operator
         // sends a message to another human in a group, and the
         // agent inserts itself into the conversation. Drop early.
-        if info.IsFromMe == true { return (); }
+        let is_self_message = info.IsFromMe == true;
+        if is_self_message && !inbound_self_message_import_enabled() { return (); }
 
         let text = ();
         if msg.conversation != () { text = msg.conversation; }
         if text == () && msg.extendedTextMessage != () && msg.extendedTextMessage.text != () {
             text = msg.extendedTextMessage.text;
         }
-        if text == () && msg.imageMessage != () && msg.imageMessage.caption != () {
-            text = msg.imageMessage.caption;
+        let image_message = if msg.imageMessage != () { msg.imageMessage } else { msg.ImageMessage };
+        let document_message = if msg.documentMessage != () { msg.documentMessage } else { msg.DocumentMessage };
+        let video_message = if msg.videoMessage != () { msg.videoMessage } else { msg.VideoMessage };
+        let gif_message = if msg.gifMessage != () { msg.gifMessage } else { msg.GifMessage };
+        if text == () && image_message != () && image_message.caption != () {
+            text = image_message.caption;
         }
-        if text == () && msg.documentMessage != () && msg.documentMessage.caption != () {
-            text = msg.documentMessage.caption;
+        if text == () && document_message != () && document_message.caption != () {
+            text = document_message.caption;
+        }
+        if text == () && video_message != () && video_message.caption != () {
+            text = video_message.caption;
+        }
+        if text == () && gif_message != () && gif_message.caption != () {
+            text = gif_message.caption;
         }
         let trimmed = if text != () { trim(text) } else { "" };
 
         let attachments = [];
-        if msg.imageMessage != () {
-            let m = msg.imageMessage;
+        if image_message != () {
+            let m = image_message;
             let bridge_id = if m.url != () { m.url } else if m.directPath != () { m.directPath } else { () };
             if bridge_id != () {
                 attachments.push(#{ "bridge_id": bridge_id, "content_type": m.mimetype, "filename": m.fileName, "size_bytes": m.fileLength });
             }
         }
-        if msg.documentMessage != () {
-            let m = msg.documentMessage;
+        if document_message != () {
+            let m = document_message;
             let bridge_id = if m.url != () { m.url } else if m.directPath != () { m.directPath } else { () };
             if bridge_id != () {
                 attachments.push(#{ "bridge_id": bridge_id, "content_type": m.mimetype, "filename": m.fileName, "size_bytes": m.fileLength });
             }
         }
-        if msg.videoMessage != () {
-            let m = msg.videoMessage;
+        if video_message != () {
+            let m = video_message;
             let bridge_id = if m.url != () { m.url } else if m.directPath != () { m.directPath } else { () };
             if bridge_id != () {
                 attachments.push(#{ "bridge_id": bridge_id, "content_type": m.mimetype, "filename": m.fileName, "size_bytes": m.fileLength });
+            }
+        }
+        if gif_message != () {
+            let m = gif_message;
+            let bridge_id = if m.url != () { m.url } else if m.directPath != () { m.directPath } else { () };
+            if bridge_id != () {
+                attachments.push(#{ "bridge_id": bridge_id, "content_type": if m.mimetype != () { m.mimetype } else { "image/gif" }, "filename": m.fileName, "size_bytes": m.fileLength });
             }
         }
         if msg.audioMessage != () {
@@ -653,6 +678,7 @@ fn decode_event_map(env) {
             "reuse_conversation": true,
             "conversation_scope": inbound_conversation_scope(),
             "agent_handling_enabled": inbound_agent_handling_enabled(),
+            "is_self_message": is_self_message,
             "native_id": native_id,
             "display_name": info.PushName,
             "group_id": group_id,

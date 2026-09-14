@@ -151,6 +151,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "memory_assets_knowledge",
         sql: include_str!("../migrations/0025_memory_assets_knowledge.sql"),
     },
+    Migration {
+        id: 26,
+        name: "message_archive",
+        sql: include_str!("../migrations/0026_message_archive.sql"),
+    },
+    Migration {
+        id: 27,
+        name: "message_archive_projection",
+        sql: include_str!("../migrations/0027_message_archive_projection.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

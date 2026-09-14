@@ -45,6 +45,7 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     const [chatImportEnabled, setChatImportEnabled] = useState(true);
     const [agentHandlingEnabled, setAgentHandlingEnabled] = useState(true);
     const [dedicatedChatEnabled, setDedicatedChatEnabled] = useState(false);
+    const [selfMessageImportEnabled, setSelfMessageImportEnabled] = useState(true);
 
     const refresh = useCallback(async () => {
         try {
@@ -116,6 +117,15 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
             setDedicatedChatEnabled(dedicatedSetting.value === "true");
         } catch {
             setDedicatedChatEnabled(false);
+        }
+        try {
+            const selfSetting = await bridge.fetchJson<{ value: string }>(
+                "GET",
+                "/api/admin/plugins/whatsapp/settings/inbound_self_message_import_enabled",
+            );
+            setSelfMessageImportEnabled(selfSetting.value !== "false");
+        } catch {
+            setSelfMessageImportEnabled(true);
         }
     }, [bridge]);
 
@@ -238,6 +248,19 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                                 data-testid="whatsapp-agent-handling-toggle"
                             />
                             <span>Enable agent handling of new WhatsApp messages</span>
+                        </label>
+                        <label className="d-flex gap-2 align-items-center small mt-2">
+                            <input
+                                type="checkbox"
+                                checked={selfMessageImportEnabled}
+                                disabled={busy}
+                                onChange={(event) => {
+                                    setSelfMessageImportEnabled(event.target.checked);
+                                    void saveInboundSetting("inbound_self_message_import_enabled", event.target.checked);
+                                }}
+                                data-testid="whatsapp-self-message-import-toggle"
+                            />
+                            <span>Show my phone messages in execlaw chats</span>
                         </label>
                         <label className="d-flex gap-2 align-items-center small mt-2">
                             <input

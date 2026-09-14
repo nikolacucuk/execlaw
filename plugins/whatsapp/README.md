@@ -14,7 +14,7 @@ For generic plugin creation and packaging instructions, read
 ## Current version and layout
 
 The current source manifest is `plugins/whatsapp/plugin.toml`. Its plugin id
-is `whatsapp` and its current version is `0.2.14`.
+is `whatsapp` and its current version is `0.2.16`.
 
 ```text
 plugins/whatsapp/
@@ -127,6 +127,11 @@ The current plugin provides:
   each approval routed to the recipient that produced that response.
 - Durable sent/cancelled review decisions with an explicit override action.
 - Optional dedicated WhatsApp chat routing.
+- Image and GIF inbound media decoding accepts both lowercase and
+  capitalized WuzAPI message field shapes.
+- Optional import of messages sent from the linked operator phone, enabled by
+  default. These messages are visible for conversation context but are marked
+  audit-only and never trigger an agent or LLM turn.
 - Independent settings for importing messages into execlaw chats and for
   allowing agent/LLM handling of imported messages.
 - Local SPA unread indicators for imported inbound direct and group messages;
@@ -160,6 +165,22 @@ An event-only agent must not run an interval-based "no new mailbox messages"
 turn. It becomes due only when `generic_inbound::enqueue_triggered_agents`
 receives a matching inbound webhook event. The supervisor wake signal is an
 internal scheduling notification, not a WhatsApp polling mechanism.
+
+## Release 0.2.16: Import operator phone messages
+
+The WhatsApp settings panel includes **Show my phone messages in execlaw
+chats**, enabled by default. When enabled, messages sent from the linked
+WhatsApp phone are imported into the transcript for context, but the host
+never dispatches agent or LLM handling for them. Disable the setting to return
+to the previous self-message filtering behavior.
+
+## Release 0.2.15: WhatsApp media decoding compatibility
+
+Inbound image, GIF, document, and video payloads now accept both the
+lowercase JSON field names and the capitalized Go-style field names emitted by
+different WuzAPI versions. Image and GIF media are persisted into the shared
+attachment store so they render in the execlaw chat instead of appearing as a
+metadata-only message.
 
 ## Release 0.2.14: Durable review decisions and dedicated chat routing
 

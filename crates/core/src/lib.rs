@@ -48,6 +48,7 @@ pub mod memory;
 pub mod memory_assertions;
 pub mod memory_assets;
 pub mod memory_lifecycle;
+pub mod message_archive;
 pub mod migrations;
 pub mod oauth;
 pub mod outbox;

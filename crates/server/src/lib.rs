@@ -59,6 +59,7 @@ pub mod mcp_admin;
 pub mod mcp_host;
 pub mod mcp_http_client;
 pub mod memory_extract_runtime;
+pub mod message_archive;
 pub mod my_identities;
 pub mod oauth_admin;
 pub mod oauth_provider;

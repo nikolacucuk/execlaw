@@ -241,14 +241,25 @@ impl<'db> MemoryAssetStore<'db> {
                     injection_mode = excluded.injection_mode,
                     priority = excluded.priority,
                     max_chars = excluded.max_chars",
-                params![asset_id, agent_scope, injection_mode.as_sql(), priority, max_chars, now_unix],
+                params![
+                    asset_id,
+                    agent_scope,
+                    injection_mode.as_sql(),
+                    priority,
+                    max_chars,
+                    now_unix
+                ],
             )?;
             Ok(())
         })?;
         Ok(())
     }
 
-    pub fn list_loadout(&self, agent_scope: &str, limit: u32) -> Result<Vec<AssetBinding>, MemoryAssetError> {
+    pub fn list_loadout(
+        &self,
+        agent_scope: &str,
+        limit: u32,
+    ) -> Result<Vec<AssetBinding>, MemoryAssetError> {
         Ok(self.db.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT asset_id, agent_scope, injection_mode, priority, max_chars, created_at
@@ -310,12 +321,27 @@ impl<'db> MemoryAssetStore<'db> {
         }
         let mut hits = Vec::new();
         for id in ids {
-            let Some(asset) = self.get(&id)? else { continue };
-            let lexical_rank = lexical.iter().position(|(candidate, _)| candidate == &id).map(|i| i as i64 + 1);
-            let vector_rank = vector_ids.iter().position(|(candidate, _)| candidate == &id).map(|i| i as i64 + 1);
+            let Some(asset) = self.get(&id)? else {
+                continue;
+            };
+            let lexical_rank = lexical
+                .iter()
+                .position(|(candidate, _)| candidate == &id)
+                .map(|i| i as i64 + 1);
+            let vector_rank = vector_ids
+                .iter()
+                .position(|(candidate, _)| candidate == &id)
+                .map(|i| i as i64 + 1);
             let score = 1.0 / (60.0 + lexical_rank.unwrap_or(10_000) as f64)
-                + vector_rank.map(|rank| 1.0 / (60.0 + rank as f64)).unwrap_or(0.0);
-            hits.push(AssetHit { asset, score, lexical_rank: lexical_rank.unwrap_or(0), vector_rank });
+                + vector_rank
+                    .map(|rank| 1.0 / (60.0 + rank as f64))
+                    .unwrap_or(0.0);
+            hits.push(AssetHit {
+                asset,
+                score,
+                lexical_rank: lexical_rank.unwrap_or(0),
+                vector_rank,
+            });
         }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(limit as usize);
@@ -342,7 +368,14 @@ impl<'db> MemoryAssetStore<'db> {
                  ON CONFLICT(asset_id, model_id) DO UPDATE SET
                     dimensions = excluded.dimensions, vector_json = excluded.vector_json,
                     source_hash = excluded.source_hash, created_at = excluded.created_at",
-                params![asset_id, model_id, vector.len() as i64, json, source_hash, now_unix],
+                params![
+                    asset_id,
+                    model_id,
+                    vector.len() as i64,
+                    json,
+                    source_hash,
+                    now_unix
+                ],
             )?;
             Ok(())
         })?;
@@ -359,9 +392,20 @@ impl<'db> MemoryAssetStore<'db> {
                     title = excluded.title, body = excluded.body,
                     source_path = excluded.source_path, source_hash = excluded.source_hash,
                     updated_at = excluded.updated_at",
-                params![page.wiki_id, page.page_ref, page.title, page.body, page.source_path, page.source_hash, page.updated_at],
+                params![
+                    page.wiki_id,
+                    page.page_ref,
+                    page.title,
+                    page.body,
+                    page.source_path,
+                    page.source_hash,
+                    page.updated_at
+                ],
             )?;
-            c.execute("DELETE FROM knowledge_wiki_search WHERE wiki_id = ?1 AND page_ref = ?2", params![page.wiki_id, page.page_ref])?;
+            c.execute(
+                "DELETE FROM knowledge_wiki_search WHERE wiki_id = ?1 AND page_ref = ?2",
+                params![page.wiki_id, page.page_ref],
+            )?;
             c.execute(
                 "INSERT INTO knowledge_wiki_search(wiki_id, page_ref, title, body)
                  VALUES (?1, ?2, ?3, ?4)",
@@ -372,7 +416,12 @@ impl<'db> MemoryAssetStore<'db> {
         Ok(())
     }
 
-    pub fn search_wiki(&self, wiki_id: &str, query: &str, limit: u32) -> Result<Vec<WikiPage>, MemoryAssetError> {
+    pub fn search_wiki(
+        &self,
+        wiki_id: &str,
+        query: &str,
+        limit: u32,
+    ) -> Result<Vec<WikiPage>, MemoryAssetError> {
         Ok(self.db.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT p.wiki_id, p.page_ref, p.title, p.body, p.source_path, p.source_hash, p.updated_at
@@ -395,14 +444,28 @@ impl<'db> MemoryAssetStore<'db> {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(graph_id, symbol, file_path, start_line) DO UPDATE SET
                     kind = excluded.kind, end_line = excluded.end_line, source = excluded.source",
-                params![node.graph_id, node.symbol, node.kind, node.file_path, node.start_line, node.end_line, node.source],
+                params![
+                    node.graph_id,
+                    node.symbol,
+                    node.kind,
+                    node.file_path,
+                    node.start_line,
+                    node.end_line,
+                    node.source
+                ],
             )?;
             Ok(())
         })?;
         Ok(())
     }
 
-    pub fn add_code_edge(&self, graph_id: &str, caller: &str, callee: &str, kind: &str) -> Result<(), MemoryAssetError> {
+    pub fn add_code_edge(
+        &self,
+        graph_id: &str,
+        caller: &str,
+        callee: &str,
+        kind: &str,
+    ) -> Result<(), MemoryAssetError> {
         self.db.with_conn(|c| {
             c.execute(
                 "INSERT OR IGNORE INTO knowledge_code_edges(graph_id, caller, callee, kind)
@@ -414,50 +477,104 @@ impl<'db> MemoryAssetStore<'db> {
         Ok(())
     }
 
-    pub fn search_code(&self, graph_id: &str, symbol: &str, limit: u32) -> Result<Vec<CodeNode>, MemoryAssetError> {
+    pub fn search_code(
+        &self,
+        graph_id: &str,
+        symbol: &str,
+        limit: u32,
+    ) -> Result<Vec<CodeNode>, MemoryAssetError> {
         Ok(self.db.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT graph_id, symbol, kind, file_path, start_line, end_line, source
                  FROM knowledge_code_nodes WHERE graph_id = ?1 AND symbol LIKE ?2
                  ORDER BY symbol LIMIT ?3",
             )?;
-            Ok(stmt.query_map(params![graph_id, format!("%{}%", symbol.replace('%', "")), limit as i64], |r| {
-                Ok(CodeNode { graph_id: r.get(0)?, symbol: r.get(1)?, kind: r.get(2)?, file_path: r.get(3)?, start_line: r.get(4)?, end_line: r.get(5)?, source: r.get(6)? })
-            })?.collect::<Result<Vec<_>, _>>()?)
+            Ok(stmt
+                .query_map(
+                    params![
+                        graph_id,
+                        format!("%{}%", symbol.replace('%', "")),
+                        limit as i64
+                    ],
+                    |r| {
+                        Ok(CodeNode {
+                            graph_id: r.get(0)?,
+                            symbol: r.get(1)?,
+                            kind: r.get(2)?,
+                            file_path: r.get(3)?,
+                            start_line: r.get(4)?,
+                            end_line: r.get(5)?,
+                            source: r.get(6)?,
+                        })
+                    },
+                )?
+                .collect::<Result<Vec<_>, _>>()?)
         })?)
     }
 
-    pub fn callers(&self, graph_id: &str, symbol: &str, limit: u32) -> Result<Vec<String>, MemoryAssetError> {
+    pub fn callers(
+        &self,
+        graph_id: &str,
+        symbol: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, MemoryAssetError> {
         self.edge_names(graph_id, symbol, "callee", limit)
     }
 
-    pub fn callees(&self, graph_id: &str, symbol: &str, limit: u32) -> Result<Vec<String>, MemoryAssetError> {
+    pub fn callees(
+        &self,
+        graph_id: &str,
+        symbol: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, MemoryAssetError> {
         self.edge_names(graph_id, symbol, "caller", limit)
     }
 
     /// Return a bounded breadth-first impact set following callers and
     /// callees. The graph is derived and revision-scoped; callers should
     /// reject stale graphs before exposing this result to a model.
-    pub fn impact(&self, graph_id: &str, symbol: &str, depth: u32, limit: u32) -> Result<Vec<String>, MemoryAssetError> {
+    pub fn impact(
+        &self,
+        graph_id: &str,
+        symbol: &str,
+        depth: u32,
+        limit: u32,
+    ) -> Result<Vec<String>, MemoryAssetError> {
         let mut frontier = vec![symbol.to_owned()];
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..depth.max(1) {
             let mut next = Vec::new();
             for current in frontier {
-                if !seen.insert(current.clone()) { continue; }
+                if !seen.insert(current.clone()) {
+                    continue;
+                }
                 next.extend(self.callers(graph_id, &current, limit)?);
                 next.extend(self.callees(graph_id, &current, limit)?);
-                if seen.len() >= limit as usize { break; }
+                if seen.len() >= limit as usize {
+                    break;
+                }
             }
             frontier = next;
-            if frontier.is_empty() || seen.len() >= limit as usize { break; }
+            if frontier.is_empty() || seen.len() >= limit as usize {
+                break;
+            }
         }
         seen.remove(symbol);
         Ok(seen.into_iter().take(limit as usize).collect())
     }
 
-    fn edge_names(&self, graph_id: &str, symbol: &str, side: &str, limit: u32) -> Result<Vec<String>, MemoryAssetError> {
-        let column = match side { "callee" => "callee", "caller" => "caller", _ => return Ok(Vec::new()) };
+    fn edge_names(
+        &self,
+        graph_id: &str,
+        symbol: &str,
+        side: &str,
+        limit: u32,
+    ) -> Result<Vec<String>, MemoryAssetError> {
+        let column = match side {
+            "callee" => "callee",
+            "caller" => "caller",
+            _ => return Ok(Vec::new()),
+        };
         Ok(self.db.with_conn(|c| {
             let sql = format!("SELECT {} FROM knowledge_code_edges WHERE graph_id = ?1 AND {} = ?2 ORDER BY {} LIMIT ?3", column, side, column);
             let mut stmt = c.prepare(&sql)?;
@@ -465,7 +582,12 @@ impl<'db> MemoryAssetStore<'db> {
         })?)
     }
 
-    fn vector_candidates(&self, query: &[f32], model_id: &str, limit: u32) -> Result<Vec<(String, f32)>, MemoryAssetError> {
+    fn vector_candidates(
+        &self,
+        query: &[f32],
+        model_id: &str,
+        limit: u32,
+    ) -> Result<Vec<(String, f32)>, MemoryAssetError> {
         let rows = self.db.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT asset_id, dimensions, vector_json FROM memory_asset_embeddings
@@ -482,8 +604,12 @@ impl<'db> MemoryAssetStore<'db> {
         })?;
         let mut scored = Vec::new();
         for (id, dimensions, json) in rows {
-            if dimensions != query.len() { continue; }
-            let Ok(values) = serde_json::from_str::<Vec<f32>>(&json) else { continue; };
+            if dimensions != query.len() {
+                continue;
+            }
+            let Ok(values) = serde_json::from_str::<Vec<f32>>(&json) else {
+                continue;
+            };
             let score = cosine_similarity(query, &values);
             scored.push((id, score));
         }
@@ -494,36 +620,82 @@ impl<'db> MemoryAssetStore<'db> {
 }
 
 fn sanitize_fts_query(query: &str) -> String {
-    query.split_whitespace().filter_map(|word| {
-        let clean: String = word.chars().filter(|ch| ch.is_alphanumeric()).collect();
-        (!clean.is_empty()).then_some(clean)
-    }).collect::<Vec<_>>().join(" ")
+    query
+        .split_whitespace()
+        .filter_map(|word| {
+            let clean: String = word.chars().filter(|ch| ch.is_alphanumeric()).collect();
+            (!clean.is_empty()).then_some(clean)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     let (mut dot, mut left_norm, mut right_norm) = (0.0, 0.0, 0.0);
-    for (a, b) in left.iter().zip(right) { dot += a * b; left_norm += a * a; right_norm += b * b; }
-    if left_norm == 0.0 || right_norm == 0.0 { 0.0 } else { dot / (left_norm.sqrt() * right_norm.sqrt()) }
+    for (a, b) in left.iter().zip(right) {
+        dot += a * b;
+        left_norm += a * a;
+        right_norm += b * b;
+    }
+    if left_norm == 0.0 || right_norm == 0.0 {
+        0.0
+    } else {
+        dot / (left_norm.sqrt() * right_norm.sqrt())
+    }
 }
 
 fn row_to_asset(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryAsset> {
     Ok(MemoryAsset {
         asset_id: r.get(0)?,
-        asset_type: AssetType::parse(&r.get::<_, String>(1)?).ok_or_else(|| rusqlite::Error::InvalidQuery)?,
-        name: r.get(2)?, description: r.get(3)?, owner_scope: r.get(4)?,
-        visibility: match r.get::<_, String>(5)?.as_str() { "private" => AssetVisibility::Private, "team" => AssetVisibility::Team, "restricted" => AssetVisibility::Restricted, "agent" => AssetVisibility::Agent, _ => return Err(rusqlite::Error::InvalidQuery) },
-        trust_floor: r.get(6)?, status: r.get(7)?, version: r.get(8)?, source_ref: r.get(9)?, content_ref: r.get(10)?, source_hash: r.get(11)?, expires_at: r.get(12)?, last_used_at: r.get(13)?, usage_count: r.get(14)?, created_at: r.get(15)?, updated_at: r.get(16)?,
+        asset_type: AssetType::parse(&r.get::<_, String>(1)?)
+            .ok_or_else(|| rusqlite::Error::InvalidQuery)?,
+        name: r.get(2)?,
+        description: r.get(3)?,
+        owner_scope: r.get(4)?,
+        visibility: match r.get::<_, String>(5)?.as_str() {
+            "private" => AssetVisibility::Private,
+            "team" => AssetVisibility::Team,
+            "restricted" => AssetVisibility::Restricted,
+            "agent" => AssetVisibility::Agent,
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        },
+        trust_floor: r.get(6)?,
+        status: r.get(7)?,
+        version: r.get(8)?,
+        source_ref: r.get(9)?,
+        content_ref: r.get(10)?,
+        source_hash: r.get(11)?,
+        expires_at: r.get(12)?,
+        last_used_at: r.get(13)?,
+        usage_count: r.get(14)?,
+        created_at: r.get(15)?,
+        updated_at: r.get(16)?,
     })
 }
 
 fn row_to_binding(r: &rusqlite::Row<'_>) -> rusqlite::Result<AssetBinding> {
-    Ok(AssetBinding { asset_id: r.get(0)?, agent_scope: r.get(1)?, injection_mode: match r.get::<_, String>(2)?.as_str() { "hot" => InjectionMode::Hot, "discoverable" => InjectionMode::Discoverable, "tool_only" => InjectionMode::ToolOnly, _ => return Err(rusqlite::Error::InvalidQuery) }, priority: r.get(3)?, max_chars: r.get(4)?, created_at: r.get(5)? })
+    Ok(AssetBinding {
+        asset_id: r.get(0)?,
+        agent_scope: r.get(1)?,
+        injection_mode: match r.get::<_, String>(2)?.as_str() {
+            "hot" => InjectionMode::Hot,
+            "discoverable" => InjectionMode::Discoverable,
+            "tool_only" => InjectionMode::ToolOnly,
+            _ => return Err(rusqlite::Error::InvalidQuery),
+        },
+        priority: r.get(3)?,
+        max_chars: r.get(4)?,
+        created_at: r.get(5)?,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{db::{Database, DbConfig}, migrations::MigrationRunner};
+    use crate::{
+        db::{Database, DbConfig},
+        migrations::MigrationRunner,
+    };
 
     fn db() -> Database {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
@@ -535,11 +707,38 @@ mod tests {
     fn loadout_and_hybrid_search_are_bounded_and_versioned() {
         let db = db();
         let store = MemoryAssetStore::new(&db);
-        store.create(NewMemoryAsset { asset_id: "skill-1", asset_type: AssetType::Skill, name: "Release checklist", description: "release validation", owner_scope: "controller", visibility: AssetVisibility::Private, trust_floor: "Controller", source_ref: Some("release.md"), content_ref: None, source_hash: Some("a"), now_unix: 1 }).unwrap();
-        store.bind("skill-1", "builder", InjectionMode::Discoverable, 10, 4000, 1).unwrap();
-        store.upsert_embedding("skill-1", "local-test", &[1.0, 0.0], "a", 1).unwrap();
+        store
+            .create(NewMemoryAsset {
+                asset_id: "skill-1",
+                asset_type: AssetType::Skill,
+                name: "Release checklist",
+                description: "release validation",
+                owner_scope: "controller",
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: Some("release.md"),
+                content_ref: None,
+                source_hash: Some("a"),
+                now_unix: 1,
+            })
+            .unwrap();
+        store
+            .bind(
+                "skill-1",
+                "builder",
+                InjectionMode::Discoverable,
+                10,
+                4000,
+                1,
+            )
+            .unwrap();
+        store
+            .upsert_embedding("skill-1", "local-test", &[1.0, 0.0], "a", 1)
+            .unwrap();
         assert_eq!(store.list_loadout("builder", 10).unwrap().len(), 1);
-        let hits = store.search("release", Some(&[1.0, 0.0]), Some("local-test"), 5).unwrap();
+        let hits = store
+            .search("release", Some(&[1.0, 0.0]), Some("local-test"), 5)
+            .unwrap();
         assert_eq!(hits[0].asset.asset_id, "skill-1");
         assert!(hits[0].score > 0.0);
     }
@@ -548,12 +747,50 @@ mod tests {
     fn wiki_and_code_graph_queries_are_revision_scoped() {
         let db = db();
         let store = MemoryAssetStore::new(&db);
-        store.upsert_wiki_page(&WikiPage { wiki_id: "wiki-1".into(), page_ref: "release".into(), title: "Release plan".into(), body: "Ship after review".into(), source_path: "docs/release.md".into(), source_hash: "h1".into(), updated_at: 1 }).unwrap();
+        store
+            .upsert_wiki_page(&WikiPage {
+                wiki_id: "wiki-1".into(),
+                page_ref: "release".into(),
+                title: "Release plan".into(),
+                body: "Ship after review".into(),
+                source_path: "docs/release.md".into(),
+                source_hash: "h1".into(),
+                updated_at: 1,
+            })
+            .unwrap();
         assert_eq!(store.search_wiki("wiki-1", "release", 5).unwrap().len(), 1);
-        store.upsert_code_node(&CodeNode { graph_id: "graph-1".into(), symbol: "build_prompt".into(), kind: "function".into(), file_path: "src/prompt.rs".into(), start_line: 1, end_line: 4, source: None }).unwrap();
-        store.upsert_code_node(&CodeNode { graph_id: "graph-1".into(), symbol: "run_turn".into(), kind: "function".into(), file_path: "src/turn.rs".into(), start_line: 5, end_line: 8, source: None }).unwrap();
-        store.add_code_edge("graph-1", "run_turn", "build_prompt", "calls").unwrap();
-        assert_eq!(store.callers("graph-1", "build_prompt", 5).unwrap(), vec!["run_turn"]);
-        assert_eq!(store.search_code("other-graph", "build", 5).unwrap().len(), 0);
+        store
+            .upsert_code_node(&CodeNode {
+                graph_id: "graph-1".into(),
+                symbol: "build_prompt".into(),
+                kind: "function".into(),
+                file_path: "src/prompt.rs".into(),
+                start_line: 1,
+                end_line: 4,
+                source: None,
+            })
+            .unwrap();
+        store
+            .upsert_code_node(&CodeNode {
+                graph_id: "graph-1".into(),
+                symbol: "run_turn".into(),
+                kind: "function".into(),
+                file_path: "src/turn.rs".into(),
+                start_line: 5,
+                end_line: 8,
+                source: None,
+            })
+            .unwrap();
+        store
+            .add_code_edge("graph-1", "run_turn", "build_prompt", "calls")
+            .unwrap();
+        assert_eq!(
+            store.callers("graph-1", "build_prompt", 5).unwrap(),
+            vec!["run_turn"]
+        );
+        assert_eq!(
+            store.search_code("other-graph", "build", 5).unwrap().len(),
+            0
+        );
     }
 }

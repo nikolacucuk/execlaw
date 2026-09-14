@@ -554,14 +554,27 @@ mod tests {
         let db = fresh();
         warm_row(&db, "global", "Controller", "promote-me");
         let memory = MemoryStore::new(&db);
-        memory.bump_hit("global", "Controller", "promote-me", 90).unwrap();
-        memory.bump_hit("global", "Controller", "promote-me", 91).unwrap();
-        memory.bump_hit("global", "Controller", "promote-me", 92).unwrap();
+        memory
+            .bump_hit("global", "Controller", "promote-me", 90)
+            .unwrap();
+        memory
+            .bump_hit("global", "Controller", "promote-me", 91)
+            .unwrap();
+        memory
+            .bump_hit("global", "Controller", "promote-me", 92)
+            .unwrap();
         let store = PromotionStore::new(&db);
         let report = store.sweep(100, 3, 80, 0, 10).unwrap();
         assert_eq!(report.promotion_proposals, 1);
         assert_eq!(store.list_pending(10).unwrap().len(), 1);
-        assert_eq!(memory.get("global", "Controller", "promote-me").unwrap().unwrap().tier, MemoryTier::Warm);
+        assert_eq!(
+            memory
+                .get("global", "Controller", "promote-me")
+                .unwrap()
+                .unwrap()
+                .tier,
+            MemoryTier::Warm
+        );
     }
 
     #[test]

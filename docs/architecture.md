@@ -719,6 +719,38 @@ Default `idle_timeout_ms` per transport: web/UI = explicit (resolver not called)
 
 **Incognito threads** (`is_ephemeral = 1` on `state_conversations`) persist events during the conversation (so crash recovery works) but the `EphemeralSweeper` task DELETEs every event row whose parent is past `ephemeral_expires_at`. The conversation row stays with `last_seq = 0` after purge so audit reports can show "N incognito threads existed but their content was purged." `execlaw replay` skips purged ephemerals.
 
+### 5.9 Deterministic transport archive
+
+Transport messages are archived independently of agent handling. The shared
+inbound router writes every inbound message, including blocked, cold-contact,
+self, and unaddressed group messages, to `message_archive_conversations` and
+`message_archive_messages`. The archive key is `(channel, remote_id)`, where
+`remote_id` is the transport group id for group conversations and the sender
+handle for direct conversations. Message rows are idempotent and have an FTS5
+index over body and sender name.
+
+The server also emits a lossless Markdown projection under:
+
+```
+.obsidian/archive/<transport>/<group|direct>/<remote-id>/_conversation.md
+.obsidian/archive/<transport>/<group|direct>/<remote-id>/<year>/<year>-<month>.md
+.obsidian/archive/archive-index.md
+```
+
+The archive uses one Markdown file per conversation per month, not one file per
+message. Each page has frontmatter containing the transport, conversation kind,
+remote id, execlaw conversation id, period, and archive tags. Participant
+metadata is stored separately in SQLite. The projection is mechanical: it
+performs no inference, summarization, embedding, or model call. SQLite remains
+authoritative; Markdown is the human-readable Obsidian surface and Graphify is
+the optional navigable graph over that projection. Outbound auto-bridge
+messages are written before the plugin call with `generated` status, then
+updated to `delivered` only after the plugin succeeds, or `failed` when the
+plugin returns an error. The monthly page is regenerated after each transition,
+so failed and merely generated replies remain visible without being mislabeled
+as delivered. Other outbox producers should use the same contract when their
+transport delivery callback is added.
+
 ---
 
 ## 6. The conversation FSM

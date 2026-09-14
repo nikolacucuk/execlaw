@@ -68,6 +68,8 @@ setx PATH "$env:PATH;C:\Users\DjEnKa\.local\bin"
 - **Per-conversation runner containers**: stateless against the log, stateless OpenAI-compatible client to local inference (vLLM / OpenArc / Whisper / Kokoro).
 - **Trust ladder + Rule of Two**: `Controller / Delegated / KnownTrusted / KnownLimited / UnknownPending / Blocked` with cold-contact escalation, signed approval-token JWTs, sideband HITL.
 - **HMAC-chained event log**: every committed row is tamper-evident; replay rebuilds state deterministically.
+- **Deterministic social archive**: transport messages are retained in SQLite and mirrored as Obsidian-compatible Markdown under `.obsidian/archive/<transport>/<group|direct>/`, without LLM calls; SQLite FTS5 provides exact search and the files are ready for Graphify indexing.
+- **Archive roles**: SQLite is the archive database, Obsidian is the human-readable filesystem projection, Graphify is the navigable graph over that projection, and the LLM is an optional reader, never the archivist.
 - **Outbox + idempotency**: framework-minted `(conversation_id, turn_seq, tool_call_ordinal)` keys, retries with backoff, dead-letter queue.
 - **Plugin framework** (18 in-tree plugins — see [Plugins shipped](#plugins-shipped)): script-tier (Rhai) + subprocess-tier (JSON-RPC), full manifest schema (tools / transports / identity providers / OAuth / sidecars / admin routes / webhook routes / UI panels / skills).
 - **Five shipped transports**: Signal (signal-cli sidecar), WhatsApp (wuzapi sidecar), Slack (multi-workspace Socket Mode OAuth), Discord (multi-guild Gateway WebSocket), SMS (Android-gateway WebSocket).

@@ -125,6 +125,14 @@ pub async fn route_inbound(
     pg_store
         .bind_conversation(cid.as_str(), &principal_group_id)
         .map_err(|e| HostCapError::new(format!("bind conversation: {e}")))?;
+    if let Err(error) = crate::message_archive::archive_inbound(state, &msg, &cid, &sender) {
+        tracing::error!(
+            target: "message_archive",
+            channel,
+            error,
+            "failed to archive inbound transport message"
+        );
+    }
     tracing::info!(
         target: "generic_inbound",
         channel,
@@ -224,7 +232,7 @@ pub async fn route_inbound(
     let attachment_ids: Vec<String> =
         crate::chats::persist_inbound_attachments(state, &cid, channel, &msg.attachments).await;
 
-    if !msg.agent_handling_enabled {
+    if msg.is_self_message || !msg.agent_handling_enabled {
         if let Err(e) = crate::chats::commit_inbound_user_msg_silently(
             state,
             &cid,

@@ -856,6 +856,18 @@ WhatsApp chat** setting uses `dedicated_chat_enabled`; enabled messages use a
 stable dedicated scope, while disabled messages continue through the
 latest-active-chat routing.
 
+WhatsApp `0.2.15` also hardens inbound media decoding across WuzAPI payload
+variants. Lowercase and capitalized Go-style image/GIF/document/video fields
+are accepted; image and GIF attachments are persisted through the host
+attachment store and rendered in the chat transcript.
+
+Signal `0.5.3` and WhatsApp `0.2.16` add the same operator-phone setting:
+**Show my phone messages in execlaw chats**. It defaults to enabled. When
+enabled, messages sent by the linked phone are imported for transcript context
+but marked audit-only by the inbound host contract, so they never trigger
+matching agents or an LLM turn. Disabling the setting restores self-message
+filtering for that transport.
+
 WhatsApp `0.2.13` adds per-reply review routing. Every pending
 WhatsApp-originated model response in the shared chat gets independent
 **Send to WhatsApp** and **Cancel reply** actions. The inbound event stores
