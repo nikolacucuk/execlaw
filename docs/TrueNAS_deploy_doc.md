@@ -48,7 +48,7 @@ The implementation authorities for this deployment are:
 | Slack, Discord, SMS | Ready | Provider application/token or reachable Android gateway |
 | Google Apps and Places | Ready | Google OAuth client or API key and browser-reachable callback |
 | Python Sandbox | Image-dependent | `execlaw/python-sandbox-fast:0.1.0` available locally or in a registry |
-| Web Scraper | Image-dependent | `execlaw/web-scraper:0.1.0` available locally or in a registry |
+| Web Scraper | Image-dependent | `execlaw/web-scraper:0.2.2` available locally or in a registry |
 | Filesystem and plugin skills | Ready | Persistent `skills/**/SKILL.md` tree or skill-bearing plugin ZIP |
 | MCP tools | Ready | Reviewed stdio command or reachable Streamable HTTP server |
 | Always-on agents and automations | Ready | Inference, required tools/plugins, explicit budgets and trust policy |

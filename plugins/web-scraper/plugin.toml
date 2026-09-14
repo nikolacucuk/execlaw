@@ -1,7 +1,7 @@
 [plugin]
 id = "web-scraper"
 name = "Web Scraper"
-version = "0.2.0"
+version = "0.2.2"
 description = "Advanced webpage scraping via a supervised sidecar. Designed for JavaScript-rendered pages and selector-driven extraction while preserving execlaw trust gating and tool-level policy controls."
 author = "execlaw"
 license = "Apache-2.0"

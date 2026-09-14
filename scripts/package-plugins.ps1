@@ -137,6 +137,21 @@ foreach ($dir in $pluginDirs) {
         continue
     }
 
+    # Fail before creating an installable archive when a manifest-declared
+    # schema is absent. The host resolves these paths after staging, so a
+    # partial archive otherwise fails later as an opaque hook-registry error.
+    $manifestText = Get-Content -LiteralPath $manifest -Raw
+    $schemaMatches = [regex]::Matches($manifestText, '(?ms)^\[\[tools\]\](.*?)(?=^\[|\z)')
+    foreach ($toolMatch in $schemaMatches) {
+        $schemaMatch = [regex]::Match($toolMatch.Groups[1].Value, '(?m)^schema\s*=\s*"([^"]+)"')
+        if ($schemaMatch.Success) {
+            $schemaPath = Join-Path $dir.FullName $schemaMatch.Groups[1].Value
+            if (-not (Test-Path -LiteralPath $schemaPath -PathType Leaf)) {
+                throw "${name}: manifest schema missing: $($schemaMatch.Groups[1].Value)"
+            }
+        }
+    }
+
     $zipName = "$id-$version.zip"
     $outPath = Join-Path $DistDir $zipName
     if (Test-Path -LiteralPath $outPath) {

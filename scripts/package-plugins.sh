@@ -131,6 +131,24 @@ for plugin_dir in plugins/*/ ; do
         continue
     fi
 
+    # Fail before creating an installable archive when a manifest-declared
+    # schema is absent. The host resolves these paths after staging, so a
+    # partial archive otherwise fails later as an opaque hook-registry error.
+    while IFS= read -r schema; do
+        [[ -z "$schema" ]] && continue
+        if [[ ! -f "$plugin_dir/$schema" ]]; then
+            echo "  $name: manifest schema missing: $schema" >&2
+            exit 1
+        fi
+    done < <(awk '
+        /^\[\[tools\]\]/ { in_tool = 1; next }
+        /^\[/ { in_tool = 0 }
+        in_tool && $1 == "schema" {
+            match($0, /"[^"]*"/)
+            print substr($0, RSTART + 1, RLENGTH - 2)
+        }
+    ' "$manifest")
+
     out="$DIST_DIR/${id}-${version}.zip"
     sha_out="${out}.sha256"
     sbom_out="${out}.spdx.json"
