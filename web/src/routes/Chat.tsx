@@ -75,7 +75,6 @@ import {
     mergeMessages,
     setActiveThread,
     setAlertFiringCount,
-    setMessages,
     setThreadProcessing,
     setThreads,
     setToolActivity,
