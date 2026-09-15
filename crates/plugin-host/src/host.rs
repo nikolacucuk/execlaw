@@ -230,7 +230,7 @@ impl PluginHost {
         {
             return Ok(());
         }
-        let executable = resolve_executable(target, runtime_executable_or_err(runtime)?)?;
+        let executable = resolve_executable(target, runtime_executable_or_err(runtime)?);
         let artifact_id = format!("subprocess:{}", manifest.plugin.id);
         let parent = store
             .statement_for(ArtifactType::PluginZip, &manifest.plugin.id)
