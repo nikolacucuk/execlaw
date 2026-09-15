@@ -25,6 +25,9 @@
 use crate::hook_registry::HookRegistry;
 use crate::subprocess::{SubprocessPlugin, SubprocessSpec};
 use async_trait::async_trait;
+use execlaw_core::artifact_provenance::{
+    ArtifactProvenanceStore, ArtifactType, AttestationVerifier, ProvenanceStatement,
+};
 use execlaw_core::db::{Database, DbError};
 use execlaw_plugin_sdk::PluginManifest;
 use rusqlite::params;
@@ -51,6 +54,8 @@ pub enum PluginHostError {
     UnsupportedTier(String),
     #[error("plugin declares tools/transport but has no [runtime] table")]
     MissingRuntime,
+    #[error("artifact provenance: {0}")]
+    Provenance(String),
     #[error("db: {0}")]
     Db(#[from] DbError),
     #[error("io: {0}")]
@@ -126,6 +131,7 @@ struct PluginHostInner {
     notification_tx: std::sync::OnceLock<
         tokio::sync::mpsc::UnboundedSender<crate::subprocess::PluginNotification>,
     >,
+    attestation_verifier: std::sync::OnceLock<Arc<dyn AttestationVerifier>>,
 }
 
 impl PluginHost {
@@ -159,8 +165,87 @@ impl PluginHost {
                 stage_root,
                 skill_store: std::sync::OnceLock::new(),
                 notification_tx: std::sync::OnceLock::new(),
+                attestation_verifier: std::sync::OnceLock::new(),
             }),
         }
+    }
+
+    /// Attach the verifier used for signed plugin archives. Boot configures
+    /// this once; tests may omit it when exercising unsigned local plugins.
+    pub fn attach_attestation_verifier(&self, verifier: Arc<dyn AttestationVerifier>) -> bool {
+        self.inner.attestation_verifier.set(verifier).is_ok()
+    }
+
+    /// Verify and record a signed plugin archive before it is installed.
+    pub fn authorize_verified_plugin_archive(
+        &self,
+        bytes: &[u8],
+        statement: &ProvenanceStatement,
+        manifest: &PluginManifest,
+        target: &Path,
+    ) -> Result<(), PluginHostError> {
+        let verifier = self
+            .inner
+            .attestation_verifier
+            .get()
+            .ok_or_else(|| PluginHostError::Provenance("attestation verifier is not configured".into()))?;
+        let store = ArtifactProvenanceStore::new(self.inner.db.clone());
+        store
+            .verify_bytes(bytes, statement, Some(verifier.as_ref()))
+            .map_err(|error| PluginHostError::Provenance(error.to_string()))?;
+        self.record_subprocess_digests(&store, manifest, target)?;
+        Ok(())
+    }
+
+    /// Record the Controller-approved unsigned local-development override.
+    pub fn authorize_local_plugin_archive(
+        &self,
+        manifest: &PluginManifest,
+        target: &Path,
+    ) -> Result<(), PluginHostError> {
+        let store = ArtifactProvenanceStore::new(self.inner.db.clone());
+        let artifact_id = format!("plugin-zip:{}:{}", manifest.plugin.id, manifest.plugin.version);
+        store
+            .use_local_development_override(
+                &artifact_id,
+                ArtifactType::PluginZip,
+                &target.to_string_lossy(),
+                "Controller",
+                "plugin-admin-upload",
+            )
+            .map_err(|error| PluginHostError::Provenance(error.to_string()))
+    }
+
+    fn record_subprocess_digests(
+        &self,
+        store: &ArtifactProvenanceStore,
+        manifest: &PluginManifest,
+        target: &Path,
+    ) -> Result<(), PluginHostError> {
+        let Some(runtime) = manifest.runtime.as_ref() else {
+            return Ok(());
+        };
+        if runtime.parsed_tier()
+            != Some(execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess)
+        {
+            return Ok(());
+        }
+        let executable = resolve_executable(target, runtime_executable_or_err(runtime)?)?;
+        let artifact_id = format!("subprocess:{}", manifest.plugin.id);
+        let parent = store
+            .statement_for(ArtifactType::PluginZip, &manifest.plugin.id)
+            .map_err(|error| PluginHostError::Provenance(error.to_string()))?;
+        if let Some(parent) = parent {
+            store
+                .record_derived_file(
+                    &parent,
+                    &artifact_id,
+                    ArtifactType::Subprocess,
+                    Path::new(&executable),
+                )
+                .map_err(|error| PluginHostError::Provenance(error.to_string()))?;
+        }
+        Ok(())
     }
 
     /// Attach a shared skill store. Idempotent on the same store
