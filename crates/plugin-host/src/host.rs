@@ -1016,7 +1016,41 @@ impl PluginHost {
     pub async fn hydrate(&self) -> Result<(), PluginHostError> {
         let rows = self.list_rows()?;
         for row in rows.into_iter().filter(|r| r.enabled) {
-            let manifest = match PluginManifest::parse(&row.manifest_toml) {
+            // The staged plugin directory is the installed artifact. Refresh
+            // the cached manifest before registering hooks so upgrades to
+            // sidecar mounts and services cannot be shadowed by stale SQLite
+            // metadata from an earlier install.
+            let manifest = match std::fs::read_to_string(
+                PathBuf::from(&row.stage_path).join("plugin.toml"),
+            ) {
+                Ok(staged_toml) => match PluginManifest::parse(&staged_toml) {
+                    Ok(staged_manifest) => {
+                        if staged_manifest.plugin.id != row.plugin_id {
+                            warn!(
+                                plugin_id = %row.plugin_id,
+                                staged_id = %staged_manifest.plugin.id,
+                                "staged manifest id does not match plugin row; using cached manifest"
+                            );
+                            PluginManifest::parse(&row.manifest_toml)
+                        } else {
+                            if staged_toml != row.manifest_toml {
+                                let now = chrono::Utc::now().timestamp();
+                                let _ = self.inner.db.with_conn(|c| {
+                                    c.execute(
+                                        "UPDATE state_plugins SET version = ?1, manifest_toml = ?2, updated_at = ?3 WHERE plugin_id = ?4",
+                                        params![staged_manifest.plugin.version, staged_toml, now, row.plugin_id],
+                                    )?;
+                                    Ok::<_, DbError>(())
+                                });
+                            }
+                            Ok(staged_manifest)
+                        }
+                    }
+                    Err(_) => PluginManifest::parse(&row.manifest_toml),
+                },
+                Err(_) => PluginManifest::parse(&row.manifest_toml),
+            };
+            let manifest = match manifest {
                 Ok(m) => m,
                 Err(e) => {
                     // Unparseable manifest in the DB row → the row
