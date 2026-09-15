@@ -131,6 +131,10 @@ services:
       # Child runner containers use these values, not the Docker host alias.
       EXECLAW_RUNNER_IMAGE: execlaw/runner:truenas
       EXECLAW_RUNNER_NETWORK: execlaw-net
+      # Supervised plugin sidecars use this network. Set it to the network
+      # hosting any Docker-name-addressed dependency, such as the Obsidian
+      # LiveSync CouchDB container (`ix-obsidian_default` on this host).
+      EXECLAW_SIDECAR_NETWORK: ix-obsidian_default
       EXECLAW_RPC_URL: ws://execlaw:3031
       # Sidecars are published by the Docker host. The control plane must
       # not use its own loopback address to reach them. This deployment uses
