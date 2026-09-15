@@ -15,7 +15,7 @@ sudo docker build -t execlaw/obsidian-livesync-publisher:0.1.0 \
 ```
 
 The manifest mounts the operator path
-`/mnt/AI_Pool/obsidian_vault/execlaw` read-only at `/vault/execlaw`.
+`/mnt/AI_Pool/obsidian-vault/execlaw` read-only at `/vault/execlaw`.
 Install the plugin ZIP through the execlaw admin UI after building the image.
 
 ## Configuration
