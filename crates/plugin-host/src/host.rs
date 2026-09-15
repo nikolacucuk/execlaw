@@ -439,6 +439,7 @@ impl PluginHost {
                             stage_path,
                             runtime_executable_or_err(runtime)?,
                         ),
+                        expected_sha256: None,
                         args: runtime.args.clone(),
                         cwd: Some(stage_path.to_path_buf()),
                     };
@@ -852,6 +853,7 @@ impl PluginHost {
                     let spec = SubprocessSpec {
                         plugin_id: plugin_id.to_owned(),
                         executable: resolve_executable(&stage, runtime_executable_or_err(runtime)?),
+                        expected_sha256: None,
                         args: runtime.args.clone(),
                         cwd: Some(stage),
                     };
@@ -980,6 +982,7 @@ impl PluginHost {
                             let spec = SubprocessSpec {
                                 plugin_id: row.plugin_id.clone(),
                                 executable: resolve_executable(&stage, exe),
+                                expected_sha256: None,
                                 args: runtime.args.clone(),
                                 cwd: Some(stage),
                             };
