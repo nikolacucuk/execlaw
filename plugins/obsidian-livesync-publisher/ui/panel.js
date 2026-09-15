@@ -27,12 +27,14 @@ export default function ObsidianPublisherPanel({ bridge }) {
         database: "djenka_db",
         username: "ncucuk",
         password: "",
+        source_subdir: "execlaw",
         max_files: 1000,
         max_bytes: 52428800,
     });
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [publishing, setPublishing] = useState(false);
+    const [checking, setChecking] = useState(false);
     const [message, setMessage] = useState(null);
     const [error, setError] = useState(null);
 
@@ -79,6 +81,20 @@ export default function ObsidianPublisherPanel({ bridge }) {
         }
     }
 
+    async function checkSource() {
+        setChecking(true);
+        setMessage(null);
+        setError(null);
+        try {
+            const result = await bridge.fetchJson("GET", path("/test"));
+            setMessage(`Source ready: ${result.source}; ${result.markdown_files} markdown file(s) found.`);
+        } catch (value) {
+            setError(String(value));
+        } finally {
+            setChecking(false);
+        }
+    }
+
     if (loading) return React.createElement("div", { className: "execlaw-muted" }, "Loading publisher configuration...");
 
     const update = (key, value) => setConfig((current) => ({ ...current, [key]: value }));
@@ -92,10 +108,12 @@ export default function ObsidianPublisherPanel({ bridge }) {
         field("Database", config.database, (value) => update("database", value)),
         field("Username", config.username, (value) => update("username", value), "text", "Defaults to ncucuk from the current CouchDB deployment."),
         field("Password", config.password, (value) => update("password", value), "password", "Leave blank only when a password was already saved."),
+        field("Vault source folder", config.source_subdir, (value) => update("source_subdir", value), "text", "Relative to the mounted /vault parent; normally execlaw."),
         field("Maximum files per publish", String(config.max_files), (value) => update("max_files", Number(value) || 1000), "number"),
         field("Maximum bytes per publish", String(config.max_bytes), (value) => update("max_bytes", Number(value) || 52428800), "number"),
         React.createElement("div", { className: "d-flex gap-2" },
             React.createElement(Button, { onClick: save, disabled: saving }, saving ? "Saving..." : "Save configuration"),
+            React.createElement(Button, { onClick: checkSource, disabled: checking }, checking ? "Checking..." : "Check source"),
             React.createElement(Button, { onClick: publish, disabled: publishing, variant: "primary" }, publishing ? "Publishing..." : "Publish now"),
         ),
     );

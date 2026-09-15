@@ -15,7 +15,9 @@ sudo docker build -t execlaw/obsidian-livesync-publisher:0.1.0 \
 ```
 
 The manifest mounts the operator path
-`/mnt/AI_Pool/obsidian-vault/execlaw` read-only at `/vault/execlaw`.
+`/mnt/AI_Pool/obsidian-vault` read-only at `/vault`. The publisher source
+folder defaults to the relative path `execlaw`, so the effective source is
+`/vault/execlaw` and the host path is `/mnt/AI_Pool/obsidian-vault/execlaw`.
 Install the plugin ZIP through the execlaw admin UI after building the image.
 
 ## Configuration
@@ -26,6 +28,7 @@ Configure the plugin's admin route with:
 {
   "couchdb_url": "http://couchdb-obsidian-livesync:5984",
   "database": "djenka_db",
+  "source_subdir": "execlaw",
   "username": "a-dedicated-livesync-user",
   "password": "entered-directly-in-the-admin-form",
   "max_files": 1000,

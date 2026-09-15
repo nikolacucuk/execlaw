@@ -6,14 +6,14 @@ fn tool_call(name, args, oauth) {
 }
 
 fn admin_get_config(req) {
-    let cfg = read_config();
+    let cfg = normalize_config(read_config());
     cfg["password"] = "<redacted>";
     cfg
 }
 
 fn admin_set_config(req) {
     let body = if req.body != () { req.body } else { #{} };
-    let cfg = read_config();
+    let cfg = normalize_config(read_config());
 
     if body["couchdb_url"] != () { cfg["couchdb_url"] = require_string(body["couchdb_url"], "couchdb_url"); }
     if body["database"] != () { cfg["database"] = require_string(body["database"], "database"); }
@@ -21,6 +21,7 @@ fn admin_set_config(req) {
     if body["password"] != () && type_of(body["password"]) == "string" && body["password"] != "<redacted>" {
         cfg["password"] = body["password"];
     }
+    if body["source_subdir"] != () { cfg["source_subdir"] = require_relative_path(body["source_subdir"], "source_subdir"); }
     if body["max_files"] != () { cfg["max_files"] = clamp_int(body["max_files"], 1, 10000, cfg["max_files"]); }
     if body["max_bytes"] != () { cfg["max_bytes"] = clamp_int(body["max_bytes"], 1, 52428800, cfg["max_bytes"]); }
 
@@ -34,6 +35,13 @@ fn admin_publish(req) {
     publish_impl()
 }
 
+fn admin_test(req) {
+    let base = sidecar_url("publisher");
+    if base == () { throw "obsidian-livesync-publisher sidecar is not healthy"; }
+    let cfg = normalize_config(read_config());
+    sidecar_http_post(base + "/v1/check", #{ "source_subdir": cfg["source_subdir"] }, #{})
+}
+
 fn publish_impl() {
     let cfg = normalize_config(read_config());
     validate_config(cfg);
@@ -44,6 +52,7 @@ fn publish_impl() {
     payload["database"] = cfg["database"];
     payload["username"] = cfg["username"];
     payload["password"] = cfg["password"];
+    payload["source_subdir"] = cfg["source_subdir"];
     payload["max_files"] = cfg["max_files"];
     payload["max_bytes"] = cfg["max_bytes"];
     sidecar_http_post(base + "/v1/publish", payload, #{})
@@ -55,6 +64,7 @@ fn read_config() {
         "database": "djenka_db",
         "username": "",
         "password": "",
+        "source_subdir": "execlaw",
         "max_files": 1000,
         "max_bytes": 52428800,
     };
@@ -74,6 +84,9 @@ fn normalize_config(cfg) {
     if type_of(cfg["username"]) != "string" || cfg["username"] == "" {
         cfg["username"] = "ncucuk";
     }
+    if type_of(cfg["source_subdir"]) != "string" || cfg["source_subdir"] == "" || starts_with(cfg["source_subdir"], "/") || cfg["source_subdir"].index_of("..") >= 0 || cfg["source_subdir"].index_of("\\") >= 0 {
+        cfg["source_subdir"] = "execlaw";
+    }
     cfg
 }
 
@@ -90,6 +103,14 @@ fn validate_config(cfg) {
 fn require_string(value, name) {
     if value == () || type_of(value) != "string" || value == "" { throw name + " is required"; }
     value
+}
+
+fn require_relative_path(value, name) {
+    let path = require_string(value, name);
+    if starts_with(path, "/") || path.index_of("..") >= 0 || path.index_of("\\") >= 0 {
+        throw name + " must be a relative folder below the mounted vault";
+    }
+    path
 }
 
 fn starts_with(value, prefix) {

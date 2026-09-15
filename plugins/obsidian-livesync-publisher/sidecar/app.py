@@ -18,7 +18,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
-ROOT = Path("/vault/execlaw")
+VAULT_ROOT = Path("/vault")
 PORT = int(os.environ.get("PORT", "8080"))
 MAX_REQUEST_BYTES = 256 * 1024
 
@@ -101,13 +101,19 @@ def put_document(base: str, database: str, document: dict, username: str, passwo
     return True
 
 
-def source_files(max_files: int, max_bytes: int) -> list[tuple[str, Path, int]]:
-    if not ROOT.is_dir():
-        raise RuntimeError(f"publisher source directory is missing: {ROOT}")
+def source_files(source_subdir: str, max_files: int, max_bytes: int) -> list[tuple[str, Path, int]]:
+    relative_root = Path(source_subdir)
+    if relative_root.is_absolute() or ".." in relative_root.parts:
+        raise ValueError("source_subdir must be a relative path below /vault")
+    root = (VAULT_ROOT / relative_root).resolve()
+    if not root.is_relative_to(VAULT_ROOT.resolve()):
+        raise ValueError("source_subdir escapes /vault")
+    if not root.is_dir():
+        raise RuntimeError(f"publisher source directory is missing: {root}")
     files: list[tuple[str, Path, int]] = []
     total = 0
-    for path in sorted(ROOT.rglob("*.md")):
-        if not path.is_file() or any(part.startswith(".") for part in path.relative_to(ROOT).parts):
+    for path in sorted(root.rglob("*.md")):
+        if not path.is_file() or any(part.startswith(".") for part in path.relative_to(root).parts):
             continue
         size = path.stat().st_size
         total += size
@@ -115,9 +121,15 @@ def source_files(max_files: int, max_bytes: int) -> list[tuple[str, Path, int]]:
             raise RuntimeError(f"publisher file limit exceeded ({max_files})")
         if total > max_bytes:
             raise RuntimeError(f"publisher byte limit exceeded ({max_bytes})")
-        relative = path.relative_to(ROOT).as_posix()
-        files.append(("execlaw/" + relative, path, size))
+        relative = path.relative_to(root).as_posix()
+        files.append((relative_root.as_posix() + "/" + relative, path, size))
     return files
+
+
+def source_status(source_subdir: str) -> dict:
+    files = source_files(source_subdir, 10000, 52428800)
+    root = (VAULT_ROOT / Path(source_subdir)).resolve()
+    return {"ok": True, "source": str(root), "markdown_files": len(files)}
 
 
 def publish(payload: dict) -> dict:
@@ -127,10 +139,11 @@ def publish(payload: dict) -> dict:
     password = str(payload.get("password", ""))
     max_files = max(1, min(int(payload.get("max_files", 1000)), 10000))
     max_bytes = max(1, min(int(payload.get("max_bytes", 52428800)), 52428800))
+    source_subdir = str(payload.get("source_subdir", "execlaw")).strip()
     if not base or not database or not username or not password:
         raise ValueError("couchdb_url, database, username, and password are required")
 
-    files = source_files(max_files, max_bytes)
+    files = source_files(source_subdir, max_files, max_bytes)
     published = 0
     skipped = 0
     chunks = 0
@@ -169,12 +182,12 @@ def publish(payload: dict) -> dict:
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/healthz":
-            json_response(self, 200, {"ok": True, "source": str(ROOT)})
+            json_response(self, 200, {"ok": True, "source": str(VAULT_ROOT)})
             return
         json_response(self, 404, {"error": "not found"})
 
     def do_POST(self) -> None:
-        if self.path != "/v1/publish":
+        if self.path not in {"/v1/publish", "/v1/check"}:
             json_response(self, 404, {"error": "not found"})
             return
         try:
@@ -182,6 +195,9 @@ class Handler(BaseHTTPRequestHandler):
             if length <= 0 or length > MAX_REQUEST_BYTES:
                 raise ValueError("request body is missing or too large")
             payload = json.loads(self.rfile.read(length))
+            if self.path == "/v1/check":
+                json_response(self, 200, source_status(str(payload.get("source_subdir", "execlaw")).strip()))
+                return
             result = publish(payload)
             json_response(self, 200, result)
         except (ValueError, RuntimeError, OSError, UnicodeError) as error:
