@@ -1,7 +1,7 @@
 [plugin]
 id = "obsidian-livesync-publisher"
 name = "Obsidian LiveSync Publisher"
-version = "0.1.1"
+version = "0.1.6"
 description = "Publishes markdown from the operator-selected execlaw export directory into an Obsidian LiveSync CouchDB database."
 author = "execlaw"
 license = "Apache-2.0"
@@ -23,7 +23,6 @@ rpc_health_path = "/healthz"
 [[tools]]
 name = "obsidian.publish"
 description = "Publish markdown files from the configured execlaw export directory into the configured Obsidian LiveSync CouchDB database. Does not delete remote files."
-schema = "schemas/publish.json"
 trust_floor = "Controller"
 latency = "high"
 
@@ -44,6 +43,10 @@ method = "POST"
 path = "/publish"
 handler = "admin_publish"
 description = "Run a controller-requested publish and return its result."
+
+[[ui_panels]]
+mount = "admin/plugins/{plugin_id}"
+entry = "ui/panel.js"
 
 [runtime]
 tier = "script"

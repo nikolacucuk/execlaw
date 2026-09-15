@@ -393,6 +393,7 @@ export function Chat() {
                 text,
                 actor: auth.user?.user_id ?? null,
                 committed_at: Math.floor(Date.now() / 1000),
+                optimistic: true,
                 attachments: optimisticAttachments,
                 // 2026-05-15 — surface the chosen skills as a chip on
                 // the user bubble immediately. The canonical row from

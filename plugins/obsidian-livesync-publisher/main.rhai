@@ -35,7 +35,7 @@ fn admin_publish(req) {
 }
 
 fn publish_impl() {
-    let cfg = read_config();
+    let cfg = normalize_config(read_config());
     validate_config(cfg);
     let base = sidecar_url("publisher");
     if base == () { throw "obsidian-livesync-publisher sidecar is not healthy"; }
@@ -70,13 +70,21 @@ fn read_config() {
     parsed
 }
 
+fn normalize_config(cfg) {
+    if type_of(cfg["username"]) != "string" || cfg["username"] == "" {
+        cfg["username"] = "ncucuk";
+    }
+    cfg
+}
+
 fn validate_config(cfg) {
     if type_of(cfg["couchdb_url"]) != "string" || !starts_with(cfg["couchdb_url"], "http") {
         throw "obsidian-livesync-publisher: couchdb_url must be an http(s) URL";
     }
     if type_of(cfg["database"]) != "string" || cfg["database"] == "" { throw "database is required"; }
-    if type_of(cfg["username"]) != "string" || cfg["username"] == "" { throw "username is required"; }
-    if type_of(cfg["password"]) != "string" || cfg["password"] == "" { throw "password is required"; }
+    if type_of(cfg["password"]) != "string" || cfg["password"] == "" {
+        throw "CouchDB password is not configured. Open Obsidian LiveSync Publisher settings and save the password before publishing.";
+    }
 }
 
 fn require_string(value, name) {

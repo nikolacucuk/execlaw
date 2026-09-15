@@ -181,6 +181,8 @@ export interface MessageView {
     text: string | null;
     actor: string | null;
     committed_at: number;
+    /** Local-only marker for a message shown before the server commits it. */
+    optimistic?: boolean;
     /**
      * Originating transport when this message flowed through a
      * bridge (signal / email / voice / sms). Absent for the default

@@ -367,17 +367,6 @@ fn merge_scoped_conversation_if_needed(
     current_cid: &ConversationId,
     now: i64,
 ) -> Result<ConversationId, HostCapError> {
-    // A scoped transport conversation is selected once, not on every
-    // inbound message. Retargeting an already-used scope to the newest
-    // ordinary chat makes messages appear to vanish from the thread the
-    // operator is viewing and splits one transport transcript across URLs.
-    let current = execlaw_core::conversation::ConversationStore::new(&state.db)
-        .get(current_cid)
-        .map_err(|e| HostCapError::new(format!("read scoped conversation: {e}")))?;
-    if current.as_ref().is_some_and(|row| row.last_seq.0 > 0) {
-        return Ok(current_cid.clone());
-    }
-
     let summaries = execlaw_core::conversation::ConversationStore::new(&state.db)
         .list_thread_summaries()
         .map_err(|e| HostCapError::new(format!("list active conversations: {e}")))?;

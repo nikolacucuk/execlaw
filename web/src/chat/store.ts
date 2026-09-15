@@ -185,17 +185,14 @@ export function mergeMessages(conversationId: string, messages: MessageView[]) {
             (max, message) => Math.max(max, message.seq),
             0,
         );
-        const incomingTexts = new Set(
-            messages.map(
-                (message) => `${message.kind}\u0000${message.text ?? ""}`,
-            ),
+        const incomingKeys = new Set(
+            messages.map((message) => `${message.kind}\u0000${message.text ?? ""}`),
         );
         const preserved = existing.filter(
             (message) =>
-                message.seq > incomingMax &&
-                !incomingTexts.has(
-                    `${message.kind}\u0000${message.text ?? ""}`,
-                ),
+                !message.optimistic &&
+                (message.seq > incomingMax ||
+                    !incomingKeys.has(`${message.kind}\u0000${message.text ?? ""}`)),
         );
         const bySeq = new Map(
             [...messages, ...preserved].map((message) => [message.seq, message]),
