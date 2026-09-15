@@ -25,9 +25,6 @@
 use crate::hook_registry::HookRegistry;
 use crate::subprocess::{SubprocessPlugin, SubprocessSpec};
 use async_trait::async_trait;
-use execlaw_core::artifact_provenance::{
-    ArtifactProvenanceStore, ArtifactType, AttestationVerifier, ProvenanceStatement,
-};
 use execlaw_core::db::{Database, DbError};
 use execlaw_plugin_sdk::PluginManifest;
 use rusqlite::params;
@@ -129,7 +126,6 @@ struct PluginHostInner {
     notification_tx: std::sync::OnceLock<
         tokio::sync::mpsc::UnboundedSender<crate::subprocess::PluginNotification>,
     >,
-    attestation_verifier: std::sync::OnceLock<Arc<dyn AttestationVerifier>>,
 }
 
 impl PluginHost {
@@ -163,18 +159,8 @@ impl PluginHost {
                 stage_root,
                 skill_store: std::sync::OnceLock::new(),
                 notification_tx: std::sync::OnceLock::new(),
-                attestation_verifier: std::sync::OnceLock::new(),
             }),
         }
-    }
-
-    /// Install the production Sigstore/SLSA verifier. The first verifier wins
-    /// so runtime code cannot swap trust roots after boot.
-    pub fn attach_attestation_verifier(
-        &self,
-        verifier: Arc<dyn AttestationVerifier>,
-    ) -> Result<(), Arc<dyn AttestationVerifier>> {
-        self.inner.attestation_verifier.set(verifier)
     }
 
     /// Attach a shared skill store. Idempotent on the same store
@@ -362,121 +348,6 @@ impl PluginHost {
         &self.inner.db
     }
 
-    /// Verify a plugin ZIP and its detached SBOM, then bind any staged
-    /// subprocess executable to the verified archive before installation.
-    pub fn authorize_verified_plugin_archive(
-        &self,
-        archive_bytes: &[u8],
-        statement: &ProvenanceStatement,
-        manifest: &PluginManifest,
-        stage_path: &Path,
-    ) -> Result<(), PluginHostError> {
-        if statement.artifact_type != ArtifactType::PluginZip {
-            return Err(PluginHostError::Manifest(
-                "plugin provenance artifact_type must be plugin_zip".into(),
-            ));
-        }
-        let store = ArtifactProvenanceStore::new(self.inner.db.clone());
-        store
-            .verify_bytes(
-                archive_bytes,
-                statement,
-                self.inner.attestation_verifier.get().map(Arc::as_ref),
-            )
-            .map_err(|error| PluginHostError::Manifest(error.to_string()))?;
-        store
-            .verify_file_digest(Path::new(&statement.sbom_location), &statement.sbom_sha256)
-            .map_err(|error| PluginHostError::Manifest(error.to_string()))?;
-        self.bind_subprocess_digest(&store, statement, manifest, stage_path)
-    }
-
-    /// Authorize an unsigned local plugin only when the persisted Controller
-    /// override is enabled. Every use is appended to the audit table.
-    pub fn authorize_local_plugin_archive(
-        &self,
-        manifest: &PluginManifest,
-        stage_path: &Path,
-    ) -> Result<(), PluginHostError> {
-        let store = ArtifactProvenanceStore::new(self.inner.db.clone());
-        let plugin_artifact_id =
-            format!("plugin:{}:{}", manifest.plugin.id, manifest.plugin.version);
-        store
-            .use_local_development_override(
-                &plugin_artifact_id,
-                ArtifactType::PluginZip,
-                &stage_path.to_string_lossy(),
-                "Controller",
-                "plugin-admin-api",
-            )
-            .map_err(|error| PluginHostError::Manifest(error.to_string()))?;
-        if let Some(runtime) = &manifest.runtime {
-            if runtime.parsed_tier() == Some(execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess)
-            {
-                let executable =
-                    resolve_executable(stage_path, runtime_executable_or_err(runtime)?);
-                store
-                    .record_local_file_override(
-                        &format!("subprocess:{}", manifest.plugin.id),
-                        ArtifactType::Subprocess,
-                        Path::new(&executable),
-                        "Controller",
-                        "plugin-admin-api",
-                    )
-                    .map_err(|error| PluginHostError::Manifest(error.to_string()))?;
-            }
-        }
-        Ok(())
-    }
-
-    fn bind_subprocess_digest(
-        &self,
-        store: &ArtifactProvenanceStore,
-        parent: &ProvenanceStatement,
-        manifest: &PluginManifest,
-        stage_path: &Path,
-    ) -> Result<(), PluginHostError> {
-        let Some(runtime) = &manifest.runtime else {
-            return Ok(());
-        };
-        if runtime.parsed_tier() != Some(execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess) {
-            return Ok(());
-        }
-        let executable = resolve_executable(stage_path, runtime_executable_or_err(runtime)?);
-        store
-            .record_derived_file(
-                parent,
-                &format!("subprocess:{}", manifest.plugin.id),
-                ArtifactType::Subprocess,
-                Path::new(&executable),
-            )
-            .map_err(|error| PluginHostError::Manifest(error.to_string()))
-    }
-
-    fn subprocess_digest_or_override(
-        &self,
-        plugin_id: &str,
-        executable: &str,
-    ) -> Result<Option<String>, PluginHostError> {
-        let store = ArtifactProvenanceStore::new(self.inner.db.clone());
-        let artifact_id = format!("subprocess:{plugin_id}");
-        if let Some(digest) = store
-            .digest_for_artifact_id(&artifact_id)
-            .map_err(|error| PluginHostError::Spawn(error.to_string()))?
-        {
-            return Ok(Some(digest));
-        }
-        store
-            .use_local_development_override(
-                &artifact_id,
-                ArtifactType::Subprocess,
-                executable,
-                "Controller",
-                "plugin-host",
-            )
-            .map_err(|error| PluginHostError::Spawn(error.to_string()))?;
-        Ok(None)
-    }
-
     /// Install a plugin from an already-staged directory.
     ///
     /// The caller is expected to have staged the ZIP via
@@ -562,13 +433,12 @@ impl PluginHost {
             })?;
             match tier {
                 execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess => {
-                    let executable =
-                        resolve_executable(stage_path, runtime_executable_or_err(runtime)?);
                     let spec = SubprocessSpec {
                         plugin_id: plugin_id.clone(),
-                        expected_sha256: self
-                            .subprocess_digest_or_override(&plugin_id, &executable)?,
-                        executable,
+                        executable: resolve_executable(
+                            stage_path,
+                            runtime_executable_or_err(runtime)?,
+                        ),
                         args: runtime.args.clone(),
                         cwd: Some(stage_path.to_path_buf()),
                     };
@@ -979,13 +849,9 @@ impl PluginHost {
             let stage = PathBuf::from(&row.stage_path);
             match tier {
                 execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess => {
-                    let executable =
-                        resolve_executable(&stage, runtime_executable_or_err(runtime)?);
                     let spec = SubprocessSpec {
                         plugin_id: plugin_id.to_owned(),
-                        expected_sha256: self
-                            .subprocess_digest_or_override(plugin_id, &executable)?,
-                        executable,
+                        executable: resolve_executable(&stage, runtime_executable_or_err(runtime)?),
                         args: runtime.args.clone(),
                         cwd: Some(stage),
                     };
@@ -1077,30 +943,6 @@ impl PluginHost {
                     continue;
                 }
             };
-            let provenance = ArtifactProvenanceStore::new(self.inner.db.clone());
-            for service in &manifest.services {
-                if service.sidecar.is_some() {
-                    match provenance.grandfather_legacy_sidecar(
-                        &row.plugin_id,
-                        &service.name,
-                        &service.image,
-                    ) {
-                        Ok(true) => info!(
-                            plugin_id = %row.plugin_id,
-                            service = %service.name,
-                            image = %service.image,
-                            "grandfathered pre-provenance sidecar with audited override"
-                        ),
-                        Ok(false) => {}
-                        Err(error) => warn!(
-                            plugin_id = %row.plugin_id,
-                            service = %service.name,
-                            error = %error,
-                            "could not evaluate legacy sidecar provenance override"
-                        ),
-                    }
-                }
-            }
             if let Err(e) = self
                 .inner
                 .registry
@@ -1135,21 +977,9 @@ impl PluginHost {
                                     continue;
                                 }
                             };
-                            let executable = resolve_executable(&stage, exe);
-                            let expected_sha256 = match self
-                                .subprocess_digest_or_override(&row.plugin_id, &executable)
-                            {
-                                Ok(digest) => digest,
-                                Err(error) => {
-                                    warn!(plugin_id = %row.plugin_id, error = %error, "subprocess provenance check failed on hydrate; quarantining");
-                                    self.quarantine_plugin(&row.plugin_id, &error.to_string());
-                                    continue;
-                                }
-                            };
                             let spec = SubprocessSpec {
                                 plugin_id: row.plugin_id.clone(),
-                                executable,
-                                expected_sha256,
+                                executable: resolve_executable(&stage, exe),
                                 args: runtime.args.clone(),
                                 cwd: Some(stage),
                             };

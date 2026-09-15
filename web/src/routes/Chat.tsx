@@ -72,6 +72,7 @@ import {
     getChatState,
     markSendingThread,
     markUnread,
+    mergeMessages,
     setActiveThread,
     setAlertFiringCount,
     setMessages,
@@ -244,7 +245,7 @@ export function Chat() {
                     }),
                 ]);
                 if (cancelled) return;
-                setMessages(activeId, messagesResp.messages);
+                mergeMessages(activeId, messagesResp.messages);
                 if (cardsResp) {
                     setCardsForConversation(
                         activeId,
@@ -473,7 +474,7 @@ export function Chat() {
                 } else {
                     // Reload the canonical history so seqs are correct.
                     const fresh = await listMessages(targetId, getToken);
-                    setMessages(targetId, fresh.messages);
+                    mergeMessages(targetId, fresh.messages);
                     clearStreamingBuffer(targetId);
                     // Refresh the thread list (last_seq + new threads land here).
                     listThreads(getToken)
@@ -577,7 +578,7 @@ export function Chat() {
                             .then((r) => setThreads(r.threads))
                             .catch(() => {});
                         listMessages(cid, getToken)
-                            .then((r) => setMessages(cid, r.messages))
+                            .then((r) => mergeMessages(cid, r.messages))
                             .catch(() => {});
                     }
                     const thread = getChatState().threads.find(

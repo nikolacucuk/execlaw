@@ -133,6 +133,7 @@ sidecar-backed transports if required.
 | `humanizer-skills` | script | Installs reusable writing-style skills. |
 | `identity-local-address-book` | subprocess | Local contact-list identity provider and trust resolution. |
 | `obsidian-skills` | script | Installs Obsidian vault workflow skills. |
+| `obsidian-livesync-publisher` | script + sidecar | Publishes bounded markdown exports into an existing Obsidian LiveSync CouchDB database. |
 | `open-meteo` | script | Weather, marine, air-quality, climate, flood, geocoding, and elevation data. |
 | `pushover` | script | One-way Pushover notifications to the operator. |
 | `python-sandbox` | script | Persistent per-conversation Python execution through a supervised kernel gateway. |

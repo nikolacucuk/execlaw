@@ -1,0 +1,50 @@
+[plugin]
+id = "obsidian-livesync-publisher"
+name = "Obsidian LiveSync Publisher"
+version = "0.1.0"
+description = "Publishes markdown from the operator-selected execlaw export directory into an Obsidian LiveSync CouchDB database."
+author = "execlaw"
+license = "Apache-2.0"
+
+[[services]]
+name = "publisher"
+image = "execlaw/obsidian-livesync-publisher:0.1.0"
+ports = []
+
+[[services.mounts]]
+source = "/mnt/AI_Pool/obsidian_vault/execlaw"
+target = "/vault/execlaw"
+read_only = true
+
+[services.sidecar]
+rpc_port = 8080
+rpc_health_path = "/healthz"
+
+[[tools]]
+name = "obsidian.publish"
+description = "Publish markdown files from the configured execlaw export directory into the configured Obsidian LiveSync CouchDB database. Does not delete remote files."
+schema = "schemas/publish.json"
+trust_floor = "Controller"
+latency = "high"
+
+[[admin_routes]]
+method = "GET"
+path = "/config"
+handler = "admin_get_config"
+description = "Show the configured LiveSync target with the password redacted."
+
+[[admin_routes]]
+method = "POST"
+path = "/config"
+handler = "admin_set_config"
+description = "Configure the CouchDB URL, database, username, password, and export limits."
+
+[[admin_routes]]
+method = "POST"
+path = "/publish"
+handler = "admin_publish"
+description = "Run a controller-requested publish and return its result."
+
+[runtime]
+tier = "script"
+source = "main.rhai"

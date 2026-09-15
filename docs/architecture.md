@@ -159,11 +159,6 @@ The coordinator. Owns:
 - **Automation bus** — durable `state_bus_events` inbox; dispatcher + worker pool; Rhai-evaluated typed-graph automation runtime (M1–M4). See §4.6.
 - **Inference metrics** — per-consumer attribution (chat / routines / research / automations); `in_flight`, total calls/failures, p50/p95 latency ring buffer. `GET /api/admin/inference/metrics` + `POST /api/admin/inference/probe`.
 - **Skills subsystem** — `crates/skills/` owns the versioned skill store, durable leased auto-capture worker (C), reuse-update worker (D), and built-in secret scanner. Auto-capture requests are deduplicated SQLite `memory_jobs` rows over committed event ranges, so restart cannot lose queued work. Separate from the `config_skills` DB table (operator toggles) and the `[[skills]]` manifest entries (plugin-shipped skills). See §4.9.
-- **Durable run store** — migration 0017 and `crates/core/src/runs.rs` define stable run/step identities, cursor transitions, leases, approval waits, and atomic outbox enqueue/completion. `next_safe_action` distinguishes claim, expired-lease reclaim, wait, cursor advance, and terminal states. The in-process `TurnExecutor` checkpoints every model request and tool dispatch under `turn:<conversation_id>:<input_event_seq>` and can resume from that persisted input event without repeating completed work. Runner-mediated server turns use the same coordinator around model-round checkpoints and host tool dispatches. HTTP callers still need a request idempotency key before an automatic retry can identify a previously appended `UserMsg`; internal recovery uses the persisted input event sequence directly.
-- **Local endpoint policy** — migration 0018 stores approved CIDRs/DNS names and last resolution diagnostics. `crates/local-endpoint-policy/` rejects public or mixed DNS answers, userinfo, and alternate numeric hosts; pins accepted DNS answers into no-redirect clients. Server adapters apply it to configured inference, HTTP MCP, Graphiti, and STT/TTS endpoints.
-- **Evidence-backed memory** — migration 0020 adds append-only assertions and evidence, validity/supersession, an evidence-gated current projection, and leased `memory_jobs`; migration 0024 pins host-derived scope and trust on extraction jobs. Successful committed turns enqueue exact event ranges for a bounded local Small/Standard extractor. The worker validates every evidence path, quote, and SHA-256 hash against replay before insertion, retries under leases, and leaves assertions pending by default. Only explicitly enabled conservative policy may approve and project non-procedural assertions; procedural candidates remain proposals.
-- **Governed memory assets** — migration 0025 adds a metadata-only registry for memory, skills, local Wiki indexes, CodeGraph indexes, and research outputs. Assets carry owner scope, visibility, trust floor, status, version, source hash, expiry, and usage metadata. Controller-managed bindings define bounded `hot`, `discoverable`, or `tool_only` loadouts. SQLite FTS5 search and optional local embeddings use reciprocal-rank fusion; derived vectors never authorize access. See [`memory-roadmap.md`](memory-roadmap.md).
-- **Artifact provenance** — migration 0022 stores Controller-owned allowlists, verified artifact identity, digests, SLSA/Sigstore metadata, SBOM references, and append-only verification events. Bundled plugins, subprocesses, sidecars, and runner images fail closed unless verified or covered by the audited local-development override.
 - **Model adapter** — `crates/model-adapter/` provides per-family `ModelAdapter` impls (Qwen3, DeepSeekR1, DeepSeekV3, Llama3, Mistral, Gemma, OpenAiGeneric). Every LLM call site calls `adapter_for(ModelFamily::detect(&model_id)).chat(...)` so reasoning-block extraction, thinking suppression, and guided-decoding toggling are isolated per family.
 - **Graphiti bridge** — Controller-only built-in `graphiti` tool with typed `status`, `ingest`, `search`, `retract`, and `reconcile` actions. Endpoint configuration is SQLite-backed, credentials are vault-backed, and ingest/reconcile effects run as durable leased jobs. Model calls cannot select the URL, API key, HTTP method, path, or scope. See §4.11.
 - **Cards primitive** — `crates/core/src/cards.rs`; event-sourced `CardOpened`/`CardProgressed`/`CardClosed` lifecycle for long-running tasks (research, Python execution, agent fan-out). Channel-capability downgrade to plain text on non-rich transports.
@@ -478,11 +473,6 @@ Requests use the shared local-endpoint policy, DNS pinning, and no-redirect
 client. Search results are rejected unless every item matches the requested
 scope and carries a scope-bound evidence ID. Admin routes under
 `/api/admin/graphiti/config|health|test-call` configure and validate the bridge.
-Ingest and reconcile enqueue deduplicated `state_graphiti_jobs` rows keyed by
-operation and evidence ID. `GraphitiWorker` claims them with expiring leases,
-applies bounded exponential retry, and can reclaim interrupted work after
-restart. Graphiti remains an optional projection: the source event and local
-evidence identity remain authoritative.
 
 **Graphify (developer tooling, external CLI):** Graphify is an offline AST-level knowledge-graph tool (`~/.local/bin/graphify.exe`). It is not part of the execlaw runtime — it is an operator-side developer aid.
 
@@ -501,7 +491,7 @@ The graph persists at `graphify-out/` (graph.json, manifest.json, GRAPH_REPORT.m
 
 ## 5. Data model
 
-Full schema is the union of every file in [`crates/core/migrations/`](../crates/core/migrations/): the consolidated pre-v1 schema in `0001_baseline.sql` plus additive migrations through `0022`. The load-bearing tables:
+Full schema is the union of every file in [`crates/core/migrations/`](../crates/core/migrations/): the consolidated pre-v1 schema in `0001_baseline.sql` plus additive migrations `0005` through `0016`. The load-bearing tables:
 
 ### 5.1 `state_events` — the source of truth
 
@@ -513,18 +503,11 @@ CREATE TABLE state_events (
     payload         BLOB NOT NULL,     -- MessagePack
     committed_at    INTEGER NOT NULL,
     actor           TEXT,
-    tag             BLOB,              -- v1 row HMAC or v2 chain tag
-    key_id          INTEGER NOT NULL,
-    integrity_version INTEGER NOT NULL, -- 1 = legacy row MAC, 2 = chained
-    prev_tag        BLOB,               -- required for v2 rows
     PRIMARY KEY (conversation_id, seq)
 );
 ```
 
-  Append-only. Monotonic `seq` per `conversation_id`. Every action in the system
-  is a row here. Replay reconstructs state deterministically and, with a key ring,
-  verifies legacy v1 rows plus the v2 chain and signed terminal head before
-  returning any suffix.
+Append-only. Monotonic `seq` per `conversation_id`. Every action in the system is a row here. Replay reconstructs state deterministically.
 
 **Event kinds** (from [`crates/core/src/events.rs`](../crates/core/src/events.rs)):
 
@@ -629,25 +612,6 @@ CREATE TABLE memory_entries (
 
 ### 5.6 Other tables (pointer-level)
 
-- `state_runs`, `state_run_steps` (migration 0017) — execution cursors and
-  leased step boundaries. Stable input hashes, approval IDs, and unique outbox
-  idempotency keys make retries auditable and effect enqueue idempotent.
-- `config_local_endpoint_approvals`, `state_local_endpoint_resolutions`
-  (migration 0018) — operator-approved CIDR/DNS policy and the latest accepted
-  or denied resolution diagnostics.
-- `state_graphiti_jobs` (migration 0019) — leased, deduplicated ingest and
-  reconcile work bound to a source event and evidence ID.
-- `memory_assertions`, `memory_evidence`, `memory_current_projection`,
-  `memory_jobs` (migration 0020) — append-only evidence-backed memory plus
-  durable extraction/skill-capture work. Migration 0024 adds pinned
-  host-derived scope and trust to extraction jobs.
-- `state_event_integrity_heads` and the v2 columns on `state_events` (migration
-  0021) — legacy-prefix genesis anchors, chained rows, and signed terminal
-  checkpoints.
-- `config_artifact_verification`, `state_artifact_provenance`, and
-  `state_artifact_verification_events` (migration 0022) — supply-chain policy,
-  verified identities/digests/SBOM references, and audit history.
-
 - `state_alerts`, `state_incidents`, `state_alert_silences` — operational alerting (§10 of plan).
 - `state_attachments`, `state_artifacts` — blob references for inbound images and research PDFs. `state_attachments.filename` column added (migration 0006) so python-sandbox hydration and inbound transport attachments have original filenames instead of sha256-hex paths.
 - `config_runner_deployments` — GPU + model + backend mapping per `RunnerPurpose`.
@@ -718,38 +682,6 @@ Default `idle_timeout_ms` per transport: web/UI = explicit (resolver not called)
 **Per-message `channel_origin`** field on event payloads lets the SPA render channel icons in the Control thread without losing the unified-DM UX.
 
 **Incognito threads** (`is_ephemeral = 1` on `state_conversations`) persist events during the conversation (so crash recovery works) but the `EphemeralSweeper` task DELETEs every event row whose parent is past `ephemeral_expires_at`. The conversation row stays with `last_seq = 0` after purge so audit reports can show "N incognito threads existed but their content was purged." `execlaw replay` skips purged ephemerals.
-
-### 5.9 Deterministic transport archive
-
-Transport messages are archived independently of agent handling. The shared
-inbound router writes every inbound message, including blocked, cold-contact,
-self, and unaddressed group messages, to `message_archive_conversations` and
-`message_archive_messages`. The archive key is `(channel, remote_id)`, where
-`remote_id` is the transport group id for group conversations and the sender
-handle for direct conversations. Message rows are idempotent and have an FTS5
-index over body and sender name.
-
-The server also emits a lossless Markdown projection under:
-
-```
-.obsidian/archive/<transport>/<group|direct>/<remote-id>/_conversation.md
-.obsidian/archive/<transport>/<group|direct>/<remote-id>/<year>/<year>-<month>.md
-.obsidian/archive/archive-index.md
-```
-
-The archive uses one Markdown file per conversation per month, not one file per
-message. Each page has frontmatter containing the transport, conversation kind,
-remote id, execlaw conversation id, period, and archive tags. Participant
-metadata is stored separately in SQLite. The projection is mechanical: it
-performs no inference, summarization, embedding, or model call. SQLite remains
-authoritative; Markdown is the human-readable Obsidian surface and Graphify is
-the optional navigable graph over that projection. Outbound auto-bridge
-messages are written before the plugin call with `generated` status, then
-updated to `delivered` only after the plugin succeeds, or `failed` when the
-plugin returns an error. The monthly page is regenerated after each transition,
-so failed and merely generated replies remain visible without being mislabeled
-as delivered. Other outbox producers should use the same contract when their
-transport delivery callback is added.
 
 ---
 
@@ -1312,18 +1244,8 @@ For the reader who wants to jump into code:
 | [`crates/core/migrations/0010_suggestion_drafts.sql`](../crates/core/migrations/0010_suggestion_drafts.sql) | Draft storage for automation builder |
 | [`crates/core/migrations/0011_enable_skills_learning_loop_defaults.sql`](../crates/core/migrations/0011_enable_skills_learning_loop_defaults.sql) | Enables `auto_capture_enabled=1` and `reuse_update_enabled=1` in `config_skills` for existing installs |
 | [`crates/core/migrations/0012_chain_plans_runs.sql`](../crates/core/migrations/0012_chain_plans_runs.sql) | `state_chain_plans`, `state_chain_runs`, `state_chain_run_steps` for tool-chain plugin phase 2 |
-| [`crates/core/migrations/0017_durable_runs.sql`](../crates/core/migrations/0017_durable_runs.sql) | Generic durable runs, leased step boundaries, approval/outbox identities, and recovery indexes |
-| [`crates/core/migrations/0018_local_endpoint_policy.sql`](../crates/core/migrations/0018_local_endpoint_policy.sql) | SQLite-approved CIDR/DNS policy and endpoint-resolution diagnostics |
-| [`crates/core/migrations/0019_graphiti_jobs.sql`](../crates/core/migrations/0019_graphiti_jobs.sql) | Durable leased Graphiti ingest/reconcile jobs with source evidence |
-| [`crates/core/migrations/0020_memory_assertions_jobs.sql`](../crates/core/migrations/0020_memory_assertions_jobs.sql) | Append-only assertions/evidence, current projection, and durable memory jobs |
 | [`crates/core/src/events.rs`](../crates/core/src/events.rs) | Event-log primitives, `commit_turn`, `enforce_tool_pairing`, HMAC sign/verify |
 | [`crates/core/src/event_hmac.rs`](../crates/core/src/event_hmac.rs) | HMAC-SHA256 canonical bytes + constant-time verify |
-| [`crates/core/migrations/0021_event_integrity_chain.sql`](../crates/core/migrations/0021_event_integrity_chain.sql) | Versioned per-conversation event chains + signed terminal checkpoints |
-| [`crates/core/migrations/0022_artifact_provenance.sql`](../crates/core/migrations/0022_artifact_provenance.sql) | Artifact verification policy, provenance records, and append-only audit events |
-| [`crates/core/src/runs.rs`](../crates/core/src/runs.rs) | `RunStore` transitions, leases, atomic outbox completion, and `next_safe_action` recovery |
-| [`crates/core/src/local_endpoint_policy.rs`](../crates/core/src/local_endpoint_policy.rs) | SQLite policy/diagnostic store; enforcement lives in `crates/local-endpoint-policy/` |
-| [`crates/core/src/memory_assertions.rs`](../crates/core/src/memory_assertions.rs) | Assertion/evidence projection and leased memory-job store |
-| [`crates/core/src/artifact_provenance.rs`](../crates/core/src/artifact_provenance.rs) | Allowlist policy, offline cosign adapter, digest/OCI checks, and override audit |
 | [`crates/core/src/principal.rs`](../crates/core/src/principal.rs) | Trust ladder + `PrincipalStore` persistence (Phase 3) |
 | [`crates/core/src/outbox.rs`](../crates/core/src/outbox.rs) | Outbox enqueue / inbox dedup |
 | [`crates/core/src/automations.rs`](../crates/core/src/automations.rs) | M2 Automations: `AutomationDef` typed-graph store, `AutomationStore::upsert`, `list_enabled_for_kind` hot path |
@@ -1359,9 +1281,8 @@ For the reader who wants to jump into code:
 | [`crates/server/src/research/runner.rs`](../crates/server/src/research/runner.rs) | Per-job runner: Plan → Gather → Synthesize; phase-gating; LLM planner call + JSON plan parse |
 | [`crates/server/src/research/synthesize.rs`](../crates/server/src/research/synthesize.rs) | Synthesize phase: assemble notes → one LLM call → report.md → `AttachmentRow` |
 | [`crates/server/src/research/workspace.rs`](../crates/server/src/research/workspace.rs) | Per-job scratch directory + source URL registry |
-| [`crates/server/src/graphiti_tool.rs`](../crates/server/src/graphiti_tool.rs) | Controller-only typed Graphiti actions, host-derived scope/evidence, SQLite/vault config, and local-endpoint enforcement |
-| [`crates/server/src/graphiti_worker.rs`](../crates/server/src/graphiti_worker.rs) | Leased ingest/reconcile worker with bounded retry and restart reclaim |
-| [`crates/server/src/graphiti_admin.rs`](../crates/server/src/graphiti_admin.rs) | Admin configuration, health, and test-call routes |
+| [`crates/server/src/graphiti_tool.rs`](../crates/server/src/graphiti_tool.rs) | Controller-only `graphiti` tool with typed `status`, `ingest_episode`, and `search` actions; loopback-only HTTP bridge |
+| [`crates/server/src/graphiti_admin.rs`](../crates/server/src/graphiti_admin.rs) | Admin routes `GET /api/admin/graphiti/health` + `POST /api/admin/graphiti/test-call` |
 | [`crates/server/src/mcp_http_client.rs`](../crates/server/src/mcp_http_client.rs) | Streamable HTTP MCP client (JSON-RPC-2.0, `2025-06-18` protocol version, bearer auth) |
 | [`crates/server/src/routine_runner.rs`](../crates/server/src/routine_runner.rs) | Minute-aligned cron tick; fires `config_routines` rows as controller-trust turns |
 | [`crates/core/src/cards.rs`](../crates/core/src/cards.rs) | `CardKind` enum + event-sourced card lifecycle (`CardOpened`, `CardProgressed`, `CardClosed`); channel-capability downgrade |
@@ -1767,7 +1688,7 @@ stateDiagram-v2
 - **Skills learning loop on by default** (migration 0011): `auto_capture_enabled=1`, `reuse_update_enabled=1` enabled for existing installs.
 - **Model adapter layer**: `crates/model-adapter/` isolates per-family LLM quirks (Qwen3 thinking tokens, DeepSeekR1 reasoning blocks, Llama3/Mistral/Gemma normalization). Every inference call site uses `adapter_for(ModelFamily::detect(&model_id))`.
 - **BackendPurpose routing**: `InferenceResolver` resolves per-call from `config_backends`; `BackendPurpose::Small` used for skill summarization; `BackendPurpose::Vision` for automation `AskAgent` image nodes.
-- **Graphiti built-in tool**: Controller-only `graphiti` tool registered host-side; supports typed `status`, `ingest`, `search`, `retract`, and `reconcile`, with host-derived scope/evidence, SQLite/vault configuration, shared local-endpoint enforcement, and durable ingest/reconcile jobs.
+- **Graphiti built-in tool**: Controller-only `graphiti` tool registered host-side; supports typed `status`, `ingest_episode`, and `search` against a loopback Graphiti-compatible endpoint; admin validation routes at `/api/admin/graphiti/`.
 - **Cards primitive** (§4.11): event-sourced `CardOpened/Progressed/Closed` lifecycle surfaced in SPA for long-running tasks; channel-capability-aware text downgrade on non-rich transports.
 - **Deep research pipeline** (§4.10): `crates/server/src/research/` — plan/gather/synthesize phases; `ResearchWorkspace`; `AttachmentRow` report delivery.
 - **Streamable HTTP MCP client**: `crates/server/src/mcp_http_client.rs` complements stdio MCP client; bearer token auth; protocol version `2025-06-18`.

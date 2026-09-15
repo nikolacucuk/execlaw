@@ -177,6 +177,41 @@ export function setMessages(conversationId: string, messages: MessageView[]) {
     }));
 }
 
+/** Merge a refetched transcript without erasing newer live messages. */
+export function mergeMessages(conversationId: string, messages: MessageView[]) {
+    setState((prev) => {
+        const existing = prev.messages[conversationId] ?? [];
+        const incomingMax = messages.reduce(
+            (max, message) => Math.max(max, message.seq),
+            0,
+        );
+        const incomingTexts = new Set(
+            messages.map(
+                (message) => `${message.kind}\u0000${message.text ?? ""}`,
+            ),
+        );
+        const preserved = existing.filter(
+            (message) =>
+                message.seq > incomingMax &&
+                !incomingTexts.has(
+                    `${message.kind}\u0000${message.text ?? ""}`,
+                ),
+        );
+        const bySeq = new Map(
+            [...messages, ...preserved].map((message) => [message.seq, message]),
+        );
+        return {
+            ...prev,
+            messages: {
+                ...prev.messages,
+                [conversationId]: [...bySeq.values()].sort(
+                    (a, b) => a.seq - b.seq,
+                ),
+            },
+        };
+    });
+}
+
 /// 2026-04-28 — drop ALL local state for a conversation id. Used
 /// when an incognito session is being torn down so its transcript
 /// doesn't linger in the store after the operator navigates away.

@@ -83,29 +83,32 @@ through additional infrastructure:
 
 The roadmap should close gaps around these strengths rather than rebuild them.
 
-## 4. Important verified gaps and closed foundations
+## 4. Important verified gaps
 
 These are implementation observations, not speculative product ideas.
 
-### 4.1 Event integrity chain and checkpoint
+### 4.1 Event rows are authenticated but not chained
 
-Migration `0021_event_integrity_chain.sql` closes the earlier sequence-integrity
-gap. Legacy v1 rows retain independent authentication, while v2 rows bind the
-previous tag and key id and a signed per-conversation head authenticates the
-terminal state. The retained checkpoint boundary and whole-conversation
-deletion limitation are documented in §7.7.
+`crates/core/src/event_hmac.rs::canonical_bytes` signs each row independently.
+The canonical input does not include a previous event tag or checkpoint root.
+This detects row mutation, but deletion and truncation are not cryptographically
+linked to neighboring rows. Documentation that calls this an HMAC chain is
+stronger than the current implementation.
 
-### 4.2 Memory evidence lineage (implemented)
+Recommendation: either describe it accurately as row authentication or add a
+real chain/checkpoint design before making tamper-evident sequence claims.
 
-Migration 0020 adds append-only assertions and evidence tied to exact event
-sequences, payload paths, quote hashes, extraction run IDs, trust classes,
-validity windows, and supersession links. Approved evidence-backed assertions
-project into existing memory reads, and trust filtering precedes ranking.
-Migration 0024 pins host-derived scope and trust on extraction jobs. Successful
-committed turns now enqueue exact ranges for a leased, restart-safe local
-Small/Standard worker that validates evidence against replay before insertion.
-The production policy leaves candidates pending by default and never projects
-procedural candidates as ordinary facts.
+### 4.2 Memory lacks evidence-level lineage
+
+Long-term memory is trust-scoped and durable, but memory mutation is not yet a
+complete append-only assertion history tied to exact source events and text
+spans. A remembered fact should be able to answer:
+
+- Which event or attachment supplied this claim?
+- Which model/configuration extracted it?
+- Was it directly stated, inferred, imported, or agent-generated?
+- What superseded or retracted it?
+- Which trust class and approval applied at each revision?
 
 ### 4.3 Skill capture queue durability (implemented)
 
@@ -115,15 +118,24 @@ persist retries with backoff and terminal status, and resume pending work after
 a process restart. Each row records the capture-policy and model-selector hashes
 used to define the extraction run.
 
-### 4.4 Graphiti bridge hardening (implemented)
+### 4.4 Graphiti bridge hardening is incomplete
 
-The Controller-only model schema exposes only typed status, ingest, search,
-retract, and reconcile actions. The host derives scope, trust, source event,
-and evidence identity; SQLite stores the endpoint and vault-secret reference,
-while the vault stores the credential. Requests use the shared endpoint policy
-and search results fail closed on scope/evidence mismatch. Ingest/reconcile are
-deduplicated leased jobs with retry and restart reclaim. Graphiti remains an
-optional projection rather than authoritative memory.
+The model-callable Graphiti schema no longer accepts `base_url`, `api_key`,
+`group_id`, or `raw_request`; it is Controller-only, derives scope from the
+conversation, rejects unknown fields, disables redirects, and currently permits
+only a root HTTP loopback endpoint. The remaining gap is configuration and
+durability: endpoint configuration still uses a compatibility environment
+variable, the credential is not yet vault-backed, and ingestion is synchronous.
+
+Graphiti should be an optional projection/retrieval service with:
+
+- Endpoint configuration in SQLite.
+- Credentials in the vault.
+- A fixed, allowlisted action contract.
+- Host-derived scope/trust partitioning.
+- No model-controlled URL or API key.
+- No generic raw HTTP request action.
+- Evidence IDs attached to every ingested episode.
 
 ### 4.5 Backend behavior is inferred rather than declared
 
@@ -142,31 +154,24 @@ engines increasingly expose portable JSON Schema response formats and
 engine-specific `structured_outputs` or `format` fields. Execlaw needs a
 capability-negotiated structured-output layer rather than one vLLM-era knob.
 
-### 4.7 Durable step recovery foundation is present
+### 4.7 Turn recovery is coarser than leading durable runtimes
 
-Migration 0017 and `RunStore` implement durable model, compute, tool, approval,
-outbox, child-run, and artifact step kinds with leases, cursor transitions, and
-an explicit recovery decision. Atomic outbox enqueue plus step completion
-prevents duplicate effects at that boundary. The remaining gap is adoption by
-normal turn execution and the production process-kill/child-join matrix.
+Execlaw has strong atomic turn and effect guarantees. The gap is durable
+checkpointing inside long operations: model request, deterministic step,
+approval wait, child-agent join, and outbox enqueue. Leading durable runtimes
+resume at these boundaries rather than replaying an entire turn.
 
-### 4.8 Artifact provenance enforcement is present
+### 4.8 Plugin and MCP artifacts lack enforced provenance
 
-Migration 0022 and the provenance store enforce digest, publisher, repository,
-workflow, offline cosign/SLSA, and SBOM policy for bundled plugin installation.
-Subprocess bytes are rechecked at spawn; sidecar and runner launches require
-digest-pinned OCI provenance. Controller-enabled local overrides are persisted
-and audited. The remaining release gap is publishing the detached provenance
-statement and offline cosign bundle consumed by bundled installation. Stdio MCP
-commands remain operator-configured executables rather than packaged artifacts.
+ZIP path staging and checksums protect shape and accidental corruption, but a
+checksum alone does not authenticate a publisher or build workflow. Subprocess
+plugins and stdio MCP servers execute code with significant local authority.
 
-### 4.9 Local endpoint policy (implemented)
+### 4.9 Local-only inference needs network enforcement
 
-Migration 0018 stores approved CIDRs/DNS names and resolution diagnostics. The
-shared policy rejects public and mixed DNS answers, redirects, userinfo, and
-alternate numeric hosts, pins accepted DNS answers, and is wired to configured
-inference, HTTP MCP, Graphiti, and STT/TTS clients. New embedding, reranking, or
-judge transports must use the same adapter.
+The product rule forbids cloud LLMs, but endpoint configuration should also
+reject public inference destinations, redirects, and DNS rebinding by default.
+The invariant must be enforced in code and tested, not only documented.
 
 ## 5. Competitive landscape
 
@@ -266,13 +271,6 @@ schema migration, security review, tests, UI, operations, and documentation.
 **Problem:** atomic turns are safe, but long-running workflows need finer resume
 points.
 
-**Implemented foundation:** migration 0017 and `core::runs::RunStore` provide
-the tables below, guarded transitions, leases, idempotent stable definitions,
-approval waits, atomic outbox enqueue/completion, cursor advancement, and an
-explicit next-safe-action decision. Reopen and expired-lease tests cover the
-store. Normal chat/runner execution is not yet driven by `RunStore`, so the
-end-to-end process-kill matrix remains open.
-
 Add SQLite-backed:
 
 ```text
@@ -318,7 +316,7 @@ Owning surfaces: `crates/core`, `crates/runner-local`, `crates/server`,
 
 ### 7.2 Typed tool failure protocol
 
-The in-process tool path now wraps outcomes in a stable result envelope:
+Replace opaque model-facing strings with a stable result envelope:
 
 ```json
 {
@@ -340,13 +338,6 @@ Add:
 - Repeated-identical-call detection based on tool name plus canonical arguments.
 - Circuit breakers for repeatedly failing integrations.
 - A bounded correction attempt for schema-invalid model output.
-
-`ToolResultEnvelope`/`ToolFailure` and the in-process executor implement the
-failure kinds, retry normalization, three-attempt transient/timeout retry,
-bounded schema correction, repeated-identical-call detection, and a 30-second
-integration circuit breaker. Retry budgets, backoff, and circuit state are not
-yet persisted, and `runner-protocol` still exposes its older string-error
-envelope.
 
 Acceptance:
 
@@ -373,14 +364,6 @@ Requirements:
 This is the most direct way to improve local-model reliability because weak
 models fail most often at structured boundaries.
 
-Plugin input/result schemas and path-safe bundled local references compile at
-registration; built-in input and declared-result schemas compile at
-registration; MCP input schemas compile at discovery. Dispatch validates before
-side effects, successful plugin/built-in results are validated, canonical
-bundle hashes reject in-place plugin contract changes, and focused tests cover
-the failure paths. Invocation events/traces do not yet persist the schema hash,
-and MCP has no advertised result-schema contract to validate.
-
 ### 7.4 Enforce local-only inference
 
 Introduce a shared outbound endpoint policy for inference:
@@ -396,13 +379,6 @@ Introduce a shared outbound endpoint policy for inference:
 
 Acceptance: adversarial tests for redirects, mixed DNS answers, IPv6 forms,
 userinfo, alternate numeric IP forms, and rebinding.
-
-Migration 0018 and `crates/local-endpoint-policy/` implement this as a shared
-policy loaded from SQLite-approved CIDRs/DNS names. DNS answers are validated
-once and pinned, redirects are disabled rather than followed, and accepted or
-denied resolutions are persisted. Configured inference, HTTP MCP, Graphiti, and
-voice STT/TTS use the shared adapter. Future dedicated embedding, reranking, or
-judge transports must use the same adapter when introduced.
 
 ### 7.5 Memory assertion and evidence model
 
@@ -447,15 +423,6 @@ Acceptance:
 - Forced termination loses no memory jobs.
 - Cross-trust leakage remains zero in adversarial tests.
 
-Migration 0020 and `core::memory_assertions` implement append-only assertions
-and evidence, validity windows, supersession, evidence-gated projection into
-existing memory reads, trust-before-ranking queries, and leased retryable jobs.
-Skill capture persists `skill_capture` jobs before waking its worker. Migration
-0024 and `server::memory_extract_runtime` add the production `memory_extract`
-producer and worker with pinned host authority, policy/model hashes, bounded
-local inference, replay-validated evidence, retry/backoff, and pending-by-default
-approval.
-
 ### 7.6 Graphiti hardening
 
 Make Graphiti an optional projection consumer, never the source of truth.
@@ -472,37 +439,18 @@ Immediate changes:
 - Disable Graphiti telemetry in the supported local deployment.
 - Add endpoint SSRF and redirect policy.
 
-Implemented: the model sees only typed actions; scope, trust, source event, and
-evidence identity are host-derived. Endpoint configuration is in SQLite, the
-credential reference resolves through the vault, requests use the shared
-local-endpoint policy, search results fail closed on scope/evidence mismatch,
-and ingest/reconcile run as deduplicated leased jobs with retry and restart
-reclaim. Graphiti remains optional and is not authoritative memory.
-
 ### 7.7 Integrity checkpoints
 
-Implemented by migration `0021_event_integrity_chain.sql` as a
-per-conversation HMAC chain plus a signed terminal head:
+Choose and document one of these designs:
 
-- Existing rows are `integrity_version = 1`; their tags retain the original
-  independent-row canonical encoding.
-- `EventLog::establish_v2_checkpoint` (or the all-conversation backfill helper)
-  creates a v2 genesis HMAC over the exact legacy prefix without rewriting it.
-  The next event chains from that anchor.
-- V2 event tags bind the unchanged v1 canonical row, signing `key_id`, and
-  `prev_tag`. `state_event_integrity_heads` signs the chain start, terminal
-  sequence, terminal tag, genesis key id, and checkpoint key id.
-- Event rows and the terminal head update in one SQLite transaction. Replay
-  verifies the full conversation before returning a suffix and keyed hydration
-  does not trust snapshots that omit integrity metadata.
-- Rotation changes the current signing key id only. Prior event ranges and
-  checkpoints continue to verify through retained key-ring entries; no
-  destructive re-signing occurs.
+1. **Per-conversation HMAC chain:** include previous tag in each event's canonical
+   bytes.
+2. **Merkle checkpoints:** periodically commit a signed root over event ranges.
+3. **Both:** chain for local ordering plus roots for efficient verification and
+   backup attestations.
 
-Detection is guaranteed through the latest retained signed head. As with any
-same-database checkpoint, deleting the entire conversation, all of its v2 rows,
-and its head is outside this local proof; backup manifests or an external
-anchor are still required to prove that a whole conversation once existed.
+Migration must preserve verification for old rows through an integrity version.
+Do not silently reinterpret old tags.
 
 Acceptance:
 
@@ -526,15 +474,6 @@ For plugin ZIPs, subprocess binaries, sidecars, installers, and runner images:
   and workflow.
 - Surface dependency/VEX status without treating an SBOM as a vulnerability
   verdict.
-
-Migration 0022 and `core::artifact_provenance` implement SQLite allowlists,
-SHA-256 checks, offline cosign SLSA verification, persisted provenance, and
-audited local overrides. Bundled plugin installation verifies ZIP and SBOM;
-subprocess spawn rechecks the derived executable digest; sidecar and runner
-launch require digest-pinned OCI plus persisted provenance. Packaging emits
-SPDX 2.3 plugin sidecars and release workflows create GitHub attestations. The
-remaining P0 release task is to export/publish the detached provenance statement
-and offline cosign bundle in the format bundled installation consumes.
 
 ## 8. P1: product-defining enhancements
 
@@ -1353,55 +1292,30 @@ is complete unless the text says so.
   model-call scope from the conversation, reject unknown arguments, disable
   redirects, bound result counts, reject unscoped admin search/ingestion, and
   restrict the compatibility endpoint to a root HTTP loopback URL.
-- [x] Correct security documentation for versioned integrity: legacy v1 rows
-  authenticate independently; v2 rows chain to a signed terminal checkpoint.
+- [x] Correct security documentation: current event HMACs authenticate rows
+  independently and are not an integrity chain.
 - [x] Move Graphiti endpoint configuration into SQLite and credentials into
   the vault; add scope-bound evidence, durable leased ingest/reconcile jobs,
   retry/restart recovery, and fail-closed search-result validation.
 
-### P0 implementation status
+### Outstanding P0 work
 
-- [x] Compile and validate plugin input/result schemas, bundled path-safe local
-  `$ref` documents, built-in input/declared-result schemas, and MCP input
-  schemas; hash registered contracts and reject plugin upgrades whose hashes
-  change in place.
-- [x] Persist input/result schema hashes on durable tool-invocation traces;
-  validate MCP's standard result shape and any advertised `outputSchema` before
-  exposing structured content to the model.
-- [x] Add the SQLite-backed `RunStore` with stable step definitions, leases,
-  approval waits, atomic outbox enqueue/completion, cursor advancement, and a
-  `next_safe_action` recovery decision. Reopen and lease-expiry tests exist.
-- [x] Drive normal runner/server turns through `RunStore`, replay completed
-  model/tool checkpoints after reopen, and preserve atomic event pairing and
-  outbox idempotency. Durable child fan-out/join remains part of the P1 run-tree
-  enhancement below because normal turns do not create child runs today.
-- [x] Add the typed in-process `ToolResultEnvelope`/`ToolFailure` contract,
-  bounded schema correction, transient retry/backoff, repeated-call detection,
-  and per-integration circuit breaking.
-- [x] Persist retry budgets, backoff, repeated-call fingerprints, schema hashes,
-  and circuit state; carry the typed failure envelope through
-  `runner-protocol` with legacy `{status,message}` deserialization.
-- [x] Add the shared local-endpoint policy with SQLite-approved CIDRs/DNS names,
-  public/mixed-answer rejection, DNS pinning, redirect denial, IPv4/IPv6 and
-  alternate-numeric-host tests, and persisted resolution diagnostics. It is
-  wired to configured inference, HTTP MCP, Graphiti, and STT/TTS clients.
-- [x] Add append-only memory assertions/evidence, validity and supersession,
-  evidence-gated projection into normal memory reads, durable leased jobs, and
-  trust-first retrieval tests.
-- [x] Wire the production `memory_extract` producer and leased worker at server
-  bootstrap, with exact committed ranges, pinned host authority and policy/model
-  hashes, bounded local inference, replay-validated evidence, retry/backoff,
-  conservative approval, and procedural candidates retained as proposals.
-- [x] Replace skill capture's volatile work queue with deduplicated leased
-  SQLite `memory_jobs`; wake notifications are only an optimization.
-- [x] Implement event-integrity v2 chaining/checkpoints with frozen legacy-v1
-  verification, truncation detection, and non-destructive key rotation.
-- [x] Enforce persisted provenance policy for bundled plugin ZIPs, subprocess
-  executables, digest-pinned sidecar/runner OCI images, and audited Controller
-  local-development overrides; generate SPDX 2.3 plugin sidecars.
-- [x] Generate detached runtime provenance statements and offline cosign SLSA
-  bundles before desktop packaging; embed and publish them beside each exact
-  ZIP/checksum/SPDX artifact on Linux, macOS, and Windows.
+- [ ] Extend fail-closed schema compilation and input/result validation to
+  built-in and MCP tools, bundled content-addressed `$ref`, schema hashes, and
+  plugin-upgrade compatibility checks.
+- [ ] Add the SQLite-backed durable run/step machine and crash-boundary matrix.
+- [ ] Add the typed tool failure envelope, persisted retry budgets/backoff,
+  repeated-identical-call detection, and integration circuit breakers.
+- [ ] Add shared local-only endpoint policy with approved LAN/VPN CIDRs, DNS
+  rebinding protection, redirect re-resolution, and coverage for inference,
+  embeddings, reranking, STT, TTS, judges, MCP, and Graphiti.
+- [ ] Add append-only memory assertions, evidence, validity windows, durable
+  extraction jobs, supersession, and trust-first retrieval tests.
+- [ ] Replace the in-memory skill capture channel with leased SQLite jobs.
+- [ ] Design and migrate event integrity chaining/checkpoints with versioned
+  legacy verification, truncation detection, and key rotation.
+- [ ] Persist and verify plugin, subprocess, sidecar, installer, and runner
+  signatures, provenance, digests, and SBOMs.
 
 ### Outstanding P1/P2 and lab work
 

@@ -6,6 +6,7 @@ import {
     clearStreamingBuffer,
     getChatState,
     markUnread,
+    mergeMessages,
     setActiveThread,
     setMessages,
     setThreadProcessing,
@@ -92,6 +93,21 @@ describe("chat store", () => {
         appendMessage("conv", M(1, "first"));
         setMessages("conv", [M(10, "later")]);
         expect(getChatState().messages.conv.map((m) => m.seq)).toEqual([10]);
+    });
+
+    it("mergeMessages preserves newer live messages after a stale fetch", () => {
+        setMessages("conv", [M(1, "inbound"), M(2, "reply")]);
+        mergeMessages("conv", [M(1, "inbound")]);
+        expect(getChatState().messages.conv.map((m) => m.text)).toEqual([
+            "inbound",
+            "reply",
+        ]);
+    });
+
+    it("mergeMessages replaces an optimistic duplicate with its canonical row", () => {
+        setMessages("conv", [M(1_000_000_000_000, "hello")]);
+        mergeMessages("conv", [M(1, "hello")]);
+        expect(getChatState().messages.conv.map((m) => m.seq)).toEqual([1]);
     });
 
     it("appendStreamingToken concatenates and toggles is_processing", () => {
