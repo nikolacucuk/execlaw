@@ -1,7 +1,7 @@
 [plugin]
 id = "obsidian-livesync-publisher"
 name = "Obsidian LiveSync Publisher"
-version = "0.1.11"
+version = "0.1.13"
 description = "Publishes markdown from the operator-selected execlaw export directory into an Obsidian LiveSync CouchDB database."
 author = "execlaw"
 license = "Apache-2.0"
@@ -12,8 +12,8 @@ image = "execlaw/obsidian-livesync-publisher:0.1.1"
 ports = []
 
 [[services.mounts]]
-source = "/mnt/AI_Pool/obsidian-vault"
-target = "/vault"
+source = "/mnt/AI_Pool"
+target = "/ai_pool"
 read_only = true
 
 [services.sidecar]

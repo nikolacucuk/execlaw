@@ -4,7 +4,7 @@
 
 - [x] Fix the stale TrueNAS sidecar image problem by changing the manifest
   image from `0.1.0` to `0.1.1`.
-- [x] Mount `/mnt/AI_Pool/obsidian-vault` at `/vault` and resolve the source
+- [x] Mount `/mnt/AI_Pool` at `/ai_pool` and resolve the source
   folder from the relative `source_subdir` setting.
 - [x] Persist `source_subdir` when saving plugin settings.
 - [x] Preserve the stored password when the UI receives `<redacted>`.
@@ -12,8 +12,8 @@
 - [ ] On TrueNAS, build and verify `execlaw/obsidian-livesync-publisher:0.1.1`.
 - [ ] If the settings page reports `sidecar is not healthy`, inspect the
   sidecar container state and logs before retrying the UI.
-- [ ] On TrueNAS, install the matching `0.1.11` ZIP and verify the staged
-  manifest has `source = "/mnt/AI_Pool/obsidian-vault"`.
+- [ ] On TrueNAS, install the matching `0.1.12` ZIP and verify the staged
+  manifest has `source = "/mnt/AI_Pool"` and `target = "/ai_pool"`.
 - [ ] Run **Check source** and confirm `/vault/execlaw` resolves to the
   configured folder and reports at least one markdown file.
 - [ ] Run **Publish now** and capture the result counters.

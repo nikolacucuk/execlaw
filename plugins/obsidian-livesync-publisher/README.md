@@ -16,9 +16,10 @@ sudo docker build --no-cache \
 ```
 
 The manifest mounts the operator path
-`/mnt/AI_Pool/obsidian-vault` read-only at `/vault`. The publisher source
-folder defaults to the relative path `execlaw`, so the effective source is
-`/vault/execlaw` and the host path is `/mnt/AI_Pool/obsidian-vault/execlaw`.
+`/mnt/AI_Pool` read-only at `/ai_pool`. The publisher source folder defaults
+to the relative path `obsidian-vault/execlaw`, so the effective source is
+`/ai_pool/obsidian-vault/execlaw` and the host path is
+`/mnt/AI_Pool/obsidian-vault/execlaw`.
 Install the plugin ZIP through the execlaw admin UI only after building the
 image. The manifest deliberately uses a new image tag whenever sidecar code
 changes; otherwise Docker may keep running an older image that still reports
@@ -38,7 +39,7 @@ Configure the plugin's admin route with:
 {
   "couchdb_url": "http://couchdb-obsidian-livesync:5984",
   "database": "djenka_db",
-  "source_subdir": "execlaw",
+  "source_subdir": "obsidian-vault/execlaw",
   "username": "a-dedicated-livesync-user",
   "password": "entered-directly-in-the-admin-form",
   "max_files": 1000,
@@ -97,10 +98,10 @@ There were two independent causes:
 The current contract is:
 
 ```text
-TrueNAS: /mnt/AI_Pool/obsidian-vault
-sidecar: /vault
-setting: source_subdir=execlaw
-effective source: /vault/execlaw
+TrueNAS: /mnt/AI_Pool
+sidecar: /ai_pool
+setting: source_subdir=obsidian-vault/execlaw
+effective source: /ai_pool/obsidian-vault/execlaw
 ```
 
 The sidecar reads markdown from `/vault` and calls the CouchDB HTTP API. It
@@ -179,7 +180,7 @@ sudo docker inspect <publisher-container-name> \
   --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 ```
 
-The mount must be `/mnt/AI_Pool/obsidian-vault -> /vault`. Once the container
+The mount must be `/mnt/AI_Pool -> /ai_pool`. Once the container
 is running, test its published health port from the execlaw container host
 using the port shown by the sidecar status page or `docker ps`:
 

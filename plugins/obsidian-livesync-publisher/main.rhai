@@ -64,7 +64,7 @@ fn read_config() {
         "database": "djenka_db",
         "username": "",
         "password": "",
-        "source_subdir": "execlaw",
+        "source_subdir": "obsidian-vault/execlaw",
         "max_files": 1000,
         "max_bytes": 52428800,
     };
@@ -84,8 +84,9 @@ fn normalize_config(cfg) {
     if type_of(cfg["username"]) != "string" || cfg["username"] == "" {
         cfg["username"] = "ncucuk";
     }
+    if cfg["source_subdir"] == "execlaw" { cfg["source_subdir"] = "obsidian-vault/execlaw"; }
     if type_of(cfg["source_subdir"]) != "string" || cfg["source_subdir"] == "" || starts_with(cfg["source_subdir"], "/") || cfg["source_subdir"].index_of("..") >= 0 || cfg["source_subdir"].index_of("\\") >= 0 {
-        cfg["source_subdir"] = "execlaw";
+        cfg["source_subdir"] = "obsidian-vault/execlaw";
     }
     cfg
 }
@@ -108,7 +109,7 @@ fn require_string(value, name) {
 fn require_relative_path(value, name) {
     let path = require_string(value, name);
     if starts_with(path, "/") || path.index_of("..") >= 0 || path.index_of("\\") >= 0 {
-        throw name + " must be a relative folder below the mounted vault";
+        throw name + " must be a relative folder below /ai_pool, for example obsidian-vault/execlaw";
     }
     path
 }

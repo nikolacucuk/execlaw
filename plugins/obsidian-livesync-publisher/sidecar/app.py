@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
-VAULT_ROOT = Path("/vault")
+VAULT_ROOT = Path("/ai_pool")
 PORT = int(os.environ.get("PORT", "8080"))
 MAX_REQUEST_BYTES = 256 * 1024
 
@@ -97,10 +97,10 @@ def put_document(base: str, database: str, document: dict, username: str, passwo
 def source_files(source_subdir: str, max_files: int, max_bytes: int) -> list[tuple[str, Path, int]]:
     relative_root = Path(source_subdir)
     if relative_root.is_absolute() or ".." in relative_root.parts:
-        raise ValueError("source_subdir must be a relative path below /vault")
+        raise ValueError("source_subdir must be a relative path below /ai_pool")
     root = (VAULT_ROOT / relative_root).resolve()
     if not root.is_relative_to(VAULT_ROOT.resolve()):
-        raise ValueError("source_subdir escapes /vault")
+        raise ValueError("source_subdir escapes /ai_pool")
     if not root.is_dir():
         raise RuntimeError(f"publisher source directory is missing: {root}")
     files: list[tuple[str, Path, int]] = []

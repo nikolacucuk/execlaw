@@ -20,6 +20,14 @@ function field(label, value, onChange, type = "text", help = "") {
     );
 }
 
+function normalizeSource(value) {
+    let source = String(value ?? "").trim().replaceAll("\\", "/");
+    const prefix = "/mnt/AI_Pool/";
+    if (source.startsWith(prefix)) source = source.slice(prefix.length);
+    if (source === "execlaw") source = "obsidian-vault/execlaw";
+    return source;
+}
+
 export default function ObsidianPublisherPanel({ bridge }) {
     const { Button, ErrorBanner } = bridge.components;
     const [config, setConfig] = useState({
@@ -27,7 +35,7 @@ export default function ObsidianPublisherPanel({ bridge }) {
         database: "djenka_db",
         username: "ncucuk",
         password: "",
-        source_subdir: "execlaw",
+        source_subdir: "obsidian-vault/execlaw",
         max_files: 1000,
         max_bytes: 52428800,
     });
@@ -56,6 +64,7 @@ export default function ObsidianPublisherPanel({ bridge }) {
         setError(null);
         try {
             const body = { ...config };
+            body.source_subdir = normalizeSource(body.source_subdir);
             if (!body.password) delete body.password;
             const result = await bridge.fetchJson("POST", path("/config"), body);
             setConfig((current) => ({ ...current, ...result.config, password: "" }));
@@ -98,6 +107,7 @@ export default function ObsidianPublisherPanel({ bridge }) {
     if (loading) return React.createElement("div", { className: "execlaw-muted" }, "Loading publisher configuration...");
 
     const update = (key, value) => setConfig((current) => ({ ...current, [key]: value }));
+    const sourceHelp = "Relative to /ai_pool. Use obsidian-vault/execlaw (or obsidian_vault/execlaw if that is the actual TrueNAS folder), not /mnt/AI_Pool/...";
     return React.createElement(
         "div",
         { className: "execlaw-plugin-panel" },
@@ -108,7 +118,7 @@ export default function ObsidianPublisherPanel({ bridge }) {
         field("Database", config.database, (value) => update("database", value)),
         field("Username", config.username, (value) => update("username", value), "text", "Defaults to ncucuk from the current CouchDB deployment."),
         field("Password", config.password, (value) => update("password", value), "password", "Leave blank only when a password was already saved."),
-        field("Vault source folder", config.source_subdir, (value) => update("source_subdir", value), "text", "Relative to the mounted /vault parent; normally execlaw."),
+        field("Vault source folder", config.source_subdir, (value) => update("source_subdir", value), "text", "Relative to /ai_pool. Use obsidian-vault/execlaw, or enter /mnt/AI_Pool/obsidian-vault/execlaw and it will be normalized."),
         field("Maximum files per publish", String(config.max_files), (value) => update("max_files", Number(value) || 1000), "number"),
         field("Maximum bytes per publish", String(config.max_bytes), (value) => update("max_bytes", Number(value) || 52428800), "number"),
         React.createElement("div", { className: "d-flex gap-2" },
