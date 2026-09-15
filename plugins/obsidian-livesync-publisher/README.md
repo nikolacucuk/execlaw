@@ -64,6 +64,21 @@ were persisted; it does not prove the sidecar mount or CouchDB publish path.
 Use **Check source** before **Publish now**. A successful publish reports
 `files_seen`, `metadata_written`, `files_unchanged`, and `chunks_written`.
 
+`couchdb-obsidian-livesync` is a Docker DNS name, not a TrueNAS host name. It
+works only when the publisher sidecar joins the same Docker network as CouchDB.
+Set the control-plane environment variable `EXECLAW_SIDECAR_NETWORK` to the
+network shown by:
+
+```bash
+sudo docker inspect couchdb-obsidian-livesync \
+  --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}'
+```
+
+Recreate `execlaw`, remove the publisher container, and let the supervisor
+create it again. If CouchDB is intentionally exposed on the TrueNAS LAN rather
+than a shared Docker network, use its reachable host IP and published port in
+the CouchDB URL instead.
+
 ## Confirmed investigation findings
 
 The observed errors included:

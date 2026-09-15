@@ -384,6 +384,7 @@ fn spec_from_row(row: &BackendRow) -> Result<ServiceSpec, String> {
         gpu_id: row.gpu_id.clone(),
         gpu_vendor,
         mounts,
+        network: None,
         host_port: host_port_for(row.purpose),
         container_port,
         runtime,

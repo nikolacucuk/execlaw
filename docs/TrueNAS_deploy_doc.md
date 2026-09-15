@@ -163,6 +163,7 @@ services:
     environment:
       EXECLAW_RUNNER_IMAGE: execlaw/runner:truenas
       EXECLAW_RUNNER_NETWORK: execlaw-net
+      EXECLAW_SIDECAR_NETWORK: execlaw-net
       EXECLAW_RPC_URL: ws://execlaw:3031
       EXECLAW_SIDECAR_BIND_HOST: 0.0.0.0
       EXECLAW_SIDECAR_CONNECT_HOST: host.docker.internal
@@ -330,6 +331,20 @@ Install one ZIP at a time through **Settings -> Plugins**, inspect its declared
 tools/services/routes, enable it, and run its smallest read-only validation.
 Re-enable a plugin after an upgrade when it owns a sidecar, webhook, or
 long-running WebSocket connection.
+
+Supervised sidecars use `EXECLAW_SIDECAR_NETWORK` when it is set. A sidecar
+that addresses another container by its Docker service name must join that
+container's network. For an existing service outside this compose project,
+inspect its network name and use it as the environment value:
+
+```bash
+sudo docker inspect couchdb-obsidian-livesync \
+  --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}'
+```
+
+Recreate the `execlaw` service after changing the environment value, then
+remove the publisher container so the supervisor recreates it on the selected
+network.
 
 ### Plugin capability matrix
 

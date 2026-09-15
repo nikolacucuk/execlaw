@@ -98,6 +98,9 @@ pub struct ServiceSpec {
     /// strongly preferred for cache mounts since the host-side
     /// downloader is the single writer.
     pub mounts: Vec<HostMount>,
+    /// Optional Docker network name for the container. `None` keeps
+    /// Docker's default network selection.
+    pub network: Option<String>,
     /// Host port to bind the service on. Picked by the supervisor
     /// from a per-purpose pool to keep URLs stable across restarts.
     pub host_port: u16,
@@ -130,6 +133,7 @@ impl Default for ServiceSpec {
             gpu_id: None,
             gpu_vendor: None,
             mounts: Vec::new(),
+            network: None,
             host_port: 0,
             container_port: 0,
             runtime: ServiceRuntime::Docker,
@@ -581,6 +585,7 @@ impl ServiceController for BollardServiceController {
             device_requests,
             devices,
             binds: if binds.is_empty() { None } else { Some(binds) },
+            network_mode: spec.network.clone(),
             // Transport sidecars call back into the control plane using
             // host.docker.internal. Docker Desktop provides this alias,
             // but Linux Docker requires the explicit host-gateway entry.
@@ -1530,6 +1535,7 @@ mod tests {
             gpu_id: Some("0".into()),
             gpu_vendor: Some(GpuVendor::Nvidia),
             mounts: Vec::new(),
+            network: None,
             host_port: 8001,
             container_port: 8000,
             runtime: ServiceRuntime::Docker,
@@ -1671,6 +1677,7 @@ mod tests {
         let spec = ServiceSpec::default();
         assert_eq!(spec.runtime, ServiceRuntime::Docker);
         assert!(spec.binary_hint.is_empty());
+        assert_eq!(spec.network, None);
     }
 
     #[tokio::test]

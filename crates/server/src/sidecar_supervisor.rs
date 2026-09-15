@@ -695,6 +695,9 @@ impl SidecarSupervisor {
                 entrypoint: sidecar.entrypoint.clone(),
                 env: sidecar.env.clone(),
                 mounts,
+                network: std::env::var("EXECLAW_SIDECAR_NETWORK")
+                    .ok()
+                    .filter(|network| !network.trim().is_empty()),
                 host_port: port,
                 container_port: sidecar.rpc_port,
                 ..Default::default()
