@@ -665,6 +665,9 @@ fn plugin_error_response(e: PluginHostError) -> axum::response::Response {
         PluginHostError::Manifest(_) => (StatusCode::BAD_REQUEST, "bad_manifest"),
         PluginHostError::UnsupportedTier(_) => (StatusCode::BAD_REQUEST, "unsupported_tier"),
         PluginHostError::MissingRuntime => (StatusCode::BAD_REQUEST, "missing_runtime"),
+        PluginHostError::Provenance(_) => {
+            (StatusCode::FORBIDDEN, "provenance_verification_failed")
+        }
         PluginHostError::Spawn(_) => (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed"),
         PluginHostError::Db(_) | PluginHostError::Io(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "internal")
