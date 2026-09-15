@@ -10,7 +10,8 @@ its HTTP API.
 Build the sidecar on TrueNAS from the repository root:
 
 ```bash
-sudo docker build -t execlaw/obsidian-livesync-publisher:0.1.0 \
+sudo docker build --no-cache \
+  -t execlaw/obsidian-livesync-publisher:0.1.1 \
   plugins/obsidian-livesync-publisher/sidecar
 ```
 
@@ -18,7 +19,16 @@ The manifest mounts the operator path
 `/mnt/AI_Pool/obsidian-vault` read-only at `/vault`. The publisher source
 folder defaults to the relative path `execlaw`, so the effective source is
 `/vault/execlaw` and the host path is `/mnt/AI_Pool/obsidian-vault/execlaw`.
-Install the plugin ZIP through the execlaw admin UI after building the image.
+Install the plugin ZIP through the execlaw admin UI only after building the
+image. The manifest deliberately uses a new image tag whenever sidecar code
+changes; otherwise Docker may keep running an older image that still reports
+the obsolete `/vault/execlaw` path.
+
+Verify the image contains the current sidecar before installing:
+
+```bash
+sudo docker image inspect execlaw/obsidian-livesync-publisher:0.1.1
+```
 
 ## Configuration
 
@@ -52,3 +62,138 @@ The first successful publish should make files appear under `execlaw/` in an
 Obsidian client connected to the same database. If the client reports a
 compatibility mismatch, stop publishing and align its LiveSync compatibility
 settings before retrying.
+
+## Runtime verification
+
+Use **Check source** first. It calls the sidecar's `/v1/check` endpoint and
+reports the resolved source path plus the markdown count. Then use **Publish
+now**. A successful response reports `files_seen`, `metadata_written`,
+`files_unchanged`, and `chunks_written` in the settings page.
+
+The publisher never writes `/mnt/AI_Pool/obsidian_notes`; that is CouchDB's
+private storage. CouchDB is accessed over HTTP, and the sidecar must be on a
+Docker network that can resolve `couchdb-obsidian-livesync`.
+
+## Debugging findings
+
+The repeated TrueNAS error was:
+
+```text
+publisher source directory is missing: /vault/execlaw
+```
+
+There were two independent causes:
+
+1. Early ZIPs were created by Windows `Compress-Archive` with backslash ZIP
+   entry names such as `ui\\panel.js`. Linux staging treats that as a literal
+   filename, so the UI entry was missing. Current release ZIPs are built with
+   explicit POSIX entry names.
+2. The manifest changed its mount from the leaf directory to the existing
+   parent vault, but the manifest continued to reference the old sidecar image
+   tag `0.1.0`. TrueNAS therefore kept running the old image, whose Python
+   code used a hardcoded `/vault/execlaw` root and had no current `/v1/check`
+   endpoint.
+
+The current contract is:
+
+```text
+TrueNAS: /mnt/AI_Pool/obsidian-vault
+sidecar: /vault
+setting: source_subdir=execlaw
+effective source: /vault/execlaw
+```
+
+The sidecar reads markdown from `/vault` and calls the CouchDB HTTP API. It
+creates one plain metadata document per markdown file and one content-addressed
+leaf chunk when needed. It does not delete remote files.
+
+## TrueNAS clean upgrade procedure
+
+Build the new image first; rebuilding execlaw alone is insufficient:
+
+```bash
+cd /mnt/AI_Pool/execlaw-source
+sudo docker build --no-cache \
+  -t execlaw/obsidian-livesync-publisher:0.1.1 \
+  plugins/obsidian-livesync-publisher/sidecar
+sudo docker image inspect execlaw/obsidian-livesync-publisher:0.1.1
+```
+
+Install the matching `obsidian-livesync-publisher-0.1.11.zip`, disable and
+remove the old publisher first, then enable the new one. Inspect the sidecar
+mount:
+
+```bash
+sudo docker ps --format '{{.Names}}\\t{{.Image}}' | grep obsidian
+sudo docker inspect <publisher-container> \
+  --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+```
+
+The mount must be:
+
+```text
+/mnt/AI_Pool/obsidian-vault -> /vault
+```
+
+Create a disposable note and use **Check source** before publishing:
+
+```bash
+sudo mkdir -p /mnt/AI_Pool/obsidian-vault/execlaw
+printf '# LiveSync publisher test\\n' | \
+  sudo tee /mnt/AI_Pool/obsidian-vault/execlaw/livesync-test.md
+```
+
+The UI should report the resolved source and a positive markdown count. Only
+then use **Publish now**. A successful response includes `files_seen` and
+`metadata_written`; a second run should report the file as unchanged.
+
+## Sidecar-not-healthy diagnosis
+
+If the settings page returns `sidecar is not healthy`, the request did not
+reach Python, the vault mount, or CouchDB. The host only exposes a sidecar URL
+after the supervisor has started the container and its `/healthz` probe has
+passed. Run these commands on TrueNAS:
+
+```bash
+sudo docker image inspect execlaw/obsidian-livesync-publisher:0.1.1
+sudo docker ps -a --filter 'name=obsidian-livesync-publisher' \
+  --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}'
+sudo docker ps -a --format '{{.Names}}\\t{{.Image}}\\t{{.Status}}' \
+  | grep -E 'obsidian|publisher'
+```
+
+The running image must be `0.1.1`, not `0.1.0`. If it is absent, build it:
+
+```bash
+cd /mnt/AI_Pool/execlaw-source
+sudo docker build --no-cache \
+  -t execlaw/obsidian-livesync-publisher:0.1.1 \
+  plugins/obsidian-livesync-publisher/sidecar
+```
+
+If a container exists but is stopped or restarting, inspect its logs:
+
+```bash
+sudo docker logs <publisher-container-name>
+sudo docker inspect <publisher-container-name> \
+  --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+```
+
+The mount must be `/mnt/AI_Pool/obsidian-vault -> /vault`. Once the container
+is running, test its published health port from the execlaw container host
+using the port shown by the sidecar status page or `docker ps`:
+
+```bash
+curl -i http://127.0.0.1:<publisher-host-port>/healthz
+```
+
+Expected response:
+
+```json
+{"ok":true,"source":"/vault"}
+```
+
+Only after this returns HTTP 200 will the plugin's **Check source** and
+**Publish now** routes be able to run. The plugin cannot access
+`/mnt/AI_Pool/obsidian_notes` directly; CouchDB remains an HTTP dependency
+after the sidecar is healthy.

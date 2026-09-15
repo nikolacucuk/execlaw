@@ -1,19 +1,12 @@
-"""Small, bounded CouchDB publisher for an Obsidian LiveSync vault.
-
-The sidecar reads only /vault/execlaw, never CouchDB's data directory. It
-writes ordinary, unencrypted LiveSync plain-file metadata and leaf chunks.
-Obsidian LiveSync remains responsible for downloading and resolving conflicts.
-"""
+"""Bounded CouchDB publisher for a read-only Obsidian vault mount."""
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
-import mimetypes
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from time import time_ns
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
