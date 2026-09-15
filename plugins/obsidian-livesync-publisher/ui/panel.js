@@ -51,7 +51,7 @@ export default function ObsidianPublisherPanel({ bridge }) {
         bridge.fetchJson("GET", path("/config"))
             .then((value) => {
                 if (!active) return;
-                setConfig((current) => ({ ...current, ...value, password: "" }));
+                setConfig((current) => ({ ...current, ...value, password: value.password === "<redacted>" ? "<redacted>" : "" }));
             })
             .catch((value) => active && setError(String(value)))
             .finally(() => active && setLoading(false));
@@ -67,8 +67,8 @@ export default function ObsidianPublisherPanel({ bridge }) {
             body.source_subdir = normalizeSource(body.source_subdir);
             if (!body.password) delete body.password;
             const result = await bridge.fetchJson("POST", path("/config"), body);
-            setConfig((current) => ({ ...current, ...result.config, password: "" }));
-            setMessage("Configuration saved. The password is stored in the encrypted plugin vault.");
+            setConfig((current) => ({ ...current, ...result.config, password: "<redacted>" }));
+            setMessage("Configuration saved. Password is stored in the encrypted plugin vault.");
         } catch (value) {
             setError(String(value));
         } finally {
