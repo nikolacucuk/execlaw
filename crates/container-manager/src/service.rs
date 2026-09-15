@@ -570,34 +570,11 @@ impl ServiceController for BollardServiceController {
         }
 
         // Render `spec.mounts` into the bollard `binds` shape:
-        // `"<host>:<container>[:ro]"`. We sanity-check the host
-        // path exists on this side so a typo doesn't get to dockerd
-        // (which would error 400 with a less-helpful message).
-        // Read-only mounts get the `:ro` suffix; rw is the default.
-        let binds: Vec<String> = spec
-            .mounts
-            .iter()
-            .filter(|m| {
-                let host = std::path::Path::new(&m.host_path);
-                if !host.exists() {
-                    tracing::warn!(
-                        host_path = %m.host_path,
-                        container_path = %m.container_path,
-                        "mount host_path does not exist; skipping bind"
-                    );
-                    false
-                } else {
-                    true
-                }
-            })
-            .map(|m| {
-                if m.read_only {
-                    format!("{}:{}:ro", m.host_path, m.container_path)
-                } else {
-                    format!("{}:{}", m.host_path, m.container_path)
-                }
-            })
-            .collect();
+        // `"<host>:<container>[:ro]"`. The Docker daemon resolves
+        // host paths, which can differ from this process's namespace
+        // when execlaw itself runs in a container, so do not preflight
+        // with `Path::exists()` here.
+        let binds = render_binds(&spec.mounts);
 
         let host_config = HostConfig {
             port_bindings: Some(port_bindings),
@@ -1526,6 +1503,19 @@ impl ServiceController for MockServiceController {
     }
 }
 
+fn render_binds(mounts: &[HostMount]) -> Vec<String> {
+    mounts
+        .iter()
+        .map(|mount| {
+            if mount.read_only {
+                format!("{}:{}:ro", mount.host_path, mount.container_path)
+            } else {
+                format!("{}:{}", mount.host_path, mount.container_path)
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1555,6 +1545,17 @@ mod tests {
             host_port: 8123,
         };
         assert_eq!(h.endpoint_url("http"), "http://127.0.0.1:8123");
+    }
+
+    #[test]
+    fn render_binds_keeps_host_paths_outside_control_plane_namespace() {
+        let mounts = vec![HostMount {
+            host_path: "/mnt/AI_Pool".into(),
+            container_path: "/ai_pool".into(),
+            read_only: true,
+        }];
+
+        assert_eq!(render_binds(&mounts), vec!["/mnt/AI_Pool:/ai_pool:ro"]);
     }
 
     #[tokio::test]
