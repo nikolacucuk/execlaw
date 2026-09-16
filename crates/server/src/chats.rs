@@ -3394,7 +3394,17 @@ pub async fn dispatch_external_turn(
     // typing-indicator timeout) and the guard's Drop sends an
     // explicit stop so the indicator clears immediately when the
     // turn returns.
-    let _typing_guard = TypingIndicatorGuard::for_conversation(state, cid).await;
+    let review_mode = execlaw_core::vault_row::VaultRowStore::new(&state.db)
+        .get(Some(inbound_channel_origin.unwrap_or("")), "inbound_reply_mode")
+        .ok()
+        .flatten()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .is_some_and(|mode| mode != "automatic");
+    let _typing_guard = if review_mode {
+        TypingIndicatorGuard { cancel: None }
+    } else {
+        TypingIndicatorGuard::for_conversation(state, cid).await
+    };
 
     let sender = Some(principal.id.as_str().to_owned());
     let caller_caps: Vec<String> = policy
@@ -4343,6 +4353,7 @@ pub async fn force_transport_response(
         )
             .into_response();
     }
+    let before_seq = event_log(&state).last_seq(&cid).map(|seq| seq.0).unwrap_or(0);
     match dispatch_external_turn(
         &state,
         &cid,
@@ -4356,11 +4367,42 @@ pub async fn force_transport_response(
     )
     .await
     {
-        Ok(()) => (
-            StatusCode::ACCEPTED,
-            Json(serde_json::json!({"accepted": true})),
-        )
-            .into_response(),
+        Ok(()) => {
+            // `dispatch_external_turn` commits the forced turn but does not
+            // publish chat events because normal transport turns publish via
+            // their originating consumer. The force button is an HTTP-only
+            // path, so publish the committed model response explicitly and
+            // let the SPA refetch the canonical transcript.
+            if let Ok(events) = event_log(&state).replay_since(&cid, EventSeq(before_seq)) {
+                for event in events {
+                    match event.kind {
+                        EventKind::ModelTurn => {
+                            if let Ok(payload) = event.decode_payload::<RealModelTurnPayload>() {
+                                state.events.publish(UiEvent::ChatMessageOutbound {
+                                    conversation_id: cid.as_str().to_owned(),
+                                    seq: event.seq.0,
+                                    text: payload.text,
+                                });
+                            } else if let Ok(payload) =
+                                event.decode_payload::<StubModelTurnPayload>()
+                            {
+                                state.events.publish(UiEvent::ChatMessageOutbound {
+                                    conversation_id: cid.as_str().to_owned(),
+                                    seq: event.seq.0,
+                                    text: payload.text,
+                                });
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"accepted": true})),
+            )
+                .into_response()
+        }
         Err(error) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": error})),
@@ -4548,6 +4590,7 @@ pub async fn list_messages(
         })
         .collect();
     let mut latest_transport_context: Option<String> = None;
+    let mut latest_transport_seq: Option<i64> = None;
     let messages: Vec<MessageView> = events
         .into_iter()
         .filter(|e| {
@@ -4581,6 +4624,7 @@ pub async fn list_messages(
                 inbound_transport_context(&state.db, &e, conversation_context.as_deref());
             if inbound_context.is_some() {
                 latest_transport_context = inbound_context.clone();
+                latest_transport_seq = Some(e.seq.0);
             }
             let transport_context =
                 if e.kind == EventKind::ModelTurn && extract_channel_origin(&e).is_some() {
@@ -4596,6 +4640,13 @@ pub async fn list_messages(
                 committed_at: e.committed_at,
                 channel_origin: extract_channel_origin(&e),
                 transport_context,
+                reply_to_seq: if e.kind == EventKind::ModelTurn
+                    && extract_channel_origin(&e).is_some()
+                {
+                    latest_transport_seq
+                } else {
+                    None
+                },
                 review_state: if e.kind == EventKind::ModelTurn {
                     review_states.get(&e.seq.0).cloned()
                 } else {

@@ -199,6 +199,8 @@ export interface MessageView {
         | null;
     /** Human-readable inbound sender, phone, and group context. */
     transport_context?: string | null;
+    /** Event sequence of the inbound transport message answered by this turn. */
+    reply_to_seq?: number | null;
     /** Durable review decision for a transport-originated model reply. */
     review_state?: "sent" | "cancelled" | "pending" | null;
     /**

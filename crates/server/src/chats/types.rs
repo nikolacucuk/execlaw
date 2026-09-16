@@ -214,6 +214,9 @@ pub struct MessageView {
     /// such as `Jovan · +382... · CamperMontenegro`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_context: Option<String>,
+    /// Event sequence of the inbound transport message this model turn answers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to_seq: Option<i64>,
     /// Durable review state for a transport-originated model reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_state: Option<String>,

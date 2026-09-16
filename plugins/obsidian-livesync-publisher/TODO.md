@@ -23,22 +23,32 @@ open still require execution or proof on TrueNAS.
   `state_plugins.manifest_toml`.
 - [x] Confirm the staged `0.1.14` manifest contained `/mnt/AI_Pool -> /ai_pool`.
 - [x] Confirm CouchDB logs show authenticated `200 ok` traffic to `djenka_db`.
-
-## Current blocker
-
-- [ ] Confirm the TrueNAS control-plane Docker image contains the
-  `host.rs` hydration fix. Earlier TrueNAS builds pulled commits that changed
-  only plugin files.
-- [ ] Confirm the running registered sidecar has a non-empty `mounts` list.
-- [ ] Confirm `docker inspect` no longer returns `Mounts: []`.
-- [ ] Confirm the sidecar sees
+- [x] Rebuild the TrueNAS control-plane image with the hydration and mount
+  forwarding fixes.
+- [x] Confirm the publisher container has a non-empty `/mnt/AI_Pool ->
+  /ai_pool` read-only bind.
+- [x] Confirm the sidecar sees
   `/ai_pool/obsidian-vault/execlaw/livesync-test.md`.
-- [ ] Confirm `/healthz` returns HTTP 200 from the running sidecar.
-- [ ] Run **Check source** and record the returned path/file count.
-- [ ] Run **Publish now** and record `files_seen`, `metadata_written`,
-  `files_unchanged`, and `chunks_written`.
+- [x] Configure `EXECLAW_SIDECAR_NETWORK=ix-obsidian_default` and confirm the
+  publisher shares that network with `couchdb-obsidian-livesync`.
+- [x] Run **Check source** successfully.
+- [x] Run **Publish now** successfully: one source file and one metadata
+  document written.
+- [x] Confirm CouchDB persisted
+  `f:obsidian-vault/execlaw/livesync-test.md` with a referenced `h:` chunk.
 
-## Exact evidence to collect next
+## Remaining validation
+
+- [ ] Re-run **Publish now** without changing the source and confirm zero
+  metadata documents are written.
+- [ ] Modify `livesync-test.md`, publish again, and confirm its metadata `_rev`
+  and child `h:` hash change.
+- [ ] Read the published `h:` chunk through CouchDB's HTTP API and confirm its
+  `data` equals the Markdown source.
+- [ ] Confirm the note appears with the expected content in the connected
+  Obsidian LiveSync client.
+
+## Completed TrueNAS evidence
 
 ```bash
 grep -n "staged plugin directory is the installed artifact" \
@@ -53,19 +63,15 @@ sudo docker ps -a \
 
 PUBLISHER=execlaw-sidecar-obsidian-livesync-publisher-publisher
 sudo docker inspect "$PUBLISHER" --format '{{json .Mounts}}'
-sudo docker logs "$PUBLISHER"
 sudo docker exec "$PUBLISHER" \
   sh -lc 'find /ai_pool/obsidian-vault/execlaw -maxdepth 2 -type f -name "*.md" -print'
 ```
 
-Interpretation:
-
-- staged manifest wrong: plugin ZIP/install problem;
-- staged manifest correct, `Mounts: []`: host hydration/registration problem;
-- mount present, source absent: host path/permissions problem;
-- source present, health fails: sidecar image/startup problem;
-- source and health pass, publish fails: CouchDB URL/auth/network or
-  LiveSync document compatibility problem.
+Observed results: the sidecar has a read-only `/mnt/AI_Pool -> /ai_pool` bind,
+the test Markdown file is visible, and both it and CouchDB are on
+`ix-obsidian_default`. CouchDB returned a persisted `plain` metadata document
+for `f:obsidian-vault/execlaw/livesync-test.md` whose `children` array refers
+to an `h:` content chunk.
 
 ## Open compatibility work
 

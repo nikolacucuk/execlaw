@@ -1394,9 +1394,11 @@ function ActiveThreadPane({
                     )
                 }
                 onForceTransportResponse={(sourceSeq) =>
-                    forceTransportResponse(conversationId, sourceSeq, getToken).then(
-                        () => undefined,
-                    )
+                    forceTransportResponse(conversationId, sourceSeq, getToken)
+                        .then(() => listMessages(conversationId, getToken))
+                        .then((response) => {
+                            mergeMessages(conversationId, response.messages);
+                        })
                 }
                 onSetTransportReviewDecision={(sourceSeq, decision) =>
                     setTransportReviewDecision(

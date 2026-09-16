@@ -344,7 +344,31 @@ sudo docker inspect couchdb-obsidian-livesync \
 
 Recreate the `execlaw` service after changing the environment value, then
 remove the publisher container so the supervisor recreates it on the selected
-network.
+network. The observed Obsidian LiveSync installation uses
+`ix-obsidian_default`:
+
+```yaml
+environment:
+  EXECLAW_SIDECAR_NETWORK: ix-obsidian_default
+```
+
+Verify the publisher and CouchDB containers share that network after
+recreation:
+
+```bash
+sudo docker inspect \
+  couchdb-obsidian-livesync \
+  execlaw-sidecar-obsidian-livesync-publisher-publisher \
+  --format '{{.Name}} {{range $name, $_ := .NetworkSettings.Networks}}{{$name}} {{end}}'
+```
+
+With this topology, the publisher's CouchDB URL is
+`http://couchdb-obsidian-livesync:5984`. A verified publish read the mounted
+test Markdown file and wrote a `plain` metadata document named
+`f:obsidian-vault/execlaw/livesync-test.md`, including a referenced `h:`
+content chunk, to `djenka_db`. Before publishing important notes, repeat an
+unchanged publish (zero writes expected), publish one source-file change, and
+confirm the note appears in the connected Obsidian LiveSync client.
 
 ### Plugin capability matrix
 

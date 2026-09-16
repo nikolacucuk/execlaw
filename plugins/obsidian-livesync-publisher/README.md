@@ -74,10 +74,11 @@ sudo docker inspect couchdb-obsidian-livesync \
   --format '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}'
 ```
 
-Recreate `execlaw`, remove the publisher container, and let the supervisor
-create it again. If CouchDB is intentionally exposed on the TrueNAS LAN rather
-than a shared Docker network, use its reachable host IP and published port in
-the CouchDB URL instead.
+On the verified TrueNAS deployment, CouchDB and the publisher sidecar both use
+`ix-obsidian_default`. Recreate `execlaw`, remove the publisher container, and
+let the supervisor create it again after changing this setting. If CouchDB is
+intentionally exposed on the TrueNAS LAN rather than a shared Docker network,
+use its reachable host IP and published port in the CouchDB URL instead.
 
 ## Confirmed investigation findings
 
@@ -121,9 +122,22 @@ staged plugin.toml: correct mount
 running Docker container: Mounts = []
 ```
 
-The CouchDB logs are healthy and show authenticated `200 ok` requests to
-`djenka_db/` and continuous `_changes` traffic from LiveSync. The publisher
-fails before CouchDB because its source directory is unavailable.
+These failures are resolved. The publisher container now has a read-only
+`/mnt/AI_Pool -> /ai_pool` bind, sees
+`/ai_pool/obsidian-vault/execlaw/livesync-test.md`, and shares
+`ix-obsidian_default` with `couchdb-obsidian-livesync`.
+
+**Publish now** successfully reported one source file and one metadata write.
+CouchDB returned the persisted document:
+
+```json
+{
+  "_id": "f:obsidian-vault/execlaw/livesync-test.md",
+  "path": "obsidian-vault/execlaw/livesync-test.md",
+  "type": "plain",
+  "children": ["h:1447ce926ff6d7833f87223aae64662c87b7b2a0b8a776472236e3fc8bbb71be"]
+}
+```
 
 ## Root causes found during the session
 
@@ -149,9 +163,28 @@ fails before CouchDB because its source directory is unavailable.
    hydration supplies the correct registered mounts, a changed mount should
    force a stop/respawn. If `Mounts` remains empty, the failure is before
    Docker creation, in hydration/registration or in the image being run.
-7. `djenka_db` is reachable independently. The CouchDB logs show successful
-   authenticated `200 ok` traffic, so source discovery must be repaired before
-   debugging CouchDB writes.
+7. `djenka_db` is reachable over the CouchDB HTTP API after the publisher joins
+  `ix-obsidian_default`. The next validation is document compatibility in a
+  real Obsidian LiveSync client.
+
+## End-to-end verification
+
+After a successful first publish, use the following checks before publishing
+important notes.
+
+1. Press **Publish now** again without changing the Markdown file. The result
+  must report zero metadata documents written, proving unchanged files are
+  skipped.
+2. Change the file body, publish again, and confirm one metadata document is
+  written. The metadata document's `_rev` and `children` hash must change.
+3. Read the referenced `h:` child document through CouchDB's HTTP API and
+  verify its `data` field exactly matches the Markdown source.
+4. Let the connected Obsidian LiveSync client replicate, then confirm that
+  `obsidian-vault/execlaw/livesync-test.md` appears with the expected content.
+
+The first three checks verify the publisher. The final check verifies that the
+current LiveSync profile does not require encryption, path obfuscation, or a
+different document format.
 
 ## Handoff diagnostic sequence
 

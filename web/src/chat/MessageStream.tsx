@@ -502,8 +502,18 @@ function MessageBubble({
 
     return (
         <div
-            className={"execlaw-msg" + (isUserMessage ? " is-user" : "")}
+            className={
+                "execlaw-msg" +
+                (isUserMessage ? " is-user" : "") +
+                (message.reply_to_seq != null ? " is-linked-reply" : "")
+            }
         >
+            {message.reply_to_seq != null && (
+                <div className="execlaw-msg__reply-link">
+                    <i className="bi bi-arrow-return-right" aria-hidden />
+                    Reply to the incoming {channelOrigin} message
+                </div>
+            )}
             <div className="execlaw-msg__meta">
                 {showOriginIcon && (
                     <ChannelOriginIcon origin={channelOrigin} />

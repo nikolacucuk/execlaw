@@ -879,6 +879,24 @@ body {
     max-width: $thread-max-width;
     margin-inline: auto;
 
+    &.is-linked-reply {
+        border-left: 2px solid $accent;
+        padding-left: 0.75rem;
+    }
+
+    &__reply-link {
+        color: $text-muted;
+        font-size: 0.72rem;
+        margin: 0 0 0.35rem 0.25rem;
+        display: flex;
+        align-items: center;
+        gap: 0.35rem;
+
+        i {
+            color: $accent;
+        }
+    }
+
     // User messages: right-align the inner bubble so the pill
     // hugs the right edge of the column. The bubble itself
     // (`.execlaw-msg__bubble.is-user`) does shrink-to-fit so the
