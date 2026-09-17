@@ -36,17 +36,25 @@ open still require execution or proof on TrueNAS.
   document written.
 - [x] Confirm CouchDB persisted
   `f:obsidian-vault/execlaw/livesync-test.md` with a referenced `h:` chunk.
+- [x] Inspect the local Obsidian LiveSync profile. It has `encrypt: true` and
+  `usePathObfuscation: true`; continuous sync is enabled in the local client.
+- [x] Replace the hand-rolled plain CouchDB writer with pinned
+  `@vrtmrz/livesync-commonlib@0.1.26` `DirectFileManipulator` support for
+  LiveSync E2EE v2 and path obfuscation.
 
 ## Remaining validation
 
+- [ ] Build `execlaw/obsidian-livesync-publisher:0.1.1` from the Node sidecar,
+  package and upgrade `obsidian-livesync-publisher-0.1.16.zip`, then re-enable
+  the plugin.
+- [ ] Save the existing LiveSync passphrase in the plugin's encrypted settings.
+  Do not place it in Compose, source files, or a terminal command.
+- [ ] Publish one disposable Markdown file and confirm it appears in the
+  connected encrypted, path-obfuscated Obsidian LiveSync client.
 - [ ] Re-run **Publish now** without changing the source and confirm zero
   metadata documents are written.
-- [ ] Modify `livesync-test.md`, publish again, and confirm its metadata `_rev`
-  and child `h:` hash change.
-- [ ] Read the published `h:` chunk through CouchDB's HTTP API and confirm its
-  `data` equals the Markdown source.
-- [ ] Confirm the note appears with the expected content in the connected
-  Obsidian LiveSync client.
+- [ ] Modify the disposable note, publish again, and confirm Obsidian receives
+  the changed content.
 
 ## Completed TrueNAS evidence
 
@@ -83,8 +91,8 @@ to an `h:` content chunk.
 - [ ] Add explicit CouchDB status/auth diagnostics without logging secrets.
 - [ ] Decide whether remote deletion/pruning is needed; current behavior is
   intentionally additive and non-destructive.
-- [ ] Run the Python sidecar unit/integration tests inside the sidecar image:
+- [ ] Run the Node sidecar unit/integration tests inside the sidecar image:
 
   ```bash
-  python -m unittest discover -s sidecar -p 'test_*.py'
+  npm test
   ```

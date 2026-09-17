@@ -132,6 +132,21 @@ impl<'db> TransportConversationStore<'db> {
             Ok(rows)
         })
     }
+
+    /// Remove every current and rotated transport mapping for a deleted
+    /// conversation so the next inbound message can mint a fresh thread.
+    pub fn delete_for_conversation(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Result<usize, DbError> {
+        self.db.with_conn(|c| {
+            let deleted = c.execute(
+                "DELETE FROM transport_conversations WHERE conversation_id = ?1",
+                params![conversation_id.as_str()],
+            )?;
+            Ok(deleted)
+        })
+    }
 }
 
 fn row_to_transport_conv(r: &rusqlite::Row<'_>) -> rusqlite::Result<TransportConversationRow> {
@@ -381,6 +396,28 @@ mod tests {
         assert!(row.is_current);
         assert_eq!(row.last_message_at, 100);
         assert_eq!(&row.conversation_id, outcome.conversation_id());
+    }
+
+    #[test]
+    fn delete_for_conversation_allows_transport_to_mint_again() {
+        let db = fresh_db();
+        let resolver = ConversationResolver::new(&db);
+        let first = resolver
+            .resolve_or_mint(&input("signal", "group-1", "principal-1", false, 100))
+            .unwrap()
+            .conversation_id()
+            .clone();
+        let deleted = TransportConversationStore::new(&db)
+            .delete_for_conversation(&first)
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        let second = resolver
+            .resolve_or_mint(&input("signal", "group-1", "principal-1", false, 200))
+            .unwrap()
+            .conversation_id()
+            .clone();
+        assert_ne!(first, second);
     }
 
     #[test]

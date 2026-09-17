@@ -1,0 +1,11 @@
+{
+  "name": "execlaw-obsidian-livesync-publisher",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@vrtmrz/livesync-commonlib": "0.1.26"
+  }
+}

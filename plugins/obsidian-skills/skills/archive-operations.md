@@ -25,6 +25,13 @@ conversation archive, preserve the event or run reference and summarize only
 after the source record is durable. For a derived note, list the raw sources
 and existing notes that informed it.
 
+Execlaw's generated archive projections use RFC 3339 timestamps for
+`first_seen`, `last_seen`, message headings, `captured_at`, and `updated_at`.
+The `archive/conversations/<conversation-id>/conversation.md` projection is a
+lossless event-log copy and includes web, transport, agent, and tool events.
+It is regenerated from SQLite when conversation history is opened; SQLite
+remains authoritative.
+
 ## Naming and placement
 
 - Put unprocessed material in `00-inbox/` only when it has no durable envelope.
@@ -51,6 +58,11 @@ After a meaningful turn or completed run:
 
 The vault is a projection of execlaw history. Do not delete an archive because
 its derived note was merged, corrected, or superseded.
+
+Deleting a chat thread removes the live conversation and its transport-routing
+mapping, but does not delete the Obsidian archive. A later Signal or WhatsApp
+message therefore mints a new live thread while the prior archive remains
+available for audit.
 
 ## Freshness and provenance
 

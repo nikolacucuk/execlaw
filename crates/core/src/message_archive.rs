@@ -268,7 +268,8 @@ mod tests {
 
     #[test]
     fn archive_message_insert_is_idempotent() {
-        let db = Database::open(DbConfig::in_memory()).unwrap();
+        let config = DbConfig::in_memory_unencrypted();
+        let db = Database::open(&config).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
         let store = MessageArchiveStore::new(&db);
         store

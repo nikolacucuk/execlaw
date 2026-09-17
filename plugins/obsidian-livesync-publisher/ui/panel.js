@@ -35,6 +35,8 @@ export default function ObsidianPublisherPanel({ bridge }) {
         database: "djenka_db",
         username: "ncucuk",
         password: "",
+        livesync_passphrase: "",
+        path_obfuscation_passphrase: "",
         source_subdir: "obsidian-vault/execlaw",
         max_files: 1000,
         max_bytes: 52428800,
@@ -51,7 +53,13 @@ export default function ObsidianPublisherPanel({ bridge }) {
         bridge.fetchJson("GET", path("/config"))
             .then((value) => {
                 if (!active) return;
-                setConfig((current) => ({ ...current, ...value, password: value.password === "<redacted>" ? "<redacted>" : "" }));
+                setConfig((current) => ({
+                    ...current,
+                    ...value,
+                    password: value.password === "<redacted>" ? "<redacted>" : "",
+                    livesync_passphrase: value.livesync_passphrase === "<redacted>" ? "<redacted>" : "",
+                    path_obfuscation_passphrase: value.path_obfuscation_passphrase === "<redacted>" ? "<redacted>" : "",
+                }));
             })
             .catch((value) => active && setError(String(value)))
             .finally(() => active && setLoading(false));
@@ -65,9 +73,17 @@ export default function ObsidianPublisherPanel({ bridge }) {
         try {
             const body = { ...config };
             body.source_subdir = normalizeSource(body.source_subdir);
-            if (!body.password) delete body.password;
+            for (const key of ["password", "livesync_passphrase", "path_obfuscation_passphrase"]) {
+                if (!body[key]) delete body[key];
+            }
             const result = await bridge.fetchJson("POST", path("/config"), body);
-            setConfig((current) => ({ ...current, ...result.config, password: "<redacted>" }));
+            setConfig((current) => ({
+                ...current,
+                ...result.config,
+                password: "<redacted>",
+                livesync_passphrase: "<redacted>",
+                path_obfuscation_passphrase: "<redacted>",
+            }));
             setMessage("Configuration saved. Password is stored in the encrypted plugin vault.");
         } catch (value) {
             setError(String(value));
@@ -82,7 +98,7 @@ export default function ObsidianPublisherPanel({ bridge }) {
         setError(null);
         try {
             const result = await bridge.fetchJson("POST", path("/publish"), {});
-            setMessage(`Publish complete: ${result.files_seen ?? 0} files seen, ${result.metadata_written ?? 0} metadata documents written.`);
+            setMessage(`Publish complete: ${result.files_seen ?? 0} files seen, ${result.metadata_written ?? 0} metadata documents written, ${result.files_unchanged ?? 0} unchanged, ${result.chunks_written ?? 0} content chunks written.`);
         } catch (value) {
             setError(String(value));
         } finally {
@@ -118,6 +134,8 @@ export default function ObsidianPublisherPanel({ bridge }) {
         field("Database", config.database, (value) => update("database", value)),
         field("Username", config.username, (value) => update("username", value), "text", "Defaults to ncucuk from the current CouchDB deployment."),
         field("Password", config.password, (value) => update("password", value), "password", "Leave blank only when a password was already saved."),
+        field("LiveSync encryption passphrase", config.livesync_passphrase, (value) => update("livesync_passphrase", value), "password", "Required for the connected encrypted LiveSync profile. Stored in the encrypted plugin vault."),
+        field("Path obfuscation passphrase", config.path_obfuscation_passphrase, (value) => update("path_obfuscation_passphrase", value), "password", "Leave blank to use the LiveSync encryption passphrase."),
         field("Vault source folder", config.source_subdir, (value) => update("source_subdir", value), "text", "Relative to /ai_pool. Use obsidian-vault/execlaw, or enter /mnt/AI_Pool/obsidian-vault/execlaw and it will be normalized."),
         field("Maximum files per publish", String(config.max_files), (value) => update("max_files", Number(value) || 1000), "number"),
         field("Maximum bytes per publish", String(config.max_bytes), (value) => update("max_bytes", Number(value) || 52428800), "number"),

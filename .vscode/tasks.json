@@ -170,6 +170,109 @@
 			"problemMatcher": [
 				"$rustc"
 			]
+		},
+		{
+			"label": "rust: runner release final",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--locked",
+				"--release",
+				"--bin",
+				"execlaw-runner",
+				"--no-default-features",
+				"--target-dir",
+				"target-release-runner"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "rust: process check",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process cargo,rustc -ErrorAction SilentlyContinue | Select-Object ProcessName,Id,CPU"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "rust: stop validation compilers",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process cargo,rustc -ErrorAction SilentlyContinue | Stop-Process -Force"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "rust: control release final",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--locked",
+				"--release",
+				"-p",
+				"execlaw",
+				"--target-dir",
+				"target-release-execlaw"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "rust: control release verified",
+			"type": "shell",
+			"command": "cargo",
+			"args": [
+				"build",
+				"--locked",
+				"--release",
+				"-p",
+				"execlaw",
+				"--target-dir",
+				"target-release-control-verified"
+			],
+			"isBackground": false,
+			"problemMatcher": [
+				"$rustc"
+			]
+		},
+		{
+			"label": "rust: release process check",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Process cargo,rustc -ErrorAction SilentlyContinue | Select-Object ProcessName,Id,CPU"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		},
+		{
+			"label": "rust: release artifact check",
+			"type": "shell",
+			"command": "powershell.exe",
+			"args": [
+				"-NoProfile",
+				"-Command",
+				"Get-Item target-release-control-verified\\release\\execlaw.exe -ErrorAction SilentlyContinue | Select-Object FullName,Length,LastWriteTime"
+			],
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

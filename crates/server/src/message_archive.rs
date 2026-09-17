@@ -10,6 +10,12 @@ use sha2::{Digest, Sha256};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+fn format_timestamp(timestamp: i64) -> String {
+    chrono::DateTime::from_timestamp(timestamp, 0)
+        .map(|value| value.to_rfc3339())
+        .unwrap_or_else(|| "unknown".to_owned())
+}
+
 pub fn archive_inbound(
     state: &AppState,
     message: &InboundMessage,
@@ -70,6 +76,7 @@ pub fn archive_inbound(
     if inserted {
         project(&store, &archive_id, &archive_root())?;
     }
+    project_conversation_history(state, cid)?;
     Ok(())
 }
 
@@ -114,6 +121,7 @@ pub fn archive_outbound_generated(
         })
         .map_err(|e| format!("archive outbound message: {e}"))?;
     project(&store, &archive_id, &archive_root())?;
+    project_conversation_history(state, cid)?;
     Ok(message_id)
 }
 
@@ -170,8 +178,8 @@ fn project(store: &MessageArchiveStore<'_>, archive_id: &str, root: &Path) -> Re
         conversation.conversation_id.as_deref().unwrap_or("unknown"),
         conversation.channel,
         conversation.conversation_kind,
-        conversation.first_seen_at,
-        conversation.last_seen_at
+        format_timestamp(conversation.first_seen_at),
+        format_timestamp(conversation.last_seen_at)
     );
     fs::write(folder.join("_conversation.md"), metadata)
         .map_err(|e| format!("write conversation metadata: {e}"))?;
@@ -191,9 +199,7 @@ fn project(store: &MessageArchiveStore<'_>, archive_id: &str, root: &Path) -> Re
         conversation.conversation_kind
     );
     for message in messages {
-        let when = chrono::DateTime::from_timestamp(message.occurred_at, 0)
-            .map(|v| v.format("%Y-%m-%d %H:%M").to_string())
-            .unwrap_or_else(|| "unknown time".to_owned());
+        let when = format_timestamp(message.occurred_at);
         let speaker = message
             .sender_name
             .as_deref()
@@ -213,6 +219,45 @@ fn project(store: &MessageArchiveStore<'_>, archive_id: &str, root: &Path) -> Re
     fs::write(folder.join(&year).join(format!("{year}-{month}.md")), page)
         .map_err(|e| format!("write monthly archive: {e}"))?;
     write_indexes(root, &conversation, &folder)
+}
+
+/// Project the authoritative event log into a lossless, timestamped Obsidian
+/// conversation copy. Transport archives remain separate; this view also
+/// covers web, voice, tool, and agent events that never enter a transport.
+pub fn project_conversation_history(state: &AppState, cid: &ConversationId) -> Result<(), String> {
+    let events = crate::chats::event_log(state)
+        .replay_since(cid, execlaw_core::ids::EventSeq(0))
+        .map_err(|error| format!("read conversation history: {error}"))?;
+    if events.is_empty() {
+        return Ok(());
+    }
+    let root = archive_root().join("conversations");
+    let folder = root.join(slug(cid.as_str()));
+    fs::create_dir_all(&folder).map_err(|error| format!("create conversation archive: {error}"))?;
+    let captured_at = chrono::Utc::now().to_rfc3339();
+    let mut page = format!(
+        "---\ntype: conversation-log\nconversation_id: {}\ncaptured_at: {}\nupdated_at: {}\nevent_count: {}\ntags:\n  - archive/conversation\n  - archive/execlaw\n---\n\n# Conversation {}\n\n",
+        cid.as_str(),
+        captured_at,
+        captured_at,
+        events.len(),
+        cid.as_str()
+    );
+    for event in events {
+        let timestamp = format_timestamp(event.committed_at);
+        let body = crate::chats::extract_text(&event).unwrap_or_default();
+        let actor = event.actor.as_deref().unwrap_or("system");
+        page.push_str(&format!(
+            "## {} - {} [{}]\n\n{}\n\n",
+            timestamp,
+            event.kind.as_str(),
+            actor.replace(['\r', '\n'], " "),
+            body
+        ));
+    }
+    fs::write(folder.join("conversation.md"), page)
+        .map_err(|error| format!("write conversation archive: {error}"))?;
+    Ok(())
 }
 
 fn write_indexes(

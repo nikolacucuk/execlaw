@@ -8,6 +8,8 @@ fn tool_call(name, args, oauth) {
 fn admin_get_config(req) {
     let cfg = normalize_config(read_config());
     cfg["password"] = "<redacted>";
+    cfg["livesync_passphrase"] = "<redacted>";
+    cfg["path_obfuscation_passphrase"] = "<redacted>";
     cfg
 }
 
@@ -21,6 +23,12 @@ fn admin_set_config(req) {
     if body["password"] != () && type_of(body["password"]) == "string" && body["password"] != "<redacted>" {
         cfg["password"] = body["password"];
     }
+    if body["livesync_passphrase"] != () && type_of(body["livesync_passphrase"]) == "string" && body["livesync_passphrase"] != "<redacted>" {
+        cfg["livesync_passphrase"] = body["livesync_passphrase"];
+    }
+    if body["path_obfuscation_passphrase"] != () && type_of(body["path_obfuscation_passphrase"]) == "string" && body["path_obfuscation_passphrase"] != "<redacted>" {
+        cfg["path_obfuscation_passphrase"] = body["path_obfuscation_passphrase"];
+    }
     if body["source_subdir"] != () { cfg["source_subdir"] = require_relative_path(body["source_subdir"], "source_subdir"); }
     if body["max_files"] != () { cfg["max_files"] = clamp_int(body["max_files"], 1, 10000, cfg["max_files"]); }
     if body["max_bytes"] != () { cfg["max_bytes"] = clamp_int(body["max_bytes"], 1, 52428800, cfg["max_bytes"]); }
@@ -28,6 +36,8 @@ fn admin_set_config(req) {
     validate_config(cfg);
     vault_put("config", to_json_string(cfg));
     cfg["password"] = "<redacted>";
+    cfg["livesync_passphrase"] = "<redacted>";
+    cfg["path_obfuscation_passphrase"] = "<redacted>";
     #{ "ok": true, "config": cfg }
 }
 
@@ -52,6 +62,8 @@ fn publish_impl() {
     payload["database"] = cfg["database"];
     payload["username"] = cfg["username"];
     payload["password"] = cfg["password"];
+    payload["livesync_passphrase"] = cfg["livesync_passphrase"];
+    payload["path_obfuscation_passphrase"] = cfg["path_obfuscation_passphrase"];
     payload["source_subdir"] = cfg["source_subdir"];
     payload["max_files"] = cfg["max_files"];
     payload["max_bytes"] = cfg["max_bytes"];
@@ -64,6 +76,8 @@ fn read_config() {
         "database": "djenka_db",
         "username": "",
         "password": "",
+        "livesync_passphrase": "",
+        "path_obfuscation_passphrase": "",
         "source_subdir": "obsidian-vault/execlaw",
         "max_files": 1000,
         "max_bytes": 52428800,

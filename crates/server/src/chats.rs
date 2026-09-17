@@ -4564,6 +4564,9 @@ pub async fn list_messages(
     Query(q): Query<ListQuery>,
 ) -> impl IntoResponse {
     let cid = ConversationId::from(conversation_id.as_str());
+    if let Err(error) = crate::message_archive::project_conversation_history(&state, &cid) {
+        tracing::warn!(conversation_id = %cid.as_str(), %error, "conversation archive projection failed");
+    }
     let limit = q.limit.unwrap_or(200).clamp(1, 1000);
     // Use the keyed log so HMAC verification rejects tampered rows
     // before they reach the UI (§7.8).

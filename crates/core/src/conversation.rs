@@ -473,6 +473,10 @@ impl<'db> ConversationStore<'db> {
                 "DELETE FROM state_conversations WHERE conversation_id = ?1",
                 params![conversation_id.as_str()],
             )?;
+            c.execute(
+                "DELETE FROM transport_conversations WHERE conversation_id = ?1",
+                params![conversation_id.as_str()],
+            )?;
             Ok(())
         })
     }
