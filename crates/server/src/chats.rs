@@ -4627,7 +4627,7 @@ pub async fn list_messages(
             .into_iter()
             .rev()
             .take(limit as usize)
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
         newest.reverse();
         newest
     } else {
@@ -6080,6 +6080,60 @@ mod tests {
         let text = extract_text(&usage).expect("ToolUse must surface text");
         let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(parsed["title"], "Test");
+    }
+
+    #[tokio::test]
+    async fn list_messages_returns_newest_visible_window_in_chronological_order() {
+        use execlaw_core::events::EventLog;
+
+        let state = crate::routes::test_app_state();
+        let app = crate::routes::build_router(state.clone());
+        let _ = send(app.clone(), "first").await;
+        let cid = ConversationId::from("conv1");
+        let log = EventLog::new(&state.db);
+        for index in 0..206 {
+            let actor = if index == 205 {
+                SYSTEM_ORCHESTRATOR_ACTOR
+            } else {
+                "controller"
+            };
+            log.append(
+                &EventRecord::new(
+                    cid.clone(),
+                    log.last_seq(&cid).unwrap().next(),
+                    EventKind::UserMsg,
+                    &UserMessagePayload {
+                        text: format!("history-{index}"),
+                        sender_principal_id: Some(actor.into()),
+                        channel_origin: None,
+                        transport_recipient: None,
+                        attachment_ids: Vec::new(),
+                        applied_skill_names: Vec::new(),
+                    },
+                    Some(actor.into()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        for (query, count, first_index) in [("", 200, 5), ("?limit=2", 2, 203)] {
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/chats/conv1/messages{query}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body: serde_json::Value = json_body(response.into_body()).await;
+            let messages = body["messages"].as_array().unwrap();
+            assert_eq!(messages.len(), count);
+            assert_eq!(messages[0]["text"], format!("history-{first_index}"));
+            assert_eq!(messages.last().unwrap()["text"], "history-204");
+            assert!(messages.windows(2).all(|pair| {
+                pair[0]["seq"].as_i64().unwrap() < pair[1]["seq"].as_i64().unwrap()
+            }));
+        }
     }
 
     #[tokio::test]

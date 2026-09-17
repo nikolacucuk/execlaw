@@ -622,6 +622,7 @@ mod tests {
             name: "missing".into(),
             description: None,
             input_schema: None,
+            output_schema: None,
         };
         assert!(compile_mcp_tool_schemas(&[missing]).is_err());
 
@@ -629,6 +630,7 @@ mod tests {
             name: "malformed".into(),
             description: None,
             input_schema: Some(serde_json::json!({"type": 7})),
+            output_schema: None,
         };
         assert!(compile_mcp_tool_schemas(&[malformed]).is_err());
 
@@ -636,6 +638,7 @@ mod tests {
             name: "networked".into(),
             description: None,
             input_schema: Some(serde_json::json!({"$ref": "https://example.invalid/schema"})),
+            output_schema: None,
         };
         assert!(compile_mcp_tool_schemas(&[networked]).is_err());
     }
@@ -650,6 +653,7 @@ mod tests {
                 "properties": {"q": {"type": "string"}},
                 "required": ["q"]
             })),
+            output_schema: None,
         };
         let schemas = compile_mcp_tool_schemas(&[tool]).unwrap();
         let schema = schemas.get("lookup").unwrap();
