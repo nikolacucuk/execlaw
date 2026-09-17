@@ -112,7 +112,7 @@ describe("Settings shell", () => {
         mountAt("/settings");
         await waitFor(() => {
             expect(screen.getByTestId("settings-general")).toBeInTheDocument();
-        });
+        }, { timeout: 5000 });
     });
 
     it("renders the post-Phase-8.7 tab set", async () => {

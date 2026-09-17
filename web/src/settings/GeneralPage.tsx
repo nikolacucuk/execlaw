@@ -28,6 +28,7 @@ import {
 } from "../api/endpoints";
 import { useAuth } from "../auth/AuthContext";
 import { ErrorBanner } from "../components/ErrorBanner";
+import { useChatAppearance } from "../chat/useChatAppearance";
 import {
     LANGUAGE_OPTIONS,
     setLanguage,
@@ -48,6 +49,7 @@ export function GeneralPage() {
     const [settings, setSettings] = useState<GeneralSettings | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    const [chatAppearance, setChatAppearance] = useChatAppearance();
     const [bindAddress, setBindAddress] = useState("");
     const [startOnBoot, setStartOnBoot] = useState(true);
     const [retentionDays, setRetentionDays] = useState(30);
@@ -168,6 +170,23 @@ export function GeneralPage() {
             )}
 
             <LanguagePicker />
+
+            <fieldset className="mb-4">
+                <legend className="h6">{t("general.chatAppearance", "Chat appearance")}</legend>
+                <div className="btn-group" role="group" aria-label={t("general.chatAppearance", "Chat appearance")}>
+                    {(["classic", "nexus"] as const).map((mode) => (
+                        <Button
+                            key={mode}
+                            variant={chatAppearance === mode ? "secondary" : "outline-secondary"}
+                            aria-pressed={chatAppearance === mode}
+                            onClick={() => setChatAppearance(mode)}
+                        >
+                            <i className={`bi ${mode === "classic" ? "bi-chat-left-text" : "bi-diagram-3"} me-2`} aria-hidden />
+                            {mode === "classic" ? t("general.classic", "Classic") : t("general.nexus", "Nexus")}
+                        </Button>
+                    ))}
+                </div>
+            </fieldset>
 
             <ErrorBanner message={error} onDismiss={() => setError(null)} className="mb-3" />
 

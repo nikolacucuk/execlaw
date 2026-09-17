@@ -190,13 +190,7 @@ export interface MessageView {
      * when set so the operator can tell at a glance "this came in
      * via Signal" / "the agent replied via Signal".
      */
-    channel_origin?:
-        | "signal"
-        | "email"
-        | "voice"
-        | "sms"
-        | "whatsapp"
-        | null;
+    channel_origin?: string | null;
     /** Human-readable inbound sender, phone, and group context. */
     transport_context?: string | null;
     /** Event sequence of the inbound transport message answered by this turn. */

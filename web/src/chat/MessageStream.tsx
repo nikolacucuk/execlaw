@@ -44,6 +44,8 @@ import "./components/WeatherCurrentComponent";
 import "./components/WeatherDailyComponent";
 import "./components/PythonExecuteComponent";
 import { useChatState } from "./store";
+import { useChatAppearance } from "./useChatAppearance";
+import { useT } from "../i18n";
 
 // 2026-05-18 — helpers for the file-vs-image branching when
 // rendering attachments under user message bubbles. Image MIMEs
@@ -125,6 +127,11 @@ export function MessageStream({
     onForceTransportResponse,
     onSetTransportReviewDecision,
 }: Props) {
+    const [appearance] = useChatAppearance();
+    const nexus = appearance === "nexus";
+    const t = useT();
+    const [selectedSource, setSelectedSource] = useState("");
+    const [activeSeq, setActiveSeq] = useState<number | null>(null);
     const messages = useChatState(
         (s) => s.messages[conversationId] ?? null,
     );
@@ -171,6 +178,27 @@ export function MessageStream({
         return acc;
     }, [messages, cards, showToolResults]);
     const scrollRef = useRef<HTMLDivElement | null>(null);
+    const visibleMessages = items.flatMap((item) => item.kind === "message" ? [item.message] : []);
+    const sources = [...new Set(visibleMessages.map(messageSource))];
+    const effectiveSource = sources.includes(selectedSource) ? selectedSource : "";
+    const matchingMessages = visibleMessages.filter((message) => !effectiveSource || messageSource(message) === effectiveSource);
+    const sourceMessages = new Map(visibleMessages.map((message) => [message.seq, message]));
+    const jumpToMessage = (seq: number) => {
+        const element = scrollRef.current?.querySelector<HTMLElement>(`[data-message-seq="${seq}"]`);
+        if (!element) return;
+        setIsAtBottom(false);
+        setActiveSeq(seq);
+        element.scrollIntoView({ behavior: "auto", block: "center" });
+        element.focus({ preventScroll: true });
+    };
+    const navigateSource = (direction: number) => {
+        if (!matchingMessages.length) return;
+        const current = matchingMessages.findIndex((message) => message.seq === activeSeq);
+        const next = current < 0
+            ? direction > 0 ? 0 : matchingMessages.length - 1
+            : (current + direction + matchingMessages.length) % matchingMessages.length;
+        jumpToMessage(matchingMessages[next].seq);
+    };
     const [isAtBottom, setIsAtBottom] = useState(true);
     const [sendingReplySeq, setSendingReplySeq] = useState<number | null>(null);
     const [optimisticReviewStates, setOptimisticReviewStates] = useState<
@@ -207,6 +235,8 @@ export function MessageStream({
     // thread starts in autoscroll mode.
     useEffect(() => {
         setIsAtBottom(true);
+        setSelectedSource("");
+        setActiveSeq(null);
     }, [conversationId]);
 
     if (messages === null) {
@@ -243,7 +273,45 @@ export function MessageStream({
     }
 
     return (
-        <div className="execlaw-stream-wrap">
+        <div className={`execlaw-stream-wrap${nexus ? " execlaw-nexus" : ""}`}>
+            {nexus && (
+                <nav className="execlaw-nexus__navigator" aria-label={t("chat.sourceNavigation", "Message source navigation")}>
+                    <div className="execlaw-nexus__summary">
+                        <i className="bi bi-diagram-3" aria-hidden />
+                        <strong>{t("chat.sources", "Sources")}</strong>
+                        <span>{sources.length}</span>
+                    </div>
+                    <select
+                        className="form-select form-select-sm"
+                        aria-label={t("chat.messageSource", "Message source")}
+                        value={effectiveSource}
+                        onChange={(event) => {
+                            setSelectedSource(event.target.value);
+                            setActiveSeq(null);
+                            setIsAtBottom(false);
+                        }}
+                    >
+                        <option value="">{t("chat.allSources", "All sources")}</option>
+                        {sources.map((source) => <option key={source} value={source}>{source}</option>)}
+                    </select>
+                    <span className="execlaw-nexus__count" aria-live="polite">
+                        {Math.max(0, matchingMessages.findIndex((message) => message.seq === activeSeq) + 1)} / {matchingMessages.length}
+                    </span>
+                    {([-1, 1] as const).map((direction) => (
+                        <button
+                            key={direction}
+                            type="button"
+                            className="execlaw-nexus__nav-button"
+                            disabled={!matchingMessages.length}
+                            title={direction < 0 ? t("chat.previousSource", "Previous matching message") : t("chat.nextSource", "Next matching message")}
+                            aria-label={direction < 0 ? t("chat.previousSource", "Previous matching message") : t("chat.nextSource", "Next matching message")}
+                            onClick={() => navigateSource(direction)}
+                        >
+                            <i className={`bi bi-arrow-${direction < 0 ? "up" : "down"}`} aria-hidden />
+                        </button>
+                    ))}
+                </nav>
+            )}
             <div
                 className="execlaw-stream"
                 ref={scrollRef}
@@ -257,6 +325,11 @@ export function MessageStream({
                             <MessageBubble
                                 key={`msg-${m.kind}-${m.seq}`}
                                 message={m}
+                                nexus={nexus}
+                                highlighted={activeSeq === m.seq}
+                                sourceMatch={!!effectiveSource && messageSource(m) === effectiveSource}
+                                replySource={m.reply_to_seq == null ? undefined : sourceMessages.get(m.reply_to_seq)}
+                                onJumpToMessage={jumpToMessage}
                                 showTransportSend={
                                     !!readChannelOrigin(m) &&
                                     m.kind === "model_turn" &&
@@ -343,12 +416,12 @@ export function MessageStream({
                 {streaming && (
                     <div className="execlaw-msg" data-testid="streaming-bubble">
                         <div className="execlaw-msg__meta">
-                            agent · streaming
+                            {nexus ? "execlaw" : "agent"} · streaming
                             <span className="execlaw-streaming-cursor" aria-hidden>
                                 ▍
                             </span>
                         </div>
-                        <div className="execlaw-msg__bubble">
+                        <div className={`execlaw-msg__bubble${nexus ? " is-agent" : ""}`}>
                             <MarkdownContent text={streaming} streaming />
                         </div>
                     </div>
@@ -390,6 +463,11 @@ export function formatMessageTimestamp(unixSeconds: number): string {
 
 function MessageBubble({
     message,
+    nexus = false,
+    highlighted = false,
+    sourceMatch = false,
+    replySource,
+    onJumpToMessage,
     showTransportSend = false,
     transportSendBusy = false,
     onSendTransportReply,
@@ -400,6 +478,11 @@ function MessageBubble({
     onForceResponse,
 }: {
     message: MessageView;
+    nexus?: boolean;
+    highlighted?: boolean;
+    sourceMatch?: boolean;
+    replySource?: MessageView;
+    onJumpToMessage?: (seq: number) => void;
     showTransportSend?: boolean;
     transportSendBusy?: boolean;
     onSendTransportReply?: () => Promise<void>;
@@ -417,6 +500,7 @@ function MessageBubble({
     // query param on `<img>` attachment URLs is absent, which would
     // 401 against the live server but doesn't affect those tests.
     const auth = useContext(AuthContext);
+    const t = useT();
     const role = roleFor(message);
     // 2026-05-15 — when the operator picked a skill from the
     // composer's `+` menu, the server prepended a `<skill
@@ -499,16 +583,57 @@ function MessageBubble({
     //     just sent it; canonical id arrives once listMessages
     //     refetches). The `<img>` accepts both verbatim.
     const attachments = message.attachments ?? [];
+    const replyExcerpt = replySource
+        ? (replySource.applied_skill_names?.length
+            ? stripSkillPrependBlock(replySource.text ?? "")
+            : replySource.text ?? "").slice(0, 160)
+        : "";
 
     return (
         <div
+            data-message-seq={message.seq}
+            data-source-tone={nexus ? sourceTone(messageSource(message)) : undefined}
+            tabIndex={nexus ? -1 : undefined}
+            aria-label={nexus ? `${messageSource(message)} #${message.seq}` : undefined}
             className={
                 "execlaw-msg" +
                 (isUserMessage ? " is-user" : "") +
-                (message.reply_to_seq != null ? " is-linked-reply" : "")
+                (message.reply_to_seq != null ? " is-linked-reply" : "") +
+                (nexus && highlighted ? " is-source-active" : "") +
+                (nexus && sourceMatch ? " is-source-match" : "")
             }
         >
-            {message.reply_to_seq != null && (
+            {nexus && (
+                <div className="execlaw-nexus__message-header">
+                    <span className="execlaw-nexus__node" aria-hidden>
+                        <i className={`bi ${message.kind === "model_turn" ? "bi-stars" : isToolKind(message.kind) ? "bi-braces" : "bi-arrow-down-left"}`} />
+                    </span>
+                    <strong>{messageSource(message)}</strong>
+                    <span className="execlaw-nexus__kind">
+                        {message.kind === "model_turn" ? t("chat.agentResponse", "Agent response")
+                            : message.kind === "tool_use" ? t("chat.toolRequest", "Tool request")
+                            : message.kind === "tool_result" ? t("chat.toolResult", "Tool result")
+                            : t("chat.incoming", "Incoming")}
+                    </span>
+                    <span className="execlaw-nexus__sequence">#{message.seq}</span>
+                </div>
+            )}
+            {nexus && message.reply_to_seq != null && (
+                <button
+                    type="button"
+                    className="execlaw-nexus__relation"
+                    disabled={!replySource}
+                    onClick={() => onJumpToMessage?.(message.reply_to_seq!)}
+                    title={replySource ? `#${replySource.seq}: ${replyExcerpt}` : undefined}
+                >
+                    <i className="bi bi-arrow-return-up" aria-hidden />
+                    <span>{t("chat.replySource", "Reply to")} #{message.reply_to_seq}
+                        {replySource ? ` · ${messageSource(replySource)}` : ` · ${t("chat.sourceNotLoaded", "Source not loaded")}`}
+                    </span>
+                    {replySource && <span className="execlaw-nexus__excerpt">{replyExcerpt}</span>}
+                </button>
+            )}
+            {!nexus && message.reply_to_seq != null && (
                 <div className="execlaw-msg__reply-link">
                     <i className="bi bi-arrow-return-right" aria-hidden />
                     Reply to the incoming {channelOrigin} message
@@ -518,7 +643,9 @@ function MessageBubble({
                 {showOriginIcon && (
                     <ChannelOriginIcon origin={channelOrigin} />
                 )}
-                {transportMeta}
+                {transportMeta !== metaText ? (
+                    <span className="execlaw-msg__transport-context">{transportMeta}</span>
+                ) : transportMeta}
                 {message.transport_context &&
                     message.channel_origin &&
                     transportMeta === metaText && (
@@ -703,26 +830,29 @@ function readChannelOrigin(m: MessageView): ChannelOrigin {
     // (signal / email / voice / sms). Web-originated turns leave it
     // absent; the SPA defaults to "web" and shows no icon.
     const raw = (m as MessageView & { channel_origin?: unknown }).channel_origin;
-    const origin: string = typeof raw === "string" ? raw : "";
-    if (
-        origin === "signal" ||
-        origin === "email" ||
-        origin === "voice" ||
-        origin === "sms" ||
-        origin === "whatsapp"
-    ) {
-        return origin;
-    }
-    return "web";
+    return typeof raw === "string" && raw.trim() ? raw.trim() : "web";
 }
 
-type ChannelOrigin =
-    | "web"
-    | "signal"
-    | "email"
-    | "voice"
-    | "sms"
-    | "whatsapp";
+type ChannelOrigin = string;
+
+function messageSource(message: MessageView): string {
+    if (message.kind === "model_turn") return "execlaw";
+    if (isToolKind(message.kind)) return message.actor || "Tools";
+    const channel = readChannelOrigin(message);
+    const labels: Record<string, string> = {
+        web: "Web", signal: "Signal", whatsapp: "WhatsApp", email: "Email",
+        sms: "SMS", voice: "Voice", slack: "Slack", discord: "Discord",
+    };
+    return Object.hasOwn(labels, channel) ? labels[channel] : channel;
+}
+
+function sourceTone(source: string): number {
+    const known: Record<string, number> = { execlaw: 0, WhatsApp: 1, Signal: 2, Email: 3, Web: 4, Tools: 5 };
+    if (Object.hasOwn(known, source)) return known[source];
+    let hash = 0;
+    for (const character of source) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+    return hash % 6;
+}
 
 function ChannelOriginIcon({ origin }: { origin: ChannelOrigin }) {
     return (

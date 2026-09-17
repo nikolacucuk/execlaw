@@ -42,25 +42,47 @@ hardware.
 
 ## Developer tooling note (Graphify CLI)
 
-On the DjEnKa workspace, Graphify CLI is installed at:
-
-```
-C:\Users\DjEnKa\.local\bin\graphify.exe
-```
-
-If PowerShell reports `graphify` as not recognized, add that directory
-to PATH in the current shell:
+Install the official `graphifyy` package (double y) with
+[uv](https://docs.astral.sh/uv/getting-started/installation/):
 
 ```powershell
-$env:Path += ";C:\Users\DjEnKa\.local\bin"
-graphify --help
+& "$HOME\.local\bin\uv.exe" tool install "graphifyy[sql]" --python 3.12
+& "$HOME\.local\bin\uv.exe" tool update-shell
+& "$HOME\.local\bin\graphify.exe" update .
 ```
 
-Persist for future shells:
+Open a new terminal after PATH changes. `graphify update .` uses local AST
+extraction, not an LLM. The root `.graphifyignore` excludes alternate Cargo
+build trees and nested graph output. Check the result with
+`graphify query "MessageStream"` or
+`graphify path MessageStream useChatAppearance`.
+
+### Windows terminal and validation
+
+The workspace VS Code terminal profile binds Ctrl+U to `BackwardDeleteLine`.
+Without that binding, line-clear input can appear as a literal `^U` and break
+otherwise valid commands. Open a new terminal to apply the profile. Existing
+terminals can run
+`Set-PSReadLineKeyHandler -Chord Ctrl+u -Function BackwardDeleteLine`.
+
+Execution policy is unchanged. Use `npm.cmd` when Restricted policy blocks
+`npm.ps1`. Tasks use a separate automation profile to avoid colliding with
+interactive startup arguments. **Tasks: Run Task -> web: verify** runs tests,
+type-check, build, size budgets, browser checks, and dependency audit.
+
+Install Chromium once before browser checks:
 
 ```powershell
-setx PATH "$env:PATH;C:\Users\DjEnKa\.local\bin"
+node web/node_modules/@playwright/test/cli.js install chromium
+npm.cmd --prefix web run build
+npm.cmd --prefix web run test:appearance
 ```
+
+The browser check captures dark/light screenshots at 1440, 390, and 320 pixels
+in a printed temporary directory. It checks source navigation, Classic
+restoration, streaming, and production bundle boot with mocked API responses.
+Its loopback servers and browser close after the test. It never starts the
+operator backend, accesses the vault, or sends real transport messages.
 
 ## What ships today
 
@@ -135,6 +157,24 @@ plugin as `dist/<plugin-id>-<version>.zip`, together with a matching
 ZIP through **Settings → Plugins** or `POST /api/admin/plugins/install`.
 
 ---
+
+## Optional Nexus chat appearance
+
+Choose **Settings -> General -> Chat appearance -> Nexus** for a source-aware
+timeline: colored source markers, explicit execlaw response labels, event
+sequence numbers, and a source selector with previous/next navigation.
+Navigation highlights matching messages without hiding the surrounding chat.
+Recorded reply links include a source excerpt and jump to the original message;
+links to history that is not loaded are disabled rather than guessed.
+
+**Classic** remains the default and restores the original layout immediately.
+The appearance preference is saved per browser and synchronized between tabs;
+it does not change server configuration, trust policy, or transport delivery.
+Existing tool visibility, streaming, attachments, and reply review controls
+remain available. Nexus supports light and dark color contexts and narrow
+screens. New transport identifiers receive a fallback label and stable color;
+tool sources use the actor metadata supplied by the server. It does not invent
+MCP connections, agent identities, or relationships absent from message data.
 
 ## Internationalisation (i18n)
 
@@ -602,14 +642,14 @@ sync, see [`docs/truenas-docker.md`](docs/truenas-docker.md).
 ### Install Graphify (Windows)
 
 ```powershell
-c:/python314/python.exe -m pip install --user graphifyy openai
-
-# repo-level assistant guidance for OpenClaw-style agents
-C:/Users/<you>/AppData/Roaming/Python/Python314/Scripts/graphify.exe claw install
+& "$HOME\.local\bin\uv.exe" tool install "graphifyy[sql]" --python 3.12
+& "$HOME\.local\bin\uv.exe" tool update-shell
+& "$HOME\.local\bin\graphify.exe" --version
 ```
 
-If Graphify is not on your `PATH`, call the full executable path as
-shown above.
+Open a new terminal before calling `graphify` by name. The SQL extra indexes
+the SQLite migrations. The repository already has agent instructions;
+installing the CLI does not require replacing them or installing Git hooks.
 
 ### Build the graph and wiki
 
@@ -619,11 +659,11 @@ PowerShell note: use `graphify .` (no leading slash).
 # full semantic extraction + wiki (requires backend)
 $env:OLLAMA_API_KEY = "local"
 $env:OLLAMA_MODEL = "qwen3.5:9b"
-C:/Users/<you>/AppData/Roaming/Python/Python314/Scripts/graphify.exe . --wiki --backend ollama
+& "$HOME\.local\bin\graphify.exe" . --wiki --backend ollama
 
 # local AST-only fallback (no API keys)
-C:/Users/<you>/AppData/Roaming/Python/Python314/Scripts/graphify.exe update . --force
-C:/Users/<you>/AppData/Roaming/Python/Python314/Scripts/graphify.exe cluster-only . --no-label
+& "$HOME\.local\bin\graphify.exe" update .
+& "$HOME\.local\bin\graphify.exe" cluster-only . --no-label
 ```
 
 ### Sync UI preview artifacts

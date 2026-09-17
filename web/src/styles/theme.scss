@@ -827,6 +827,207 @@ body {
     min-height: 0;
 }
 
+.execlaw-nexus {
+    --nexus-surface: #151719;
+    --nexus-text: #e9ecef;
+    --nexus-muted: #a6adb5;
+    --nexus-line: #34383d;
+    --source-color: #64d6ca;
+    color: var(--nexus-text);
+    background: var(--nexus-surface);
+    font-family: $font-body;
+    letter-spacing: 0;
+
+    .execlaw-stream {
+        background-image: linear-gradient(90deg, transparent 99%, color-mix(in srgb, var(--nexus-line) 15%, transparent) 100%);
+        background-size: 48px 100%;
+        padding-top: 1.5rem;
+    }
+
+    [data-source-tone="0"] { --source-color: #64d6ca; }
+    [data-source-tone="1"] { --source-color: #88ce86; }
+    [data-source-tone="2"] { --source-color: #82b6ff; }
+    [data-source-tone="3"] { --source-color: #e9bd70; }
+    [data-source-tone="4"] { --source-color: #d7a4ba; }
+    [data-source-tone="5"] { --source-color: #c2bc8c; }
+
+    &__navigator {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        padding: 0.7rem 1.25rem;
+        border-bottom: 1px solid var(--nexus-line);
+        min-width: 0;
+        flex-wrap: wrap;
+
+        .form-select {
+            width: 13rem;
+            min-width: 0;
+            max-width: 100%;
+            flex: 1 1 8rem;
+            background-color: var(--nexus-surface);
+            color: var(--nexus-text);
+            border: 1px solid var(--nexus-line);
+            border-radius: 6px;
+        }
+    }
+
+    &__summary {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-right: auto;
+        font-size: 0.8rem;
+        > i { color: var(--source-color); }
+        > span { color: var(--nexus-muted); }
+    }
+
+    &__count {
+        min-width: 4.5rem;
+        text-align: center;
+        font-size: 0.75rem;
+        font-variant-numeric: tabular-nums;
+        color: var(--nexus-muted);
+    }
+
+    &__nav-button {
+        flex: 0 0 2rem;
+        height: 2rem;
+        padding: 0;
+        border: 1px solid var(--nexus-line);
+        border-radius: 6px;
+        color: var(--nexus-text);
+        background: transparent;
+        &:hover:not(:disabled) { background: color-mix(in srgb, var(--nexus-text) 10%, transparent); }
+        &:disabled { opacity: 0.4; }
+    }
+
+    .execlaw-msg.execlaw-msg {
+        position: relative;
+        padding: 0 0 1.25rem 2.75rem;
+        margin-bottom: 0;
+        align-items: stretch;
+        border: 0;
+        scroll-margin-block: 1rem;
+        min-width: 0;
+        overflow-wrap: anywhere;
+
+        &::before {
+            content: "";
+            position: absolute;
+            left: 0.85rem;
+            top: 1.8rem;
+            bottom: 0;
+            border-left: 1px solid var(--nexus-line);
+        }
+
+        &:last-child::before { display: none; }
+        &.is-source-active .execlaw-msg__bubble,
+        &.is-source-match .execlaw-msg__bubble {
+            border-left-color: var(--source-color);
+            background: color-mix(in srgb, var(--source-color) 9%, var(--nexus-surface));
+        }
+        &.is-source-active .execlaw-nexus__node { box-shadow: 0 0 0 3px color-mix(in srgb, var(--source-color) 25%, transparent); }
+    }
+
+    &__message-header {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 0.35rem 0.7rem;
+        min-height: 1.8rem;
+        font-size: 0.85rem;
+        > strong { color: var(--source-color); }
+    }
+
+    &__node {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 1.8rem;
+        height: 1.8rem;
+        display: grid;
+        place-items: center;
+        border: 1px solid color-mix(in srgb, var(--source-color) 50%, transparent);
+        border-radius: 6px;
+        color: var(--source-color);
+        background: var(--nexus-surface);
+    }
+
+    &__kind, &__sequence {
+        color: var(--nexus-muted);
+        font-size: 0.7rem;
+    }
+    &__sequence { margin-left: auto; font-variant-numeric: tabular-nums; }
+
+    .execlaw-msg__meta { color: var(--nexus-muted); margin: 0.1rem 0 0.5rem; overflow-wrap: anywhere; }
+    .execlaw-msg__transport-context { color: var(--nexus-text); font-weight: 400; }
+    .execlaw-msg__bubble.execlaw-msg__bubble {
+        width: 100%;
+        max-width: 100%;
+        min-width: 0;
+        border: 0;
+        border-left: 2px solid color-mix(in srgb, var(--source-color) 35%, transparent);
+        border-radius: 0 6px 6px 0;
+        padding: 0.6rem 0.85rem;
+        color: var(--nexus-text);
+        background: color-mix(in srgb, var(--source-color) 4%, var(--nexus-surface));
+        &.is-agent { background: color-mix(in srgb, var(--source-color) 8%, var(--nexus-surface)); }
+        .d-flex { flex-wrap: wrap; }
+        pre { max-width: 100%; }
+    }
+    .execlaw-msg__attachment-image { max-width: 100%; }
+
+    &__relation {
+        display: flex;
+        align-items: baseline;
+        flex-wrap: wrap;
+        gap: 0.35rem 0.5rem;
+        width: 100%;
+        min-width: 0;
+        border: 0;
+        background: transparent;
+        color: var(--source-color);
+        padding: 0.3rem 0;
+        text-align: left;
+        font-size: 0.75rem;
+        &:hover:not(:disabled) { text-decoration: underline; }
+        &:disabled { color: var(--nexus-muted); }
+    }
+    &__excerpt {
+        flex: 1 1 8rem;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+        color: var(--nexus-muted);
+    }
+
+    :focus-visible { outline: 2px solid var(--source-color); outline-offset: 3px; }
+
+    @media (max-width: 480px) {
+        &__navigator { gap: 0.4rem; padding: 0.6rem 0.75rem; }
+        &__summary { flex-basis: 100%; }
+        .execlaw-stream { padding-inline: 0.75rem; }
+        .execlaw-msg { padding-left: 2.3rem; }
+    }
+}
+
+[data-bs-theme="light"] .execlaw-nexus {
+    --nexus-surface: #fafbfc;
+    --nexus-text: #202428;
+    --nexus-muted: #58616a;
+    --nexus-line: #d7dce1;
+    --source-color: #087e76;
+    [data-source-tone="0"] { --source-color: #087e76; }
+    [data-source-tone="1"] { --source-color: #397339; }
+    [data-source-tone="2"] { --source-color: #2867b8; }
+    [data-source-tone="3"] { --source-color: #93650e; }
+    [data-source-tone="4"] { --source-color: #9a476b; }
+    [data-source-tone="5"] { --source-color: #71681a; }
+    .btn-outline-success { color: #287238; }
+    .btn-outline-secondary { color: #58616a; }
+}
+
 // Floating ↓ button that surfaces when the operator scrolls up
 // past the latest message. Centered above the composer; hover/focus
 // state matches the rest of the chrome.

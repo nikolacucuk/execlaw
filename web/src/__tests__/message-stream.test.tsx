@@ -18,7 +18,11 @@ import {
     setMessages,
 } from "../chat/store";
 
-afterEach(() => __resetChatStore());
+afterEach(() => {
+    __resetChatStore();
+    localStorage.removeItem("execlaw.chat.appearance");
+    vi.restoreAllMocks();
+});
 
 const baseMsg = (
     seq: number,
@@ -39,6 +43,89 @@ const baseMsg = (
 });
 
 describe("MessageStream", () => {
+    it("keeps the classic stream as the default", () => {
+        setMessages("classic", [baseMsg(1, "hello")]);
+        render(<MessageStream conversationId="classic" />);
+        expect(document.querySelector(".execlaw-nexus")).toBeNull();
+        expect(screen.queryByRole("navigation", { name: "Message source navigation" })).toBeNull();
+    });
+
+    it("navigates recorded reply links and source matches without hiding messages", () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        const scrollIntoView = vi.fn();
+        Element.prototype.scrollIntoView = scrollIntoView;
+        setMessages("nexus", [
+            { ...baseMsg(1, "Signal question"), channel_origin: "signal" },
+            { ...baseMsg(2, "An unrelated incoming message"), channel_origin: "email" },
+            { ...baseMsg(3, "Answer", "model_turn"), reply_to_seq: 1 },
+        ]);
+        render(<MessageStream conversationId="nexus" />);
+        fireEvent.click(screen.getByRole("button", { name: /Reply to #1/ }));
+        expect(document.activeElement).toHaveAttribute("data-message-seq", "1");
+        expect(scrollIntoView).toHaveBeenCalled();
+        fireEvent.change(screen.getByRole("combobox", { name: "Message source" }), { target: { value: "Email" } });
+        fireEvent.click(screen.getByRole("button", { name: "Next matching message" }));
+        expect(document.activeElement).toHaveAttribute("data-message-seq", "2");
+        expect(screen.getByText("Signal question", { selector: "p" })).toBeInTheDocument();
+        expect(screen.getByText("Answer")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Previous matching message" }));
+        expect(document.activeElement).toHaveAttribute("data-message-seq", "2");
+    });
+
+    it("does not infer replies and disables links to unloaded sources", () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        setMessages("missing", [
+            baseMsg(2, "Question"),
+            baseMsg(3, "Unlinked response", "model_turn"),
+            { ...baseMsg(4, "Older source response", "model_turn"), reply_to_seq: 1 },
+        ]);
+        render(<MessageStream conversationId="missing" />);
+        expect(screen.getByRole("button", { name: /Reply to #1.*Source not loaded/ })).toBeDisabled();
+        expect(screen.queryByRole("button", { name: /Reply to #2/ })).toBeNull();
+    });
+
+    it.each(["slack", "discord", "custom-database", "constructor"])("preserves %s channel identity", (channel) => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        setMessages("extensible", [{ ...baseMsg(1, "Source payload"), channel_origin: channel }]);
+        render(<MessageStream conversationId="extensible" />);
+        expect(screen.getByTestId("channel-origin")).toHaveAttribute("data-channel", channel);
+        expect(screen.queryByRole("option", { name: "Web" })).toBeNull();
+    });
+
+    it("restores Classic immediately on a preference change in another tab", () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        setMessages("restore", [baseMsg(1, "Preserved message")]);
+        render(<MessageStream conversationId="restore" />);
+        expect(document.querySelector(".execlaw-nexus")).toBeInTheDocument();
+        localStorage.setItem("execlaw.chat.appearance", "classic");
+        fireEvent(window, new StorageEvent("storage", { key: "execlaw.chat.appearance", newValue: "classic" }));
+        expect(document.querySelector(".execlaw-nexus")).toBeNull();
+        expect(screen.getByText("Preserved message")).toBeInTheDocument();
+    });
+
+    it("does not expose internal skill preambles in reply previews", () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        setMessages("skill-reply", [
+            { ...baseMsg(1, '<skill name="writing">Internal instructions</skill>\n\nActual question'), applied_skill_names: ["writing"] },
+            { ...baseMsg(2, "Answer", "model_turn"), reply_to_seq: 1 },
+        ]);
+        render(<MessageStream conversationId="skill-reply" />);
+        const link = screen.getByRole("button", { name: /Reply to #1/ });
+        expect(link).toHaveAttribute("title", "#1: Actual question");
+        expect(link).not.toHaveTextContent("Internal instructions");
+    });
+
+    it("honors hidden tools in Nexus and keeps streaming visible", () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        setMessages("tools", [baseMsg(1, "Question"), { ...baseMsg(2, "secret tool payload", "tool_result"), actor: "MCP" }]);
+        appendStreamingToken("tools", "Live reply");
+        render(<MessageStream conversationId="tools" showToolResults={false} />);
+        expect(screen.queryByText("secret tool payload")).toBeNull();
+        expect(screen.queryByRole("option", { name: "MCP" })).toBeNull();
+        expect(screen.getByTestId("streaming-bubble")).toHaveTextContent("execlaw");
+        expect(screen.getByText("Live reply")).toBeInTheDocument();
+    });
+
     it("shows the loading state when messages are unset", () => {
         // No setMessages call → messages[conv] is null.
         render(<MessageStream conversationId="conv-x" />);

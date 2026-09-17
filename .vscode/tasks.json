@@ -1,0 +1,58 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "web: test", "type": "shell", "command": "npm",
+            "windows": { "command": "npm.cmd" },
+            "args": ["--prefix", "web", "test", "--", "--maxWorkers=2"],
+            "problemMatcher": [], "group": "test"
+        },
+        {
+            "label": "web: build", "type": "shell", "command": "npm",
+            "windows": { "command": "npm.cmd" },
+            "args": ["--prefix", "web", "run", "build"],
+            "problemMatcher": ["$tsc"], "group": "build"
+        },
+        {
+            "label": "web: lint", "type": "shell", "command": "npm",
+            "windows": { "command": "npm.cmd" },
+            "args": ["--prefix", "web", "run", "lint"],
+            "problemMatcher": ["$tsc"]
+        },
+        {
+            "label": "web: size", "type": "shell", "command": "npm",
+            "windows": { "command": "npm.cmd" },
+            "args": ["--prefix", "web", "run", "size"],
+            "problemMatcher": []
+        },
+        {
+            "label": "web: appearance checks", "type": "shell", "command": "npm",
+            "windows": { "command": "npm.cmd" },
+            "args": ["--prefix", "web", "run", "test:appearance"],
+            "problemMatcher": []
+        },
+        {
+            "label": "web: install Chromium", "type": "shell", "command": "node",
+            "args": ["web/node_modules/@playwright/test/cli.js", "install", "chromium"],
+            "problemMatcher": []
+        },
+        {
+            "label": "web: audit", "type": "shell", "command": "npm",
+            "windows": { "command": "npm.cmd" },
+            "args": ["--prefix", "web", "audit"],
+            "problemMatcher": []
+        },
+        {
+            "label": "web: verify",
+            "dependsOrder": "sequence",
+            "dependsOn": ["web: test", "web: lint", "web: build", "web: size", "web: appearance checks", "web: audit"],
+            "problemMatcher": []
+        },
+        {
+            "label": "graphify: update", "type": "shell", "command": "graphify",
+            "windows": { "command": "${env:USERPROFILE}\\.local\\bin\\graphify.exe" },
+            "args": ["update", "."],
+            "problemMatcher": []
+        }
+    ]
+}

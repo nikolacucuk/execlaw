@@ -62,6 +62,9 @@ export default defineConfig({
                 // grouping.
                 manualChunks(id: string): string | undefined {
                     if (!id.includes("node_modules")) return undefined;
+                    if (/[\\/]node_modules[\\/]i18next[\\/]/.test(id)) {
+                        return "i18n-vendor";
+                    }
                     if (
                         /[\\/]node_modules[\\/](react|react-dom|scheduler|react-router|react-router-dom)[\\/]/.test(
                             id,

@@ -54,6 +54,26 @@ afterEach(() => {
 });
 
 describe("GeneralPage", () => {
+    it("defaults to Classic and persists reversible chat appearance without an API write", async () => {
+        localStorage.removeItem("execlaw.chat.appearance");
+        fetchMock.mockImplementation(async (url: string) => {
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/settings/general") return settingsResponse();
+            return new Response("{}", { status: 200 });
+        });
+        const view = mountPage();
+        await screen.findByTestId("general-form");
+        expect(screen.getByRole("button", { name: "Classic" })).toHaveAttribute("aria-pressed", "true");
+        fireEvent.click(screen.getByRole("button", { name: "Nexus" }));
+        expect(localStorage.getItem("execlaw.chat.appearance")).toBe("nexus");
+        view.unmount();
+        mountPage();
+        expect(screen.getByRole("button", { name: "Nexus" })).toHaveAttribute("aria-pressed", "true");
+        fireEvent.click(screen.getByRole("button", { name: "Classic" }));
+        expect(localStorage.getItem("execlaw.chat.appearance")).toBe("classic");
+        expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PUT")).toBe(false);
+    });
+
     it("loads + renders the seeded defaults", async () => {
         fetchMock.mockImplementation(async (url: string) => {
             if (url === "/api/admin/me") return meResponse();

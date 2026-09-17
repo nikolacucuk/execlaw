@@ -1,0 +1,24 @@
+{
+    "terminal.integrated.profiles.windows": {
+        "execlaw PowerShell": {
+            "path": "${env:windir}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+            "args": [
+                "-NoLogo",
+                "-NoExit",
+                "-Command",
+                "Import-Module PSReadLine\nSet-PSReadLineKeyHandler -Chord Ctrl+u -Function BackwardDeleteLine"
+            ],
+            "env": {
+                "PATH": "${env:USERPROFILE}\\.local\\bin;${env:PATH}"
+            }
+        }
+    },
+    "terminal.integrated.defaultProfile.windows": "execlaw PowerShell",
+    "terminal.integrated.automationProfile.windows": {
+        "path": "${env:windir}\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+        "args": ["-NoLogo", "-NoProfile"],
+        "env": {
+            "PATH": "${env:USERPROFILE}\\.local\\bin;${env:PATH}"
+        }
+    }
+}

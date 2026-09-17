@@ -4591,7 +4591,7 @@ pub async fn list_messages(
         .collect();
     let mut latest_transport_context: Option<String> = None;
     let mut latest_transport_seq: Option<i64> = None;
-    let messages: Vec<MessageView> = events
+    let visible_events: Vec<EventRecord> = events
         .into_iter()
         .filter(|e| {
             matches!(
@@ -4617,7 +4617,24 @@ pub async fn list_messages(
             !matches!(e.kind, EventKind::UserMsg | EventKind::ColdContactArrived)
                 || e.actor.as_deref() != Some(SYSTEM_ORCHESTRATOR_ACTOR)
         })
-        .take(limit as usize)
+        .collect();
+    // Return the newest event window, then restore chronological order.
+    // Taking the first 200 events made older conversations look empty after
+    // navigation once tool events pushed the latest user/reply pair past the
+    // prefix returned by this endpoint.
+    let visible_events = if visible_events.len() > limit as usize {
+        let mut newest = visible_events
+            .into_iter()
+            .rev()
+            .take(limit as usize)
+            .collect::<Vec<_>>()
+        newest.reverse();
+        newest
+    } else {
+        visible_events
+    };
+    let messages: Vec<MessageView> = visible_events
+        .into_iter()
         .map(|e| {
             let attachment_ids = extract_attachment_ids(&e);
             let inbound_context =
