@@ -8719,6 +8719,27 @@ required_capabilities = []
         (status, value)
     }
 
+    async fn delete_thread_request(
+        app: &axum::Router,
+        token: Option<&str>,
+        cid: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let mut req = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/api/chats/{cid}"));
+        if let Some(token) = token {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let resp = app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let value: serde_json::Value = json_body(resp.into_body()).await;
+        (status, value)
+    }
+
     #[tokio::test]
     async fn list_threads_requires_auth() {
         let app = build_app();
@@ -8734,6 +8755,34 @@ required_capabilities = []
         assert_eq!(status, StatusCode::OK);
         assert!(body["threads"].is_array());
         assert_eq!(body["threads"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn delete_thread_removes_it_from_the_thread_list() {
+        let app = build_app();
+        let token = setup_and_get_token(&app).await;
+        let cid = "conv-delete-me";
+        let create = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/chats/{cid}/messages"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"text":"delete me"}"#))
+            .unwrap();
+        let create_response = app.clone().oneshot(create).await.unwrap();
+        assert_eq!(create_response.status(), StatusCode::OK);
+
+        let (status, body) = delete_thread_request(&app, Some(&token), cid).await;
+        assert_eq!(status, StatusCode::OK, "body was {body}");
+        assert_eq!(body["conversation_id"], cid);
+        assert_eq!(body["existed"], true);
+
+        let (status, body) = list_threads(&app, Some(&token)).await;
+        assert_eq!(status, StatusCode::OK, "body was {body}");
+        assert!(body["threads"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|thread| thread["conversation_id"] != cid));
     }
 
     #[tokio::test]
