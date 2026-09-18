@@ -492,6 +492,10 @@ impl<'db> ConversationStore<'db> {
                 "state_routine_runs",
                 "state_reply_drafts",
                 "state_chain_plans",
+                // Integrity heads are keyed by conversation rather than
+                // cascading from state_events, so they must be removed
+                // explicitly before the conversation row is deleted.
+                "state_event_integrity_heads",
                 "state_events",
                 "transport_conversations",
                 "state_conversations",
