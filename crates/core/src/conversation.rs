@@ -470,6 +470,12 @@ impl<'db> ConversationStore<'db> {
                 [],
             )?;
             for table in [
+                // Legacy conversation projections have no foreign-key
+                // cascade, but must be removed before the source event log
+                // disappears.
+                "eval_flagged",
+                "log_entries",
+                "memory_reflections",
                 "state_run_steps",
                 "state_runs",
                 "state_graphiti_jobs",
@@ -505,6 +511,20 @@ impl<'db> ConversationStore<'db> {
                     params![cid],
                 )?;
             }
+            // Archive projections point to their archive conversation by
+            // archive_id, while the conversation link is only a nullable
+            // projection column. Remove the matching archive rows so a
+            // deleted chat cannot leave a stale social transcript behind.
+            tx.execute(
+                "DELETE FROM message_archive_messages WHERE archive_id IN (\
+                    SELECT archive_id FROM message_archive_conversations \
+                    WHERE conversation_id = ?1)",
+                params![cid],
+            )?;
+            tx.execute(
+                "DELETE FROM message_archive_conversations WHERE conversation_id = ?1",
+                params![cid],
+            )?;
             tx.execute_batch(
                 "CREATE TRIGGER memory_evidence_append_only_delete
                  BEFORE DELETE ON memory_evidence BEGIN
