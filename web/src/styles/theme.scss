@@ -658,6 +658,37 @@ body {
     }
 }
 
+// Hover is unavailable on touch devices, so keep thread actions reachable
+// on phones and tablets instead of making delete/rename appear missing.
+@media (hover: none), (pointer: coarse) {
+    .execlaw-thread-row__menu-btn {
+        opacity: 1;
+    }
+}
+
+.execlaw-sidebar__thread-error {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin: 0.5rem 0.75rem;
+    padding: 0.5rem 0.6rem;
+    border: 1px solid rgba($danger, 0.45);
+    border-radius: $radius-card;
+    color: $danger;
+    background: rgba($danger, 0.08);
+    font-size: 0.75rem;
+
+    span { flex: 1 1 auto; overflow-wrap: anywhere; }
+    button {
+        flex: 0 0 auto;
+        border: 0;
+        background: transparent;
+        color: inherit;
+        padding: 0;
+        cursor: pointer;
+    }
+}
+
 .execlaw-thread-row:hover .execlaw-thread-row__menu-btn,
 .execlaw-thread-row__menu-btn.is-open,
 .execlaw-thread-row__menu-btn:focus-visible {

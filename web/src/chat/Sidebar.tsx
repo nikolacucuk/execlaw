@@ -70,6 +70,7 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
     // here; the row swaps its label for an `<input>` until the user
     // commits (Enter / blur) or cancels (Esc).
     const [renamingId, setRenamingId] = useState<string | null>(null);
+    const [threadActionError, setThreadActionError] = useState<string | null>(null);
     const getToken = auth.getAccessToken;
     // Pending-approvals badge — when the cold-contact flow has any
     // open approvals waiting on the controller, surface a count in
@@ -522,6 +523,7 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
                                     }
                                 }}
                                 onDelete={async () => {
+                                    setThreadActionError(null);
                                     // Defensive confirm — it's a hard
                                     // delete with no undo. The server
                                     // treats the call as idempotent so
@@ -564,6 +566,11 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
                                         setThreads(r.threads);
                                     } catch (e) {
                                         console.warn("delete failed", e);
+                                        setThreadActionError(
+                                            e instanceof Error
+                                                ? e.message
+                                                : "Could not delete the thread.",
+                                        );
                                     }
                                 }}
                             />
@@ -572,6 +579,19 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
                 )}
             </div>
 
+            {threadActionError && (
+                <div className="execlaw-sidebar__thread-error" role="alert">
+                    <i className="bi bi-exclamation-triangle" aria-hidden />
+                    <span>{threadActionError}</span>
+                    <button
+                        type="button"
+                        aria-label="Dismiss thread error"
+                        onClick={() => setThreadActionError(null)}
+                    >
+                        <i className="bi bi-x" aria-hidden />
+                    </button>
+                </div>
+            )}
             <div className="execlaw-sidebar__foot">
                 <Link
                     to="/settings"

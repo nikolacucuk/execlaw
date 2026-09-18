@@ -4822,7 +4822,7 @@ fn inbound_transport_context(
     if let Some(handle) = handle {
         parts.push(handle);
     }
-    if matches!(channel, "signal" | "whatsapp") {
+    if matches!(channel.as_str(), "signal" | "whatsapp") {
         let is_group_label = conversation_name
             .zip(display_name.as_deref())
             .is_some_and(|(conversation, sender)| conversation != sender);
