@@ -1108,6 +1108,7 @@ function ChatPane({
             />
             <ActiveThreadPane
                 conversationId={activeId!}
+                availableTransports={availableTransports}
                 onSend={onSend}
                 sendVoiceFrame={sendVoiceFrame}
                 sendVoiceControl={sendVoiceControl}
@@ -1124,6 +1125,7 @@ function ChatPane({
 
 function ActiveThreadPane({
     conversationId,
+    availableTransports,
     onSend,
     sendVoiceFrame,
     sendVoiceControl,
@@ -1135,6 +1137,7 @@ function ActiveThreadPane({
     defaultSkillNames,
 }: {
     conversationId: string;
+    availableTransports: AvailableTransportView[];
     onSend: (
         text: string,
         attachments: InlineAttachment[],
