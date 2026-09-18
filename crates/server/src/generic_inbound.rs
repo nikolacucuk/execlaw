@@ -392,8 +392,7 @@ fn should_merge_scoped_conversation(scope: &str) -> bool {
 }
 
 fn should_use_controller_thread(is_controller: bool, conversation_scope: Option<&str>) -> bool {
-    is_controller
-        && !conversation_scope.is_some_and(|scope| scope.ends_with("-dedicated"))
+    is_controller && !conversation_scope.is_some_and(|scope| scope.ends_with("-dedicated"))
 }
 
 fn merge_scoped_conversation_if_needed(
