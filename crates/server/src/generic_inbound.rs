@@ -19,6 +19,7 @@
 //! coexist behind the new Rhai binding.
 
 use crate::state::AppState;
+use execlaw_core::conversation::ConversationStore;
 use execlaw_core::ids::{ConversationId, PrincipalId};
 use execlaw_core::principal::{Identifier, PrincipalStore, TrustLevel as CoreTrustLevel};
 use execlaw_core::principal_groups::{GroupKey, PrincipalGroupStore};
@@ -123,6 +124,24 @@ pub async fn route_inbound(
     if let Some(scope) = msg.conversation_scope.as_deref() {
         if should_merge_scoped_conversation(scope) {
             cid = merge_scoped_conversation_if_needed(state, &plugin_id, scope, &cid, now)?;
+        } else {
+            let binding_store = TransportBindingStore::new(&state.db);
+            if let Ok(Some(group_id)) = PrincipalGroupStore::new(&state.db)
+                .principal_group_id_for(cid.as_str())
+            {
+                let mixed = binding_store
+                    .bindings_for_group_any_channel(&group_id)
+                    .map(|bindings| bindings.iter().any(|binding| binding.channel != channel))
+                    .unwrap_or(false);
+                if mixed {
+                    if let Some(fresh) = execlaw_core::transport_conversations::TransportConversationStore::new(&state.db)
+                        .force_rotate_current(&plugin_id, scope, scope, now)
+                        .map_err(|e| HostCapError::new(format!("dedicated conversation rotate: {e}")))?
+                    {
+                        cid = fresh;
+                    }
+                }
+            }
         }
     }
 
@@ -134,6 +153,14 @@ pub async fn route_inbound(
         msg.display_name.as_deref()
     };
     crate::chats::apply_auto_display_name(&state.db, &cid, display_name_for_seed);
+    if msg
+        .conversation_scope
+        .as_deref()
+        .is_some_and(|scope| scope.ends_with("-dedicated"))
+    {
+        let label = if channel == "whatsapp" { "WhatsApp" } else { "Signal" };
+        let _ = ConversationStore::new(&state.db).set_display_name(&cid, Some(label));
+    }
     let pg_store = PrincipalGroupStore::new(&state.db);
     pg_store
         .bind_conversation(cid.as_str(), &principal_group_id)

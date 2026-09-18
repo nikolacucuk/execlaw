@@ -112,6 +112,44 @@ impl<'db> TransportConversationStore<'db> {
         })
     }
 
+    /// Rotate a current transport mapping into a fresh conversation.
+    /// Used when a transport switches from the shared scope to its dedicated
+    /// scope and the old mapping still points at a mixed conversation.
+    pub fn force_rotate_current(
+        &self,
+        plugin_id: &str,
+        transport_handle: &str,
+        principal_id: &str,
+        now: i64,
+    ) -> Result<Option<ConversationId>, DbError> {
+        self.db.transaction(|tx| {
+            let current: Option<String> = tx
+                .query_row(
+                    "SELECT conversation_id FROM transport_conversations \
+                     WHERE plugin_id=?1 AND transport_handle=?2 \
+                       AND principal_id=?3 AND is_current=1 LIMIT 1",
+                    params![plugin_id, transport_handle, principal_id],
+                    |row| row.get(0),
+                )
+                .ok();
+            let Some(_) = current else { return Ok(None); };
+            tx.execute(
+                "UPDATE transport_conversations SET is_current=0 \
+                 WHERE plugin_id=?1 AND transport_handle=?2 \
+                   AND principal_id=?3 AND is_current=1",
+                params![plugin_id, transport_handle, principal_id],
+            )?;
+            let fresh = ConversationId::new();
+            tx.execute(
+                "INSERT INTO transport_conversations \
+                 (plugin_id, transport_handle, principal_id, conversation_id, is_current, last_message_at) \
+                 VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+                params![plugin_id, transport_handle, principal_id, fresh.as_str(), now],
+            )?;
+            Ok(Some(fresh))
+        })
+    }
+
     /// Every row (current + rotated) for the principal across every
     /// transport. Used by the "previous threads with X" UI affordance.
     pub fn list_for_principal(

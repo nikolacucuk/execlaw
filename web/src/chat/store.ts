@@ -147,6 +147,13 @@ export function setThreads(next: ThreadSummary[]) {
     });
 }
 
+export function removeThread(conversationId: string) {
+    setState((prev) => ({
+        ...prev,
+        threads: prev.threads.filter((thread) => thread.conversation_id !== conversationId),
+    }));
+}
+
 export function setActiveThread(conversationId: string | null) {
     // 2026-04-28 dev-only: log every activeId change with the
     // calling stack so we can spot which code path is wiping

@@ -25,6 +25,7 @@ import {
     setActiveThread,
     setAlertFiringCount,
     setPendingApprovals,
+    removeThread,
     setThreads,
     useChatState,
 } from "./store";
@@ -545,6 +546,7 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
                                             t.conversation_id,
                                             getToken,
                                         );
+                                        removeThread(t.conversation_id);
                                         // Drop active id if we just
                                         // deleted the active thread —
                                         // otherwise the chat pane
