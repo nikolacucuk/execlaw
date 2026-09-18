@@ -391,6 +391,11 @@ fn should_merge_scoped_conversation(scope: &str) -> bool {
     !scope.ends_with("-dedicated")
 }
 
+fn should_use_controller_thread(is_controller: bool, conversation_scope: Option<&str>) -> bool {
+    is_controller
+        && !conversation_scope.is_some_and(|scope| scope.ends_with("-dedicated"))
+}
+
 fn merge_scoped_conversation_if_needed(
     state: &AppState,
     plugin_id: &str,
@@ -636,7 +641,10 @@ async fn resolve_dm(
             pg.group_id
         }
     };
-    let is_controller = matches!(sender.trust_level, CoreTrustLevel::Controller);
+    let is_controller = should_use_controller_thread(
+        matches!(sender.trust_level, CoreTrustLevel::Controller),
+        conversation_scope,
+    );
     let resolver = ConversationResolver::new(&state.db);
     // Keep the resolver key transport-scoped rather than contact-scoped
     // when the plugin declares a shared operator conversation.
@@ -777,5 +785,20 @@ mod tests {
         ));
         assert!(super::should_merge_scoped_conversation("signal"));
         assert!(super::should_merge_scoped_conversation("whatsapp"));
+    }
+
+    #[test]
+    fn dedicated_transport_scopes_do_not_use_controller_thread() {
+        assert!(!super::should_use_controller_thread(
+            true,
+            Some("whatsapp-dedicated")
+        ));
+        assert!(!super::should_use_controller_thread(
+            true,
+            Some("signal-dedicated")
+        ));
+        assert!(super::should_use_controller_thread(true, Some("whatsapp")));
+        assert!(super::should_use_controller_thread(true, None));
+        assert!(!super::should_use_controller_thread(false, None));
     }
 }
