@@ -713,7 +713,7 @@ pub async fn run_turn(
 
         // Non-tool finish — we're done.
         final_assistant_text = if text_acc.is_empty() {
-            "(empty response)".to_owned()
+            empty_response_message(finish_reason.as_deref(), tool_calls.len())
         } else {
             text_acc
         };
@@ -1120,6 +1120,23 @@ pub(crate) fn build_malformed_args_retry_note(
     ))
 }
 
+fn empty_response_message(finish_reason: Option<&str>, tool_call_count: usize) -> String {
+    if finish_reason == Some("tool_calls") && tool_call_count == 0 {
+        return "(empty response: the model reported tool_calls, but no tool call was parsed; "
+            .to_owned()
+            + "the configured tool-call parser may not match the model output)";
+    }
+
+    match finish_reason {
+        Some(reason) => {
+            format!("(empty response: the model returned no visible text; finish reason: {reason})")
+        }
+        None => {
+            "(empty response: the model returned no visible text and no finish reason)".to_owned()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1132,6 +1149,22 @@ mod tests {
         assert!(!f1.load(Ordering::SeqCst));
         flags.cancel("t-1");
         assert!(f1.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn empty_response_explains_unparsed_tool_call_finish() {
+        let message = empty_response_message(Some("tool_calls"), 0);
+        assert!(message.contains("tool_calls"));
+        assert!(message.contains("no tool call was parsed"));
+        assert!(message.contains("tool-call parser"));
+    }
+
+    #[test]
+    fn empty_response_includes_finish_reason() {
+        assert_eq!(
+            empty_response_message(Some("length"), 0),
+            "(empty response: the model returned no visible text; finish reason: length)"
+        );
     }
 
     #[test]

@@ -121,7 +121,7 @@ pub async fn route_inbound(
     };
 
     if let Some(scope) = msg.conversation_scope.as_deref() {
-        if scope != "whatsapp-dedicated" {
+        if should_merge_scoped_conversation(scope) {
             cid = merge_scoped_conversation_if_needed(state, &plugin_id, scope, &cid, now)?;
         }
     }
@@ -360,6 +360,10 @@ pub async fn route_inbound(
     Ok(RouteOutcome::Dispatched)
 }
 
+fn should_merge_scoped_conversation(scope: &str) -> bool {
+    !scope.ends_with("-dedicated")
+}
+
 fn merge_scoped_conversation_if_needed(
     state: &AppState,
     plugin_id: &str,
@@ -426,7 +430,13 @@ fn enqueue_triggered_agents(
         .into_iter()
         .filter(|agent| agent.enabled && !agent.paused)
     {
-        if !trigger_matches(&agent.trigger, channel, msg.group_id.as_deref(), &msg.text) {
+        if !trigger_matches(
+            &agent.trigger,
+            channel,
+            msg.group_id.as_deref(),
+            msg.group_name.as_deref(),
+            &msg.text,
+        ) {
             continue;
         }
         let envelope = serde_json::json!({
@@ -453,6 +463,7 @@ fn trigger_matches(
     trigger: &serde_json::Value,
     channel: &str,
     group_id: Option<&str>,
+    group_name: Option<&str>,
     text: &str,
 ) -> bool {
     let configured_channel = trigger.get("channel").and_then(|v| v.as_str());
@@ -470,7 +481,11 @@ fn trigger_matches(
     let Some(keywords) = trigger.get("keywords").and_then(|v| v.as_array()) else {
         return configured_channel.is_some();
     };
-    let normalized = text.to_ascii_lowercase();
+    let normalized = format!(
+        "{} {}",
+        text.to_ascii_lowercase(),
+        group_name.unwrap_or_default().to_ascii_lowercase()
+    );
     keywords.iter().filter_map(|v| v.as_str()).any(|keyword| {
         !keyword.trim().is_empty() && normalized.contains(&keyword.to_ascii_lowercase())
     })
@@ -636,17 +651,20 @@ mod tests {
             &trigger,
             "WhatsApp",
             None,
+            None,
             "Do you rent a CAMPER van?"
         ));
         assert!(!trigger_matches(
             &trigger,
             "signal",
             None,
+            None,
             "Do you rent a camper?"
         ));
         assert!(!trigger_matches(
             &trigger,
             "whatsapp",
+            None,
             None,
             "Can you help with a boat?"
         ));
@@ -655,8 +673,8 @@ mod tests {
     #[test]
     fn channel_only_trigger_matches_without_keywords() {
         let trigger = json!({"channel": "whatsapp"});
-        assert!(trigger_matches(&trigger, "whatsapp", None, "hello"));
-        assert!(!trigger_matches(&trigger, "signal", None, "hello"));
+        assert!(trigger_matches(&trigger, "whatsapp", None, None, "hello"));
+        assert!(!trigger_matches(&trigger, "signal", None, None, "hello"));
     }
 
     #[test]
@@ -671,12 +689,14 @@ mod tests {
             &trigger,
             "whatsapp",
             None,
+            None,
             "Camper available?"
         ));
         assert!(trigger_matches(
             &trigger,
             "whatsapp",
             Some("group-123"),
+            None,
             "Camper available?"
         ));
     }
@@ -693,13 +713,42 @@ mod tests {
             &trigger,
             "signal",
             Some("group-123"),
+            None,
             "Camper available?"
         ));
         assert!(!trigger_matches(
             &trigger,
             "whatsapp",
             Some("group-123"),
+            None,
             "What time is dinner?"
         ));
+    }
+
+    #[test]
+    fn trigger_matches_keywords_in_group_title() {
+        let trigger = json!({
+            "channel": "whatsapp",
+            "group_only": true,
+            "keywords": ["camper"]
+        });
+
+        assert!(trigger_matches(
+            &trigger,
+            "whatsapp",
+            Some("group-123"),
+            Some("1th Sept 2026, Luka Villa, Camper Montenegro"),
+            "I'm at the beach haha"
+        ));
+    }
+
+    #[test]
+    fn dedicated_transport_scopes_do_not_merge_into_latest_chat() {
+        assert!(!super::should_merge_scoped_conversation("signal-dedicated"));
+        assert!(!super::should_merge_scoped_conversation(
+            "whatsapp-dedicated"
+        ));
+        assert!(super::should_merge_scoped_conversation("signal"));
+        assert!(super::should_merge_scoped_conversation("whatsapp"));
     }
 }

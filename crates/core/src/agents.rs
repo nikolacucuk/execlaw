@@ -247,6 +247,18 @@ impl AgentStore {
         Ok(id)
     }
 
+    pub fn clear_event_only_due(&self, agent_id: &str) -> Result<(), AgentError> {
+        self.db
+            .with_conn(|c| {
+                c.execute(
+                    "UPDATE config_agents SET next_run_at=NULL, updated_at=strftime('%s','now') WHERE id=?1",
+                    [agent_id],
+                )?;
+                Ok(())
+            })
+            .map_err(Into::into)
+    }
+
     pub fn deliver(&self, ids: &[String], run_id: &str, now: i64) -> Result<(), AgentError> {
         self.db.with_conn(|c|{for id in ids{c.execute("UPDATE state_agent_messages SET delivered_at=?1,result_run_id=?2 WHERE id=?3",params![now,run_id,id])?;}Ok(())}).map_err(Into::into)
     }

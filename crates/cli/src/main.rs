@@ -2187,6 +2187,7 @@ async fn cmd_serve(
         db.clone(),
         inference.clone(),
         state.events.clone(),
+        state.event_log_hmac_key.clone(),
     );
     let _agent_supervisor = agent_supervisor.spawn();
 

@@ -54,6 +54,31 @@ The local `Obsidian Vault` profile inspected during this investigation has
 profile. Its continuous-sync settings are enabled separately by the Obsidian
 client and do not replace the publisher's need for the passphrase.
 
+Self-hosted LiveSync's reader also accepts unencrypted legacy entries. The
+earlier `obsidian-vault/execlaw/livesync-test.md` note appeared in the local
+vault after a plain publisher run, so encryption alone is not a proven
+explanation for a missing `obsidian-personal` archive. Inspect the LiveSync
+status and replication log when that path is absent. Encrypted mode remains
+the correct writer for new files in a profile configured for E2EE v2 and path
+obfuscation.
+
+### Repairing old publisher metadata
+
+Older publisher versions used readable metadata IDs such as
+`f:obsidian-personal/execlaw/archive/archive-index.md`. A path-obfuscated
+LiveSync profile expects a derived ID such as
+`f:87835d01e7a4d0647844b36f822e39f1b28ee48011b479e3c70546520f26ba18`.
+Self-hosted LiveSync Doctor detects this exact mismatch and offers **Move local
+metadata entry to the ID derived from its recorded path**.
+
+Use the Doctor's **Fix** action for every affected execlaw archive entry. It
+verifies the derived target before removing the old source entry. Do not edit
+or delete CouchDB documents manually. Pause other LiveSync clients during the
+repair, let this client upload the repairs, and then resume each client. The
+local `obsidian-personal/execlaw/archive` tree begins appearing as each repair
+is replicated; three files appeared after the first three repair proposals were
+processed.
+
 ## Configuration
 
 The settings page is the supported configuration surface:

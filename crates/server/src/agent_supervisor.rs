@@ -21,19 +21,26 @@ pub struct AgentSupervisor {
     db: Database,
     inference: Arc<InferenceResolver>,
     events: EventBus,
+    event_log_hmac_key: Option<Arc<Vec<u8>>>,
     wake: Arc<Notify>,
     stop: CancellationToken,
     permits: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
 }
 
 impl AgentSupervisor {
-    pub fn new(db: Database, inference: Arc<InferenceResolver>, events: EventBus) -> Self {
+    pub fn new(
+        db: Database,
+        inference: Arc<InferenceResolver>,
+        events: EventBus,
+        event_log_hmac_key: Option<Arc<Vec<u8>>>,
+    ) -> Self {
         let wake = Arc::new(Notify::new());
         let _ = GLOBAL_WAKE.set(wake.clone());
         Self {
             db,
             inference,
             events,
+            event_log_hmac_key,
             wake,
             stop: CancellationToken::new(),
             permits: Arc::new(Mutex::new(HashMap::new())),
@@ -87,6 +94,7 @@ impl AgentSupervisor {
             let inference = self.inference.clone();
             let permits = self.permits.clone();
             let events = self.events.clone();
+            let event_log_hmac_key = self.event_log_hmac_key.clone();
             tokio::spawn(async move {
                 let permit = {
                     let mut all = permits.lock().await;
@@ -96,7 +104,7 @@ impl AgentSupervisor {
                         })
                         .clone()
                 };
-                if let Err(error) = run_agent(db, inference, agent, permit, events).await {
+                if let Err(error) = run_agent(db, inference, agent, permit, events, event_log_hmac_key).await {
                     warn!(%error, "agent run failed");
                 }
             });
@@ -111,6 +119,7 @@ async fn run_agent(
     agent: AgentRow,
     semaphore: Arc<Semaphore>,
     events: EventBus,
+    event_log_hmac_key: Option<Arc<Vec<u8>>>,
 ) -> Result<(), String> {
     let store = AgentStore::new(&db);
     let claimed = store
@@ -124,6 +133,12 @@ async fn run_agent(
     let messages = store
         .pending_messages(&agent.id, 32)
         .map_err(|e| e.to_string())?;
+    if trigger_is_event_only(&agent.trigger) && messages.is_empty() {
+        store
+            .clear_event_only_due(&agent.id)
+            .map_err(|e| e.to_string())?;
+        return Ok(());
+    }
     let mailbox = messages
         .iter()
         .map(|m| format!("[{}] {}", m.direction, m.content))
@@ -155,11 +170,21 @@ async fn run_agent(
         tool_choice: None,
         guided_decoding_backend: None,
     };
+    let inbound = messages
+        .first()
+        .and_then(|message| serde_json::from_str::<serde_json::Value>(&message.content).ok());
+    let checkpoint = serde_json::json!({
+        "mailbox_count": messages.len(),
+        "channel": inbound.as_ref().and_then(|value| value.get("channel")),
+        "conversation_id": inbound.as_ref().and_then(|value| value.get("conversation_id")),
+        "group_name": inbound.as_ref().and_then(|value| value.get("group_name")),
+        "inbound_text": inbound.as_ref().and_then(|value| value.get("text")),
+    });
     let run_id = store
         .insert_run(
             &agent.id,
             chrono::Utc::now().timestamp(),
-            &serde_json::json!({"mailbox_count": messages.len()}),
+            &checkpoint,
         )
         .map_err(|e| e.to_string())?;
     events.publish(UiEvent::AgentRunChanged {
@@ -211,6 +236,32 @@ async fn run_agent(
                 run_id: run_id.clone(),
                 status: "success".into(),
             });
+            if !text.trim().is_empty() && !text.contains("NOT_APPLICABLE") {
+                if let Some(inbound) = inbound.as_ref() {
+                    let conversation_id = inbound
+                        .get("conversation_id")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "agent inbound lacks conversation_id".to_owned())?;
+                    let channel = inbound
+                        .get("channel")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("whatsapp");
+                    let recipient = inbound
+                        .get("recipient")
+                        .and_then(serde_json::Value::as_str)
+                        .ok_or_else(|| "agent inbound lacks recipient".to_owned())?;
+                    crate::chats::append_agent_reply(
+                        &db,
+                        event_log_hmac_key.as_deref().map(Vec::as_slice),
+                        &events,
+                        &execlaw_core::ids::ConversationId::from(conversation_id),
+                        &agent.name,
+                        &text,
+                        channel,
+                        recipient,
+                    )?;
+                }
+            }
             for parent_id in messages.iter().filter_map(|m| m.parent_agent_id.as_deref()) {
                 store
                     .enqueue(parent_id, Some(&agent.id), &text, now)
@@ -287,7 +338,12 @@ mod tests {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
         let supervisor =
-            AgentSupervisor::new(db, Arc::new(InferenceResolver::new(None)), EventBus::new());
+            AgentSupervisor::new(
+                db,
+                Arc::new(InferenceResolver::new(None)),
+                EventBus::new(),
+                None,
+            );
         supervisor.tick_once().await.unwrap();
     }
 }

@@ -184,11 +184,9 @@ impl PluginHost {
         manifest: &PluginManifest,
         target: &Path,
     ) -> Result<(), PluginHostError> {
-        let verifier = self
-            .inner
-            .attestation_verifier
-            .get()
-            .ok_or_else(|| PluginHostError::Provenance("attestation verifier is not configured".into()))?;
+        let verifier = self.inner.attestation_verifier.get().ok_or_else(|| {
+            PluginHostError::Provenance("attestation verifier is not configured".into())
+        })?;
         let store = ArtifactProvenanceStore::new(self.inner.db.clone());
         store
             .verify_bytes(bytes, statement, Some(verifier.as_ref()))
@@ -204,7 +202,10 @@ impl PluginHost {
         target: &Path,
     ) -> Result<(), PluginHostError> {
         let store = ArtifactProvenanceStore::new(self.inner.db.clone());
-        let artifact_id = format!("plugin-zip:{}:{}", manifest.plugin.id, manifest.plugin.version);
+        let artifact_id = format!(
+            "plugin-zip:{}:{}",
+            manifest.plugin.id, manifest.plugin.version
+        );
         store
             .use_local_development_override(
                 &artifact_id,
@@ -225,9 +226,7 @@ impl PluginHost {
         let Some(runtime) = manifest.runtime.as_ref() else {
             return Ok(());
         };
-        if runtime.parsed_tier()
-            != Some(execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess)
-        {
+        if runtime.parsed_tier() != Some(execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess) {
             return Ok(());
         }
         let executable = resolve_executable(target, runtime_executable_or_err(runtime)?);

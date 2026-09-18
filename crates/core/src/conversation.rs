@@ -460,22 +460,52 @@ impl<'db> ConversationStore<'db> {
     /// stronger retention is needed later we can add a soft-delete
     /// flag column instead of removing rows.
     pub fn delete(&self, conversation_id: &ConversationId) -> Result<(), DbError> {
-        self.db.with_conn(|c| {
-            // Delete dependents first to avoid FK fallout if we
-            // ever turn FKs back on. The order is conservative —
-            // events reference the conversation row, so events
-            // first.
-            c.execute(
-                "DELETE FROM state_events WHERE conversation_id = ?1",
-                params![conversation_id.as_str()],
+        self.db.transaction(|tx| {
+            let cid = conversation_id.as_str();
+
+            // Event-linked projections must be removed before their source
+            // events while foreign-key enforcement is enabled.
+            tx.execute(
+                "DROP TRIGGER IF EXISTS memory_evidence_append_only_delete",
+                [],
             )?;
-            c.execute(
-                "DELETE FROM state_conversations WHERE conversation_id = ?1",
-                params![conversation_id.as_str()],
-            )?;
-            c.execute(
-                "DELETE FROM transport_conversations WHERE conversation_id = ?1",
-                params![conversation_id.as_str()],
+            for table in [
+                "state_run_steps",
+                "state_runs",
+                "state_graphiti_jobs",
+                "memory_jobs",
+                "memory_evidence",
+                "state_chain_run_steps",
+                "state_chain_runs",
+            ] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE conversation_id = ?1"),
+                    params![cid],
+                )?;
+            }
+
+            for table in [
+                "state_outbox",
+                "state_attachments",
+                "state_research_jobs",
+                "state_skill_invocations",
+                "state_routine_runs",
+                "state_reply_drafts",
+                "state_chain_plans",
+                "state_events",
+                "transport_conversations",
+                "state_conversations",
+            ] {
+                tx.execute(
+                    &format!("DELETE FROM {table} WHERE conversation_id = ?1"),
+                    params![cid],
+                )?;
+            }
+            tx.execute_batch(
+                "CREATE TRIGGER memory_evidence_append_only_delete
+                 BEFORE DELETE ON memory_evidence BEGIN
+                     SELECT RAISE(ABORT, 'memory evidence is append-only');
+                 END;",
             )?;
             Ok(())
         })

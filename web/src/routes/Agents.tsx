@@ -125,7 +125,8 @@ export function Agents() {
                                 <div key={agent.id} className={`w-100 text-start mb-2 p-3 border ${selected === agent.id ? "border-primary" : ""}`}>
                                     <button className="btn btn-link text-start p-0 text-decoration-none" onClick={() => setSelected(agent.id)}>
                                         <strong>{agent.name}</strong>
-                                        <span className="d-block small text-muted">{agent.paused ? "Paused" : agent.enabled ? "Running" : "Disabled"} · every {agent.interval_secs}s</span>
+                                        <span className="d-block small text-muted">{agent.paused ? "Paused" : agent.enabled ? "Running" : "Disabled"} · {agent.trigger.event_only ? "on matching inbound event" : `every ${agent.interval_secs}s`}</span>
+                                        <span className="d-block small text-muted">{agent.trigger.channel ? String(agent.trigger.channel) : "any channel"}{agent.trigger.group_only ? " · groups only" : ""}{Array.isArray(agent.trigger.keywords) && agent.trigger.keywords.length > 0 ? ` · ${agent.trigger.keywords.join(", ")}` : ""}</span>
                                         <span className="d-block small">{agent.last_run_status ?? "Never run"}</span>
                                     </button>
                                     <span className="d-block mt-2"><Button size="sm" variant="outline-secondary" onClick={() => void toggle(agent)}>{agent.paused ? "Resume" : "Pause"}</Button></span>
@@ -136,7 +137,7 @@ export function Agents() {
                             <h3 className="h5">Mailbox and runs</h3>
                             {selected ? <>
                                 <div className="input-group mb-3"><Form.Control placeholder="Send a message to this agent" value={message} onChange={(e) => setMessage(e.target.value)} /><Button onClick={() => void enqueue()}>Send</Button></div>
-                                {runs.map((run) => <div className="border-bottom py-2" key={run.id}><strong>{run.status}</strong> <span className="small text-muted">{new Date(run.started_at * 1000).toLocaleString()}</span>{run.output_text && <p className="mb-0">{run.output_text}</p>}{run.error && <p className="text-danger mb-0">{run.error}</p>}</div>)}
+                                {runs.map((run) => <div className="border-bottom py-2" key={run.id}><strong>{run.status}</strong> <span className="small text-muted">{new Date(run.started_at * 1000).toLocaleString()}</span>{run.checkpoint?.mailbox_count ? <p className="small text-muted mb-1">Inbound event: {String(run.checkpoint.mailbox_count)} mailbox item(s)</p> : null}{run.output_text && <pre className="mb-0 small text-wrap">{run.output_text}</pre>}{run.error && <p className="text-danger mb-0">{run.error}</p>}</div>)}
                             </> : <p className="text-muted">Select an agent to inspect its mailbox and run history.</p>}
                         </div>
                     </div>

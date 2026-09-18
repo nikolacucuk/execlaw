@@ -87,6 +87,56 @@ pub(crate) fn has_non_whatsapp_activity(state: &AppState, cid: &ConversationId) 
 #[cfg(test)]
 pub(crate) use helpers::rewrite_url_with_alias;
 pub use helpers::{apply_auto_display_name, ensure_conversation_for};
+
+pub(crate) fn append_agent_reply(
+    db: &execlaw_core::Database,
+    event_log_hmac_key: Option<&[u8]>,
+    events: &crate::events::EventBus,
+    conversation_id: &ConversationId,
+    agent_name: &str,
+    text: &str,
+    channel: &str,
+    recipient: &str,
+) -> Result<i64, String> {
+    let pending = PendingEvent::encode(
+        EventKind::ModelTurn,
+        &RealModelTurnPayload {
+            model: format!("agent:{agent_name}"),
+            text: text.to_owned(),
+            finish_reason: Some("agent_draft".into()),
+            prompt_tokens: None,
+            completion_tokens: None,
+            channel_origin: Some(channel.to_owned()),
+            transport_recipient: Some(recipient.to_owned()),
+        },
+        Some(format!("agent:{agent_name}")),
+    )
+    .map_err(|e| format!("encode agent reply: {e}"))?;
+    let log = execlaw_core::events::EventLog::new(db);
+    let log = match event_log_hmac_key {
+        Some(key) => log.with_hmac_key(key.to_vec()),
+        None => log,
+    };
+    let base_seq = log
+        .last_seq(conversation_id)
+        .map_err(|e| format!("agent reply last_seq: {e}"))?;
+    let written = log
+        .commit_turn(conversation_id, base_seq, vec![pending])
+        .map_err(|e| format!("commit agent reply: {e}"))?;
+    let seq = written
+        .first()
+        .map(|event| event.seq.0)
+        .ok_or_else(|| "agent reply commit returned no event".to_owned())?;
+    events.publish(UiEvent::AgentReplyPublished {
+        conversation_id: conversation_id.as_str().to_owned(),
+        seq,
+        text: text.to_owned(),
+        actor: format!("agent:{agent_name}"),
+        channel_origin: channel.to_owned(),
+        transport_recipient: recipient.to_owned(),
+    });
+    Ok(seq)
+}
 use types::{
     ColdContactPayload, RealModelTurnPayload, StubModelTurnPayload, TransportReviewDecisionPayload,
     UserMessagePayload,
@@ -757,6 +807,23 @@ fn run_stub_turn(
     Ok((user_seq, reply_text, assistant_seq))
 }
 
+fn empty_response_message(finish_reason: Option<&str>) -> String {
+    if finish_reason == Some("tool_calls") {
+        return "(empty response: the model reported tool_calls, but no tool call was parsed; "
+            .to_owned()
+            + "the configured tool-call parser may not match the model output)";
+    }
+
+    match finish_reason {
+        Some(reason) => {
+            format!("(empty response: the model returned no visible text; finish reason: {reason})")
+        }
+        None => {
+            "(empty response: the model returned no visible text and no finish reason)".to_owned()
+        }
+    }
+}
+
 /// Run a real turn against the configured inference backend,
 /// streaming the assistant's reply over the WebSocket event bus as
 /// chunks arrive.
@@ -1107,7 +1174,7 @@ async fn run_real_turn(
         if was_cancelled {
             "(stopped before any output)".to_owned()
         } else {
-            "(empty response)".to_owned()
+            empty_response_message(finish_reason.as_deref())
         }
     } else if was_cancelled {
         format!("{assembled} … (stopped)")
@@ -3395,7 +3462,10 @@ pub async fn dispatch_external_turn(
     // explicit stop so the indicator clears immediately when the
     // turn returns.
     let review_mode = execlaw_core::vault_row::VaultRowStore::new(&state.db)
-        .get(Some(inbound_channel_origin.unwrap_or("")), "inbound_reply_mode")
+        .get(
+            Some(inbound_channel_origin.unwrap_or("")),
+            "inbound_reply_mode",
+        )
         .ok()
         .flatten()
         .and_then(|raw| String::from_utf8(raw).ok())
@@ -4243,6 +4313,8 @@ pub struct SendTransportReplyRequest {
     pub text: String,
     #[serde(default)]
     pub source_seq: Option<i64>,
+    #[serde(default)]
+    pub channel: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -4353,7 +4425,10 @@ pub async fn force_transport_response(
         )
             .into_response();
     }
-    let before_seq = event_log(&state).last_seq(&cid).map(|seq| seq.0).unwrap_or(0);
+    let before_seq = event_log(&state)
+        .last_seq(&cid)
+        .map(|seq| seq.0)
+        .unwrap_or(0);
     match dispatch_external_turn(
         &state,
         &cid,
@@ -4427,7 +4502,7 @@ pub async fn send_transport_reply(
             .into_response();
     }
     let cid = ConversationId::from(conversation_id.as_str());
-    match send_transport_text(&state, &cid, text, req.source_seq).await {
+    match send_transport_text(&state, &cid, text, req.source_seq, req.channel.as_deref()).await {
         Ok(channel) => match req.source_seq {
             Some(model_seq) => {
                 match append_transport_review_decision(&state, &cid, model_seq, "sent") {
@@ -4458,6 +4533,7 @@ async fn send_transport_text(
     cid: &ConversationId,
     text: &str,
     source_seq: Option<i64>,
+    requested_channel: Option<&str>,
 ) -> Result<String, String> {
     use execlaw_core::principal_groups::PrincipalGroupStore;
     use execlaw_core::transport_bindings::TransportBindingStore;
@@ -4472,7 +4548,9 @@ async fn send_transport_text(
     // A transport-wide conversation can have one binding per contact or
     // group. Use the binding matching the source event when available, then
     // fall back to the most recently active binding for that channel.
-    let (source_channel, source_recipient) = if let Some(seq) = source_seq {
+    let (source_channel, source_recipient) = if let Some(channel) = requested_channel {
+        (channel.to_owned(), None)
+    } else if let Some(seq) = source_seq {
         let events = event_log(state)
             .replay_since(cid, EventSeq(0))
             .map_err(|e| format!("replay conversation: {e}"))?;
@@ -4594,6 +4672,7 @@ pub async fn list_messages(
         .collect();
     let mut latest_transport_context: Option<String> = None;
     let mut latest_transport_seq: Option<i64> = None;
+    let mut latest_transport_group: Option<String> = None;
     let visible_events: Vec<EventRecord> = events
         .into_iter()
         .filter(|e| {
@@ -4645,6 +4724,11 @@ pub async fn list_messages(
             if inbound_context.is_some() {
                 latest_transport_context = inbound_context.clone();
                 latest_transport_seq = Some(e.seq.0);
+                latest_transport_group = conversation_group_label(
+                    &state.db,
+                    &e,
+                    conversation_context.as_deref(),
+                );
             }
             let transport_context =
                 if e.kind == EventKind::ModelTurn && extract_channel_origin(&e).is_some() {
@@ -4652,6 +4736,13 @@ pub async fn list_messages(
                 } else {
                     inbound_context
                 };
+            let transport_group = if e.kind == EventKind::ModelTurn {
+                latest_transport_group.clone()
+            } else {
+                latest_transport_group.clone().or_else(|| {
+                    conversation_group_label(&state.db, &e, conversation_context.as_deref())
+                })
+            };
             MessageView {
                 seq: e.seq.0,
                 kind: e.kind.as_str().to_owned(),
@@ -4660,6 +4751,7 @@ pub async fn list_messages(
                 committed_at: e.committed_at,
                 channel_origin: extract_channel_origin(&e),
                 transport_context,
+                transport_group,
                 reply_to_seq: if e.kind == EventKind::ModelTurn
                     && extract_channel_origin(&e).is_some()
                 {
@@ -4730,7 +4822,7 @@ fn inbound_transport_context(
     if let Some(handle) = handle {
         parts.push(handle);
     }
-    if channel == "whatsapp" {
+    if matches!(channel, "signal" | "whatsapp") {
         let is_group_label = conversation_name
             .zip(display_name.as_deref())
             .is_some_and(|(conversation, sender)| conversation != sender);
@@ -4741,6 +4833,36 @@ fn inbound_transport_context(
         }
     }
     (!parts.is_empty()).then(|| parts.join(" · "))
+}
+
+fn conversation_group_label(
+    db: &execlaw_core::db::Database,
+    event: &EventRecord,
+    conversation_name: Option<&str>,
+) -> Option<String> {
+    let channel = extract_channel_origin(event)?;
+    if !matches!(channel.as_str(), "signal" | "whatsapp") {
+        return None;
+    }
+    let principal_id = event
+        .decode_payload::<UserMessagePayload>()
+        .ok()
+        .and_then(|payload| payload.sender_principal_id)?;
+    let sender_name = PrincipalStore::new(db)
+        .get(&execlaw_core::ids::PrincipalId::from(principal_id))
+        .ok()
+        .flatten()
+        .and_then(|principal| {
+            principal
+                .metadata
+                .get("display_name")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+        });
+    conversation_name
+        .filter(|name| !name.trim().is_empty())
+        .filter(|name| sender_name.as_deref() != Some(*name))
+        .map(str::to_owned)
 }
 
 /// `GET /api/chats/:id/cards` — projection of every card in this
@@ -5109,7 +5231,7 @@ async fn run_incognito_send(
         if was_cancelled {
             "(stopped before any output)".to_owned()
         } else {
-            "(empty response)".to_owned()
+            empty_response_message(finish_reason.as_deref())
         }
     } else if was_cancelled {
         format!("{assembled} … (stopped)")
@@ -5432,6 +5554,22 @@ mod tests {
     use axum::body::{self, Body};
     use axum::http::{HeaderValue, Method, Request, header};
     use tower::ServiceExt;
+
+    #[test]
+    fn empty_response_message_explains_tool_call_parser_failure() {
+        let message = empty_response_message(Some("tool_calls"));
+        assert!(message.contains("tool_calls"));
+        assert!(message.contains("no tool call was parsed"));
+        assert!(message.contains("tool-call parser"));
+    }
+
+    #[test]
+    fn empty_response_message_includes_finish_reason() {
+        assert_eq!(
+            empty_response_message(Some("stop")),
+            "(empty response: the model returned no visible text; finish reason: stop)"
+        );
+    }
 
     async fn json_body<T: for<'de> serde::Deserialize<'de>>(body: Body) -> T {
         let bytes = body::to_bytes(body, usize::MAX).await.unwrap();

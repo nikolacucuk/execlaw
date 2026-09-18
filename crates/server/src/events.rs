@@ -46,6 +46,15 @@ pub enum UiEvent {
         seq: i64,
         text: String,
     },
+    /// A durable child-agent draft was added to the conversation.
+    AgentReplyPublished {
+        conversation_id: String,
+        seq: i64,
+        text: String,
+        actor: String,
+        channel_origin: String,
+        transport_recipient: String,
+    },
     /// Incremental token during a streaming turn.
     ChatTokenDelta {
         conversation_id: String,

@@ -193,6 +193,8 @@ export interface MessageView {
     channel_origin?: string | null;
     /** Human-readable inbound sender, phone, and group context. */
     transport_context?: string | null;
+    /** Group descriptor shared by transport members and agent replies. */
+    transport_group?: string | null;
     /** Event sequence of the inbound transport message answered by this turn. */
     reply_to_seq?: number | null;
     /** Durable review decision for a transport-originated model reply. */
@@ -259,11 +261,12 @@ export async function sendTransportReply(
     conversationId: string,
     text: string,
     sourceSeq: number,
+    channel: string | undefined,
     tokenAccessor: () => string | null,
 ): Promise<{ sent: boolean; channel: string }> {
     return apiFetch<{ sent: boolean; channel: string }>(
         `/api/chats/${encodeURIComponent(conversationId)}/transport-reply`,
-        { method: "POST", body: { text, source_seq: sourceSeq } },
+        { method: "POST", body: { text, source_seq: sourceSeq, channel } },
         tokenAccessor,
     );
 }

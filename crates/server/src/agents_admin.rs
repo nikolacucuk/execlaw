@@ -218,6 +218,7 @@ async fn import_markdown(
             "camper van",
             "motorhome",
             "camper montenegro",
+            "montenegro",
             "camping",
         ]
     } else {

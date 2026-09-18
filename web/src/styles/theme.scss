@@ -872,6 +872,36 @@ body {
         }
     }
 
+    &__group-header {
+        width: min(48rem, calc(100% - 1rem));
+        margin: 0.75rem auto 0.2rem;
+        padding: 0.55rem 0.75rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        border: 1px solid color-mix(in srgb, var(--source-color) 42%, var(--nexus-line));
+        border-radius: 7px;
+        color: var(--nexus-text);
+        background: color-mix(in srgb, var(--source-color) 10%, var(--nexus-surface));
+        text-align: left;
+        font-size: 0.78rem;
+        font-weight: 600;
+        &:hover { background: color-mix(in srgb, var(--source-color) 16%, var(--nexus-surface)); }
+        > span:first-child { display: flex; align-items: center; gap: 0.5rem; }
+        > span:first-child > i { color: var(--source-color); }
+    }
+
+    &__group-toggle {
+        color: var(--nexus-muted);
+        display: inline-flex;
+        align-items: center;
+        gap: 0.35rem;
+        font-size: 0.7rem;
+        font-weight: 400;
+        white-space: nowrap;
+    }
+
     &__summary {
         display: flex;
         align-items: center;
@@ -922,6 +952,12 @@ body {
         }
 
         &:last-child::before { display: none; }
+        &.is-group-member {
+            margin-inline: auto;
+            width: min(48rem, calc(100% - 1rem));
+            padding-right: 0.75rem;
+            background: color-mix(in srgb, var(--source-color) 3%, transparent);
+        }
         &.is-source-active .execlaw-msg__bubble,
         &.is-source-match .execlaw-msg__bubble {
             border-left-color: var(--source-color);

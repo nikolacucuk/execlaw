@@ -19,6 +19,7 @@ import {
     listCards,
     listMessages,
     listSkills,
+    listAvailableTransports,
     listThreads,
     listUiPanels,
     patchThread,
@@ -33,6 +34,7 @@ import {
     type InlineAttachment,
     type SkillListEntry,
     type UiPanelSummary,
+    type AvailableTransportView,
 } from "../api/endpoints";
 import { useBackendCapabilities } from "../chat/useBackendCapabilities";
 import { useToolResultsVisible } from "../chat/useToolResultsVisible";
@@ -97,6 +99,7 @@ export function Chat() {
     const { conversationId: routeConversationId } = useParams();
     const activeId = useChatState((s) => s.activeId);
     const [topError, setTopError] = useState<string | null>(null);
+    const [availableTransports, setAvailableTransports] = useState<AvailableTransportView[]>([]);
 
     // 2026-04-28 — incognito mode. When true, the next send mints a
     // client-only conversation (id prefix `incognito:`) that lives
@@ -176,6 +179,12 @@ export function Chat() {
 
     // Stable accessor used by everything that needs the live access token.
     const getToken = auth.getAccessToken;
+
+    useEffect(() => {
+        void listAvailableTransports(getToken)
+            .then((response) => setAvailableTransports(response.transports))
+            .catch(() => setAvailableTransports([]));
+    }, [getToken]);
 
     // Plugin-declared UI panels for the Sidebar's "More" section.
     // Loaded here (rather than inside Sidebar) because the panel set
@@ -589,6 +598,19 @@ export function Chat() {
                     if (cid !== activeId || isWhatsAppThread) {
                         markUnread(cid);
                     }
+                }
+                break;
+            case "agent_reply_published":
+                if (cid && typeof ev.text === "string") {
+                    appendMessage(cid, {
+                        seq: typeof ev.seq === "number" ? ev.seq : Date.now(),
+                        kind: "model_turn",
+                        text: ev.text,
+                        actor: typeof ev.actor === "string" ? ev.actor : "agent",
+                        committed_at: typeof ev.committed_at === "number" ? ev.committed_at : Math.floor(Date.now() / 1000),
+                        channel_origin: typeof ev.channel_origin === "string" ? ev.channel_origin : undefined,
+                        transport_recipient: typeof ev.transport_recipient === "string" ? ev.transport_recipient : undefined,
+                    });
                 }
                 break;
             case "alert_fired":
@@ -1387,9 +1409,10 @@ function ActiveThreadPane({
 
             <MessageStream
                 conversationId={conversationId}
+                availableTransports={availableTransports}
                 showToolResults={toolResultsVisible}
-                onSendTransportReply={(text, sourceSeq) =>
-                    sendTransportReply(conversationId, text, sourceSeq, getToken).then(
+                onSendTransportReply={(text, sourceSeq, channel) =>
+                    sendTransportReply(conversationId, text, sourceSeq, channel, getToken).then(
                         () => undefined,
                     )
                 }

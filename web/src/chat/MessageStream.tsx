@@ -15,6 +15,7 @@
 // message.
 
 import {
+    Fragment,
     useCallback,
     useContext,
     useEffect,
@@ -22,7 +23,7 @@ import {
     useRef,
     useState,
 } from "react";
-import type { MessageView } from "../api/endpoints";
+import type { AvailableTransportView, MessageView } from "../api/endpoints";
 import { signDownloadUrl } from "../api/signedDownloadUrl";
 import { AuthContext } from "../auth/AuthContext";
 import { getCardRenderer } from "../cards/CardRenderer";
@@ -91,7 +92,12 @@ function formatBytes(n: number): string {
 
 interface Props {
     conversationId: string;
-    onSendTransportReply?: (text: string, sourceSeq: number) => Promise<void>;
+    availableTransports?: AvailableTransportView[];
+    onSendTransportReply?: (
+        text: string,
+        sourceSeq: number,
+        channel: string,
+    ) => Promise<void>;
     onForceTransportResponse?: (sourceSeq: number) => Promise<void>;
     onSetTransportReviewDecision?: (
         sourceSeq: number,
@@ -122,6 +128,7 @@ type StreamItem =
 
 export function MessageStream({
     conversationId,
+    availableTransports = [],
     showToolResults = true,
     onSendTransportReply,
     onForceTransportResponse,
@@ -131,7 +138,9 @@ export function MessageStream({
     const nexus = appearance === "nexus";
     const t = useT();
     const [selectedSource, setSelectedSource] = useState("");
+    const [selectedTransportBySeq, setSelectedTransportBySeq] = useState<Record<number, string>>({});
     const [activeSeq, setActiveSeq] = useState<number | null>(null);
+    const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
     const messages = useChatState(
         (s) => s.messages[conversationId] ?? null,
     );
@@ -237,6 +246,7 @@ export function MessageStream({
         setIsAtBottom(true);
         setSelectedSource("");
         setActiveSeq(null);
+        setCollapsedGroups({});
     }, [conversationId]);
 
     if (messages === null) {
@@ -321,9 +331,41 @@ export function MessageStream({
                 {items.map((item) => {
                     if (item.kind === "message") {
                         const m = item.message;
+                        const group = nexus ? m.transport_group ?? null : null;
+                        const groupCollapsed = !!group && collapsedGroups[group];
+                        const index = items.indexOf(item);
+                        const previous = items
+                            .slice(0, index)
+                            .reverse()
+                            .find((candidate) => candidate.kind === "message");
+                        const previousGroup = previous?.kind === "message"
+                            ? previous.message.transport_group
+                            : null;
+                        const groupStart = !!group && group !== previousGroup;
+                        if (groupCollapsed && !groupStart) return null;
                         return (
+                            <Fragment key={`msg-${m.kind}-${m.seq}`}>
+                                {groupStart && (
+                                    <button
+                                        type="button"
+                                        className="execlaw-nexus__group-header"
+                                        onClick={() => setCollapsedGroups((current) => ({
+                                            ...current,
+                                            [group!]: !current[group!],
+                                        }))}
+                                        aria-expanded={!groupCollapsed}
+                                    >
+                                        <span>
+                                            <i className="bi bi-people" aria-hidden />
+                                            {group}
+                                        </span>
+                                        <span className="execlaw-nexus__group-toggle">
+                                            {groupCollapsed ? "Show group" : "Collapse group"}
+                                            <i className={`bi bi-chevron-${groupCollapsed ? "down" : "up"}`} aria-hidden />
+                                        </span>
+                                    </button>
+                                )}
                             <MessageBubble
-                                key={`msg-${m.kind}-${m.seq}`}
                                 message={m}
                                 nexus={nexus}
                                 highlighted={activeSeq === m.seq}
@@ -339,11 +381,25 @@ export function MessageStream({
                                     !!onSendTransportReply
                                 }
                                 transportSendBusy={sendingReplySeq === m.seq}
+                                transportChoices={availableTransports}
+                                selectedTransport={
+                                    selectedTransportBySeq[m.seq] ?? readChannelOrigin(m) ?? ""
+                                }
+                                onTransportChange={(channel) => {
+                                    setSelectedTransportBySeq((current) => ({
+                                        ...current,
+                                        [m.seq]: channel,
+                                    }));
+                                }}
                                 onSendTransportReply={async () => {
                                     if (!onSendTransportReply) return;
                                     setSendingReplySeq(m.seq);
                                     try {
-                                        await onSendTransportReply(m.text ?? "", m.seq);
+                                        await onSendTransportReply(
+                                            m.text ?? "",
+                                            m.seq,
+                                            selectedTransportBySeq[m.seq] ?? readChannelOrigin(m) ?? "",
+                                        );
                                         setOptimisticReviewStates((states) => ({
                                             ...states,
                                             [m.seq]: "sent",
@@ -384,6 +440,7 @@ export function MessageStream({
                                     await onForceTransportResponse?.(m.seq);
                                 }}
                             />
+                            </Fragment>
                         );
                     }
                     const Renderer = getCardRenderer(item.card.kind);
@@ -470,6 +527,9 @@ function MessageBubble({
     onJumpToMessage,
     showTransportSend = false,
     transportSendBusy = false,
+    transportChoices = [],
+    selectedTransport = "",
+    onTransportChange,
     onSendTransportReply,
     onCancelTransportReply,
     showReviewOverride = false,
@@ -485,6 +545,9 @@ function MessageBubble({
     onJumpToMessage?: (seq: number) => void;
     showTransportSend?: boolean;
     transportSendBusy?: boolean;
+    transportChoices?: AvailableTransportView[];
+    selectedTransport?: string;
+    onTransportChange?: (channel: string) => void;
     onSendTransportReply?: () => Promise<void>;
     onCancelTransportReply?: () => void;
     showReviewOverride?: boolean;
@@ -599,6 +662,7 @@ function MessageBubble({
                 "execlaw-msg" +
                 (isUserMessage ? " is-user" : "") +
                 (message.reply_to_seq != null ? " is-linked-reply" : "") +
+                (nexus && message.transport_group ? " is-group-member" : "") +
                 (nexus && highlighted ? " is-source-active" : "") +
                 (nexus && sourceMatch ? " is-source-match" : "")
             }
@@ -720,6 +784,24 @@ function MessageBubble({
                 )}
                 {showTransportSend && (
                     <div className="d-flex gap-2 mt-3">
+                        <select
+                            className="form-select form-select-sm"
+                            value={selectedTransport}
+                            onChange={(event) => onTransportChange?.(event.target.value)}
+                            aria-label="Send reply via transport"
+                            data-testid="send-transport-select"
+                        >
+                            {transportChoices.length === 0 && (
+                                <option value={selectedTransport}>
+                                    {transportLabel(selectedTransport)}
+                                </option>
+                            )}
+                            {transportChoices.map((transport) => (
+                                <option key={transport.id} value={transport.id}>
+                                    {transport.label}
+                                </option>
+                            ))}
+                        </select>
                         <button
                             type="button"
                             className="btn btn-sm btn-outline-success"

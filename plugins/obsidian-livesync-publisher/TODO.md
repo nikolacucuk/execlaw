@@ -38,9 +38,17 @@ open still require execution or proof on TrueNAS.
   `f:obsidian-vault/execlaw/livesync-test.md` with a referenced `h:` chunk.
 - [x] Inspect the local Obsidian LiveSync profile. It has `encrypt: true` and
   `usePathObfuscation: true`; continuous sync is enabled in the local client.
+- [x] Confirm the local vault contains the earlier plain-publisher note
+  `obsidian-vault/execlaw/livesync-test.md`. E2EE does not by itself explain
+  the missing `obsidian-personal` archive because LiveSync accepts unencrypted
+  legacy entries.
 - [x] Replace the hand-rolled plain CouchDB writer with pinned
   `@vrtmrz/livesync-commonlib@0.1.26` `DirectFileManipulator` support for
   LiveSync E2EE v2 and path obfuscation.
+- [x] Identify the recovery path for older plain path-derived metadata IDs:
+  Self-hosted LiveSync Doctor's verified **Move local metadata entry to the ID
+  derived from its recorded path** repair. The first three repairs materialized
+  the local `obsidian-personal/execlaw/archive` tree.
 
 ## Remaining validation
 
@@ -51,6 +59,13 @@ open still require execution or proof on TrueNAS.
   Do not place it in Compose, source files, or a terminal command.
 - [ ] Publish one disposable Markdown file and confirm it appears in the
   connected encrypted, path-obfuscated Obsidian LiveSync client.
+- [ ] Capture the LiveSync status/log output while replicating the existing
+  plain `obsidian-personal/execlaw/archive` documents to determine why that
+  path is not materialized locally.
+- [ ] Apply the verified LiveSync Doctor metadata-ID repair to every remaining
+  `obsidian-personal/execlaw/archive` entry while other clients are paused.
+- [ ] Confirm the local archive file count matches the archive documents in
+  `djenka_db` after the repair completes.
 - [ ] Re-run **Publish now** without changing the source and confirm zero
   metadata documents are written.
 - [ ] Modify the disposable note, publish again, and confirm Obsidian receives
