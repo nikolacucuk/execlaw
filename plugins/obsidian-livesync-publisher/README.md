@@ -33,52 +33,6 @@ The sidecar reads markdown from the bind mount and sends LiveSync-compatible
 metadata/chunk documents to CouchDB over HTTP. It does not delete remote
 documents.
 
-## Encrypted LiveSync mode
-
-Version `0.1.16` uses the pinned
-`@vrtmrz/livesync-commonlib@0.1.26` `DirectFileManipulator` to write files with
-the same E2EE v2, PBKDF2 salt, chunking, and path-obfuscation handling used by
-Self-hosted LiveSync. The sidecar retrieves the required salt from CouchDB; it
-does not derive a substitute value or implement its own cryptography.
-
-For an encrypted, path-obfuscated LiveSync profile, enter the existing
-LiveSync encryption passphrase in **LiveSync encryption passphrase** on this
-plugin's settings page. The optional **Path obfuscation passphrase** defaults
-to that value and should be changed only when the LiveSync profile uses a
-separate path-obfuscation passphrase. Both values are stored only in execlaw's
-encrypted per-plugin vault, are redacted on read, and must never be placed in
-`plugin.toml`, Compose environment variables, or source files.
-
-The local `Obsidian Vault` profile inspected during this investigation has
-`encrypt: true` and `usePathObfuscation: true`; use encrypted mode for that
-profile. Its continuous-sync settings are enabled separately by the Obsidian
-client and do not replace the publisher's need for the passphrase.
-
-Self-hosted LiveSync's reader also accepts unencrypted legacy entries. The
-earlier `obsidian-vault/execlaw/livesync-test.md` note appeared in the local
-vault after a plain publisher run, so encryption alone is not a proven
-explanation for a missing `obsidian-personal` archive. Inspect the LiveSync
-status and replication log when that path is absent. Encrypted mode remains
-the correct writer for new files in a profile configured for E2EE v2 and path
-obfuscation.
-
-### Repairing old publisher metadata
-
-Older publisher versions used readable metadata IDs such as
-`f:obsidian-personal/execlaw/archive/archive-index.md`. A path-obfuscated
-LiveSync profile expects a derived ID such as
-`f:87835d01e7a4d0647844b36f822e39f1b28ee48011b479e3c70546520f26ba18`.
-Self-hosted LiveSync Doctor detects this exact mismatch and offers **Move local
-metadata entry to the ID derived from its recorded path**.
-
-Use the Doctor's **Fix** action for every affected execlaw archive entry. It
-verifies the derived target before removing the old source entry. Do not edit
-or delete CouchDB documents manually. Pause other LiveSync clients during the
-repair, let this client upload the repairs, and then resume each client. The
-local `obsidian-personal/execlaw/archive` tree begins appearing as each repair
-is replicated; three files appeared after the first three repair proposals were
-processed.
-
 ## Configuration
 
 The settings page is the supported configuration surface:
@@ -95,10 +49,6 @@ Database:        djenka_db
 Username:        ncucuk
 Source folder:   obsidian-vault/execlaw
 ```
-
-For the connected encrypted LiveSync profile, also enter its existing LiveSync
-encryption passphrase. Leave **Path obfuscation passphrase** blank when it uses
-the same value.
 
 An absolute path entered in the source-folder field is normalized by the UI:
 
@@ -314,9 +264,7 @@ Only after the mount and health checks pass should **Check source** and
 
 ## Rebuild requirements
 
-The control plane and sidecar are separate images. Version `0.1.16` changes the
-publisher sidecar from Python to Node.js so it can call the pinned maintained
-LiveSync protocol library:
+The control plane and sidecar are separate images:
 
 ```bash
 cd /mnt/AI_Pool/execlaw-source
@@ -342,11 +290,11 @@ plugin ZIP alone cannot fix a host hydration defect.
 
 ## LiveSync compatibility
 
-Encrypted mode delegates protocol compatibility to the pinned LiveSync library,
-but it has not yet completed an end-to-end publish and replication test against
-the existing `djenka_db` profile. Before publishing important data, verify a
-single disposable note appears in the connected Obsidian client, then verify
-an unchanged publish produces zero writes and an edited note updates normally.
+The publisher currently writes unencrypted, non-obfuscated ordinary-file
+metadata and plain leaf chunks. It is not yet proven compatible with the
+existing database's E2EE, path obfuscation, custom chunk size, or alternate
+hash settings. Do not publish important data until those settings are matched
+or a disposable database has passed a two-way Obsidian test.
 
 The publisher is additive and non-destructive: it does not delete remote files
 or prune old chunks.

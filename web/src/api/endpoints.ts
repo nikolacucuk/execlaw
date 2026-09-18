@@ -191,6 +191,8 @@ export interface MessageView {
      * via Signal" / "the agent replied via Signal".
      */
     channel_origin?: string | null;
+    /** Foreign recipient used by transport-originated replies. */
+    transport_recipient?: string | null;
     /** Human-readable inbound sender, phone, and group context. */
     transport_context?: string | null;
     /** Group descriptor shared by transport members and agent replies. */

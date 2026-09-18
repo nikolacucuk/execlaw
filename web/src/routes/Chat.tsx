@@ -901,6 +901,7 @@ export function Chat() {
                 />
                 <ChatPane
                     activeId={activeId}
+                    availableTransports={availableTransports}
                     onSend={onSend}
                     getToken={getToken}
                     incognito={incognito}
@@ -944,6 +945,7 @@ export function Chat() {
  */
 function ChatPane({
     activeId,
+    availableTransports,
     onSend,
     getToken,
     onStop,
@@ -954,6 +956,7 @@ function ChatPane({
     voiceTranscript,
 }: {
     activeId: string | null;
+    availableTransports: AvailableTransportView[];
     onSend: (
         text: string,
         attachments: InlineAttachment[],
