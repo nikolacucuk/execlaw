@@ -542,10 +542,15 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
                                         return;
                                     }
                                     try {
-                                        await deleteThread(
+                                        const deleted = await deleteThread(
                                             t.conversation_id,
                                             getToken,
                                         );
+                                        if (!deleted.existed) {
+                                            throw new Error(
+                                                "The server did not find this thread to delete. Refresh the thread list and try again.",
+                                            );
+                                        }
                                         removeThread(t.conversation_id);
                                         // Drop active id if we just
                                         // deleted the active thread —
@@ -565,6 +570,17 @@ export function Sidebar({ onNewThread, onSignOut, uiPanels }: SidebarProps) {
                                             navigate("/chat");
                                         }
                                         const r = await listThreads(getToken);
+                                        if (
+                                            r.threads.some(
+                                                (thread) =>
+                                                    thread.conversation_id ===
+                                                    t.conversation_id,
+                                            )
+                                        ) {
+                                            throw new Error(
+                                                "The server kept this thread after deletion. The deployed server needs updating.",
+                                            );
+                                        }
                                         setThreads(r.threads);
                                     } catch (e) {
                                         console.warn("delete failed", e);
