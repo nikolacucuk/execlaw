@@ -476,12 +476,10 @@ impl<'db> ConversationStore<'db> {
                 "eval_flagged",
                 "log_entries",
                 "memory_reflections",
-                "state_run_steps",
                 "state_runs",
                 "state_graphiti_jobs",
                 "memory_jobs",
                 "memory_evidence",
-                "state_chain_run_steps",
                 "state_chain_runs",
             ] {
                 tx.execute(
@@ -839,6 +837,19 @@ mod tests {
         let got = store.get(&row.conversation_id).unwrap().unwrap();
         assert_eq!(got.phase, Phase::AwaitingApproval);
         assert_eq!(got.last_seq, EventSeq(17));
+    }
+
+    #[test]
+    fn delete_removes_conversation_from_store() {
+        let db = fresh_db();
+        let store = ConversationStore::new(&db);
+        let row = fresh_row("conv-delete");
+        store.upsert(&row).unwrap();
+
+        store.delete(&row.conversation_id).unwrap();
+
+        assert!(store.get(&row.conversation_id).unwrap().is_none());
+        assert!(store.list_thread_summaries().unwrap().is_empty());
     }
 
     /// Once metadata is set via the dedicated mutators, a follow-up
