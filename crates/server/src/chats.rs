@@ -5500,6 +5500,7 @@ pub async fn delete_thread(
     let cid = ConversationId::from(conversation_id.as_str());
     let store = ConversationStore::new(&state.db);
     let existed = matches!(store.get(&cid), Ok(Some(_)));
+    tracing::info!(conversation_id = %cid, existed, "conversation deletion requested");
     if let Err(e) = store.delete(&cid) {
         return err_500(&format!("delete: {e}"));
     }
@@ -5529,6 +5530,7 @@ pub async fn delete_thread(
             svc.on_conversation_deleted(&cid_for_cleanup).await;
         });
     }
+    tracing::info!(conversation_id = %cid, existed, "conversation deleted");
     (
         StatusCode::OK,
         Json(serde_json::json!({
