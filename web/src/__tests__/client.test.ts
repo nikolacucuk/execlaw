@@ -91,6 +91,20 @@ describe("apiFetch", () => {
         }
     });
 
+    it("surfaces string-shaped server errors", async () => {
+        fetchMock.mockResolvedValueOnce(
+            new Response(
+                JSON.stringify({ error: "delete: sqlite error: foreign key constraint failed" }),
+                { status: 500 },
+            ),
+        );
+        await expect(apiFetch("/api/chats/thread-1", { method: "DELETE" })).rejects.toMatchObject({
+            code: "server",
+            message: "delete: sqlite error: foreign key constraint failed",
+            status: 500,
+        });
+    });
+
     it("rawText: returns the raw text body for /api/ping", async () => {
         fetchMock.mockResolvedValueOnce(
             new Response("setup", {

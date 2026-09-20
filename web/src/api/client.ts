@@ -243,12 +243,14 @@ function readServerMessage(parsed: unknown): string | undefined {
     if (
         typeof parsed === "object" &&
         parsed !== null &&
-        "error" in parsed &&
-        typeof (parsed as { error?: unknown }).error === "object" &&
-        (parsed as { error?: { message?: unknown } }).error !== null
+        "error" in parsed
     ) {
-        const msg = (parsed as { error: { message?: unknown } }).error.message;
-        return typeof msg === "string" ? msg : undefined;
+        const error = (parsed as { error?: unknown }).error;
+        if (typeof error === "string") return error;
+        if (typeof error === "object" && error !== null) {
+            const message = (error as { message?: unknown }).message;
+            return typeof message === "string" ? message : undefined;
+        }
     }
     return undefined;
 }
