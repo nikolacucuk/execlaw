@@ -185,6 +185,26 @@ enum Command {
         #[arg(long, default_value_t = false)]
         no_encrypt: bool,
     },
+    /// Permanently remove one conversation and all of its derived rows.
+    /// Stop the control plane before invoking this recovery command.
+    DeleteThread {
+        /// Conversation id to remove.
+        conversation_id: String,
+        /// Required acknowledgement because this deletes event history.
+        #[arg(long, default_value_t = false)]
+        i_understand_this_deletes_history: bool,
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        no_encrypt: bool,
+    },
+    /// List conversation ids and their sidebar metadata.
+    ListThreads {
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        no_encrypt: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -824,6 +844,50 @@ fn cmd_db_repair_checksum(id: u32, db_path: PathBuf, no_encrypt: bool) -> anyhow
         println!(
             "no schema_version row for migration id {id}; nothing to repair \
              (run `execlaw db migrate` first if this is a fresh DB)"
+        );
+    }
+    Ok(())
+}
+
+fn cmd_delete_thread(
+    conversation_id: String,
+    confirmed: bool,
+    db_path: PathBuf,
+    no_encrypt: bool,
+) -> anyhow::Result<()> {
+    if !confirmed {
+        anyhow::bail!(
+            "refusing to delete conversation history; pass \
+             --i-understand-this-deletes-history"
+        );
+    }
+
+    use execlaw_core::conversation::ConversationStore;
+    use execlaw_core::ids::ConversationId;
+
+    let db = open_db(&db_path, no_encrypt)?;
+    let cid = ConversationId::from(conversation_id.as_str());
+    let store = ConversationStore::new(&db);
+    let existed = store.get(&cid)?.is_some();
+    store.delete(&cid)?;
+    println!(
+        "conversation {} {}",
+        cid.as_str(),
+        if existed { "deleted" } else { "was already absent" }
+    );
+    Ok(())
+}
+
+fn cmd_list_threads(db_path: PathBuf, no_encrypt: bool) -> anyhow::Result<()> {
+    use execlaw_core::conversation::ConversationStore;
+
+    let db = open_db(&db_path, no_encrypt)?;
+    for thread in ConversationStore::new(&db).list_thread_summaries()? {
+        println!(
+            "{}\t{}\t{}",
+            thread.conversation_id.as_str(),
+            thread.display_name.as_deref().unwrap_or("(unnamed)"),
+            thread.last_activity_at,
         );
     }
     Ok(())
@@ -2681,6 +2745,20 @@ fn main() -> ExitCode {
             force,
             no_encrypt,
         } => cmd_restore(from, db.unwrap_or_else(default_db_path), force, no_encrypt),
+        Command::DeleteThread {
+            conversation_id,
+            i_understand_this_deletes_history,
+            db,
+            no_encrypt,
+        } => cmd_delete_thread(
+            conversation_id,
+            i_understand_this_deletes_history,
+            db.unwrap_or_else(default_db_path),
+            no_encrypt,
+        ),
+        Command::ListThreads { db, no_encrypt } => {
+            cmd_list_threads(db.unwrap_or_else(default_db_path), no_encrypt)
+        }
     })();
 
     match result {
