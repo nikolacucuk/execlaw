@@ -1,5 +1,8 @@
 ALTER TABLE message_archive_messages ADD COLUMN topic_keywords TEXT NOT NULL DEFAULT '';
 
+DROP TRIGGER IF EXISTS message_archive_search_insert;
+DROP TRIGGER IF EXISTS message_archive_search_delete;
+DROP TRIGGER IF EXISTS message_archive_search_update;
 DROP TABLE message_archive_search;
 CREATE VIRTUAL TABLE message_archive_search USING fts5(
     archive_message_id UNINDEXED,
