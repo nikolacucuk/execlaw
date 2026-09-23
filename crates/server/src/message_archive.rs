@@ -42,6 +42,7 @@ pub fn archive_inbound(
         / 1000;
     let name = message.display_name.as_deref();
     let store = MessageArchiveStore::new(&state.db);
+    let topic_keywords = execlaw_core::message_archive::extract_topic_keywords(&message.text, 5);
     store
         .upsert_conversation(
             &archive_id,
@@ -66,6 +67,7 @@ pub fn archive_inbound(
             sender_id: Some(sender.id.as_str()),
             sender_name: name,
             body: &message.text,
+            topic_keywords: &topic_keywords,
             occurred_at,
             source_message_id: Some(&message_id),
             created_at: chrono::Utc::now().timestamp(),
@@ -92,6 +94,7 @@ pub fn archive_outbound_generated(
     let message_id = stable_id(&[channel, remote_id, cid.as_str(), body]);
     let now = chrono::Utc::now().timestamp();
     let store = MessageArchiveStore::new(&state.db);
+    let topic_keywords = execlaw_core::message_archive::extract_topic_keywords(body, 5);
     store
         .upsert_conversation(
             &archive_id,
@@ -113,6 +116,7 @@ pub fn archive_outbound_generated(
             sender_id: Some("execlaw-agent"),
             sender_name: Some("execlaw"),
             body,
+            topic_keywords: &topic_keywords,
             occurred_at: now,
             source_message_id: Some(&message_id),
             created_at: now,

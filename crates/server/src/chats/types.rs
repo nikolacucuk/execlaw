@@ -217,6 +217,9 @@ pub struct MessageView {
     /// Group descriptor for Signal/WhatsApp messages and their replies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub transport_group: Option<String>,
+    /// Number of related archived transport messages included in the turn context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_matches: Option<u32>,
     /// Event sequence of the inbound transport message this model turn answers.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to_seq: Option<i64>,

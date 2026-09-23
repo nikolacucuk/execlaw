@@ -186,23 +186,48 @@ via OAuth.
 ## SMS (Android-side WebSocket gateway)
 
 SMS transport uses a companion Android app
-([`sms-socket-app`](https://github.com/justinelgenlong/sms-socket-app))
-running on a phone with a SIM. The phone exposes an HTTP+WebSocket
-gateway on the local network; execlaw connects out to it.
+([`sms-socket-app`](https://github.com/crockpotveggies/sms-socket-app))
+running on a phone with a SIM. The phone exposes a WebSocket gateway on
+the local network; execlaw connects out to it. The GitHub project currently
+publishes source code, not a downloadable APK, so the app must be built and
+installed from source unless you already have an APK from a trusted build.
 
 ### Steps
 
-1. Install the `sms-socket-app` APK on an Android phone with a SIM.
-   Grant SMS, dialer, and notification permissions when prompted.
+1. Install Android Studio, Android SDK 36, Android SDK Build-Tools 36,
+   Android NDK 27.1.12297006, Node.js 22.11+, and Git on the Windows host.
+   Clone the app and build its debug APK:
 
-2. In the app, set an API key and start the gateway. The app shows
-   the gateway's local URL (e.g. `ws://192.168.1.42:8787/`) and the
-   API key.
+   ```powershell
+   git clone https://github.com/crockpotveggies/sms-socket-app.git
+   cd sms-socket-app
+   npm install
+   adb devices
+   npm run android
+   ```
 
-3. Open **Settings → Plugins → SMS**. Paste the gateway URL and the
-   API key. Save.
+   `npm run android` installs the debug APK directly when an Android phone
+   with USB debugging enabled is connected. To build the APK without the
+   React Native CLI, run `cd android; .\gradlew.bat assembleDebug`; the APK
+   is `android\app\build\outputs\apk\debug\app-debug.apk`, which can be
+   installed with `adb install -r android\app\build\outputs\apk\debug\app-debug.apk`.
 
-4. The plugin's `on_enable` connects, runs a `getGatewayState`
+2. Open the app on an Android phone with a SIM. Grant the default SMS role,
+   SMS/phone permissions, and notifications when prompted. Do not start the
+   gateway until the app has become the default SMS app.
+
+3. In the app, set an API key and start the gateway. Disable battery
+   optimization for the app. The gateway listens on port `8787`; use the
+   phone's Wi-Fi IP in execlaw, for example
+   `ws://192.168.1.42:8787/`. `127.0.0.1` means the execlaw host itself,
+   not the phone. Both devices must be on the same LAN. For USB testing,
+   `adb reverse tcp:8787 tcp:8787` permits `ws://127.0.0.1:8787/`.
+
+4. Open **Settings → Plugins → SMS Socket**. Paste the gateway URL and the
+   API key. Leave **Default SIM subscription id** blank unless the phone has
+   multiple SIMs and you need to select a particular subscription. Save.
+
+5. The plugin's `on_enable` connects, runs a `getGatewayState`
    handshake, and issues a `rehydrate` request to pull any messages
    the gateway buffered since the last cursor. Status shows the
    phone's connection state, last-seen timestamp, and inbound count.

@@ -69,6 +69,67 @@ pub(crate) use helpers::{
     resolve_skill_prepend, rewrite_url_for_container, sanitize_generated_title,
 };
 
+fn append_transport_history_context(
+    state: &AppState,
+    cid: &ConversationId,
+    channel: Option<&str>,
+    current_text: &str,
+    turn_context: &mut String,
+) {
+    use execlaw_core::message_archive::{extract_topic_keywords, MessageArchiveStore};
+    use execlaw_core::vault_row::VaultRowStore;
+
+    let Some(channel) = channel.filter(|value| matches!(*value, "signal" | "whatsapp")) else {
+        return;
+    };
+    let vault = VaultRowStore::new(&state.db);
+    let enabled = vault
+        .get(Some(channel), "history_buffer_enabled")
+        .ok()
+        .flatten()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .map(|value| value != "false")
+        .unwrap_or(true);
+    if !enabled {
+        return;
+    }
+    let limit = vault
+        .get(Some(channel), "history_buffer_size")
+        .ok()
+        .flatten()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    let terms = extract_topic_keywords(current_text, 5)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    let hits = match MessageArchiveStore::new(&state.db)
+        .related_recent_messages(cid.as_str(), &terms, limit)
+    {
+        Ok(hits) => hits,
+        Err(error) => {
+            tracing::debug!(target: "transport_history", %error, channel, "history lookup skipped");
+            return;
+        }
+    };
+    let prior = hits
+        .into_iter()
+        .filter(|message| message.body != current_text)
+        .rev()
+        .collect::<Vec<_>>();
+    if prior.is_empty() {
+        return;
+    }
+    turn_context.push_str("\n\n## Related transport history\n");
+    turn_context.push_str("These archived messages matched the current topic. Use them only when relevant:\n");
+    for message in prior {
+        let speaker = message.sender_name.as_deref().unwrap_or("unknown");
+        turn_context.push_str(&format!("- {speaker}: {}\n", message.body));
+    }
+}
+
 /// Returns whether a conversation already contains activity that did not
 /// originate on WhatsApp. Used to migrate the old dedicated WhatsApp thread
 /// into the operator's existing active execlaw thread exactly once.
@@ -136,6 +197,34 @@ pub(crate) fn append_agent_reply(
         transport_recipient: recipient.to_owned(),
     });
     Ok(seq)
+}
+
+pub(crate) async fn deliver_agent_reply_automatically(
+    state: &AppState,
+    conversation_id: &ConversationId,
+    model_seq: i64,
+    channel: &str,
+    recipient: &str,
+    text: &str,
+) -> Result<(), String> {
+    let tool_name = format!("{channel}.send_message");
+    state
+        .plugin_host
+        .call_tool(
+            &tool_name,
+            serde_json::json!({"to": recipient, "text": text}),
+            &["*"],
+            Some("Controller"),
+        )
+        .await
+        .map_err(|error| format!("send automatic agent reply via {tool_name}: {error}"))?;
+    append_transport_review_decision(state, conversation_id, model_seq, "sent")?;
+    tracing::info!(
+        conversation_id = %conversation_id.as_str(),
+        channel,
+        "automatic child-agent reply sent"
+    );
+    Ok(())
 }
 use types::{
     ColdContactPayload, RealModelTurnPayload, StubModelTurnPayload, TransportReviewDecisionPayload,
@@ -926,6 +1015,7 @@ async fn run_real_turn(
         caller_timezone,
         group_context.as_ref(),
     );
+    append_transport_history_context(state, cid, inbound_channel_origin, user_text, &mut turn_context);
     // 2026-05-18 — Phase C of the python-sandbox attach-file UX:
     // tell the agent about any non-image attachments on this
     // conversation so it knows to reach for python.execute against
@@ -1831,6 +1921,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
         caller_timezone,
         group_context.as_ref(),
     );
+    append_transport_history_context(state, cid, inbound_channel_origin, user_text, &mut turn_context);
     // 2026-05-18 — Phase C of the python-sandbox attach-file UX.
     // Runner turns (this path) are the most common place CSV /
     // PDF / etc. flow through — the agent has tools and can act
@@ -2703,6 +2794,7 @@ async fn run_tool_capable_turn(
         caller_timezone,
         group_context.as_ref(),
     );
+    append_transport_history_context(state, cid, inbound_channel_origin, user_text, &mut turn_context);
     // 2026-05-18 — Phase C: announce non-image attachments to the
     // agent. Third call site (the run_agent_turn path); same
     // best-effort semantics as the other two.
@@ -4673,6 +4765,7 @@ pub async fn list_messages(
     let mut latest_transport_context: Option<String> = None;
     let mut latest_transport_seq: Option<i64> = None;
     let mut latest_transport_group: Option<String> = None;
+    let mut latest_history_matches: Option<u32> = None;
     let visible_events: Vec<EventRecord> = events
         .into_iter()
         .filter(|e| {
@@ -4729,6 +4822,7 @@ pub async fn list_messages(
                     &e,
                     conversation_context.as_deref(),
                 );
+                latest_history_matches = related_history_count(&state, &e, &cid);
             }
             let transport_context =
                 if e.kind == EventKind::ModelTurn && extract_channel_origin(&e).is_some() {
@@ -4752,6 +4846,11 @@ pub async fn list_messages(
                 channel_origin: extract_channel_origin(&e),
                 transport_context,
                 transport_group,
+                history_matches: if e.kind == EventKind::ModelTurn {
+                    latest_history_matches
+                } else {
+                    None
+                },
                 reply_to_seq: if e.kind == EventKind::ModelTurn
                     && extract_channel_origin(&e).is_some()
                 {
@@ -4863,6 +4962,55 @@ fn conversation_group_label(
         .filter(|name| !name.trim().is_empty())
         .filter(|name| sender_name.as_deref() != Some(*name))
         .map(str::to_owned)
+}
+
+fn related_history_count(
+    state: &AppState,
+    event: &EventRecord,
+    cid: &ConversationId,
+) -> Option<u32> {
+    let channel = extract_channel_origin(event)?;
+    if !matches!(channel.as_str(), "signal" | "whatsapp") {
+        return None;
+    }
+    let limit = execlaw_core::vault_row::VaultRowStore::new(&state.db)
+        .get(Some(&channel), "history_buffer_size")
+        .ok()
+        .flatten()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    let enabled = execlaw_core::vault_row::VaultRowStore::new(&state.db)
+        .get(Some(&channel), "history_buffer_enabled")
+        .ok()
+        .flatten()
+        .and_then(|raw| String::from_utf8(raw).ok())
+        .map(|value| value != "false")
+        .unwrap_or(true);
+    if !enabled {
+        return Some(0);
+    }
+    let events = crate::chats::event_log(state)
+        .replay_since(cid, EventSeq(0))
+        .ok()?;
+    let current = events
+        .iter()
+        .filter(|candidate| candidate.seq.0 < event.seq.0 && candidate.kind == EventKind::UserMsg)
+        .rev()
+        .find_map(|candidate| candidate.decode_payload::<UserMessagePayload>().ok())?;
+    let terms = execlaw_core::message_archive::extract_topic_keywords(&current.text, 5)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    Some(
+        execlaw_core::message_archive::MessageArchiveStore::new(&state.db)
+            .related_recent_messages(cid.as_str(), &terms, limit)
+            .ok()?
+            .into_iter()
+            .filter(|message| message.body != current.text)
+            .count() as u32,
+    )
 }
 
 /// `GET /api/chats/:id/cards` — projection of every card in this
@@ -5576,6 +5724,45 @@ mod tests {
     async fn json_body<T: for<'de> serde::Deserialize<'de>>(body: Body) -> T {
         let bytes = body::to_bytes(body, usize::MAX).await.unwrap();
         serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn fake_whatsapp_agent_draft_is_persisted_and_published_to_its_thread() {
+        let state = test_app_state();
+        let cid = ConversationId::from("fake-whatsapp-camper-group");
+        ensure_conversation_for(&state.db, &cid);
+        let mut live = state.events.subscribe();
+
+        let seq = append_agent_reply(
+            &state.db,
+            None,
+            &state.events,
+            &cid,
+            "camper_wha",
+            "Could you please confirm the dates you have in mind?",
+            "whatsapp",
+            "120363000000000000@g.us",
+        )
+        .unwrap();
+
+        let events = event_log(&state).replay_since(&cid, EventSeq(0)).unwrap();
+        let payload = events[0].decode_payload::<RealModelTurnPayload>().unwrap();
+        assert_eq!(seq, events[0].seq.0);
+        assert_eq!(payload.model, "agent:camper_wha");
+        assert_eq!(payload.channel_origin.as_deref(), Some("whatsapp"));
+        assert_eq!(
+            payload.transport_recipient.as_deref(),
+            Some("120363000000000000@g.us")
+        );
+        assert!(matches!(
+            live.try_recv().unwrap(),
+            UiEvent::AgentReplyPublished { conversation_id, seq: published_seq, actor, channel_origin, transport_recipient, .. }
+                if conversation_id == cid.as_str()
+                    && published_seq == seq
+                    && actor == "agent:camper_wha"
+                    && channel_origin == "whatsapp"
+                    && transport_recipient == "120363000000000000@g.us"
+        ));
     }
 
     // ---- is_send_tool_for_channel ----------------------------------

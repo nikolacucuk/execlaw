@@ -5,6 +5,7 @@ export interface AgentRun { id:string; agent_id:string; status:string; started_a
 export interface AgentRequest { id?:string; name:string; role_prompt:string; model?:string|null; backend_purpose?:string; tools?:string[]; trust_policy?:Record<string, unknown>; trigger?:Record<string, unknown>; reply_mode?:"draft"|"automatic"; interval_secs?:number; token_budget?:number; max_runtime_secs?:number; concurrency_limit?:number; enabled?:boolean; }
 export function listAgents(token:()=>string|null){return apiFetch<AgentView[]>("/api/admin/agents",{},token)}
 export function createAgent(body:AgentRequest,token:()=>string|null){return apiFetch<AgentView>("/api/admin/agents",{method:"POST",body},token)}
+export function updateAgent(id:string,body:AgentRequest,token:()=>string|null){return apiFetch<AgentView>(`/api/admin/agents/${encodeURIComponent(id)}`,{method:"PUT",body},token)}
 export function importAgentMarkdown(markdown:string,token:()=>string|null){return apiFetch<AgentView>("/api/admin/agents/import-markdown",{method:"POST",body:{markdown}},token)}
 export function pauseAgent(id:string,token:()=>string|null){return apiFetch<boolean>(`/api/admin/agents/${encodeURIComponent(id)}/pause`,{method:"POST"},token)}
 export function resumeAgent(id:string,token:()=>string|null){return apiFetch<boolean>(`/api/admin/agents/${encodeURIComponent(id)}/resume`,{method:"POST"},token)}

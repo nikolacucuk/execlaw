@@ -197,6 +197,8 @@ fn ensure_default_settings() {
         ["inbound_agent_handling_enabled", "true"],
         ["dedicated_chat_enabled", "false"],
         ["inbound_self_message_import_enabled", "true"],
+        ["history_buffer_enabled", "true"],
+        ["history_buffer_size", "50"],
     ];
     for entry in defaults {
         if vault_get(entry[0]) == () { vault_put(entry[0], entry[1]); }

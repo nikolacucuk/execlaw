@@ -197,6 +197,8 @@ export interface MessageView {
     transport_context?: string | null;
     /** Group descriptor shared by transport members and agent replies. */
     transport_group?: string | null;
+    /** Number of related archived transport messages used for this response. */
+    history_matches?: number | null;
     /** Event sequence of the inbound transport message answered by this turn. */
     reply_to_seq?: number | null;
     /** Durable review decision for a transport-originated model reply. */

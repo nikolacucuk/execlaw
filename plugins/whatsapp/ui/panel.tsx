@@ -46,6 +46,8 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     const [agentHandlingEnabled, setAgentHandlingEnabled] = useState(true);
     const [dedicatedChatEnabled, setDedicatedChatEnabled] = useState(false);
     const [selfMessageImportEnabled, setSelfMessageImportEnabled] = useState(true);
+    const [historyBufferEnabled, setHistoryBufferEnabled] = useState(true);
+    const [historyBufferSize, setHistoryBufferSize] = useState(50);
 
     const refresh = useCallback(async () => {
         try {
@@ -127,15 +129,23 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
         } catch {
             setSelfMessageImportEnabled(true);
         }
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>("GET", "/api/admin/plugins/whatsapp/settings/history_buffer_enabled");
+            setHistoryBufferEnabled(setting.value !== "false");
+        } catch { setHistoryBufferEnabled(true); }
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>("GET", "/api/admin/plugins/whatsapp/settings/history_buffer_size");
+            setHistoryBufferSize(Math.min(200, Math.max(1, Number(setting.value) || 50)));
+        } catch { setHistoryBufferSize(50); }
     }, [bridge]);
 
-    const saveInboundSetting = useCallback(async (key: string, enabled: boolean) => {
+    const saveInboundSetting = useCallback(async (key: string, value: boolean | number) => {
         setBusy(true);
         try {
             await bridge.fetchJson(
                 "PUT",
                 `/api/admin/plugins/whatsapp/settings/${key}`,
-                { value: enabled ? "true" : "false" },
+                { value: typeof value === "boolean" ? (value ? "true" : "false") : String(value) },
             );
             setError(null);
         } catch (e) {
@@ -274,6 +284,17 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                                 data-testid="whatsapp-dedicated-chat-toggle"
                             />
                             <span>Show WhatsApp messages in a dedicated WhatsApp chat</span>
+                        </label>
+                        <label className="d-flex gap-2 align-items-center small mt-2">
+                            <input type="checkbox" checked={historyBufferEnabled} disabled={busy}
+                                onChange={(event) => { setHistoryBufferEnabled(event.target.checked); void saveInboundSetting("history_buffer_enabled", event.target.checked); }} />
+                            <span>Use related WhatsApp history before answering</span>
+                        </label>
+                        <label className="d-flex gap-2 align-items-center small mt-2">
+                            <span>History buffer messages</span>
+                            <input type="number" min={1} max={200} value={historyBufferSize} disabled={busy || !historyBufferEnabled}
+                                style={{ width: "5rem" }}
+                                onChange={(event) => { const value = Math.min(200, Math.max(1, Number(event.target.value) || 50)); setHistoryBufferSize(value); void saveInboundSetting("history_buffer_size", value); }} />
                         </label>
                     </div>
                     <div className="execlaw-card mb-3" data-testid="whatsapp-reply-settings">

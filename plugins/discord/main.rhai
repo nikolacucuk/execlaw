@@ -90,9 +90,9 @@ fn on_enable() {
     // and surfaces session_start_limit — useful for diagnostics.
     let gw = ();
     try {
-        gw = http_get(DISCORD_API + "/gateway/bot", #{}, "", #{
+        gw = http_get("https://discord.com/api/v10/gateway/bot", #{}, "", #{
             "Authorization": "Bot " + token,
-            "User-Agent": DISCORD_USER_AGENT,
+            "User-Agent": "DiscordBot (https://github.com/anthropics/execlaw, 0.1.0)",
         });
     } catch (e) {
         log_warn("discord: GET /gateway/bot failed: " + e + " — check bot_token");
@@ -559,12 +559,12 @@ fn send_message_impl(args) {
             reply_to = ();
         }
         last = http_post(
-            DISCORD_API + "/channels/" + channel_id + "/messages",
+            "https://discord.com/api/v10/channels/" + channel_id + "/messages",
             body,
             "",
             #{
                 "Authorization": "Bot " + token,
-                "User-Agent": DISCORD_USER_AGENT,
+                "User-Agent": "DiscordBot (https://github.com/anthropics/execlaw, 0.1.0)",
             },
         );
         if last == () || last.id == () {
@@ -639,12 +639,12 @@ fn set_typing_impl(args) {
     if channel_id == () || channel_id == "" { return #{ "ok": true }; }
     try {
         http_post(
-            DISCORD_API + "/channels/" + channel_id + "/typing",
+            "https://discord.com/api/v10/channels/" + channel_id + "/typing",
             #{},
             "",
             #{
                 "Authorization": "Bot " + token,
-                "User-Agent": DISCORD_USER_AGENT,
+                "User-Agent": "DiscordBot (https://github.com/anthropics/execlaw, 0.1.0)",
             },
         );
     } catch (e) {
@@ -776,12 +776,12 @@ fn get_or_create_dm_channel(user_id, token) {
     let resp = ();
     try {
         resp = http_post(
-            DISCORD_API + "/users/@me/channels",
+            "https://discord.com/api/v10/users/@me/channels",
             #{ "recipient_id": user_id },
             "",
             #{
                 "Authorization": "Bot " + token,
-                "User-Agent": DISCORD_USER_AGENT,
+                "User-Agent": "DiscordBot (https://github.com/anthropics/execlaw, 0.1.0)",
             },
         );
     } catch (e) {
@@ -1010,9 +1010,9 @@ fn admin_set_config(req) {
     // we don't try to validate format beyond non-empty.
     let me = ();
     try {
-        me = http_get(DISCORD_API + "/users/@me", #{}, "", #{
+        me = http_get("https://discord.com/api/v10/users/@me", #{}, "", #{
             "Authorization": "Bot " + token,
-            "User-Agent": DISCORD_USER_AGENT,
+            "User-Agent": "DiscordBot (https://github.com/anthropics/execlaw, 0.1.0)",
         });
     } catch (e) {
         throw "Discord rejected the bot_token: " + e;
@@ -1049,7 +1049,7 @@ fn admin_test_message(req) {
     let token = vault_get("bot_token");
     if token == () || token == "" { throw "no bot_token configured"; }
     let resp = http_post(
-        DISCORD_API + "/channels/" + channel_id + "/messages",
+        "https://discord.com/api/v10/channels/" + channel_id + "/messages",
         #{
             "content": "execlaw test message — Discord plugin v0.1.0 wiring confirmed.",
             "allowed_mentions": #{ "parse": ["users"] },
@@ -1057,7 +1057,7 @@ fn admin_test_message(req) {
         "",
         #{
             "Authorization": "Bot " + token,
-            "User-Agent": DISCORD_USER_AGENT,
+            "User-Agent": "DiscordBot (https://github.com/anthropics/execlaw, 0.1.0)",
         },
     );
     if resp == () || resp.id == () {

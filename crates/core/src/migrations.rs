@@ -161,6 +161,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "message_archive_projection",
         sql: include_str!("../migrations/0027_message_archive_projection.sql"),
     },
+    Migration {
+        id: 28,
+        name: "transport_history_buffer",
+        sql: include_str!("../migrations/0028_transport_history_buffer.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

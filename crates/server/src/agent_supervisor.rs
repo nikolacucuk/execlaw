@@ -2,6 +2,7 @@
 
 use crate::events::{EventBus, UiEvent};
 use crate::inference_resolver::InferenceResolver;
+use crate::state::AppState;
 use execlaw_core::Database;
 use execlaw_core::agents::{AgentRow, AgentStore, trigger_is_event_only};
 use execlaw_core::backends::BackendPurpose;
@@ -22,6 +23,7 @@ pub struct AgentSupervisor {
     inference: Arc<InferenceResolver>,
     events: EventBus,
     event_log_hmac_key: Option<Arc<Vec<u8>>>,
+    app_state: Option<AppState>,
     wake: Arc<Notify>,
     stop: CancellationToken,
     permits: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
@@ -41,10 +43,16 @@ impl AgentSupervisor {
             inference,
             events,
             event_log_hmac_key,
+            app_state: None,
             wake,
             stop: CancellationToken::new(),
             permits: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn with_app_state(mut self, app_state: AppState) -> Self {
+        self.app_state = Some(app_state);
+        self
     }
 
     pub fn kick(&self) {
@@ -95,6 +103,7 @@ impl AgentSupervisor {
             let permits = self.permits.clone();
             let events = self.events.clone();
             let event_log_hmac_key = self.event_log_hmac_key.clone();
+            let app_state = self.app_state.clone();
             tokio::spawn(async move {
                 let permit = {
                     let mut all = permits.lock().await;
@@ -104,7 +113,17 @@ impl AgentSupervisor {
                         })
                         .clone()
                 };
-                if let Err(error) = run_agent(db, inference, agent, permit, events, event_log_hmac_key).await {
+                if let Err(error) = run_agent(
+                    db,
+                    inference,
+                    agent,
+                    permit,
+                    events,
+                    event_log_hmac_key,
+                    app_state,
+                )
+                .await
+                {
                     warn!(%error, "agent run failed");
                 }
             });
@@ -120,6 +139,7 @@ async fn run_agent(
     semaphore: Arc<Semaphore>,
     events: EventBus,
     event_log_hmac_key: Option<Arc<Vec<u8>>>,
+    app_state: Option<AppState>,
 ) -> Result<(), String> {
     let store = AgentStore::new(&db);
     let claimed = store
@@ -250,7 +270,7 @@ async fn run_agent(
                         .get("recipient")
                         .and_then(serde_json::Value::as_str)
                         .ok_or_else(|| "agent inbound lacks recipient".to_owned())?;
-                    crate::chats::append_agent_reply(
+                    let model_seq = crate::chats::append_agent_reply(
                         &db,
                         event_log_hmac_key.as_deref().map(Vec::as_slice),
                         &events,
@@ -260,6 +280,20 @@ async fn run_agent(
                         channel,
                         recipient,
                     )?;
+                    if agent.reply_mode == "automatic" {
+                        let state = app_state.ok_or_else(|| {
+                            "automatic agent replies require application state".to_owned()
+                        })?;
+                        crate::chats::deliver_agent_reply_automatically(
+                            &state,
+                            &execlaw_core::ids::ConversationId::from(conversation_id),
+                            model_seq,
+                            channel,
+                            recipient,
+                            &text,
+                        )
+                        .await?;
+                    }
                 }
             }
             for parent_id in messages.iter().filter_map(|m| m.parent_agent_id.as_deref()) {

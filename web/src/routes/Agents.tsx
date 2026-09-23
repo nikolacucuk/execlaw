@@ -12,6 +12,7 @@ import {
     pauseAgent,
     resumeAgent,
     sendAgentMessage,
+    updateAgent,
     type AgentRun,
     type AgentView,
 } from "../api/agents";
@@ -80,6 +81,11 @@ export function Agents() {
         await refresh();
     }
 
+    async function setReplyMode(agent: AgentView, reply_mode: "draft" | "automatic") {
+        await updateAgent(agent.id, { ...agent, reply_mode }, token);
+        await refresh();
+    }
+
     async function enqueue() {
         if (!selected || !message.trim()) return;
         await sendAgentMessage(selected, message, token);
@@ -127,9 +133,22 @@ export function Agents() {
                                         <strong>{agent.name}</strong>
                                         <span className="d-block small text-muted">{agent.paused ? "Paused" : agent.enabled ? "Running" : "Disabled"} · {agent.trigger.event_only ? "on matching inbound event" : `every ${agent.interval_secs}s`}</span>
                                         <span className="d-block small text-muted">{agent.trigger.channel ? String(agent.trigger.channel) : "any channel"}{agent.trigger.group_only ? " · groups only" : ""}{Array.isArray(agent.trigger.keywords) && agent.trigger.keywords.length > 0 ? ` · ${agent.trigger.keywords.join(", ")}` : ""}</span>
+                                        <span className="d-block small text-muted">{agent.reply_mode === "automatic" ? "Automatic replies enabled" : "Draft replies require review"}</span>
                                         <span className="d-block small">{agent.last_run_status ?? "Never run"}</span>
                                     </button>
-                                    <span className="d-block mt-2"><Button size="sm" variant="outline-secondary" onClick={() => void toggle(agent)}>{agent.paused ? "Resume" : "Pause"}</Button></span>
+                                    <span className="d-flex gap-2 mt-2">
+                                        <Button size="sm" variant="outline-secondary" onClick={() => void toggle(agent)}>{agent.paused ? "Resume" : "Pause"}</Button>
+                                        <Form.Select
+                                            aria-label={`Reply mode for ${agent.name}`}
+                                            size="sm"
+                                            className="w-auto"
+                                            value={agent.reply_mode}
+                                            onChange={(event) => void setReplyMode(agent, event.target.value as "draft" | "automatic")}
+                                        >
+                                            <option value="draft">Review before sending</option>
+                                            <option value="automatic">Send automatically</option>
+                                        </Form.Select>
+                                    </span>
                                 </div>
                             ))}
                         </div>

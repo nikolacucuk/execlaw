@@ -138,6 +138,11 @@ impl AgentStore {
                 "budgets and concurrency must be greater than zero".into(),
             ));
         }
+        if !matches!(input.reply_mode.as_str(), "draft" | "automatic") {
+            return Err(AgentError::Invalid(
+                "reply_mode must be draft or automatic".into(),
+            ));
+        }
         let id = input
             .id
             .clone()
@@ -411,5 +416,33 @@ mod tests {
         s.enqueue_triggered(&a.id, "new WhatsApp message", 2)
             .unwrap();
         assert_eq!(s.get(&a.id).unwrap().unwrap().next_run_at, Some(2));
+    }
+
+    #[test]
+    fn rejects_unknown_reply_mode() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        let error = AgentStore::new(&db)
+            .upsert(
+                &AgentUpsert {
+                    id: None,
+                    name: "invalid-mode".into(),
+                    role_prompt: "Draft replies".into(),
+                    model: None,
+                    backend_purpose: "standard".into(),
+                    tools: Vec::new(),
+                    trust_policy: serde_json::json!({}),
+                    interval_secs: 300,
+                    token_budget: 100,
+                    max_runtime_secs: 30,
+                    concurrency_limit: 1,
+                    enabled: true,
+                    trigger: serde_json::json!({}),
+                    reply_mode: "unattended".into(),
+                },
+                1,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("reply_mode must be draft or automatic"));
     }
 }

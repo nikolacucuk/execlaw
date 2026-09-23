@@ -2252,7 +2252,8 @@ async fn cmd_serve(
         inference.clone(),
         state.events.clone(),
         state.event_log_hmac_key.clone(),
-    );
+    )
+    .with_app_state(state.clone());
     let _agent_supervisor = agent_supervisor.spawn();
 
     // C3 — research subsystem supervisor. Picks up `Pending` rows

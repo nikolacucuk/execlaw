@@ -7,6 +7,7 @@
 use crate::db::{Database, DbError};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ArchiveConversation {
@@ -30,6 +31,7 @@ pub struct ArchiveMessage<'a> {
     pub sender_id: Option<&'a str>,
     pub sender_name: Option<&'a str>,
     pub body: &'a str,
+    pub topic_keywords: &'a str,
     pub occurred_at: i64,
     pub source_message_id: Option<&'a str>,
     pub created_at: i64,
@@ -55,6 +57,35 @@ pub struct ArchiveSearchHit {
     pub archive_id: String,
     pub body: String,
     pub sender_name: Option<String>,
+    pub topic_keywords: String,
+}
+
+/// Extract a small deterministic topic vocabulary for FTS lookup.
+/// The archive must remain useful when no inference backend is available.
+pub fn extract_topic_keywords(body: &str, limit: usize) -> String {
+    let stopwords = [
+        "about", "after", "are", "been", "could", "from", "have", "into", "just",
+        "that", "the", "their", "there", "this", "what", "when", "where", "with",
+        "would", "your", "you", "and", "for", "not", "was", "were", "will",
+    ];
+    let mut counts = HashMap::<String, usize>::new();
+    for raw in body.split(|c: char| !c.is_alphanumeric()) {
+        let word = raw.trim().to_lowercase();
+        if word.len() < 3 || stopwords.contains(&word.as_str()) || word.chars().all(|c| c.is_numeric()) {
+            continue;
+        }
+        *counts.entry(word).or_default() += 1;
+    }
+    let mut words = counts.into_iter().collect::<Vec<_>>();
+    words.sort_by(|(left_word, left_count), (right_word, right_count)| {
+        right_count.cmp(left_count).then_with(|| left_word.cmp(right_word))
+    });
+    words
+        .into_iter()
+        .take(limit)
+        .map(|(word, _)| word)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub struct MessageArchiveStore<'db> {
@@ -105,9 +136,9 @@ impl<'db> MessageArchiveStore<'db> {
             let inserted = c.execute(
                 "INSERT OR IGNORE INTO message_archive_messages(
                     archive_message_id, archive_id, source_event_seq, source_event_kind,
-                    direction, sender_id, sender_name, body, occurred_at,
+                    direction, sender_id, sender_name, body, topic_keywords, occurred_at,
                           source_message_id, created_at, delivery_status, reply_to_message_id
-                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                      ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                 params![
                     message.archive_message_id,
                     message.archive_id,
@@ -117,6 +148,7 @@ impl<'db> MessageArchiveStore<'db> {
                     message.sender_id,
                     message.sender_name,
                     message.body,
+                    message.topic_keywords,
                     message.occurred_at,
                     message.source_message_id,
                     message.created_at,
@@ -241,7 +273,7 @@ impl<'db> MessageArchiveStore<'db> {
     pub fn search(&self, query: &str, limit: u32) -> Result<Vec<ArchiveSearchHit>, DbError> {
         self.db.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT archive_message_id, archive_id, body, sender_name
+                "SELECT archive_message_id, archive_id, body, sender_name, topic_keywords
                  FROM message_archive_search
                  WHERE message_archive_search MATCH ?1
                  ORDER BY rank LIMIT ?2",
@@ -253,6 +285,50 @@ impl<'db> MessageArchiveStore<'db> {
                         archive_id: row.get(1)?,
                         body: row.get(2)?,
                         sender_name: row.get(3)?,
+                        topic_keywords: row.get(4)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+    }
+
+    pub fn related_recent_messages(
+        &self,
+        conversation_id: &str,
+        query_terms: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredArchiveMessage>, DbError> {
+        if query_terms.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let match_query = query_terms
+            .iter()
+            .map(|term| format!("topic_keywords:{term} OR body:{term}"))
+            .collect::<Vec<_>>()
+            .join(" OR ");
+        self.db.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT m.archive_message_id, m.sender_id, m.sender_name, m.body,
+                        m.occurred_at, m.direction, m.delivery_status, m.reply_to_message_id
+                 FROM message_archive_messages m
+                 JOIN message_archive_conversations c ON c.archive_id = m.archive_id
+                 JOIN message_archive_search s ON s.archive_message_id = m.archive_message_id
+                 WHERE c.conversation_id = ?1
+                   AND message_archive_search MATCH ?2
+                 ORDER BY m.occurred_at DESC, m.created_at DESC
+                 LIMIT ?3",
+            )?;
+            Ok(stmt
+                .query_map(params![conversation_id, match_query, limit.min(200) as i64], |row| {
+                    Ok(StoredArchiveMessage {
+                        archive_message_id: row.get(0)?,
+                        sender_id: row.get(1)?,
+                        sender_name: row.get(2)?,
+                        body: row.get(3)?,
+                        occurred_at: row.get(4)?,
+                        direction: row.get(5)?,
+                        delivery_status: row.get(6)?,
+                        reply_to_message_id: row.get(7)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?)
@@ -292,6 +368,7 @@ mod tests {
             sender_id: Some("alice"),
             sender_name: Some("Alice"),
             body: "hello",
+            topic_keywords: "hello",
             occurred_at: 10,
             source_message_id: Some("remote-1"),
             created_at: 10,

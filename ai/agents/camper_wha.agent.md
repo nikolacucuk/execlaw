@@ -2,6 +2,9 @@
 name: camper_wha
 argument-hint: "Review an inbound WhatsApp message about a camper or camper van and prepare a reply draft using the historical camper conversation records"
 description: "Camper WhatsApp reply specialist: activates only for camper-related WhatsApp messages, consults the supplied historical Markdown records, and returns a concise reviewable reply draft without sending it."
+channel: whatsapp
+keywords: "camper, camper van, motorhome, camper rental, camper hire, camping, campsite, camper montenegro"
+group_titles: "1th Sept 2026, Luka Villa, Montenegro"
 tools:
   - read
   - search

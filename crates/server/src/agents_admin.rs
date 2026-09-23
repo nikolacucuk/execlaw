@@ -212,21 +212,7 @@ async fn import_markdown(
         .cloned()
         .unwrap_or_else(|| "Imported agent".into());
     let id = name.to_ascii_lowercase().replace([' ', '-', '.'], "_");
-    let keywords = if id == "camper_wha" {
-        vec![
-            "camper",
-            "camper van",
-            "motorhome",
-            "camper montenegro",
-            "montenegro",
-            "camping",
-        ]
-    } else {
-        Vec::new()
-    };
-    let event_only = frontmatter
-        .get("event_only")
-        .is_some_and(|value| value.eq_ignore_ascii_case("true"));
+    let trigger = markdown_trigger(&frontmatter);
     let agent = AgentStore::new(&s.db)
         .upsert(
             &AgentUpsert {
@@ -242,12 +228,7 @@ async fn import_markdown(
                 max_runtime_secs: 120,
                 concurrency_limit: 1,
                 enabled: true,
-                trigger: serde_json::json!({
-                    "channel": "whatsapp",
-                    "keywords": keywords,
-                    "group_only": id == "camper_wha",
-                    "event_only": event_only,
-                }),
+                trigger,
                 reply_mode: "draft".into(),
             },
             chrono::Utc::now().timestamp(),
@@ -255,6 +236,51 @@ async fn import_markdown(
         .map_err(map)?;
     Ok(Json(agent.into()))
 }
+
+fn markdown_trigger(frontmatter: &std::collections::HashMap<String, String>) -> serde_json::Value {
+    let mut trigger = serde_json::Map::new();
+    for key in ["channel", "event_only", "group_only"] {
+        if let Some(value) = frontmatter.get(key) {
+            let value = if matches!(key, "event_only" | "group_only") {
+                serde_json::Value::Bool(value.eq_ignore_ascii_case("true"))
+            } else {
+                serde_json::Value::String(value.clone())
+            };
+            trigger.insert(key.to_owned(), value);
+        }
+    }
+    if let Some(keywords) = frontmatter.get("keywords") {
+        let keywords = comma_separated_values(keywords);
+        if !keywords.is_empty() {
+            trigger.insert("keywords".to_owned(), serde_json::json!(keywords));
+        }
+    }
+    if let Some(group_titles) = frontmatter.get("group_titles") {
+        let group_titles = semicolon_separated_values(group_titles);
+        if !group_titles.is_empty() {
+            trigger.insert("group_titles".to_owned(), serde_json::json!(group_titles));
+        }
+    }
+    serde_json::Value::Object(trigger)
+}
+
+fn comma_separated_values(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+    fn semicolon_separated_values(value: &str) -> Vec<String> {
+        value
+            .split(';')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect()
+    }
 
 fn split_frontmatter(
     markdown: &str,
@@ -292,6 +318,30 @@ fn split_frontmatter(
         });
     }
     Ok((frontmatter, body.join("\n").trim().to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn markdown_trigger_preserves_event_scoped_camper_configuration() {
+        let (frontmatter, _) = split_frontmatter(
+            "---\nname: camper_wha\nchannel: whatsapp\nevent_only: true\ngroup_only: true\nkeywords: camper, camper van, motorhome, camping\ngroup_titles: 1th Sept 2026, Luka Villa, Montenegro\n---\nDraft replies.",
+        )
+        .unwrap();
+
+        assert_eq!(
+            markdown_trigger(&frontmatter),
+            serde_json::json!({
+                "channel": "whatsapp",
+                "event_only": true,
+                "group_only": true,
+                "keywords": ["camper", "camper van", "motorhome", "camping"],
+                "group_titles": ["1th Sept 2026, Luka Villa, Montenegro"],
+            })
+        );
+    }
 }
 async fn update(
     State(s): State<AppState>,

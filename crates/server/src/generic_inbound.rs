@@ -347,6 +347,10 @@ pub async fn route_inbound(
                             conversation_id = %cid.as_str(),
                             "silent commit of unaddressed group message failed",
                         );
+                    } else {
+                        enqueue_triggered_agents(state, channel, &cid, &msg).map_err(|e| {
+                            HostCapError::new(format!("enqueue triggered agents: {e}"))
+                        })?;
                     }
                     return Ok(RouteOutcome::GroupNotAddressed);
                 }
@@ -508,6 +512,21 @@ fn trigger_matches(
         && group_id.is_none()
     {
         return false;
+    }
+    let group_matches = trigger
+        .get("group_titles")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|titles| {
+            let Some(group_name) = group_name else {
+                return false;
+            };
+            titles
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .any(|title| !title.trim().is_empty() && title.eq_ignore_ascii_case(group_name))
+        });
+    if group_matches {
+        return true;
     }
     let Some(keywords) = trigger.get("keywords").and_then(|v| v.as_array()) else {
         return configured_channel.is_some();
@@ -772,6 +791,31 @@ mod tests {
             "whatsapp",
             Some("group-123"),
             Some("1th Sept 2026, Luka Villa, Camper Montenegro"),
+            "I'm at the beach haha"
+        ));
+    }
+
+    #[test]
+    fn trigger_matches_explicit_group_title_without_broad_location_match() {
+        let trigger = json!({
+            "channel": "whatsapp",
+            "group_only": true,
+            "group_titles": ["1th Sept 2026, Luka Villa, Montenegro"],
+            "keywords": ["camper"]
+        });
+
+        assert!(trigger_matches(
+            &trigger,
+            "whatsapp",
+            Some("group-123"),
+            Some("1th Sept 2026, Luka Villa, Montenegro"),
+            "I'm at the beach haha"
+        ));
+        assert!(!trigger_matches(
+            &trigger,
+            "whatsapp",
+            Some("group-456"),
+            Some("Another Montenegro group"),
             "I'm at the beach haha"
         ));
     }

@@ -64,6 +64,8 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
     const [agentHandlingEnabled, setAgentHandlingEnabled] = useState(true);
     const [dedicatedChatEnabled, setDedicatedChatEnabled] = useState(false);
     const [selfMessageImportEnabled, setSelfMessageImportEnabled] = useState(true);
+    const [historyBufferEnabled, setHistoryBufferEnabled] = useState(true);
+    const [historyBufferSize, setHistoryBufferSize] = useState(50);
 
     const refresh = useCallback(async () => {
         try {
@@ -109,6 +111,14 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
             );
             setSelfMessageImportEnabled(setting.value !== "false");
         } catch { setSelfMessageImportEnabled(true); }
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>("GET", "/api/admin/plugins/signal/settings/history_buffer_enabled");
+            setHistoryBufferEnabled(setting.value !== "false");
+        } catch { setHistoryBufferEnabled(true); }
+        try {
+            const setting = await bridge.fetchJson<{ value: string }>("GET", "/api/admin/plugins/signal/settings/history_buffer_size");
+            setHistoryBufferSize(Math.min(200, Math.max(1, Number(setting.value) || 50)));
+        } catch { setHistoryBufferSize(50); }
     }, [bridge]);
 
     const saveSetting = useCallback(async (key: string, value: string) => {
@@ -218,6 +228,17 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                                 onChange={(event) => { setDedicatedChatEnabled(event.target.checked); void saveSetting("dedicated_chat_enabled", event.target.checked ? "true" : "false"); }}
                                 data-testid="signal-dedicated-chat-toggle" />
                             <span>Show Signal messages in a dedicated Signal chat</span>
+                        </label>
+                        <label className="d-flex gap-2 align-items-center small mt-2">
+                            <input type="checkbox" checked={historyBufferEnabled} disabled={busy}
+                                onChange={(event) => { setHistoryBufferEnabled(event.target.checked); void saveSetting("history_buffer_enabled", event.target.checked ? "true" : "false"); }} />
+                            <span>Use related Signal history before answering</span>
+                        </label>
+                        <label className="d-flex gap-2 align-items-center small mt-2">
+                            <span>History buffer messages</span>
+                            <input type="number" min={1} max={200} value={historyBufferSize} disabled={busy || !historyBufferEnabled}
+                                style={{ width: "5rem" }}
+                                onChange={(event) => { const value = Math.min(200, Math.max(1, Number(event.target.value) || 50)); setHistoryBufferSize(value); void saveSetting("history_buffer_size", String(value)); }} />
                         </label>
                     </div>
                     <div className="execlaw-card mb-3" data-testid="signal-reply-settings">

@@ -586,6 +586,57 @@ EXECLAW_DEV_BIND=127.0.0.1:9000 bash scripts/dev-server.sh
 VITE_API_TARGET=http://127.0.0.1:9000 npm run dev
 ```
 
+### Windows local build on port 5174
+
+The following two-terminal workflow serves the built SPA at
+`http://127.0.0.1:5174` and proxies API requests and WebSocket events to the
+local control plane on `127.0.0.1:3031`. It is useful when the Cargo build is
+already available but the normal Vite dev server is not being used.
+
+Terminal 1 — start the control plane from the repository root:
+
+```powershell
+& .\target-local-ui-verification\debug\execlaw.exe serve `
+   --bind 127.0.0.1:3031 `
+   --no-encrypt `
+   --allow-unsigned-local-development
+```
+
+If that executable does not exist, build it first:
+
+```powershell
+cargo build --locked -p execlaw --target-dir target-local-ui-verification
+```
+
+Terminal 2 — start the local SPA proxy from the repository root:
+
+```powershell
+node scripts\local-spa-server.mjs
+```
+
+Open `http://127.0.0.1:5174/` (or `/login`, `/setup`, or `/chat`). Verify
+both processes are ready before signing in:
+
+```powershell
+curl.exe http://127.0.0.1:5174/api/health
+curl.exe http://127.0.0.1:3031/api/health
+```
+
+Both commands should return `{"status":"ok"}`. The
+`--allow-unsigned-local-development` flag is required only when installing
+unsigned local plugin ZIPs; it is Controller-gated and should not be used as
+a production deployment default. Docker is required for runner containers and
+plugin sidecars, but the control plane, SPA, and sidecar-free plugins such as
+Discord can start without it.
+
+To stop this local deployment, press `Ctrl+C` in both terminals. If a stale
+process remains, use:
+
+```powershell
+Get-Process -Name execlaw,node -ErrorAction SilentlyContinue |
+   Stop-Process -Force
+```
+
 ### Useful npm scripts (in `web/`)
 
 | Script | What it does |

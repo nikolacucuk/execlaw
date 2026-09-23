@@ -375,9 +375,6 @@ export function MessageStream({
                                 showTransportSend={
                                     !!readChannelOrigin(m) &&
                                     m.kind === "model_turn" &&
-                                    m.review_state !== "sent" &&
-                                    m.review_state !== "cancelled" &&
-                                    !optimisticReviewStates[m.seq] &&
                                     !!onSendTransportReply
                                 }
                                 transportSendBusy={sendingReplySeq === m.seq}
@@ -415,6 +412,11 @@ export function MessageStream({
                                     }));
                                     await onSetTransportReviewDecision?.(m.seq, "cancelled");
                                 }}
+                                showCancelTransportReply={
+                                    m.review_state !== "sent" &&
+                                    m.review_state !== "cancelled" &&
+                                    !optimisticReviewStates[m.seq]
+                                }
                                 showReviewOverride={
                                     !!readChannelOrigin(m) &&
                                     m.kind === "model_turn" &&
@@ -532,6 +534,7 @@ function MessageBubble({
     onTransportChange,
     onSendTransportReply,
     onCancelTransportReply,
+    showCancelTransportReply = false,
     showReviewOverride = false,
     onReviewOverride,
     showForceResponse = false,
@@ -550,6 +553,7 @@ function MessageBubble({
     onTransportChange?: (channel: string) => void;
     onSendTransportReply?: () => Promise<void>;
     onCancelTransportReply?: () => void;
+    showCancelTransportReply?: boolean;
     showReviewOverride?: boolean;
     onReviewOverride?: () => Promise<void>;
     showForceResponse?: boolean;
@@ -717,6 +721,12 @@ function MessageBubble({
                         {message.transport_context}
                     </span>
                 )}
+                {message.kind === "model_turn" && message.history_matches != null && (
+                    <span className="execlaw-msg__history-badge" title="Related archived transport history used in this response">
+                        <i className="bi bi-clock-history" aria-hidden />
+                        history considered: {message.history_matches}
+                    </span>
+                )}
             </div>
             <div
                 className={
@@ -812,8 +822,11 @@ function MessageBubble({
                             <i className="bi bi-send me-1" aria-hidden />
                             {transportSendBusy
                                 ? "Sending..."
-                                : `Send to ${transportLabel(message.channel_origin)}`}
+                                : message.review_state === "sent" || message.review_state === "cancelled"
+                                  ? `Resend to ${transportLabel(message.channel_origin)}`
+                                  : `Send to ${transportLabel(message.channel_origin)}`}
                         </button>
+                        {showCancelTransportReply && (
                         <button
                             type="button"
                             className="btn btn-sm btn-outline-secondary"
@@ -824,6 +837,7 @@ function MessageBubble({
                             <i className="bi bi-x-lg me-1" aria-hidden />
                             Cancel reply
                         </button>
+                        )}
                     </div>
                 )}
                 {showReviewOverride && (

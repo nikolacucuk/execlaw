@@ -210,7 +210,10 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                         )}
                     </div>
                     <p className="execlaw-muted small mb-3">
-                        Install the{" "}
+                        The GitHub project currently publishes source rather
+                        than an APK. Build and install it from source using
+                        Android Studio/SDK, Node.js 22.11+, and a connected
+                        Android device, then{" "}
                         <a
                             href="https://github.com/crockpotveggies/sms-socket-app"
                             target="_blank"
@@ -218,12 +221,14 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                         >
                             sms-socket-app
                         </a>{" "}
-                        on your Android phone, start the gateway, and copy the
-                        generated API key. The default URL{" "}
-                        <code>ws://127.0.0.1:8787/</code> works when the phone
-                        is reachable from this host (USB tether with{" "}
+                        on your Android phone. Start the gateway and copy the
+                        generated API key. On Wi-Fi, use the phone&apos;s LAN
+                        address, for example{" "}
+                        <code>ws://192.168.1.42:8787/</code>. The default URL{" "}
+                        <code>ws://127.0.0.1:8787/</code> only works with a USB
+                        port forward such as{" "}
                         <code>adb reverse tcp:8787 tcp:8787</code>, or Wi-Fi
-                        with the phone&apos;s LAN IP). For TLS, use{" "}
+                        with the phone&apos;s LAN IP. For TLS, use{" "}
                         <code>wss://</code>.
                     </p>
 
