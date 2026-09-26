@@ -59,6 +59,14 @@ fn require_controller(state: &AppState, user: &AuthedUser) -> Result<(), ApiErro
     }
 }
 
+fn handler_failure() -> ApiError {
+    ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "plugin_admin_handler_error",
+        message: "plugin admin handler failed".into(),
+    }
+}
+
 /// Mount the catch-all under `/api/admin/plugins/:plugin_id/...`.
 /// Match-anything `*tail` lets a plugin declare nested paths
 /// (`/pair/start`, `/pair/finalize`).
@@ -160,11 +168,7 @@ async fn dispatch_handler(
     let result = plugin
         .invoke_async_owned(decl.handler.clone(), dyn_args)
         .await
-        .map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "plugin_admin_handler_error",
-            message: format!("[{plugin_id}] handler {}: {e}", decl.handler),
-        })?;
+        .map_err(|_| handler_failure())?;
     Ok((StatusCode::OK, Json(result)).into_response())
 }
 
@@ -357,6 +361,18 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn admin_handler_failure_does_not_echo_credentials() {
+        let fake_token = "fake-discord-token-1234";
+        let response = handler_failure().into_response();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(!text.contains(fake_token));
+        assert!(!text.contains("1234"));
+        assert!(text.contains("plugin_admin_handler_error"));
+    }
 
     /// Helper: install a fake plugin into the test app state and
     /// drop a `ui/panel.js` file into its stage dir. Returns the

@@ -95,11 +95,11 @@ fn on_enable() {
             "User-Agent": "DiscordBot (https://github.com/anthropics/execlaw, 0.1.0)",
         });
     } catch (e) {
-        log_warn("discord: GET /gateway/bot failed: " + e + " — check bot_token");
+        log_warn("discord: GET /gateway/bot failed — check bot_token");
         return;
     }
     if gw == () || gw.url == () || gw.url == "" {
-        log_warn("discord: /gateway/bot returned no url; response: " + gw);
+        log_warn("discord: /gateway/bot returned no url");
         return;
     }
     let gateway_url = gw.url + "/?v=10&encoding=json";
@@ -649,7 +649,7 @@ fn set_typing_impl(args) {
         );
     } catch (e) {
         // Best-effort; typing indicator failure shouldn't surface.
-        log_warn("discord: typing trigger failed: " + e);
+        log_warn("discord: typing trigger failed");
     }
     #{ "ok": true }
 }
@@ -785,7 +785,7 @@ fn get_or_create_dm_channel(user_id, token) {
             },
         );
     } catch (e) {
-        log_warn("discord: DM channel create failed for user " + user_id + ": " + e);
+        log_warn("discord: DM channel create failed");
         return ();
     }
     if resp == () || resp.id == () { return (); }
@@ -1015,7 +1015,7 @@ fn admin_set_config(req) {
             "User-Agent": "DiscordBot (https://github.com/anthropics/execlaw, 0.1.0)",
         });
     } catch (e) {
-        throw "Discord rejected the bot_token: " + e;
+        throw "Discord bot token validation failed; check the token in the Discord developer portal";
     }
     if me == () || me.id == () {
         throw "/users/@me returned no id; token is probably invalid";
@@ -1068,9 +1068,7 @@ fn admin_test_message(req) {
 
 fn mask(s) {
     if s == () || s == "" { return ""; }
-    let n = s.len();
-    if n <= 4 { return repeat_char("*", n); }
-    repeat_char("*", n - 4) + s.sub_string(n - 4)
+    "********"
 }
 
 fn repeat_char(ch, n) {
@@ -1107,4 +1105,8 @@ fn _test_split(text) {
 
 fn _test_parse_timestamp(ts) {
     parse_discord_timestamp_ms(ts)
+}
+
+fn _test_mask(token) {
+    mask(token)
 }

@@ -84,6 +84,15 @@ async fn heartbeat_with_no_sequence_emits_null_payload() {
     assert_eq!(r.as_str(), Some("{\"op\":1,\"d\":null}"));
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn token_mask_does_not_reveal_any_characters() {
+    let plugin = discord_plugin();
+    let token = "fake-secret-token-1234";
+    let result = invoke_str(&plugin, "_test_mask", token).await;
+    assert_eq!(result.as_str(), Some("********"));
+    assert!(!result.to_string().contains("1234"));
+}
+
 // ---- _test_decode_message_create — DM happy path ------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

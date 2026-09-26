@@ -2794,7 +2794,13 @@ fn http_get_impl_with_headers(
     }
     let resp = req
         .call()
-        .map_err(|e| ureq_to_eval_err(plugin_id, "http_get", url, e))?;
+        .map_err(|e| {
+            if !bearer.is_empty() || headers.is_some_and(has_authorization_header) {
+                authenticated_http_error(plugin_id, "http_get", e)
+            } else {
+                ureq_to_eval_err(plugin_id, "http_get", url, e)
+            }
+        })?;
     decode_response(plugin_id, url, resp)
 }
 
@@ -2833,7 +2839,13 @@ fn http_post_impl_with_headers(
     }
     let resp = req
         .send_json(body_json)
-        .map_err(|e| ureq_to_eval_err(plugin_id, "http_post", url, e))?;
+        .map_err(|e| {
+            if !bearer.is_empty() || headers.is_some_and(has_authorization_header) {
+                authenticated_http_error(plugin_id, "http_post", e)
+            } else {
+                ureq_to_eval_err(plugin_id, "http_post", url, e)
+            }
+        })?;
     decode_response(plugin_id, url, resp)
 }
 
@@ -3133,6 +3145,22 @@ fn decode_envelope(
     Ok(Dynamic::from(envelope))
 }
 
+fn has_authorization_header(headers: &Map) -> bool {
+    headers.keys().any(|key| key.as_str().eq_ignore_ascii_case("authorization"))
+}
+
+fn authenticated_http_error(plugin_id: &str, op: &str, error: ureq::Error) -> Box<EvalAltResult> {
+    let reason = match error {
+        ureq::Error::Status(code, _) => format!("returned {code}"),
+        ureq::Error::Transport(_) => "transport failed".to_owned(),
+    };
+    EvalAltResult::ErrorRuntime(
+        format!("{op} [{plugin_id}] {reason}").into(),
+        rhai::Position::NONE,
+    )
+    .into()
+}
+
 fn ureq_to_eval_err(plugin_id: &str, op: &str, url: &str, e: ureq::Error) -> Box<EvalAltResult> {
     let msg = match e {
         ureq::Error::Status(code, resp) => {
@@ -3418,6 +3446,35 @@ mod tests {
         let err = result.unwrap_err().to_string();
         assert!(err.contains("http_get"), "got: {err}");
         assert!(err.contains("http-fail"), "got: {err}");
+    }
+
+    #[test]
+    fn authenticated_http_failure_does_not_echo_upstream_body() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            let (mut socket, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = socket.read(&mut request);
+            let body = "fake-discord-token-1234";
+            let response = format!(
+                "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).unwrap();
+        });
+        let factory = ScriptEngine::with_loopback_allowed_for_tests();
+        let (engine, _slot, _registry) = factory.build_for_plugin("auth-test");
+        let error = engine
+            .eval::<Dynamic>(&format!(
+                r#"http_get("http://{address}/", #{{}}, "", #{{"Authorization": "Bot fake-discord-token-1234"}})"#
+            ))
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+        assert!(error.contains("returned 401"), "got: {error}");
+        assert!(!error.contains("fake-discord-token-1234"), "got: {error}");
     }
 
     /// SSRF guard pins: production constructor rejects loopback /
