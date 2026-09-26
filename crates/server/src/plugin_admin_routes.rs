@@ -374,6 +374,49 @@ mod tests {
         assert!(text.contains("plugin_admin_handler_error"));
     }
 
+    #[tokio::test]
+    async fn admin_route_does_not_reflect_a_plugin_error_containing_a_token() {
+        let state = test_app_state();
+        let app = build_router(state.clone());
+        let (token, _) = fixture_with_panel(&app, &state, "fixture-auth", b"x").await;
+        let stage = state.plugin_host.stage_root().join("fixture-secret-0.1.0");
+        fs::create_dir_all(&stage).unwrap();
+        fs::write(stage.join("plugin.toml"), r#"
+[plugin]
+id = "fixture-secret"
+name = "Fixture secret"
+version = "0.1.0"
+
+[runtime]
+tier = "script"
+source = "main.rhai"
+
+[[admin_routes]]
+method = "POST"
+path = "/config"
+handler = "admin_set_config"
+"#).unwrap();
+        fs::write(stage.join("main.rhai"), r#"
+fn admin_set_config(req) {
+    throw "upstream echoed " + req.body.bot_token;
+}
+"#).unwrap();
+        state.plugin_host.install(&stage).await.unwrap();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/plugins/fixture-secret/config")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"bot_token":"fake-discord-token-1234"}"#))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        assert!(text.contains("plugin_admin_handler_error"));
+        assert!(!text.contains("fake-discord-token-1234"));
+    }
+
     /// Helper: install a fake plugin into the test app state and
     /// drop a `ui/panel.js` file into its stage dir. Returns the
     /// auth token + the stage path so the test can drop more files.

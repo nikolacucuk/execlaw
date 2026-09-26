@@ -414,3 +414,19 @@ If you're deploying execlaw on a machine that's network-reachable:
    key, if you're using it) on the same cadence as any other
    operator-critical state. `execlaw backup` produces an encrypted
    bundle suitable for offsite storage.
+
+### Discord bot token exposure
+
+If a Discord token appeared in a log accessible outside the operator's
+machine, treat it as compromised. Reset the token in the Discord Developer
+Portal, then enter the replacement only through **Settings → Plugins →
+Discord**. Remove or restrict copies of the exposed log, including any
+public issue, CI artifact, paste, or log collector; do not paste the old
+token into a bug report. Updating the plugin does not revoke the old token.
+
+Discord plugin v0.2.1 returns only a fixed redaction marker from its config
+and status routes, and does not forward upstream validation errors to the
+admin response or logs. The host also suppresses raw plugin-admin handler
+errors and authenticated HTTP response bodies, since either may reflect a
+credential supplied in a request header. The bot token remains in the
+plugin-scoped vault and is not supplied by repository defaults.

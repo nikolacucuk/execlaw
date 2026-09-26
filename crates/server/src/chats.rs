@@ -4837,11 +4837,11 @@ async fn send_transport_text(
 )]
 pub async fn list_messages(
     State(state): State<AppState>,
-    user: Option<crate::auth_extract::AuthedUser>,
+    user: Result<crate::auth_extract::AuthedUser, crate::auth_extract::AuthRejection>,
     Path(conversation_id): Path<String>,
     Query(q): Query<ListQuery>,
 ) -> impl IntoResponse {
-    if q.around.is_some() && !user.as_ref().is_some_and(|user| user.role == execlaw_core::users::UserRole::Controller) {
+    if q.around.is_some() && !user.as_ref().is_ok_and(|user| user.role == execlaw_core::users::UserRole::Controller) {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Controller required for centered history" }))).into_response();
     }
     let cid = ConversationId::from(conversation_id.as_str());
