@@ -250,15 +250,75 @@ export interface MessagesListResponse {
 export async function listMessages(
     conversationId: string,
     tokenAccessor: () => string | null,
-    opts: { before?: number; limit?: number } = {},
+    opts: { before?: number; limit?: number; around?: number } = {},
 ): Promise<MessagesListResponse> {
     const qs = new URLSearchParams();
     if (opts.before !== undefined) qs.set("before", String(opts.before));
     if (opts.limit !== undefined) qs.set("limit", String(opts.limit));
+    if (opts.around !== undefined) qs.set("around", String(opts.around));
     const path = `/api/chats/${encodeURIComponent(conversationId)}/messages${
         qs.toString() ? "?" + qs.toString() : ""
     }`;
     return apiFetch<MessagesListResponse>(path, {}, tokenAccessor);
+}
+
+export interface NexusLink {
+    target_seq: number;
+    relation: "replies_to" | "forwarded_from" | "mentions" | "generated_from";
+}
+
+export interface NexusAnnotation {
+    seq: number;
+    branch_id: string | null;
+    tags: string[];
+    links: NexusLink[];
+}
+
+export interface NexusFilters {
+    source?: string;
+    tag?: string;
+    kind?: string;
+    query?: string;
+}
+
+export interface NexusView {
+    name: string;
+    filters: NexusFilters;
+}
+
+export interface NexusOrganization {
+    annotations: NexusAnnotation[];
+    views: NexusView[];
+}
+
+export async function getNexusOrganization(conversationId: string, tokenAccessor: () => string | null): Promise<NexusOrganization> {
+    return apiFetch<NexusOrganization>(`/api/chats/${encodeURIComponent(conversationId)}/nexus`, {}, tokenAccessor);
+}
+
+export async function saveNexusAnnotation(conversationId: string, annotation: NexusAnnotation, tokenAccessor: () => string | null): Promise<void> {
+    await apiFetch(`/api/chats/${encodeURIComponent(conversationId)}/nexus/annotation`, { method: "POST", body: annotation }, tokenAccessor);
+}
+
+export async function saveNexusView(conversationId: string, view: NexusView, tokenAccessor: () => string | null): Promise<void> {
+    await apiFetch(`/api/chats/${encodeURIComponent(conversationId)}/nexus/views`, { method: "POST", body: view }, tokenAccessor);
+}
+
+export async function deleteNexusView(conversationId: string, name: string, tokenAccessor: () => string | null): Promise<void> {
+    await apiFetch(`/api/chats/${encodeURIComponent(conversationId)}/nexus/views/${encodeURIComponent(name)}`, { method: "DELETE" }, tokenAccessor);
+}
+
+export interface NexusSearchHit {
+    seq: number;
+    text: string;
+    source: string;
+    committed_at: number;
+}
+
+export async function searchNexusMessages(conversationId: string, query: string, tokenAccessor: () => string | null, before?: number, source?: string): Promise<{ matches: NexusSearchHit[]; has_more: boolean }> {
+    const params = new URLSearchParams({ q: query });
+    if (before != null) params.set("before", String(before));
+    if (source) params.set("source", source);
+    return apiFetch(`/api/chats/${encodeURIComponent(conversationId)}/messages/search?${params}`, {}, tokenAccessor);
 }
 
 export async function sendTransportReply(
@@ -282,6 +342,18 @@ export async function forceTransportResponse(
 ): Promise<{ accepted: boolean }> {
     return apiFetch<{ accepted: boolean }>(
         `/api/chats/${encodeURIComponent(conversationId)}/force-transport-response`,
+        { method: "POST", body: { source_seq: sourceSeq } },
+        tokenAccessor,
+    );
+}
+
+export async function rerunResponse(
+    conversationId: string,
+    sourceSeq: number,
+    tokenAccessor: () => string | null,
+): Promise<{ accepted: boolean }> {
+    return apiFetch<{ accepted: boolean }>(
+        `/api/chats/${encodeURIComponent(conversationId)}/rerun-response`,
         { method: "POST", body: { source_seq: sourceSeq } },
         tokenAccessor,
     );

@@ -879,6 +879,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/chats/{conversation_id}/cards",
             get(crate::chats::list_cards),
         )
+        .route("/api/chats/{conversation_id}/nexus", get(crate::chats::list_nexus_organization))
+        .route("/api/chats/{conversation_id}/nexus/annotation", post(crate::chats::save_nexus_annotation))
+        .route("/api/chats/{conversation_id}/nexus/views", post(crate::chats::save_nexus_view))
+        .route("/api/chats/{conversation_id}/nexus/views/{name}", axum::routing::delete(crate::chats::delete_nexus_view))
+        .route("/api/chats/{conversation_id}/messages/search", get(crate::chats::search_nexus_messages))
         .route(
             "/api/chats/{conversation_id}/transport-reply",
             post(crate::chats::send_transport_reply),
@@ -886,6 +891,10 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/chats/{conversation_id}/force-transport-response",
             post(crate::chats::force_transport_response),
+        )
+        .route(
+            "/api/chats/{conversation_id}/rerun-response",
+            post(crate::chats::rerun_response),
         )
         .route(
             "/api/chats/{conversation_id}/transport-review-decision",

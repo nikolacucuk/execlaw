@@ -23,7 +23,12 @@ import {
     useRef,
     useState,
 } from "react";
-import type { AvailableTransportView, MessageView } from "../api/endpoints";
+import {
+    deleteNexusView, getNexusOrganization, listMessages, saveNexusAnnotation,
+    saveNexusView, searchNexusMessages,
+    type AvailableTransportView, type MessageView, type NexusAnnotation,
+    type NexusLink, type NexusOrganization, type NexusSearchHit,
+} from "../api/endpoints";
 import { signDownloadUrl } from "../api/signedDownloadUrl";
 import { AuthContext } from "../auth/AuthContext";
 import { getCardRenderer } from "../cards/CardRenderer";
@@ -44,7 +49,7 @@ import "./components/ChartInlineComponent";
 import "./components/WeatherCurrentComponent";
 import "./components/WeatherDailyComponent";
 import "./components/PythonExecuteComponent";
-import { useChatState } from "./store";
+import { mergeMessages, useChatState } from "./store";
 import { useChatAppearance } from "./useChatAppearance";
 import { useT } from "../i18n";
 
@@ -99,6 +104,7 @@ interface Props {
         channel: string,
     ) => Promise<void>;
     onForceTransportResponse?: (sourceSeq: number) => Promise<void>;
+    onRerunResponse?: (sourceSeq: number) => Promise<void>;
     onSetTransportReviewDecision?: (
         sourceSeq: number,
         decision: "cancelled" | "pending",
@@ -132,15 +138,35 @@ export function MessageStream({
     showToolResults = true,
     onSendTransportReply,
     onForceTransportResponse,
+    onRerunResponse,
     onSetTransportReviewDecision,
 }: Props) {
     const [appearance] = useChatAppearance();
     const nexus = appearance === "nexus";
     const t = useT();
+    const auth = useContext(AuthContext);
+    const getToken = auth?.getAccessToken;
     const [selectedSource, setSelectedSource] = useState("");
+    const [sourceOrder, setSourceOrder] = useState<"first" | "name">("first");
+    const [searchText, setSearchText] = useState("");
+    const [view, setView] = useState<"conversation" | "relationships">("conversation");
     const [selectedTransportBySeq, setSelectedTransportBySeq] = useState<Record<number, string>>({});
     const [activeSeq, setActiveSeq] = useState<number | null>(null);
     const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+    const [collapsedBranches, setCollapsedBranches] = useState<Record<string, boolean>>({});
+    const [organization, setOrganization] = useState<NexusOrganization>({ annotations: [], views: [] });
+    const [selectedTag, setSelectedTag] = useState("");
+    const [selectedBranch, setSelectedBranch] = useState("");
+    const [selectedKind, setSelectedKind] = useState("");
+    const [viewName, setViewName] = useState("");
+    const [searchHits, setSearchHits] = useState<NexusSearchHit[]>([]);
+    const [searchAttempted, setSearchAttempted] = useState(false);
+    const [searchMore, setSearchMore] = useState(false);
+    const [searchError, setSearchError] = useState("");
+    const searchRequestId = useRef(0);
+    const [buffered, setBuffered] = useState<Record<string, number>>({});
+    const [newMessageSeqs, setNewMessageSeqs] = useState<number[]>([]);
+    const lastSeenSeq = useRef<number | null>(null);
     const messages = useChatState(
         (s) => s.messages[conversationId] ?? null,
     );
@@ -188,11 +214,48 @@ export function MessageStream({
     }, [messages, cards, showToolResults]);
     const scrollRef = useRef<HTMLDivElement | null>(null);
     const visibleMessages = items.flatMap((item) => item.kind === "message" ? [item.message] : []);
+    const annotations = new Map(organization.annotations.map((annotation) => [annotation.seq, annotation]));
+    const branches = [...new Set(organization.annotations.map((annotation) => annotation.branch_id).filter((branch): branch is string => !!branch))];
+    const branchLatestSeq = new Map<string, number>();
+    for (const message of visibleMessages) {
+        const branch = annotations.get(message.seq)?.branch_id;
+        if (branch) branchLatestSeq.set(branch, message.seq);
+    }
+    const tags = [...new Set(organization.annotations.flatMap((annotation) => annotation.tags))].sort();
     const sources = [...new Set(visibleMessages.map(messageSource))];
+    const orderedSources = sourceOrder === "name" ? [...sources].sort((left, right) => left.localeCompare(right)) : sources;
     const effectiveSource = sources.includes(selectedSource) ? selectedSource : "";
-    const matchingMessages = visibleMessages.filter((message) => !effectiveSource || messageSource(message) === effectiveSource);
+    const matchingMessages = visibleMessages.filter((message) =>
+        (!effectiveSource || messageSource(message) === effectiveSource) &&
+        (!searchText.trim() || (message.text ?? "").toLocaleLowerCase().includes(searchText.trim().toLocaleLowerCase())) &&
+        (!selectedTag || annotations.get(message.seq)?.tags.includes(selectedTag)) &&
+        (!selectedBranch || annotations.get(message.seq)?.branch_id === selectedBranch) &&
+        (!selectedKind || message.kind === selectedKind)
+    );
     const sourceMessages = new Map(visibleMessages.map((message) => [message.seq, message]));
+    const groupKeys = new Map<number, string>();
+    let lastGroup: string | null = null;
+    let groupKey = "";
+    for (const message of visibleMessages) {
+        const group = message.transport_group ?? null;
+        if (group && group !== lastGroup) groupKey = `${group}:${message.seq}`;
+        if (group) groupKeys.set(message.seq, groupKey);
+        lastGroup = group;
+    }
+    const pendingJump = useRef<number | null>(null);
     const jumpToMessage = (seq: number) => {
+        const branch = annotations.get(seq)?.branch_id;
+        if (branch && collapsedBranches[branch] && branchLatestSeq.get(branch) !== seq) {
+            pendingJump.current = seq;
+            setCollapsedBranches((current) => ({ ...current, [branch]: false }));
+            return;
+        }
+        const targetGroupKey = groupKeys.get(seq);
+        if (targetGroupKey && collapsedGroups[targetGroupKey]) {
+            pendingJump.current = seq;
+            setCollapsedGroups((current) => ({ ...current, [targetGroupKey]: false }));
+            return;
+        }
         const element = scrollRef.current?.querySelector<HTMLElement>(`[data-message-seq="${seq}"]`);
         if (!element) return;
         setIsAtBottom(false);
@@ -200,6 +263,13 @@ export function MessageStream({
         element.scrollIntoView({ behavior: "auto", block: "center" });
         element.focus({ preventScroll: true });
     };
+    useEffect(() => {
+        if (pendingJump.current != null) {
+            const seq = pendingJump.current;
+            pendingJump.current = null;
+            jumpToMessage(seq);
+        }
+    }, [collapsedGroups, collapsedBranches, messages]);
     const navigateSource = (direction: number) => {
         if (!matchingMessages.length) return;
         const current = matchingMessages.findIndex((message) => message.seq === activeSeq);
@@ -210,9 +280,74 @@ export function MessageStream({
     };
     const [isAtBottom, setIsAtBottom] = useState(true);
     const [sendingReplySeq, setSendingReplySeq] = useState<number | null>(null);
+    const [rerunningSeq, setRerunningSeq] = useState<number | null>(null);
     const [optimisticReviewStates, setOptimisticReviewStates] = useState<
         Record<number, "sent" | "cancelled">
     >({});
+
+    useEffect(() => {
+        if (!nexus || !getToken || messages === null) return;
+        let current = true;
+        getNexusOrganization(conversationId, getToken)
+            .then((value) => { if (current) setOrganization(value); })
+            .catch(() => { if (current) setSearchError("Organization unavailable"); });
+        return () => { current = false; };
+    }, [conversationId, nexus, getToken, messages === null]);
+
+    useEffect(() => {
+        const maxSeq = visibleMessages.reduce((max, message) => Math.max(max, message.seq), 0);
+        if (lastSeenSeq.current != null && !isAtBottom) {
+            const arrivals = visibleMessages.filter((message) => message.seq > lastSeenSeq.current!);
+            if (arrivals.length) setBuffered((previous) => {
+                const next = { ...previous };
+                for (const message of arrivals) {
+                    const source = messageSource(message);
+                    next[source] = (next[source] ?? 0) + 1;
+                }
+                return next;
+            });
+            if (arrivals.length) setNewMessageSeqs((previous) => [...new Set([...previous, ...arrivals.map((message) => message.seq)])]);
+        }
+        lastSeenSeq.current = Math.max(lastSeenSeq.current ?? 0, maxSeq);
+    }, [messages, isAtBottom]);
+
+    const saveAnnotation = async (annotation: NexusAnnotation) => {
+        if (!getToken) return;
+        await saveNexusAnnotation(conversationId, annotation, getToken);
+        setOrganization((current) => ({
+            ...current,
+            annotations: [...current.annotations.filter((item) => item.seq !== annotation.seq), annotation],
+        }));
+    };
+
+    const runSearch = async (before?: number) => {
+        if (!getToken || searchText.trim().length < 2) return;
+        const requestId = ++searchRequestId.current;
+        try {
+            setSearchError("");
+            const result = await searchNexusMessages(conversationId, searchText.trim(), getToken, before, effectiveSource ? effectiveSource.toLowerCase() : undefined);
+            if (requestId !== searchRequestId.current) return;
+            setSearchHits((previous) => before == null ? result.matches : [...previous, ...result.matches]);
+            setSearchAttempted(true);
+            setSearchMore(result.has_more);
+        } catch {
+            if (requestId === searchRequestId.current) setSearchError("Search unavailable");
+        }
+    };
+
+    const jumpToSearchHit = async (seq: number) => {
+        if (!sourceMessages.has(seq) && getToken) {
+            try {
+                const window = await listMessages(conversationId, getToken, { around: seq, limit: 100 });
+                pendingJump.current = seq;
+                mergeMessages(conversationId, window.messages);
+            } catch {
+                setSearchError("Message unavailable");
+            }
+        } else {
+            jumpToMessage(seq);
+        }
+    };
 
     // Auto-stick to the bottom only when the operator is already
     // there. Mid-history scroll-up means "I'm reading older content,
@@ -231,13 +366,17 @@ export function MessageStream({
         if (!el) return;
         const distanceFromBottom =
             el.scrollHeight - el.scrollTop - el.clientHeight;
-        setIsAtBottom(distanceFromBottom <= AT_BOTTOM_SLACK_PX);
+        const atBottom = distanceFromBottom <= AT_BOTTOM_SLACK_PX;
+        setIsAtBottom(atBottom);
+        if (atBottom) { setBuffered({}); setNewMessageSeqs([]); }
     }, []);
 
     const scrollToBottom = useCallback(() => {
         const el = scrollRef.current;
         if (!el) return;
         el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+        setBuffered({});
+        setNewMessageSeqs([]);
     }, []);
 
     // Re-establish at-bottom on conversation switch so the new
@@ -245,8 +384,24 @@ export function MessageStream({
     useEffect(() => {
         setIsAtBottom(true);
         setSelectedSource("");
+        setSourceOrder("first");
+        setSearchText("");
+        setView("conversation");
         setActiveSeq(null);
         setCollapsedGroups({});
+        setCollapsedBranches({});
+        setOrganization({ annotations: [], views: [] });
+        setSelectedTag("");
+        setSelectedBranch("");
+        setSelectedKind("");
+        setSearchHits([]);
+        setSearchAttempted(false);
+        setViewName("");
+        searchRequestId.current++;
+        setSearchError("");
+        setBuffered({});
+        setNewMessageSeqs([]);
+        lastSeenSeq.current = null;
     }, [conversationId]);
 
     if (messages === null) {
@@ -286,6 +441,15 @@ export function MessageStream({
         <div className={`execlaw-stream-wrap${nexus ? " execlaw-nexus" : ""}`}>
             {nexus && (
                 <nav className="execlaw-nexus__navigator" aria-label={t("chat.sourceNavigation", "Message source navigation")}>
+                    <div className="execlaw-nexus__views" role="group" aria-label={t("chat.nexusView", "Nexus view")}>
+                        {(["conversation", "relationships"] as const).map((mode) => (
+                            <button key={mode} type="button" aria-pressed={view === mode}
+                                onClick={() => setView(mode)}>
+                                <i className={`bi bi-${mode === "conversation" ? "chat-left-text" : "diagram-3"}`} aria-hidden />
+                                {mode === "conversation" ? t("chat.conversationView", "Conversation") : t("chat.relationshipView", "Relationships")}
+                            </button>
+                        ))}
+                    </div>
                     <div className="execlaw-nexus__summary">
                         <i className="bi bi-diagram-3" aria-hidden />
                         <strong>{t("chat.sources", "Sources")}</strong>
@@ -297,13 +461,56 @@ export function MessageStream({
                         value={effectiveSource}
                         onChange={(event) => {
                             setSelectedSource(event.target.value);
+                            searchRequestId.current++;
+                            setSearchHits([]);
+                            setSearchAttempted(false);
                             setActiveSeq(null);
                             setIsAtBottom(false);
                         }}
                     >
                         <option value="">{t("chat.allSources", "All sources")}</option>
-                        {sources.map((source) => <option key={source} value={source}>{source}</option>)}
+                        {orderedSources.map((source) => <option key={source} value={source}>{source}</option>)}
                     </select>
+                    <select className="execlaw-nexus__order" aria-label={t("chat.sourceOrder", "Source order")}
+                        value={sourceOrder} onChange={(event) => setSourceOrder(event.target.value as "first" | "name")}>
+                        <option value="first">{t("chat.firstAppearance", "First seen")}</option>
+                        <option value="name">{t("chat.sourceName", "Source name")}</option>
+                    </select>
+                    <input type="search" className="execlaw-nexus__search"
+                        aria-label={t("chat.searchMessages", "Search messages")}
+                        placeholder={t("chat.searchMessages", "Search messages")}
+                        value={searchText}
+                        onChange={(event) => {
+                            setSearchText(event.target.value);
+                            searchRequestId.current++;
+                            setSearchHits([]);
+                            setSearchAttempted(false);
+                            setActiveSeq(null);
+                            setIsAtBottom(false);
+                        }} onKeyDown={(event) => { if (event.key === "Enter") void runSearch(); }} />
+                    {getToken && <button type="button" className="execlaw-nexus__nav-button"
+                        title="Search full history" aria-label="Search full history"
+                        disabled={searchText.trim().length < 2} onClick={() => void runSearch()}>
+                        <i className="bi bi-search" aria-hidden />
+                    </button>}
+                    <select className="execlaw-nexus__order" aria-label="Message type"
+                        value={selectedKind} onChange={(event) => setSelectedKind(event.target.value)}>
+                        <option value="">All types</option>
+                        <option value="user_msg">Incoming</option>
+                        <option value="model_turn">Responses</option>
+                        <option value="tool_use">Tool requests</option>
+                        <option value="tool_result">Tool results</option>
+                    </select>
+                    {tags.length > 0 && <select className="execlaw-nexus__order" aria-label="Filter by tag"
+                        value={selectedTag} onChange={(event) => setSelectedTag(event.target.value)}>
+                        <option value="">All tags</option>
+                        {tags.map((tag) => <option key={tag} value={tag}>{tag}</option>)}
+                    </select>}
+                    {branches.length > 0 && <select className="execlaw-nexus__order" aria-label="Filter by branch"
+                        value={selectedBranch} onChange={(event) => setSelectedBranch(event.target.value)}>
+                        <option value="">All branches</option>
+                        {branches.map((branch) => <option key={branch} value={branch}>{branch}</option>)}
+                    </select>}
                     <span className="execlaw-nexus__count" aria-live="polite">
                         {Math.max(0, matchingMessages.findIndex((message) => message.seq === activeSeq) + 1)} / {matchingMessages.length}
                     </span>
@@ -320,6 +527,67 @@ export function MessageStream({
                             <i className={`bi bi-arrow-${direction < 0 ? "up" : "down"}`} aria-hidden />
                         </button>
                     ))}
+                    {getToken && <div className="execlaw-nexus__saved">
+                        <select aria-label="Saved view" value="" onChange={(event) => {
+                            const chosen = organization.views.find((item) => item.name === event.target.value);
+                            if (!chosen) return;
+                            setSelectedSource(chosen.filters.source ?? "");
+                            setSelectedTag(chosen.filters.tag ?? "");
+                            setSelectedKind(chosen.filters.kind ?? "");
+                            setSearchText(chosen.filters.query ?? "");
+                            setViewName(chosen.name);
+                        }}>
+                            <option value="">Saved views</option>
+                            {organization.views.map((saved) => <option key={saved.name} value={saved.name}>{saved.name}</option>)}
+                        </select>
+                        <input aria-label="View name" placeholder="View name" maxLength={48} value={viewName}
+                            onChange={(event) => setViewName(event.target.value)} />
+                        <button type="button" title="Save view" aria-label="Save view" disabled={!viewName.trim()}
+                            onClick={() => void saveNexusView(conversationId, {
+                                name: viewName.trim(), filters: {
+                                    source: effectiveSource || undefined, tag: selectedTag || undefined,
+                                    kind: selectedKind || undefined, query: searchText || undefined,
+                                },
+                            }, getToken).then(() => getNexusOrganization(conversationId, getToken)).then(setOrganization).catch(() => setSearchError("Unable to save view"))}>
+                            <i className="bi bi-bookmark-plus" aria-hidden />
+                        </button>
+                        {organization.views.some((item) => item.name === viewName.trim()) &&
+                            <button type="button" title="Delete view" aria-label="Delete view"
+                                onClick={() => void deleteNexusView(conversationId, viewName.trim(), getToken)
+                                    .then(() => getNexusOrganization(conversationId, getToken)).then(setOrganization).catch(() => setSearchError("Unable to delete view"))}>
+                                <i className="bi bi-trash" aria-hidden />
+                            </button>}
+                    </div>}
+                    {branches.length > 0 && <div className="execlaw-nexus__branches" aria-label="Conversation branches">
+                        {branches.map((branch) => {
+                            const members = visibleMessages.filter((message) => annotations.get(message.seq)?.branch_id === branch);
+                            const latest = members.at(-1);
+                            return <div key={branch} className="execlaw-nexus__branch-item">
+                                <button type="button" aria-pressed={selectedBranch === branch}
+                                    onClick={() => { setSelectedBranch(selectedBranch === branch ? "" : branch); if (latest) jumpToMessage(latest.seq); }}>
+                                    <i className="bi bi-diagram-2" aria-hidden /> {branch} · {organization.annotations.filter((item) => item.branch_id === branch).length} messages · {new Set(members.map(messageSource)).size} loaded sources
+                                    {latest && <span> · latest #{latest.seq}</span>}
+                                    {members.some((message) => newMessageSeqs.includes(message.seq)) &&
+                                        <span> · {members.filter((message) => newMessageSeqs.includes(message.seq)).length} new</span>}
+                                </button>
+                                {members.length > 1 && <button type="button" aria-expanded={!collapsedBranches[branch]}
+                                    aria-label={`${collapsedBranches[branch] ? "Expand" : "Collapse"} branch ${branch}`}
+                                    onClick={() => setCollapsedBranches((current) => ({ ...current, [branch]: !current[branch] }))}>
+                                    <i className={`bi bi-chevron-${collapsedBranches[branch] ? "down" : "up"}`} aria-hidden />
+                                </button>}
+                            </div>;
+                        })}
+                    </div>}
+                    {(searchAttempted || searchError) && <div className="execlaw-nexus__results" role="region" aria-label="Full history search results">
+                        {searchError && <span role="alert">{searchError}</span>}
+                        {searchAttempted && searchHits.length === 0 && <span>No matches in this conversation</span>}
+                        {searchHits.map((hit) => <button type="button" key={hit.seq}
+                            onClick={() => void jumpToSearchHit(hit.seq)}>
+                            <span>{hit.source} #{hit.seq} · {formatMessageTimestamp(hit.committed_at)}</span>
+                            <span>{hit.text}</span>
+                        </button>)}
+                        {searchMore && <button type="button" onClick={() => void runSearch(searchHits.at(-1)?.seq)}>Older matches</button>}
+                    </div>}
                 </nav>
             )}
             <div
@@ -331,8 +599,11 @@ export function MessageStream({
                 {items.map((item) => {
                     if (item.kind === "message") {
                         const m = item.message;
+                        const branch = annotations.get(m.seq)?.branch_id;
+                        if (branch && collapsedBranches[branch] && branchLatestSeq.get(branch) !== m.seq) return null;
                         const group = nexus ? m.transport_group ?? null : null;
-                        const groupCollapsed = !!group && collapsedGroups[group];
+                        const currentGroupKey = groupKeys.get(m.seq);
+                        const groupCollapsed = !!currentGroupKey && collapsedGroups[currentGroupKey];
                         const index = items.indexOf(item);
                         const previous = items
                             .slice(0, index)
@@ -342,7 +613,17 @@ export function MessageStream({
                             ? previous.message.transport_group
                             : null;
                         const groupStart = !!group && group !== previousGroup;
-                        if (groupCollapsed && !groupStart) return null;
+                        const next = items.slice(index + 1).find((candidate) => candidate.kind === "message");
+                        const groupEnd = !!group && (next?.kind !== "message" || next.message.transport_group !== group);
+                        const groupMembers: MessageView[] = [];
+                        if (groupStart) {
+                            for (const candidate of items.slice(index)) {
+                                if (candidate.kind !== "message") continue;
+                                if (candidate.message.transport_group !== group) break;
+                                groupMembers.push(candidate.message);
+                            }
+                        }
+                        if (groupCollapsed && !groupStart && !groupEnd) return null;
                         return (
                             <Fragment key={`msg-${m.kind}-${m.seq}`}>
                                 {groupStart && (
@@ -351,30 +632,43 @@ export function MessageStream({
                                         className="execlaw-nexus__group-header"
                                         onClick={() => setCollapsedGroups((current) => ({
                                             ...current,
-                                            [group!]: !current[group!],
+                                            [currentGroupKey!]: !current[currentGroupKey!],
                                         }))}
                                         aria-expanded={!groupCollapsed}
                                     >
                                         <span>
                                             <i className="bi bi-people" aria-hidden />
                                             {group}
+                                            {groupMembers.length > 0 && <small>{groupMembers.length} messages · {new Set(groupMembers.map(messageSource)).size} sources</small>}
+                                            {groupMembers.some((message) => newMessageSeqs.includes(message.seq)) &&
+                                                <small>{groupMembers.filter((message) => newMessageSeqs.includes(message.seq)).length} new</small>}
                                         </span>
                                         <span className="execlaw-nexus__group-toggle">
-                                            {groupCollapsed ? "Show group" : "Collapse group"}
+                                            {groupCollapsed ? "Expand group" : "Collapse group"}
                                             <i className={`bi bi-chevron-${groupCollapsed ? "down" : "up"}`} aria-hidden />
                                         </span>
                                     </button>
                                 )}
-                            <MessageBubble
+                            {(!groupCollapsed || groupEnd) && <MessageBubble
                                 message={m}
                                 nexus={nexus}
                                 highlighted={activeSeq === m.seq}
-                                sourceMatch={!!effectiveSource && messageSource(m) === effectiveSource}
+                                sourceMatch={(!!effectiveSource || !!searchText.trim()) && matchingMessages.includes(m)}
+                                dimmed={(view === "relationships" && m.reply_to_seq == null && !visibleMessages.some((reply) => reply.reply_to_seq === m.seq)
+                                    && !annotations.get(m.seq)?.links.length && !organization.annotations.some((item) => item.links.some((link) => link.target_seq === m.seq)))
+                                    || (!!selectedBranch && annotations.get(m.seq)?.branch_id !== selectedBranch)
+                                    || (!!selectedTag && !annotations.get(m.seq)?.tags.includes(selectedTag))
+                                    || (!!selectedKind && m.kind !== selectedKind)}
                                 replySource={m.reply_to_seq == null ? undefined : sourceMessages.get(m.reply_to_seq)}
+                                annotation={annotations.get(m.seq)}
+                                messageChoices={visibleMessages}
+                                onSaveAnnotation={saveAnnotation}
                                 onJumpToMessage={jumpToMessage}
                                 showTransportSend={
                                     !!readChannelOrigin(m) &&
                                     m.kind === "model_turn" &&
+                                    m.review_state !== "cancelled" &&
+                                    optimisticReviewStates[m.seq] !== "cancelled" &&
                                     !!onSendTransportReply
                                 }
                                 transportSendBusy={sendingReplySeq === m.seq}
@@ -441,7 +735,20 @@ export function MessageStream({
                                 onForceResponse={async () => {
                                     await onForceTransportResponse?.(m.seq);
                                 }}
-                            />
+                                showRerunResponse={
+                                    m.kind === "model_turn" && !!onRerunResponse
+                                }
+                                rerunResponseBusy={rerunningSeq === m.seq}
+                                onRerunResponse={async () => {
+                                    if (!onRerunResponse) return;
+                                    setRerunningSeq(m.seq);
+                                    try {
+                                        await onRerunResponse(m.seq);
+                                    } finally {
+                                        setRerunningSeq(null);
+                                    }
+                                }}
+                            />}
                             </Fragment>
                         );
                     }
@@ -491,10 +798,13 @@ export function MessageStream({
                     type="button"
                     className="execlaw-scroll-to-bottom"
                     onClick={scrollToBottom}
-                    aria-label="Scroll to latest message"
+                    aria-label={`Scroll to latest message${Object.keys(buffered).length ? `, ${Object.entries(buffered).map(([source, count]) => `${count} new from ${source}`).join(", ")}` : ""}`}
                     data-testid="scroll-to-bottom"
                 >
                     <i className="bi bi-arrow-down" aria-hidden />
+                    {nexus && Object.keys(buffered).length > 0 && <span className="execlaw-nexus__arrival-count" aria-live="polite">
+                        {Object.entries(buffered).map(([source, count]) => `${source}: ${count}`).join(" · ")}
+                    </span>}
                 </button>
             )}
         </div>
@@ -525,6 +835,10 @@ function MessageBubble({
     nexus = false,
     highlighted = false,
     sourceMatch = false,
+    dimmed = false,
+    annotation,
+    messageChoices = [],
+    onSaveAnnotation,
     replySource,
     onJumpToMessage,
     showTransportSend = false,
@@ -539,11 +853,18 @@ function MessageBubble({
     onReviewOverride,
     showForceResponse = false,
     onForceResponse,
+    showRerunResponse = false,
+    rerunResponseBusy = false,
+    onRerunResponse,
 }: {
     message: MessageView;
     nexus?: boolean;
     highlighted?: boolean;
     sourceMatch?: boolean;
+    dimmed?: boolean;
+    annotation?: NexusAnnotation;
+    messageChoices?: MessageView[];
+    onSaveAnnotation?: (annotation: NexusAnnotation) => Promise<void>;
     replySource?: MessageView;
     onJumpToMessage?: (seq: number) => void;
     showTransportSend?: boolean;
@@ -558,6 +879,9 @@ function MessageBubble({
     onReviewOverride?: () => Promise<void>;
     showForceResponse?: boolean;
     onForceResponse?: () => Promise<void>;
+    showRerunResponse?: boolean;
+    rerunResponseBusy?: boolean;
+    onRerunResponse?: () => Promise<void>;
 }) {
     // 2026-05-15 — read AuthContext directly (not via the `useAuth()`
     // wrapper that throws when there's no provider). MessageStream
@@ -568,6 +892,17 @@ function MessageBubble({
     // 401 against the live server but doesn't affect those tests.
     const auth = useContext(AuthContext);
     const t = useT();
+    const [branchDraft, setBranchDraft] = useState("");
+    const [tagDraft, setTagDraft] = useState("");
+    const [linkTarget, setLinkTarget] = useState("");
+    const [linkRelation, setLinkRelation] = useState<NexusLink["relation"]>("replies_to");
+    const [linkDrafts, setLinkDrafts] = useState<NexusLink[]>([]);
+    const [organizeError, setOrganizeError] = useState("");
+    useEffect(() => {
+        setBranchDraft(annotation?.branch_id ?? "");
+        setTagDraft(annotation?.tags.join(", ") ?? "");
+        setLinkDrafts(annotation?.links ?? []);
+    }, [annotation]);
     const role = roleFor(message);
     // 2026-05-15 — when the operator picked a skill from the
     // composer's `+` menu, the server prepended a `<skill
@@ -668,7 +1003,10 @@ function MessageBubble({
                 (message.reply_to_seq != null ? " is-linked-reply" : "") +
                 (nexus && message.transport_group ? " is-group-member" : "") +
                 (nexus && highlighted ? " is-source-active" : "") +
-                (nexus && sourceMatch ? " is-source-match" : "")
+                (nexus && sourceMatch ? " is-source-match" : "") +
+                (nexus && dimmed ? " is-unrelated" : "") +
+                (nexus && annotation?.branch_id ? " is-branched" : "") +
+                (nexus && annotation?.links.some((link) => link.relation === "mentions") ? " is-mentioned" : "")
             }
         >
             {nexus && (
@@ -686,6 +1024,21 @@ function MessageBubble({
                     <span className="execlaw-nexus__sequence">#{message.seq}</span>
                 </div>
             )}
+            {nexus && annotation?.branch_id && <span className="execlaw-nexus__branch-label">
+                <i className="bi bi-diagram-2" aria-hidden /> Branch: {annotation.branch_id}
+            </span>}
+            {nexus && !!annotation?.tags.length && <div className="execlaw-nexus__tags" aria-label="Message tags">
+                {annotation.tags.map((tag) => <span key={tag}><i className="bi bi-tag" aria-hidden /> {tag}</span>)}
+            </div>}
+            {nexus && annotation?.links.map((link) => {
+                const target = messageChoices.find((candidate) => candidate.seq === link.target_seq);
+                return <button key={`${link.relation}:${link.target_seq}`} type="button"
+                    className="execlaw-nexus__relation" disabled={!target}
+                    onClick={() => onJumpToMessage?.(link.target_seq)}>
+                    <i className="bi bi-arrow-return-up" aria-hidden />
+                    <span>{link.relation.replaceAll("_", " ")} #{link.target_seq} · {target ? messageSource(target) : "Message not loaded"}</span>
+                </button>;
+            })}
             {nexus && message.reply_to_seq != null && (
                 <button
                     type="button"
@@ -707,6 +1060,10 @@ function MessageBubble({
                     Reply to the incoming {channelOrigin} message
                 </div>
             )}
+            {nexus && message.kind === "model_turn" && channelOrigin !== "web" && <span className="execlaw-nexus__status">
+                <i className="bi bi-circle-half" aria-hidden />
+                {message.review_state === "sent" ? "Send requested" : message.review_state === "cancelled" ? "Cancelled" : "Awaiting review"}
+            </span>}
             <div className="execlaw-msg__meta">
                 {showOriginIcon && (
                     <ChannelOriginIcon origin={channelOrigin} />
@@ -862,7 +1219,66 @@ function MessageBubble({
                         Force response
                     </button>
                 )}
+                {showRerunResponse && (
+                    <button
+                        type="button"
+                        className="btn btn-sm btn-outline-info mt-3"
+                        disabled={rerunResponseBusy}
+                        onClick={() => void onRerunResponse?.()}
+                        data-testid="rerun-response"
+                    >
+                        <i className="bi bi-arrow-clockwise me-1" aria-hidden />
+                        {rerunResponseBusy ? "Rerunning..." : "Rerun response"}
+                    </button>
+                )}
             </div>
+            {nexus && onSaveAnnotation && <details className="execlaw-nexus__organize">
+                <summary><i className="bi bi-diagram-3" aria-hidden /> Organize message #{message.seq}</summary>
+                <div className="execlaw-nexus__organize-fields">
+                    <label>Branch
+                        <input value={branchDraft} maxLength={120} placeholder="Branch name"
+                            onChange={(event) => setBranchDraft(event.target.value)} />
+                    </label>
+                    <label>Tags
+                        <input value={tagDraft} placeholder="Comma-separated tags"
+                            onChange={(event) => setTagDraft(event.target.value)} />
+                    </label>
+                    <label>Related message
+                        <select value={linkTarget} onChange={(event) => setLinkTarget(event.target.value)}>
+                            <option value="">Select message</option>
+                            {messageChoices.filter((candidate) => candidate.seq !== message.seq).map((candidate) =>
+                                <option key={candidate.seq} value={candidate.seq}>#{candidate.seq} · {messageSource(candidate)}</option>)}
+                        </select>
+                    </label>
+                    <label>Relationship
+                        <select value={linkRelation} onChange={(event) => setLinkRelation(event.target.value as NexusLink["relation"])}>
+                            <option value="replies_to">Replies to</option>
+                            <option value="forwarded_from">Forwarded from</option>
+                            <option value="mentions">Mentions</option>
+                            <option value="generated_from">Generated from</option>
+                        </select>
+                    </label>
+                    <button type="button" disabled={!linkTarget} title="Add relationship" aria-label="Add relationship"
+                        onClick={() => { setLinkDrafts((links) => [...links.filter((link) => !(link.target_seq === Number(linkTarget) && link.relation === linkRelation)), { target_seq: Number(linkTarget), relation: linkRelation }]); setLinkTarget(""); }}>
+                        <i className="bi bi-plus-lg" aria-hidden />
+                    </button>
+                </div>
+                {linkDrafts.map((link) => <div key={`${link.target_seq}:${link.relation}`}>
+                    {link.relation.replaceAll("_", " ")} #{link.target_seq}
+                    <button type="button" title={`Remove relationship to #${link.target_seq}`} aria-label={`Remove relationship to #${link.target_seq}`}
+                        onClick={() => setLinkDrafts((links) => links.filter((item) => item !== link))}>
+                        <i className="bi bi-x" aria-hidden />
+                    </button>
+                </div>)}
+                <button type="button" className="execlaw-nexus__organize-save"
+                    onClick={() => {
+                        const tags = [...new Set(tagDraft.split(",").map((tag) => tag.trim()).filter(Boolean))];
+                        void onSaveAnnotation({ seq: message.seq, branch_id: branchDraft.trim() || null, tags, links: linkDrafts })
+                            .then(() => setOrganizeError(""))
+                            .catch(() => setOrganizeError("Unable to save organization"));
+                    }}>Save organization</button>
+                {organizeError && <span role="alert">{organizeError}</span>}
+            </details>}
         </div>
     );
 }

@@ -166,6 +166,31 @@ sequence numbers, and a source selector with previous/next navigation.
 Navigation highlights matching messages without hiding the surrounding chat.
 Recorded reply links include a source excerpt and jump to the original message;
 links to history that is not loaded are disabled rather than guessed.
+Nexus places incoming web and transport messages on the right and execlaw
+responses on the left, preserving event sequence order. Search and the source
+selector navigate matches without filtering the timeline; sources can be listed
+by first appearance or name. Conversation view
+keeps the full context; Relationships view fades messages with no recorded reply
+link. Contiguous transport groups show message/source counts and can collapse
+to their latest message; jumping to a hidden parent expands its group.
+
+Operators can assign a stable branch name, tags, and explicit relationships
+(`replies_to`, `forwarded_from`, `mentions`, `generated_from`) to recorded
+messages. These annotations are Controller-only, scoped to one conversation,
+persisted in SQLite, and never inferred from message text. Branch summaries
+can collapse interleaved messages while leaving the latest loaded member and
+unrelated messages in event order. Tags, source, type, and text can be saved as
+named views. Full-history search uses verified event-log content on the server
+and loads a bounded window around an older hit before jumping to it; results
+are limited to 100 per page and can be paged toward older events. When reading
+earlier messages, Nexus shows a per-source new-message count without moving
+the viewport. Transport response status distinguishes an awaiting-review
+draft, a canceled draft, and a send request; it does not claim downstream
+delivery confirmation. Relationships have text labels and keyboard-operable
+links; unavailable history is not fabricated. Legacy `reply_to_seq` remains
+proximity-based reply context, not an operator-confirmed relationship. Search
+and branch counts cover this conversation, not other conversations or archived
+transport copies.
 
 **Classic** remains the default and restores the original layout immediately.
 The appearance preference is saved per browser and synchronized between tabs;

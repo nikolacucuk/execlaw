@@ -11,6 +11,7 @@ const fixture = `
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { MessageStream } from "/src/chat/MessageStream.tsx";
+import { AuthContext } from "/src/auth/AuthContext.tsx";
 import { setMessages, appendStreamingToken } from "/src/chat/store.ts";
 import "/src/styles/theme.scss";
 import "@fontsource/ibm-plex-sans/400.css";
@@ -35,7 +36,9 @@ appendStreamingToken("appearance-check", "Checking the remaining records...");
 document.body.style.cssText = "margin:0;min-width:0";
 const mount = document.getElementById("root");
 mount.style.cssText = "height:100dvh;display:flex;flex-direction:column;max-width:1120px;margin:auto";
-createRoot(mount).render(React.createElement(MessageStream, { conversationId: "appearance-check", onSendTransportReply: async () => {} }));
+createRoot(mount).render(React.createElement(AuthContext.Provider, {
+    value: { status: "authenticated", user: null, tokens: null, getAccessToken: () => "fixture-token" },
+}, React.createElement(MessageStream, { conversationId: "appearance-check", onSendTransportReply: async () => {} })));
 `;
 
 const server = await createServer({
@@ -59,11 +62,24 @@ try {
     page.setDefaultTimeout(120_000);
     const errors = [];
     page.on("pageerror", error => errors.push(error.message));
-    await page.route(`${origin}/api/**`, route => route.abort());
+    await page.route(`${origin}/api/**`, route => {
+        const path = new URL(route.request().url()).pathname;
+        if (path.endsWith("/nexus")) return route.fulfill({ contentType: "application/json", body: JSON.stringify({
+            annotations: [
+                { seq: 2, branch_id: "Shipment", tags: ["urgent"], links: [] },
+                { seq: 5, branch_id: "Shipment", tags: ["urgent"], links: [{ target_seq: 2, relation: "replies_to" }] },
+            ], views: [{ name: "Urgent", filters: { tag: "urgent" } }],
+        }) });
+        if (path.endsWith("/messages/search")) return route.fulfill({ contentType: "application/json", body: JSON.stringify({ matches: [
+            { seq: 2, text: "The shipment is scheduled for Thursday", source: "signal", committed_at: 1789580920 },
+        ], has_more: false }) });
+        return route.fulfill({ contentType: "application/json", body: '{"saved":true}' });
+    });
     const html = await server.transformIndexHtml("/__appearance_check", '<html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><div id="root"></div><script type="module" src="/@id/virtual:appearance-check"></script></body></html>');
     await page.route(`${origin}/__appearance_check`, route => route.fulfill({ contentType: "text/html", body: html }));
     await page.goto(`${origin}/__appearance_check`);
     await page.getByRole("navigation", { name: "Message source navigation" }).waitFor();
+    await page.getByRole("button", { name: "Collapse branch Shipment" }).waitFor();
     for (const theme of ["dark", "light"]) {
         for (const width of [1440, 390, 320]) {
             await page.setViewportSize({ width, height: 900 });
@@ -87,6 +103,14 @@ try {
             console.log(`PASS ${theme} ${width}px: layout, source navigation, missing history`);
         }
     }
+    await page.getByRole("button", { name: "Collapse branch Shipment" }).click();
+    assert.equal(await page.locator('[data-message-seq="2"]').count(), 0);
+    assert.equal(await page.locator('[data-message-seq="5"]').count(), 1);
+    await page.getByRole("button", { name: /Reply to #2/ }).click();
+    assert.equal(await page.locator('[data-message-seq="2"]').count(), 1);
+    await page.getByRole("searchbox", { name: "Search messages" }).fill("shipment");
+    await page.getByRole("button", { name: "Search full history" }).click();
+    await page.getByRole("region", { name: "Full history search results" }).getByRole("button", { name: /signal #2/ }).waitFor();
     await page.evaluate(() => {
         localStorage.setItem("execlaw.chat.appearance", "classic");
         window.dispatchEvent(new StorageEvent("storage", { key: "execlaw.chat.appearance", newValue: "classic" }));

@@ -144,6 +144,9 @@ pub struct ListQuery {
     /// Hard cap — default 200.
     #[serde(default)]
     pub limit: Option<i64>,
+    /// Center a bounded history window on an older event returned by search.
+    #[serde(default)]
+    pub around: Option<i64>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]

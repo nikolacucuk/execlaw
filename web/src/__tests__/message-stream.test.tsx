@@ -5,7 +5,8 @@
 // - streaming bubble shows the typing cursor
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { AuthContext } from "../auth/AuthContext";
 import {
     MessageStream,
     formatMessageTimestamp,
@@ -22,6 +23,7 @@ afterEach(() => {
     __resetChatStore();
     localStorage.removeItem("execlaw.chat.appearance");
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
 });
 
 const baseMsg = (
@@ -70,6 +72,184 @@ describe("MessageStream", () => {
         expect(screen.getByText("Answer")).toBeInTheDocument();
         fireEvent.click(screen.getByRole("button", { name: "Previous matching message" }));
         expect(document.activeElement).toHaveAttribute("data-message-seq", "2");
+    });
+
+    it("keeps the latest grouped reply visible and expands hidden parents on jump", () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        Element.prototype.scrollIntoView = vi.fn();
+        setMessages("group", [
+            { ...baseMsg(1, "First Signal message"), channel_origin: "signal", transport_group: "Planning" },
+            { ...baseMsg(2, "Second WhatsApp message"), channel_origin: "whatsapp", transport_group: "Planning" },
+            { ...baseMsg(3, "Latest reply", "model_turn"), transport_group: "Planning", reply_to_seq: 2 },
+            { ...baseMsg(4, "Outside group"), channel_origin: "discord" },
+        ]);
+        render(<MessageStream conversationId="group" />);
+        const toggle = screen.getByRole("button", { name: /Planning.*3 messages.*3 sources/ });
+        fireEvent.click(toggle);
+        expect(toggle).toHaveAttribute("aria-expanded", "false");
+        expect(screen.queryByText("First Signal message")).toBeNull();
+        expect(screen.queryByText("Second WhatsApp message", { selector: "p" })).toBeNull();
+        expect(screen.getByText("Latest reply")).toBeInTheDocument();
+        expect(screen.getByText("Outside group")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: /Reply to #2/ }));
+        expect(toggle).toHaveAttribute("aria-expanded", "true");
+        expect(screen.getByText("Second WhatsApp message", { selector: "p" })).toBeInTheDocument();
+        expect(document.activeElement).toHaveAttribute("data-message-seq", "2");
+    });
+
+    it("collapses repeated group labels independently", () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        setMessages("repeated-group", [
+            { ...baseMsg(1, "Earlier group start"), transport_group: "Planning" },
+            { ...baseMsg(2, "Earlier group end"), transport_group: "Planning" },
+            baseMsg(3, "Intervening message"),
+            { ...baseMsg(4, "Later group start"), transport_group: "Planning" },
+            { ...baseMsg(5, "Later group end"), transport_group: "Planning" },
+        ]);
+        render(<MessageStream conversationId="repeated-group" />);
+        const toggles = screen.getAllByRole("button", { name: /Planning.*2 messages/ });
+        fireEvent.click(toggles[0]);
+        expect(screen.queryByText("Earlier group start")).toBeNull();
+        expect(screen.getByText("Earlier group end")).toBeInTheDocument();
+        expect(screen.getByText("Later group start")).toBeInTheDocument();
+        expect(toggles[1]).toHaveAttribute("aria-expanded", "true");
+    });
+
+    it("searches without reordering and fades only messages without recorded relationships", () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        Element.prototype.scrollIntoView = vi.fn();
+        setMessages("relationships", [
+            { ...baseMsg(1, "Signal question"), channel_origin: "signal" },
+            { ...baseMsg(2, "Discord aside"), channel_origin: "discord" },
+            { ...baseMsg(3, "Agent answer", "model_turn"), reply_to_seq: 1 },
+        ]);
+        render(<MessageStream conversationId="relationships" />);
+        const sourceOptions = () => [...screen.getByRole("combobox", { name: "Message source" }).querySelectorAll("option")].map((option) => option.textContent);
+        expect(sourceOptions()).toEqual(["All sources", "Signal", "Discord", "execlaw"]);
+        fireEvent.change(screen.getByRole("combobox", { name: "Source order" }), { target: { value: "name" } });
+        expect(sourceOptions()).toEqual(["All sources", "Discord", "execlaw", "Signal"]);
+        fireEvent.click(screen.getByRole("button", { name: "Relationships" }));
+        expect(screen.getByText("Discord aside").closest("[data-message-seq]")).toHaveClass("is-unrelated");
+        expect(screen.getByText("Signal question", { selector: "p" }).closest("[data-message-seq]")).not.toHaveClass("is-unrelated");
+        fireEvent.change(screen.getByRole("searchbox", { name: "Search messages" }), { target: { value: "answer" } });
+        expect(screen.getByText("0 / 1")).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Next matching message" }));
+        expect(document.activeElement).toHaveAttribute("data-message-seq", "3");
+        expect([...document.querySelectorAll("[data-message-seq]")].map((node) => node.getAttribute("data-message-seq"))).toEqual(["1", "2", "3"]);
+    });
+
+    it("loads older search hits and saves explicit scoped relationships", async () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        Element.prototype.scrollIntoView = vi.fn();
+        setMessages("remote", [baseMsg(3, "Recent response", "model_turn")]);
+        const fetchMock = vi.fn(async (input: RequestInfo | URL, options?: RequestInit) => {
+            const path = String(input);
+            if (path.endsWith("/nexus") && options?.method === "GET")
+                return Response.json({ annotations: [], views: [] });
+            if (path.includes("/messages/search?"))
+                return Response.json({ matches: [{ seq: 1, text: "Older shipment", source: "web", committed_at: 1 }], has_more: false });
+            if (path.includes("around=1"))
+                return Response.json({ conversation_id: "remote", messages: [baseMsg(1, "Older shipment"), baseMsg(3, "Recent response", "model_turn")] });
+            if (path.endsWith("/nexus/annotation"))
+                return Response.json({ saved: true });
+            return Response.json({ error: "unknown request" }, { status: 404 });
+        });
+        vi.stubGlobal("fetch", fetchMock);
+        render(<AuthContext.Provider value={{ status: "authenticated", getAccessToken: () => "test-token" } as never}>
+            <MessageStream conversationId="remote" />
+        </AuthContext.Provider>);
+        await screen.findByRole("button", { name: "Search full history" });
+        fireEvent.change(screen.getByRole("searchbox", { name: "Search messages" }), { target: { value: "shipment" } });
+        fireEvent.click(screen.getByRole("button", { name: "Search full history" }));
+        fireEvent.click(await screen.findByRole("button", { name: /web #1.*Older shipment/ }));
+        await waitFor(() => expect(screen.getByText("Older shipment", { selector: "p" })).toBeInTheDocument());
+        await waitFor(() => expect(document.activeElement).toHaveAttribute("data-message-seq", "1"));
+        fireEvent.click(screen.getByText("Organize message #1"));
+        const editor = screen.getByText("Organize message #1").closest("details")!;
+        fireEvent.change(editor.querySelector('input[placeholder="Branch name"]')!, { target: { value: "shipment" } });
+        fireEvent.change(editor.querySelector('input[placeholder="Comma-separated tags"]')!, { target: { value: "urgent" } });
+        fireEvent.change(editor.querySelector("select")!, { target: { value: "3" } });
+        fireEvent.click(screen.getAllByRole("button", { name: "Add relationship" })[0]);
+        fireEvent.click(screen.getAllByRole("button", { name: "Save organization" })[0]);
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/nexus/annotation"), expect.objectContaining({
+            body: expect.stringContaining('"branch_id":"shipment"'),
+        })));
+        expect(screen.getByText("Branch: shipment")).toBeInTheDocument();
+    });
+
+    it("collapses a durable branch across interleaved sources and expands a reply target", async () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        Element.prototype.scrollIntoView = vi.fn();
+        setMessages("interleaved", [
+            { ...baseMsg(1, "Signal origin"), channel_origin: "signal" },
+            { ...baseMsg(2, "Discord interlude"), channel_origin: "discord" },
+            { ...baseMsg(3, "Agent latest", "model_turn"), reply_to_seq: 1 },
+        ]);
+        vi.stubGlobal("fetch", vi.fn(async () => Response.json({ annotations: [
+            { seq: 1, branch_id: "shipment", tags: [], links: [] },
+            { seq: 3, branch_id: "shipment", tags: [], links: [] },
+        ], views: [] })));
+        render(<AuthContext.Provider value={{ status: "authenticated", getAccessToken: () => "test-token" } as never}>
+            <MessageStream conversationId="interleaved" />
+        </AuthContext.Provider>);
+        fireEvent.click(await screen.findByRole("button", { name: "Collapse branch shipment" }));
+        expect(screen.queryByText("Signal origin", { selector: "p" })).toBeNull();
+        expect(screen.getByText("Discord interlude", { selector: "p" })).toBeInTheDocument();
+        expect(screen.getByText("Agent latest", { selector: "p" })).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: /Reply to #1/ }));
+        expect(await screen.findByText("Signal origin", { selector: "p" })).toBeInTheDocument();
+        expect(document.activeElement).toHaveAttribute("data-message-seq", "1");
+    });
+
+    it("buffers arrivals by source when reading earlier messages", async () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        setMessages("buffered", [
+            { ...baseMsg(1, "Earlier Signal"), channel_origin: "signal", transport_group: "Planning" },
+            { ...baseMsg(2, "Earlier agent", "model_turn"), transport_group: "Planning" },
+        ]);
+        render(<MessageStream conversationId="buffered" />);
+        const stream = screen.getByTestId("message-stream");
+        Object.defineProperties(stream, {
+            scrollHeight: { configurable: true, value: 500 },
+            clientHeight: { configurable: true, value: 100 },
+            scrollTop: { configurable: true, writable: true, value: 0 },
+        });
+        fireEvent.scroll(stream);
+        appendMessage("buffered", { ...baseMsg(3, "New Signal"), channel_origin: "signal", transport_group: "Planning" });
+        await waitFor(() => expect(screen.getByRole("button", { name: /1 new from Signal/ })).toBeInTheDocument());
+        expect(screen.getByRole("button", { name: /Planning.*3 messages.*1 new/ })).toBeInTheDocument();
+        expect(stream.scrollTop).toBe(0);
+    });
+
+    it("discards full-history results from an obsolete query", async () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        setMessages("search-race", [baseMsg(1, "Recent")]);
+        let completeSearch!: (response: Response) => void;
+        const pendingSearch = new Promise<Response>((resolve) => { completeSearch = resolve; });
+        vi.stubGlobal("fetch", vi.fn((input: RequestInfo | URL) => String(input).includes("/messages/search?")
+            ? pendingSearch : Promise.resolve(Response.json({ annotations: [], views: [] }))));
+        render(<AuthContext.Provider value={{ status: "authenticated", getAccessToken: () => "test-token" } as never}>
+            <MessageStream conversationId="search-race" />
+        </AuthContext.Provider>);
+        fireEvent.change(screen.getByRole("searchbox", { name: "Search messages" }), { target: { value: "older" } });
+        fireEvent.click(screen.getByRole("button", { name: "Search full history" }));
+        fireEvent.change(screen.getByRole("searchbox", { name: "Search messages" }), { target: { value: "newer" } });
+        await act(async () => completeSearch(Response.json({ matches: [{ seq: 5, text: "Stale result", source: "web", committed_at: 1 }], has_more: false })));
+        expect(screen.queryByRole("region", { name: "Full history search results" })).toBeNull();
+    });
+
+    it("reports an empty full-history search", async () => {
+        localStorage.setItem("execlaw.chat.appearance", "nexus");
+        setMessages("no-matches", [baseMsg(1, "Recent")]);
+        vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => String(input).includes("/messages/search?")
+            ? Response.json({ matches: [], has_more: false })
+            : Response.json({ annotations: [], views: [] })));
+        render(<AuthContext.Provider value={{ status: "authenticated", getAccessToken: () => "test-token" } as never}>
+            <MessageStream conversationId="no-matches" />
+        </AuthContext.Provider>);
+        fireEvent.change(screen.getByRole("searchbox", { name: "Search messages" }), { target: { value: "missing" } });
+        fireEvent.click(screen.getByRole("button", { name: "Search full history" }));
+        expect(await screen.findByText("No matches in this conversation")).toBeInTheDocument();
     });
 
     it("does not infer replies and disables links to unloaded sources", () => {

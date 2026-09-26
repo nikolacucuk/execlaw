@@ -166,6 +166,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "transport_history_buffer",
         sql: include_str!("../migrations/0028_transport_history_buffer.sql"),
     },
+    Migration {
+        id: 29,
+        name: "nexus_organization",
+        sql: include_str!("../migrations/0029_nexus_organization.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

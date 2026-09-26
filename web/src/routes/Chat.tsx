@@ -28,6 +28,7 @@ import {
     postStopTurn,
     sendTransportReply,
     forceTransportResponse,
+    rerunResponse,
     setTransportReviewDecision,
     respondApproval,
     type ApprovalVerb,
@@ -1428,6 +1429,9 @@ function ActiveThreadPane({
                         .then((response) => {
                             mergeMessages(conversationId, response.messages);
                         })
+                }
+                onRerunResponse={(sourceSeq) =>
+                    rerunResponse(conversationId, sourceSeq, getToken).then(() => undefined)
                 }
                 onSetTransportReviewDecision={(sourceSeq, decision) =>
                     setTransportReviewDecision(

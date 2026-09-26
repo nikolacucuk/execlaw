@@ -34,8 +34,10 @@ use crate::state::AppState;
 
 mod attachments;
 mod helpers;
+mod nexus;
 mod prompt;
 mod types;
+pub use nexus::{delete_view as delete_nexus_view, list_organization as list_nexus_organization, save_annotation as save_nexus_annotation, save_view as save_nexus_view, search_messages as search_nexus_messages};
 
 // 2026-05-16 — types lifted into `chats/types.rs`. Re-exported
 // here so external callers (and the OpenAPI generator) keep
@@ -4578,6 +4580,111 @@ pub async fn force_transport_response(
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub struct RerunResponseRequest {
+    pub source_seq: i64,
+}
+
+fn publish_model_turns_since(state: &AppState, cid: &ConversationId, before_seq: i64) {
+    let Ok(events) = event_log(state).replay_since(cid, EventSeq(before_seq)) else {
+        return;
+    };
+    for event in events {
+        let text = if let Ok(payload) = event.decode_payload::<RealModelTurnPayload>() {
+            Some(payload.text)
+        } else {
+            event
+                .decode_payload::<StubModelTurnPayload>()
+                .ok()
+                .map(|payload| payload.text)
+        };
+        if let Some(text) = text {
+            state.events.publish(UiEvent::ChatMessageOutbound {
+                conversation_id: cid.as_str().to_owned(),
+                seq: event.seq.0,
+                text,
+            });
+        }
+    }
+}
+
+/// `POST /api/chats/:id/rerun-response` runs a fresh agent turn for the
+/// user message that produced the selected model response.
+pub async fn rerun_response(
+    State(state): State<AppState>,
+    Path(conversation_id): Path<String>,
+    Json(req): Json<RerunResponseRequest>,
+) -> impl IntoResponse {
+    let cid = ConversationId::from(conversation_id.as_str());
+    let events = match event_log(&state).replay_since(&cid, EventSeq(0)) {
+        Ok(events) => events,
+        Err(error) => return err_500(&format!("replay: {error}")),
+    };
+    let Some(source) = events
+        .iter()
+        .filter(|event| event.seq.0 <= req.source_seq && event.kind == EventKind::UserMsg)
+        .rev()
+        .find_map(|event| {
+            let payload = event.decode_payload::<UserMessagePayload>().ok()?;
+            Some((event, payload))
+        })
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "no user message found for response"})),
+        )
+            .into_response();
+    };
+    let principal_id = source
+        .1
+        .sender_principal_id
+        .clone()
+        .unwrap_or_else(|| "controller".to_owned());
+    let sender_id = Some(principal_id);
+    let (principal, trust) = match resolve_sender(&state, &PrincipalStore::new(&state.db), &sender_id).await {
+        Ok(pair) => pair,
+        Err(error) => return err_500(&format!("resolve rerun sender: {error}")),
+    };
+    if matches!(trust, TrustLevel::Blocked | TrustLevel::UnknownPending) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "message sender is not routable"})),
+        )
+            .into_response();
+    }
+    let before_seq = event_log(&state)
+        .last_seq(&cid)
+        .map(|seq| seq.0)
+        .unwrap_or(0);
+    match dispatch_external_turn(
+        &state,
+        &cid,
+        &principal,
+        trust,
+        &source.1.text,
+        source.1.channel_origin.as_deref(),
+        source.1.transport_recipient.as_deref(),
+        None,
+        extract_attachment_ids(source.0),
+    )
+    .await
+    {
+        Ok(()) => {
+            publish_model_turns_since(&state, &cid, before_seq);
+            (
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({"accepted": true})),
+            )
+                .into_response()
+        }
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": error})),
+        )
+            .into_response(),
+    }
+}
+
 /// `POST /api/chats/:id/transport-reply` sends a reviewed assistant reply
 /// verbatim through the conversation's originating transport.
 pub async fn send_transport_reply(
@@ -4730,9 +4837,13 @@ async fn send_transport_text(
 )]
 pub async fn list_messages(
     State(state): State<AppState>,
+    user: Option<crate::auth_extract::AuthedUser>,
     Path(conversation_id): Path<String>,
     Query(q): Query<ListQuery>,
 ) -> impl IntoResponse {
+    if q.around.is_some() && !user.as_ref().is_some_and(|user| user.role == execlaw_core::users::UserRole::Controller) {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": "Controller required for centered history" }))).into_response();
+    }
     let cid = ConversationId::from(conversation_id.as_str());
     if let Err(error) = crate::message_archive::project_conversation_history(&state, &cid) {
         tracing::warn!(conversation_id = %cid.as_str(), %error, "conversation archive projection failed");
@@ -4797,7 +4908,14 @@ pub async fn list_messages(
     // Taking the first 200 events made older conversations look empty after
     // navigation once tool events pushed the latest user/reply pair past the
     // prefix returned by this endpoint.
-    let visible_events = if visible_events.len() > limit as usize {
+    let visible_events = if let Some(around) = q.around {
+        let index = visible_events.iter().position(|event| event.seq.0 == around);
+        let Some(index) = index else {
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({ "error": "message not found" }))).into_response();
+        };
+        let start = index.saturating_sub(limit as usize / 2);
+        visible_events.into_iter().skip(start).take(limit as usize).collect()
+    } else if visible_events.len() > limit as usize {
         let mut newest = visible_events
             .into_iter()
             .rev()
@@ -4823,6 +4941,11 @@ pub async fn list_messages(
                     conversation_context.as_deref(),
                 );
                 latest_history_matches = related_history_count(&state, &e, &cid);
+            } else if matches!(e.kind, EventKind::UserMsg | EventKind::ColdContactArrived) {
+                latest_transport_context = None;
+                latest_transport_seq = None;
+                latest_transport_group = None;
+                latest_history_matches = None;
             }
             let transport_context =
                 if e.kind == EventKind::ModelTurn && extract_channel_origin(&e).is_some() {
@@ -6485,6 +6608,78 @@ mod tests {
         assert_eq!(msgs.len(), 4);
         assert_eq!(msgs[0]["kind"].as_str().unwrap(), "user_msg");
         assert_eq!(msgs[1]["kind"].as_str().unwrap(), "model_turn");
+    }
+
+    #[tokio::test]
+    async fn nexus_organization_rejects_cross_conversation_links_and_searches_history() {
+        let state = crate::routes::test_app_state();
+        let app = crate::routes::build_router(state);
+        let unauthorized = Request::builder().uri("/api/chats/conv1/messages/search?q=warehouse")
+            .body(Body::empty()).unwrap();
+        assert_eq!(app.clone().oneshot(unauthorized).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let token = setup_and_get_token(&app).await;
+        let _ = send(app.clone(), "Warehouse ready on Thursday").await;
+        let _ = send(app.clone(), "Supplier needs confirmation").await;
+        let search = Request::builder().uri("/api/chats/conv1/messages/search?q=warehouse")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(search).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let matches: serde_json::Value = json_body(response.into_body()).await;
+        assert_eq!(matches["matches"][0]["seq"], 1);
+
+        let invalid = Request::builder().method(Method::POST)
+            .uri("/api/chats/conv1/nexus/annotation")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "seq": 1, "branch_id": "shipment", "tags": ["urgent"],
+                "links": [{"target_seq": 999, "relation": "mentions"}]
+            })).unwrap())).unwrap();
+        let response = app.clone().oneshot(invalid).await.unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let valid = Request::builder().method(Method::POST)
+            .uri("/api/chats/conv1/nexus/annotation")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "seq": 3, "branch_id": "shipment", "tags": ["urgent"],
+                "links": [{"target_seq": 1, "relation": "replies_to"}]
+            })).unwrap())).unwrap();
+        assert_eq!(app.clone().oneshot(valid).await.unwrap().status(), StatusCode::OK);
+        let get = Request::builder().uri("/api/chats/conv1/nexus")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(get).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response.into_body()).await;
+        assert_eq!(body["annotations"][0]["branch_id"], "shipment");
+        assert_eq!(body["annotations"][0]["links"][0]["target_seq"], 1);
+
+        let save_view = Request::builder().method(Method::POST)
+            .uri("/api/chats/conv1/nexus/views")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"name":"Urgent","filters":{"tag":"urgent"}}"#)).unwrap();
+        assert_eq!(app.clone().oneshot(save_view).await.unwrap().status(), StatusCode::OK);
+        let get = Request::builder().uri("/api/chats/conv1/nexus")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty()).unwrap();
+        let response = app.clone().oneshot(get).await.unwrap();
+        let body: serde_json::Value = json_body(response.into_body()).await;
+        assert_eq!(body["views"][0]["name"], "Urgent");
+
+        let unauthorized_around = Request::builder().uri("/api/chats/conv1/messages?around=1&limit=2")
+            .body(Body::empty()).unwrap();
+        assert_eq!(app.clone().oneshot(unauthorized_around).await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        let around = Request::builder().uri("/api/chats/conv1/messages?around=1&limit=2")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty()).unwrap();
+        let response = app.oneshot(around).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response.into_body()).await;
+        assert_eq!(body["messages"][0]["seq"], 1);
     }
 
     /// Regression: the synthetic UserMsg the server-side

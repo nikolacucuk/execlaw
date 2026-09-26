@@ -491,7 +491,34 @@ The graph persists at `graphify-out/` (graph.json, manifest.json, GRAPH_REPORT.m
 
 ## 5. Data model
 
-Full schema is the union of every file in [`crates/core/migrations/`](../crates/core/migrations/): the consolidated pre-v1 schema in `0001_baseline.sql` plus additive migrations `0005` through `0016`. The load-bearing tables:
+Full schema is the union of every file in [`crates/core/migrations/`](../crates/core/migrations/):
+the consolidated baseline and additive migrations through `0029`. The
+load-bearing tables follow.
+
+### Nexus conversation organization
+
+Migration `0029_nexus_organization.sql` adds Controller-managed,
+conversation-scoped metadata over the canonical `state_events` log:
+`state_nexus_annotations` stores branch membership keyed by event seq;
+`state_nexus_links` stores explicitly labeled intra-conversation edges;
+`state_nexus_tags` stores operator tags; and `config_nexus_views` stores named
+source/tag/type/text filters. The three event-referencing tables use composite
+foreign keys so annotations cannot link to another conversation. Reads and
+writes require an authenticated Controller. These tables do not reorder or
+rewrite the event log; deleting a conversation cascades its organization data.
+
+`GET /api/chats/{id}/nexus` reads annotations and saved views;
+`POST /api/chats/{id}/nexus/annotation` replaces one event's branch, tags,
+and links after verifying every referenced sequence through signed event
+replay. `POST /api/chats/{id}/nexus/views` upserts a named filter and
+`DELETE /api/chats/{id}/nexus/views/{name}` removes one. Full-history
+`GET /api/chats/{id}/messages/search?q=...&source=...&before=...` scans verified
+event text, returns up to 100 newest matches and a `has_more` cursor flag;
+`GET /api/chats/{id}/messages?around={seq}&limit=100` loads a bounded window
+for a search jump. Search is not an FTS projection and its replay cost grows
+with conversation length; pagination bounds response size, not scan time.
+The legacy transport `reply_to_seq` is contextual proximity metadata, while
+the Nexus links above represent explicit operator-confirmed relationships.
 
 ### 5.1 `state_events` — the source of truth
 
