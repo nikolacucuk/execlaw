@@ -38,7 +38,7 @@ jobs:
       EXECLAW_BENCH_COMMIT: ${{ github.sha }}
       EXECLAW_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
