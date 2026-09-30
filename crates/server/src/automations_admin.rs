@@ -482,6 +482,9 @@ pub async fn test_run(
                 payload: s.payload,
                 internal: false,
                 dispatched_at: None,
+                completed_at: None,
+                dispatch_lease_owner: None,
+                dispatch_lease_expires_at: None,
             }
         }
         (None, None) => {

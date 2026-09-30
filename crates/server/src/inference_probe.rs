@@ -35,8 +35,12 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::post;
-use execlaw_core::backends::BackendPurpose;
-use execlaw_inference_api::{ChatMessage, ChatRequest, FunctionDecl, ModelId, ToolDeclaration};
+use base64::Engine as _;
+use execlaw_core::backends::{BackendPurpose, BackendStore};
+use execlaw_inference_api::{
+    ChatMessage, ChatRequest, ChatStreamChunk, FunctionDecl, InferenceClient, InferenceEngine,
+    ModelId, ToolDeclaration,
+};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
@@ -97,11 +101,632 @@ pub struct InferenceProbeResponse {
     pub model: String,
     pub request_body_chars: usize,
     pub tool_count: usize,
+    /// Number of distinct tool-call indices emitted by the model; no tools are executed.
+    pub tool_calls_observed: usize,
     pub errored: bool,
     /// Anyhow-chain-walked error message when `errored = true`.
     /// Absent on success.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+fn record_tool_calls(indices: &mut std::collections::HashSet<(u32, u32)>, chunk: &ChatStreamChunk) {
+    for choice in &chunk.choices {
+        for call in &choice.delta.tool_calls {
+            indices.insert((choice.index, call.index));
+        }
+    }
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ConformanceCheck {
+    pub passed: bool,
+    pub code: &'static str,
+    pub elapsed_ms: Option<u64>,
+    pub request_bytes: Option<u64>,
+    pub prompt_tokens: Option<u32>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct InferenceConformanceResponse {
+    pub model: String,
+    pub protocol: &'static str,
+    pub text: ConformanceCheck,
+    pub streaming: ConformanceCheck,
+    pub tools: ConformanceCheck,
+    pub structured_json: ConformanceCheck,
+    pub context: ConformanceCheck,
+    pub vision: ConformanceCheck,
+    pub total_elapsed_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelQualificationRequest {
+    pub context_tokens: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelQualificationResponse {
+    pub identity: execlaw_core::harness::ModelIdentity,
+    pub qualified: bool,
+    pub context_tokens: u32,
+    pub qualified_at: Option<i64>,
+    pub checks: InferenceConformanceResponse,
+}
+
+/// Build the qualification identity from the active backend row. Required
+/// fields are operator-owned backend metadata; profiles are never keyed only
+/// by a friendly model alias.
+pub(crate) fn current_model_identity(
+    db: &execlaw_core::Database,
+    purpose: BackendPurpose,
+    model_id: &str,
+) -> Option<execlaw_core::harness::ModelIdentity> {
+    let row = BackendStore::new(db).get(purpose).ok().flatten()?;
+    let quantization = row
+        .model_spec_json
+        .get("quantization")?
+        .as_str()?
+        .to_owned();
+    let chat_template = row
+        .model_spec_json
+        .get("chat_template")?
+        .as_str()?
+        .to_owned();
+    let backend_version = row
+        .model_spec_json
+        .get("backend_version")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            row.model_spec_json
+                .get("image")
+                .and_then(serde_json::Value::as_str)
+        })?
+        .to_owned();
+    if backend_version.trim().is_empty() || backend_version.ends_with(":latest") {
+        return None;
+    }
+    Some(execlaw_core::harness::ModelIdentity {
+        model_id: model_id.to_owned(),
+        quantization,
+        chat_template,
+        backend_version,
+        parser_version: execlaw_model_adapter::PARSER_IDENTITY.to_owned(),
+    })
+}
+
+pub async fn qualify_model_handler(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Json(request): Json<ModelQualificationRequest>,
+) -> Result<Json<ModelQualificationResponse>, ApiError> {
+    require_controller(&state, &user)?;
+    qualify_local_model(&state.db, &state.inference, request.context_tokens)
+        .await
+        .map(Json)
+}
+
+/// Qualify the configured Standard backend from a local database owner context.
+///
+/// The HTTP handler authenticates the Controller before calling this function.
+/// A native CLI can call it directly when it already has access to the local
+/// database and must not depend on an older running server process.
+///
+/// ```no_run
+/// # async fn inspect(db: &execlaw_core::Database) {
+/// let resolver = execlaw_server::inference_resolver::InferenceResolver::new(None);
+/// let result = execlaw_server::inference_probe::qualify_local_model(db, &resolver, 4096).await;
+/// assert!(result.is_ok());
+/// # }
+/// ```
+pub async fn qualify_local_model(
+    db: &execlaw_core::Database,
+    resolver: &crate::inference_resolver::InferenceResolver,
+    context_tokens: u32,
+) -> Result<ModelQualificationResponse, ApiError> {
+    if !(4_096..=262_144).contains(&context_tokens) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "invalid_context_budget",
+            message: "qualification context must be between 4096 and 262144 tokens".into(),
+        });
+    }
+    let resolved = resolver
+        .resolve(db, BackendPurpose::Standard)
+        .map(|resolved| resolved.with_workload("background"))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "inference_unavailable",
+            message: "no inference backend resolvable for Standard purpose".into(),
+        })?;
+    let identity = current_model_identity(db, BackendPurpose::Standard, &resolved.model_id).ok_or_else(|| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "model_identity_incomplete",
+        message: "Standard backend model_spec_json must include exact quantization, chat_template, and backend_version metadata before qualification".into(),
+    })?;
+    let mut checks = run_conformance(&resolved.client, &resolved.model_id, context_tokens).await;
+    checks.vision = run_vision_matrix(&resolved.client, &resolved.model_id).await;
+    // The probe adapts its length until the backend reports a prompt inside
+    // the requested window. Record the tested window, rather than the exact
+    // token count of the probe text, which varies across tokenizers.
+    let qualified_context_tokens = if checks.context.passed {
+        context_tokens
+    } else {
+        0
+    };
+    let qualified = checks.text.passed
+        && checks.streaming.passed
+        && checks.tools.passed
+        && checks.structured_json.passed
+        && checks.context.passed
+        && qualified_context_tokens >= 4_096;
+    let profile_store = execlaw_core::harness::HarnessStore::new(db);
+    let qualified_at = if qualified {
+        let at = chrono::Utc::now().timestamp();
+        let profile = execlaw_core::harness::ModelCapabilityProfile {
+            identity: identity.clone(),
+            context_tokens: qualified_context_tokens,
+            observed: serde_json::to_value(&checks).map_err(|error| ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "qualification_encode_error",
+                message: error.to_string(),
+            })?,
+            qualified_at: at,
+            invalidated_at: None,
+        };
+        profile_store
+            .save_profile(&profile)
+            .map_err(|error| ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "qualification_persist_error",
+                message: error.to_string(),
+            })?;
+        Some(at)
+    } else {
+        profile_store
+            .invalidate_profile(&identity, chrono::Utc::now().timestamp())
+            .map_err(|error| ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "qualification_invalidate_error",
+                message: error.to_string(),
+            })?;
+        None
+    };
+    Ok(ModelQualificationResponse {
+        identity,
+        qualified,
+        context_tokens: qualified_context_tokens,
+        qualified_at,
+        checks,
+    })
+}
+
+async fn run_vision_matrix(client: &InferenceClient, model: &str) -> ConformanceCheck {
+    let started = std::time::Instant::now();
+    let cases = [(255, 0, 0, "red"), (0, 0, 255, "blue")];
+    let mut passed = 0;
+    for (red, green, blue, expected) in cases {
+        let mut pixels = Vec::with_capacity(8 * 8 * 4);
+        for _ in 0..64 {
+            pixels.extend_from_slice(&[red, green, blue, 255]);
+        }
+        let mut png_bytes = Vec::new();
+        let encoded = (|| -> Result<(), String> {
+            let mut encoder = png::Encoder::new(&mut png_bytes, 8, 8);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().map_err(|error| error.to_string())?;
+            writer
+                .write_image_data(&pixels)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })();
+        if encoded.is_err() {
+            continue;
+        }
+        let image_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png_bytes)
+        );
+        let request = ChatRequest {
+            model: ModelId(model.to_owned()),
+            messages: vec![
+                ChatMessage::system(
+                    "Identify the single solid color in the attached image. Reply with one color word only.",
+                ),
+                ChatMessage::user_with_images("What is the color?", [image_url]),
+            ],
+            tools: None,
+            stream: false,
+            temperature: Some(0.0),
+            max_tokens: Some(16),
+            chat_template_kwargs: Some(serde_json::json!({"enable_thinking": false})),
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        if let Ok(Ok(response)) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client.chat_completions(&request),
+        )
+        .await
+        {
+            let output = response
+                .choices
+                .first()
+                .and_then(|choice| choice.message.content.as_ref())
+                .map(|content| content.as_text().to_lowercase())
+                .unwrap_or_default();
+            passed += usize::from(output.contains(expected));
+        }
+    }
+    ConformanceCheck {
+        passed: passed == 2,
+        code: if passed == 2 {
+            "2_of_2_images_identified"
+        } else {
+            "vision_matrix_failed"
+        },
+        elapsed_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+        request_bytes: None,
+        prompt_tokens: None,
+    }
+}
+
+fn conformance_check(passed: bool, code: &'static str) -> ConformanceCheck {
+    ConformanceCheck {
+        passed,
+        code,
+        elapsed_ms: None,
+        request_bytes: None,
+        prompt_tokens: None,
+    }
+}
+
+pub(crate) async fn run_conformance(
+    client: &InferenceClient,
+    model: &str,
+    context_tokens: u32,
+) -> InferenceConformanceResponse {
+    let qualification_started = std::time::Instant::now();
+    let protocol = match client.engine {
+        InferenceEngine::Ollama => "ollama",
+        InferenceEngine::OpenAICompat => "openai_compatible",
+    };
+    let mut request = ChatRequest {
+        model: ModelId(model.to_owned()),
+        messages: vec![
+            ChatMessage::system("Diagnostic request. Reply with one word."),
+            ChatMessage::user("Say READY."),
+        ],
+        tools: None,
+        stream: false,
+        temperature: Some(0.0),
+        max_tokens: Some(64),
+        chat_template_kwargs: Some(serde_json::json!({"enable_thinking": false})),
+        tool_choice: None,
+        response_format: None,
+        guided_decoding_backend: None,
+    };
+    let text = match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        client.chat_completions(&request),
+    )
+    .await
+    {
+        Err(_) => conformance_check(false, "timeout"),
+        Ok(Err(_)) => conformance_check(false, "request_failed"),
+        Ok(Ok(response)) => {
+            let passed = response.choices.iter().any(|choice| {
+                choice
+                    .message
+                    .content
+                    .as_ref()
+                    .is_some_and(|content| !content.as_text().trim().is_empty())
+            });
+            conformance_check(passed, if passed { "ok" } else { "no_text" })
+        }
+    };
+    let streaming = match tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        let mut stream = client
+            .chat_completions_stream(&request)
+            .await
+            .map_err(|_| ())?;
+        let mut has_text = false;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| ())?;
+            has_text |= chunk.choices.iter().any(|choice| {
+                choice
+                    .delta
+                    .content
+                    .as_ref()
+                    .is_some_and(|text| !text.trim().is_empty())
+            });
+        }
+        Ok::<_, ()>(has_text)
+    })
+    .await
+    {
+        Err(_) => conformance_check(false, "timeout"),
+        Ok(Err(())) => conformance_check(false, "stream_failed"),
+        Ok(Ok(passed)) => conformance_check(passed, if passed { "ok" } else { "no_stream_text" }),
+    };
+    request.messages = vec![
+        ChatMessage::system(
+            "Diagnostic request. Call only the declared probe_noop tool with empty JSON arguments. Do not answer with text.",
+        ),
+        ChatMessage::user("Call probe_noop now."),
+    ];
+    request.tools = Some(vec![ToolDeclaration::function(
+        "probe_noop",
+        "Diagnostic no-op; this tool is never executed.",
+        serde_json::json!({"type": "object", "properties": {}, "additionalProperties": false}),
+    )]);
+    request.tool_choice = Some(serde_json::Value::String("auto".into()));
+    let tools = match tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        client.chat_completions(&request),
+    )
+    .await
+    {
+        Err(_) => conformance_check(false, "timeout"),
+        Ok(Err(_)) => conformance_check(false, "request_failed"),
+        Ok(Ok(response)) => {
+            let passed = response
+                .choices
+                .iter()
+                .flat_map(|choice| &choice.message.tool_calls)
+                .any(|call| {
+                    call.function.name == "probe_noop"
+                        && serde_json::from_str::<serde_json::Value>(&call.function.arguments)
+                            .is_ok_and(|arguments| jsonschema::validator_for(
+                                &serde_json::json!({"type":"object","properties":{},"additionalProperties":false})
+                            ).is_ok_and(|validator| validator.is_valid(&arguments)))
+                });
+            conformance_check(passed, if passed { "ok" } else { "no_valid_tool_call" })
+        }
+    };
+    let structured_json = run_structured_matrix(client, model).await;
+    let context = run_context_probe(client, model, context_tokens).await;
+    InferenceConformanceResponse {
+        model: model.to_owned(),
+        protocol,
+        text,
+        streaming,
+        tools,
+        structured_json,
+        context,
+        // A text protocol probe does not establish vision understanding. Keep
+        // the capability unavailable until a model-specific image fixture is qualified.
+        vision: conformance_check(false, "vision_fixture_not_qualified"),
+        total_elapsed_ms: qualification_started
+            .elapsed()
+            .as_millis()
+            .min(u64::MAX as u128) as u64,
+    }
+}
+
+async fn run_structured_matrix(client: &InferenceClient, model: &str) -> ConformanceCheck {
+    let started = std::time::Instant::now();
+    let cases = [
+        (
+            "status",
+            serde_json::json!({"type":"object","properties":{"status":{"type":"string","enum":["READY"]}},"required":["status"],"additionalProperties":false}),
+            "Return status READY.",
+        ),
+        (
+            "count",
+            serde_json::json!({"type":"object","properties":{"count":{"type":"integer","minimum":2,"maximum":2}},"required":["count"],"additionalProperties":false}),
+            "Return count 2.",
+        ),
+        (
+            "labels",
+            serde_json::json!({"type":"array","items":{"type":"string","enum":["local"]},"minItems":1,"maxItems":1}),
+            "Return the one-item array [local].",
+        ),
+    ];
+    let mut passed = 0;
+    for (name, schema, instruction) in cases {
+        let request = ChatRequest {
+            model: ModelId(model.to_owned()),
+            messages: vec![
+                ChatMessage::system("Follow the response schema exactly."),
+                ChatMessage::user(instruction),
+            ],
+            tools: None,
+            stream: false,
+            temperature: Some(0.0),
+            max_tokens: Some(64),
+            chat_template_kwargs: Some(serde_json::json!({"enable_thinking": false})),
+            tool_choice: None,
+            response_format: Some(serde_json::json!({
+                "type":"json_schema",
+                "json_schema":{"name":name,"strict":true,"schema":schema}
+            })),
+            guided_decoding_backend: Some("outlines".into()),
+        };
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            client.chat_completions(&request),
+        )
+        .await;
+        let valid = matches!(result, Ok(Ok(ref response)) if response.choices.first()
+            .and_then(|choice| choice.message.content.as_ref())
+            .and_then(|content| serde_json::from_str::<serde_json::Value>(&content.as_text()).ok())
+            .is_some_and(|value| jsonschema::validator_for(&schema).is_ok_and(|validator| validator.is_valid(&value))));
+        passed += usize::from(valid);
+    }
+    ConformanceCheck {
+        passed: passed == 3,
+        code: if passed == 3 {
+            "3_of_3_valid"
+        } else {
+            "structured_schema_matrix_failed"
+        },
+        elapsed_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+        request_bytes: None,
+        prompt_tokens: None,
+    }
+}
+
+async fn run_context_probe(
+    client: &InferenceClient,
+    model: &str,
+    context_tokens: u32,
+) -> ConformanceCheck {
+    let started = std::time::Instant::now();
+    let mut target_chars = (context_tokens as usize)
+        .saturating_mul(6)
+        .clamp(256, 2_000_000);
+    let mut last_tokens = None;
+    let mut last_request_bytes = None;
+    for _attempt in 0..3 {
+        let probe = "context-probe ".repeat(target_chars / 14);
+        let request = ChatRequest {
+            model: ModelId(model.to_owned()),
+            messages: vec![
+                ChatMessage::system("Read the probe and reply OK."),
+                ChatMessage::user(probe),
+            ],
+            tools: None,
+            stream: false,
+            temperature: Some(0.0),
+            max_tokens: Some(64),
+            chat_template_kwargs: Some(serde_json::json!({"enable_thinking": false})),
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let request_bytes = serde_json::to_vec(&request)
+            .map(|bytes| bytes.len() as u64)
+            .unwrap_or(0);
+        last_request_bytes = Some(request_bytes);
+        let response = match tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            client.chat_completions(&request),
+        )
+        .await
+        {
+            Err(_) => {
+                return context_probe_result(
+                    false,
+                    "context_probe_timeout",
+                    started,
+                    last_request_bytes,
+                    last_tokens,
+                );
+            }
+            Ok(Err(_)) => {
+                return context_probe_result(
+                    false,
+                    "context_probe_rejected",
+                    started,
+                    last_request_bytes,
+                    last_tokens,
+                );
+            }
+            Ok(Ok(response)) => response,
+        };
+        let Some(usage) = response.usage.as_ref() else {
+            return context_probe_result(
+                false,
+                "context_probe_missing_usage",
+                started,
+                last_request_bytes,
+                None,
+            );
+        };
+        let prompt_tokens = usage.prompt_tokens;
+        last_tokens = Some(prompt_tokens);
+        let in_range = prompt_tokens >= context_tokens.saturating_mul(3) / 4
+            && prompt_tokens.saturating_add(64) <= context_tokens;
+        if in_range {
+            let has_text = response.choices.iter().any(|choice| {
+                choice
+                    .message
+                    .content
+                    .as_ref()
+                    .is_some_and(|content| !content.as_text().trim().is_empty())
+            });
+            return context_probe_result(
+                has_text,
+                if has_text {
+                    "context_probe_passed"
+                } else {
+                    "context_probe_no_text"
+                },
+                started,
+                last_request_bytes,
+                last_tokens,
+            );
+        }
+        target_chars = next_context_probe_chars(target_chars, prompt_tokens, context_tokens);
+    }
+    context_probe_result(
+        false,
+        "context_probe_token_count_mismatch",
+        started,
+        last_request_bytes,
+        last_tokens,
+    )
+}
+
+fn next_context_probe_chars(
+    current_chars: usize,
+    observed_tokens: u32,
+    context_tokens: u32,
+) -> usize {
+    let target_tokens = u64::from(context_tokens).saturating_mul(85) / 100;
+    (current_chars as u64)
+        .saturating_mul(target_tokens)
+        .checked_div(u64::from(observed_tokens.max(1)))
+        .unwrap_or(2_000_000)
+        .clamp(256, 2_000_000) as usize
+}
+
+fn context_probe_result(
+    passed: bool,
+    code: &'static str,
+    started: std::time::Instant,
+    request_bytes: Option<u64>,
+    prompt_tokens: Option<u32>,
+) -> ConformanceCheck {
+    ConformanceCheck {
+        passed,
+        code,
+        elapsed_ms: Some(started.elapsed().as_millis().min(u64::MAX as u128) as u64),
+        request_bytes,
+        prompt_tokens,
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/inference/conformance",
+    responses(
+        (status = 200, description = "Local inference protocol conformance; no tools dispatched", body = InferenceConformanceResponse),
+        (status = 503, description = "No inference backend configured"),
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "diagnostics"
+)]
+pub async fn inference_conformance_handler(
+    State(state): State<AppState>,
+    user: AuthedUser,
+) -> Result<Json<InferenceConformanceResponse>, ApiError> {
+    require_controller(&state, &user)?;
+    let resolved = state
+        .inference
+        .resolve(&state.db, BackendPurpose::Standard)
+        .map(|resolved| resolved.with_workload("background"))
+        .ok_or_else(|| ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "inference_unavailable",
+            message: "no inference backend resolvable for Standard purpose".into(),
+        })?;
+    Ok(Json(
+        run_conformance(&resolved.client, &resolved.model_id, 4096).await,
+    ))
 }
 
 #[utoipa::path(
@@ -136,6 +761,7 @@ pub async fn inference_probe_handler(
     let resolved = state
         .inference
         .resolve(&state.db, BackendPurpose::Standard)
+        .map(|resolved| resolved.with_workload("background"))
         .ok_or_else(|| ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "inference_unavailable",
@@ -228,6 +854,7 @@ pub async fn inference_probe_handler(
         chat_template_kwargs: Some(serde_json::json!({"enable_thinking": false})),
         tool_choice,
         guided_decoding_backend,
+        response_format: None,
     };
     let request_body_chars = serde_json::to_string(&chat_req)
         .map(|s| s.chars().count())
@@ -256,6 +883,7 @@ pub async fn inference_probe_handler(
                 model: model_id,
                 request_body_chars,
                 tool_count,
+                tool_calls_observed: 0,
                 errored: true,
                 error: Some(format!("stream-open failure: {e:#}")),
             }));
@@ -264,6 +892,7 @@ pub async fn inference_probe_handler(
     let open_stream_ms = round_started_at.elapsed().as_millis() as u64;
 
     let mut text_acc = String::new();
+    let mut tool_call_indices = std::collections::HashSet::new();
     let mut chunks_received: u64 = 0;
     let mut finish_reason: Option<String> = None;
     let mut first_chunk_at: Option<std::time::Instant> = None;
@@ -291,6 +920,7 @@ pub async fn inference_probe_handler(
                         }
                         last_chunk_at = std::time::Instant::now();
                         chunks_received = chunks_received.saturating_add(1);
+                        record_tool_calls(&mut tool_call_indices, &c);
                         for choice in &c.choices {
                             if let Some(t) = &choice.delta.content {
                                 text_acc.push_str(t);
@@ -356,6 +986,7 @@ pub async fn inference_probe_handler(
         model: model_id,
         request_body_chars,
         tool_count,
+        tool_calls_observed: tool_call_indices.len(),
         errored: errored.is_some(),
         error: errored,
     }))
@@ -386,7 +1017,13 @@ fn require_controller(state: &AppState, user: &AuthedUser) -> Result<(), ApiErro
 }
 
 pub fn inference_probe_router() -> Router<AppState> {
-    Router::new().route("/api/admin/inference/probe", post(inference_probe_handler))
+    Router::new()
+        .route("/api/admin/inference/probe", post(inference_probe_handler))
+        .route(
+            "/api/admin/inference/conformance",
+            post(inference_conformance_handler),
+        )
+        .route("/api/admin/inference/qualify", post(qualify_model_handler))
 }
 
 #[cfg(test)]
@@ -395,13 +1032,169 @@ mod tests {
     use crate::routes::{build_router, test_app_state};
     use axum::body::Body;
     use axum::http::{HeaderValue, Method, Request, header};
+    use axum::response::IntoResponse;
+    use execlaw_core::backends::{BackendMode, BackendUpsert};
     use execlaw_core::users::{UserRole, UserRow, UserStore};
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tower::ServiceExt;
+
+    #[test]
+    fn context_probe_resizes_from_observed_token_usage() {
+        let initial = 4_096 * 6;
+        let grown = next_context_probe_chars(initial, 2_050, 4_096);
+        assert!(grown > initial);
+        assert!(grown < 2_000_000);
+        assert!(next_context_probe_chars(initial, 5_000, 4_096) < initial);
+    }
+
+    async fn openai_fixture(Json(request): Json<serde_json::Value>) -> axum::response::Response {
+        if let Some(schema) = request.pointer("/response_format/json_schema/schema") {
+            let content = if schema["type"] == "array" {
+                "[\"local\"]"
+            } else if schema["properties"]["status"].is_object() {
+                "{\"status\":\"READY\"}"
+            } else {
+                "{\"count\":2}"
+            };
+            return Json(serde_json::json!({"id":"probe","model":"local-test","choices":[{"index":0,"message":{"role":"assistant","content":content},"finish_reason":"stop"}]})).into_response();
+        }
+        if request.get("tools").is_some() {
+            return Json(serde_json::json!({
+                "id": "probe", "model": "local-test", "choices": [{"index": 0,
+                    "message": {"role": "assistant", "content": null, "tool_calls": [{
+                        "id": "call-probe", "type": "function",
+                        "function": {"name": "probe_noop", "arguments": "{}"}
+                    }]}, "finish_reason": "tool_calls"}]
+            }))
+            .into_response();
+        }
+        if request["stream"] == true {
+            return ([(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                "data: {\"id\":\"probe\",\"model\":\"local-test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"READY\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
+                .into_response();
+        }
+        let prompt_tokens = if request["messages"].to_string().len() > 10_000 {
+            3500
+        } else {
+            8
+        };
+        Json(serde_json::json!({"id": "probe", "model": "local-test", "usage":{"prompt_tokens":prompt_tokens,"completion_tokens":1}, "choices": [{
+            "index": 0, "message": {"role": "assistant", "content": "READY"}, "finish_reason": "stop"
+        }]})).into_response()
+    }
+
+    async fn ollama_fixture(Json(request): Json<serde_json::Value>) -> axum::response::Response {
+        if let Some(schema) = request.get("format").filter(|format| format.is_object()) {
+            let content = if schema["type"] == "array" {
+                "[\"local\"]"
+            } else if schema["properties"]["status"].is_object() {
+                "{\"status\":\"READY\"}"
+            } else {
+                "{\"count\":2}"
+            };
+            return Json(serde_json::json!({"model":"local-test","message":{"role":"assistant","content":content},"done":true,"prompt_eval_count":8,"eval_count":1})).into_response();
+        }
+        if request.get("tools").is_some() {
+            return Json(serde_json::json!({"model": "local-test", "message": {
+                "role": "assistant", "content": "", "tool_calls": [{
+                    "id": "call-probe", "function": {"name": "probe_noop", "arguments": {}}
+                }]}, "done": true, "done_reason": "stop"}))
+            .into_response();
+        }
+        if request["stream"] == true {
+            return ([(axum::http::header::CONTENT_TYPE, "application/x-ndjson")],
+                "{\"model\":\"local-test\",\"message\":{\"role\":\"assistant\",\"content\":\"READY\"},\"done\":true}\n")
+                .into_response();
+        }
+        let prompt_eval_count = if request["messages"].to_string().len() > 10_000 {
+            3500
+        } else {
+            8
+        };
+        Json(serde_json::json!({"model": "local-test", "message": {"role": "assistant", "content": "READY"}, "done": true,"prompt_eval_count":prompt_eval_count,"eval_count":1})).into_response()
+    }
+
+    #[tokio::test]
+    async fn conformance_checks_text_stream_and_noop_tool_on_both_protocols() {
+        let router = Router::new()
+            .route("/v1/chat/completions", post(openai_fixture))
+            .route("/api/chat", post(ollama_fixture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(axum::serve(listener, router).into_future());
+        for engine in [InferenceEngine::OpenAICompat, InferenceEngine::Ollama] {
+            let url = if engine == InferenceEngine::Ollama {
+                format!("http://{address}")
+            } else {
+                format!("http://{address}/v1")
+            };
+            let client = InferenceClient::new(url).with_engine(engine);
+            let result = run_conformance(&client, "local-test", 4096).await;
+            assert!(
+                result.text.passed,
+                "{} text: {}",
+                result.protocol, result.text.code
+            );
+            assert!(
+                result.streaming.passed,
+                "{} streaming: {}",
+                result.protocol, result.streaming.code
+            );
+            assert!(
+                result.tools.passed,
+                "{} tools: {}",
+                result.protocol, result.tools.code
+            );
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn conformance_reports_missing_tool_call_without_dispatching() {
+        async fn text_only(_: Json<serde_json::Value>) -> Json<serde_json::Value> {
+            Json(
+                serde_json::json!({"id": "probe", "model": "local-test", "choices": [{
+                    "index": 0, "message": {"role": "assistant", "content": "READY"}, "finish_reason": "stop"
+                }]}),
+            )
+        }
+        let router = Router::new().route("/v1/chat/completions", post(text_only));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(axum::serve(listener, router).into_future());
+        let client = InferenceClient::new(format!("http://{address}/v1"));
+        let result = run_conformance(&client, "local-test", 4096).await;
+        assert!(!result.tools.passed);
+        assert_eq!(result.tools.code, "no_valid_tool_call");
+        server.abort();
+    }
+
+    #[test]
+    fn tool_call_fragments_count_once_per_choice_and_index() {
+        let first: ChatStreamChunk = serde_json::from_value(serde_json::json!({
+            "id": "probe", "model": "local", "choices": [{
+                "index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call-1", "function": {"name": "probe_noop"}}]}
+            }]
+        })).unwrap();
+        let continuation: ChatStreamChunk = serde_json::from_value(serde_json::json!({
+            "id": "probe", "model": "local", "choices": [{
+                "index": 0, "delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{}"}}]}
+            }]
+        }))
+        .unwrap();
+        let mut indices = std::collections::HashSet::new();
+        record_tool_calls(&mut indices, &first);
+        record_tool_calls(&mut indices, &continuation);
+        assert_eq!(indices.len(), 1);
+    }
 
     /// Helper mirroring `skills_admin::tests::seed_user_and_token`.
     /// Inserts a user with the given role and mints an access token.
     async fn seed_user_and_token(role: UserRole) -> (axum::Router, String) {
-        let state = test_app_state();
+        seed_user_and_token_for_state(test_app_state(), role)
+    }
+
+    fn seed_user_and_token_for_state(state: AppState, role: UserRole) -> (axum::Router, String) {
         UserStore::new(&state.db)
             .insert(&UserRow {
                 user_id: "u-probe-test".into(),
@@ -418,7 +1211,105 @@ mod tests {
             .signer
             .issue_access_token("u-probe-test", "session-test", 600)
             .expect("issue token");
+        state
+            .refresh_store
+            .issue(
+                "u-probe-test",
+                "session-test",
+                state.config.refresh_token_ttl_secs,
+            )
+            .expect("persist test session");
         (build_router(state), format!("Bearer {token}"))
+    }
+
+    #[tokio::test]
+    async fn qualification_persists_exact_identity_and_failed_recheck_invalidates_it() {
+        async fn conditional_fixture(
+            State(fail_tools): State<std::sync::Arc<AtomicBool>>,
+            Json(request): Json<serde_json::Value>,
+        ) -> axum::response::Response {
+            if fail_tools.load(Ordering::SeqCst) && request.get("tools").is_some() {
+                return Json(serde_json::json!({
+                    "id":"probe", "model":"local-test", "choices":[{
+                        "index":0, "message":{"role":"assistant","content":"READY"},
+                        "finish_reason":"stop"
+                    }]
+                }))
+                .into_response();
+            }
+            openai_fixture(Json(request)).await
+        }
+
+        let fail_tools = std::sync::Arc::new(AtomicBool::new(false));
+        let fixture = Router::new()
+            .route("/v1/chat/completions", post(conditional_fixture))
+            .with_state(fail_tools.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let fixture_server = tokio::spawn(axum::serve(listener, fixture).into_future());
+
+        let state = test_app_state();
+        BackendStore::new(&state.db)
+            .upsert(
+                &BackendUpsert {
+                    purpose: BackendPurpose::Standard,
+                    inference_backend: "service-vllm".into(),
+                    model_spec_json: serde_json::json!({
+                        "model":"local-test", "quantization":"Q4",
+                        "chat_template":"test-template-v1", "backend_version":"fixture-v1"
+                    }),
+                    gpu_id: None,
+                    endpoint: Some(format!("http://{address}/v1")),
+                    notes: None,
+                    reasoning_enabled: false,
+                    mode: BackendMode::External,
+                },
+                chrono::Utc::now().timestamp(),
+            )
+            .unwrap();
+        let db = state.db.clone();
+        let (app, bearer) = seed_user_and_token_for_state(state, UserRole::Controller);
+        let request = || {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/inference/qualify")
+                .header(header::AUTHORIZATION, &bearer)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(r#"{"context_tokens":4096}"#))
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["qualified"], true, "{result}");
+        let identity: execlaw_core::harness::ModelIdentity =
+            serde_json::from_value(result["identity"].clone()).unwrap();
+        assert_eq!(identity.chat_template, "test-template-v1");
+        assert!(
+            execlaw_core::harness::HarnessStore::new(&db)
+                .get_profile(&identity)
+                .unwrap()
+                .is_some()
+        );
+
+        fail_tools.store(true, Ordering::SeqCst);
+        let response = app.oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(result["qualified"], false, "{result}");
+        assert!(
+            execlaw_core::harness::HarnessStore::new(&db)
+                .get_profile(&identity)
+                .unwrap()
+                .is_none()
+        );
+        fixture_server.abort();
     }
 
     /// 2026-05-16 — fix #7: the doc comment says Controller-only, the
@@ -450,6 +1341,26 @@ mod tests {
             StatusCode::FORBIDDEN,
             "Operator role must NOT be able to run the inference probe"
         );
+    }
+
+    #[tokio::test]
+    async fn conformance_requires_controller_and_a_resolvable_backend() {
+        for (role, expected) in [
+            (UserRole::Viewer, StatusCode::FORBIDDEN),
+            (UserRole::Controller, StatusCode::SERVICE_UNAVAILABLE),
+        ] {
+            let (app, bearer) = seed_user_and_token(role).await;
+            let request = Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/inference/conformance")
+                .header(
+                    header::AUTHORIZATION,
+                    HeaderValue::from_str(&bearer).unwrap(),
+                )
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(app.oneshot(request).await.unwrap().status(), expected);
+        }
     }
 
     /// Same coverage for Viewer — anyone below Controller is rejected.

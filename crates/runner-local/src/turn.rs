@@ -30,12 +30,13 @@ use execlaw_core::runs::{RunStepKind, RunStoreError};
 use execlaw_core::tool::{ToolFailure, ToolFailureKind, ToolResultEnvelope, tool_schema_hash};
 use execlaw_core::tool_execution::{CircuitPermit, ToolExecutionStore, ToolInvocationDefinition};
 use execlaw_inference_api::{
-    ChatMessage, ChatRequest, ChatResponse, InferenceClient, InferenceError, ModelId, Role,
-    ToolCall, ToolDeclaration,
+    ChatMessage, ChatRequest, ChatResponse, InferenceClient, InferenceError, InferenceRetryPolicy,
+    ModelId, Role, ToolCall, ToolDeclaration,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use thiserror::Error;
 
 // ---------------------------------------------------------------------------
@@ -75,6 +76,21 @@ pub trait ToolDispatch: Send + Sync {
         tool_name: &str,
         args_json: &serde_json::Value,
     ) -> Result<serde_json::Value, String>;
+
+    /// Set the stable, framework-assigned per-turn effect ordinal before
+    /// dispatch. Normal tools may ignore the value.
+    fn set_effect_ordinal(&self, _ordinal: u32) {}
+
+    /// Return the framework key for a tool effect that this dispatcher will
+    /// place in the durable outbox. Non-effect tools return `None`.
+    fn outbox_idempotency_key(
+        &self,
+        _tool_name: &str,
+        _turn_seq: i64,
+        _ordinal: u32,
+    ) -> Option<String> {
+        None
+    }
 
     /// Typed dispatch surface. Existing implementations inherit a stable
     /// classification of their legacy string errors.
@@ -180,6 +196,8 @@ pub struct TurnConfig {
     pub max_tool_rounds: u32,
     /// The tool set the model sees in the `tools` array.
     pub tools: Vec<ToolDeclaration>,
+    /// Entire policy-filtered catalog pinned for progressive discovery.
+    pub discoverable_tools: Vec<ToolDeclaration>,
     /// HMAC key for event-log signing (§7.8). `None` during tests and
     /// pre-setup; production always sets this from the server's shared
     /// key so every row the executor writes is tamper-evident.
@@ -218,13 +236,27 @@ pub struct TurnConfig {
     /// `"token_budget:MAX:RESERVE"`. An empty string or unrecognised
     /// value falls back to `FullReplay`.
     pub context_window_policy: String,
+    /// Exact context ceiling from an identity-qualified backend profile.
+    pub qualified_context_tokens: Option<u32>,
+    /// Conservatively clamped measured bytes per tokenizer token.
+    pub bytes_per_token_milli: u32,
+    /// Exact model capability observations used for native structured output.
+    pub qualified_profile: Option<execlaw_core::harness::ModelCapabilityProfile>,
+    /// Filesystem root for conversation/run-scoped large tool-result artifacts.
+    pub tool_result_artifacts_root: Option<std::path::PathBuf>,
     /// Optional Small-backend client used by the history summarizer
     /// (§14/§7). When `Some`, messages trimmed by the context-window
     /// policy are compressed into a single bullet-point summary that
     /// is inserted at position 1 so the model retains a digest of
     /// dropped context. When `None`, trimmed messages are silently
     /// discarded (legacy behaviour).
-    pub summarizer_client: Option<(InferenceClient, ModelId)>,
+    pub summarizer_client: Option<(
+        InferenceClient,
+        ModelId,
+        Option<execlaw_core::harness::ModelCapabilityProfile>,
+    )>,
+    /// User-authored deterministic completion requirements for this run.
+    pub completion_contract: Option<execlaw_core::runs::RunCompletionContractDraft>,
     /// Optional `Session` FSM handle (§new-3). When `Some`,
     /// `run_turn` drives the FSM: `TurnStarted` at entry,
     /// `ApprovalRequired` on policy-gate wait, `TurnCompleted`
@@ -259,6 +291,14 @@ pub enum TurnError {
     DurableStepUnavailable { step_id: String, state: String },
     #[error("turn exceeded max_tool_rounds ({0})")]
     MaxRounds(u32),
+    #[error("durable turn exceeded its wall-clock budget")]
+    TimeBudgetExceeded,
+    #[error("context budget: {0}")]
+    ContextBudget(String),
+    #[error("compaction contract: {0}")]
+    CompactionContract(String),
+    #[error("asset loadout receipt: {0}")]
+    AssetLoadout(String),
 }
 
 #[derive(Debug, Clone)]
@@ -277,6 +317,9 @@ pub struct TurnSummary {
 pub struct TurnExecutor {
     pub inference: InferenceClient,
     pub tool_dispatch: Arc<dyn ToolDispatch>,
+    retry_observer: Arc<dyn Fn(std::time::Duration) + Send + Sync>,
+    cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    asset_loadout: Option<execlaw_core::memory_assets::TurnAssetLoadoutReceipt>,
 }
 
 const MAX_IDENTICAL_CALLS: u32 = 2;
@@ -284,13 +327,189 @@ const MAX_SCHEMA_CORRECTIONS: u32 = 2;
 const MAX_DISPATCH_ATTEMPTS: u32 = 3;
 const CIRCUIT_FAILURE_THRESHOLD: u32 = 3;
 const CIRCUIT_COOLDOWN_MS: u64 = 30_000;
+const INLINE_TOOL_RESULT_BYTES: usize = 16 * 1024;
+const TOOL_RESULT_PREVIEW_BYTES: usize = 4 * 1024;
+
+async fn offload_large_result(
+    db: &execlaw_core::Database,
+    root: Option<&std::path::Path>,
+    conversation_id: &ConversationId,
+    run_id: &str,
+    tool_name: &str,
+    outcome: ToolResultEnvelope,
+) -> ToolResultEnvelope {
+    if tool_name == "execlaw.discover_tool" {
+        return outcome;
+    }
+    let ToolResultEnvelope::Ok { value } = outcome else {
+        return outcome;
+    };
+    let Some(root) = root else {
+        return ToolResultEnvelope::Ok { value };
+    };
+    let Ok(bytes) = serde_json::to_vec(&value) else {
+        return ToolResultEnvelope::Ok { value };
+    };
+    if bytes.len() <= INLINE_TOOL_RESULT_BYTES {
+        return ToolResultEnvelope::Ok { value };
+    }
+    let end = bytes.len().min(TOOL_RESULT_PREVIEW_BYTES);
+    let preview = String::from_utf8_lossy(&bytes[..end]).into_owned();
+    let db = db.clone();
+    let root = root.to_owned();
+    let conversation_id = conversation_id.clone();
+    let run_id = run_id.to_owned();
+    match tokio::task::spawn_blocking(move || {
+        execlaw_core::attachments::AttachmentStore::new(&db).insert_tool_result_artifact(
+            &root,
+            &conversation_id,
+            &run_id,
+            &bytes,
+            chrono::Utc::now().timestamp(),
+        )
+    })
+    .await
+    {
+        Ok(Ok(artifact)) => ToolResultEnvelope::Ok {
+            value: serde_json::json!({
+                "artifact_id": artifact.attachment_id,
+                "sha256": artifact.sha256,
+                "total_bytes": artifact.size_bytes,
+                "preview": preview,
+                "preview_truncated": true,
+                "read_tool": "execlaw.read_artifact",
+                "next_offset": 0
+            }),
+        },
+        Ok(Err(error)) => ToolResultEnvelope::Err {
+            failure: ToolFailure::new(
+                ToolFailureKind::Permanent,
+                "tool_result_offload_failed",
+                error.to_string(),
+            ),
+        },
+        Err(error) => ToolResultEnvelope::Err {
+            failure: ToolFailure::new(
+                ToolFailureKind::Permanent,
+                "tool_result_offload_failed",
+                error.to_string(),
+            ),
+        },
+    }
+}
+
+async fn read_result_artifact(
+    db: &execlaw_core::Database,
+    root: Option<&std::path::Path>,
+    conversation_id: &ConversationId,
+    run_id: &str,
+    args: &serde_json::Value,
+) -> ToolResultEnvelope {
+    let (Some(root), Some(artifact_id)) = (
+        root,
+        args.get("artifact_id").and_then(serde_json::Value::as_str),
+    ) else {
+        return ToolResultEnvelope::Err {
+            failure: ToolFailure::new(
+                ToolFailureKind::PolicyDenied,
+                "artifact_unavailable",
+                "artifact is outside this run scope",
+            ),
+        };
+    };
+    let offset = args
+        .get("offset")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let limit = args
+        .get("limit")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(8192)
+        .min(8192) as u32;
+    let artifact_id = artifact_id.to_owned();
+    let db = db.clone();
+    let root = root.to_owned();
+    let cid = conversation_id.clone();
+    let run_id = run_id.to_owned();
+    match tokio::task::spawn_blocking(move || {
+        execlaw_core::attachments::AttachmentStore::new(&db).read_tool_result_artifact(
+            &root,
+            &artifact_id,
+            &cid,
+            &run_id,
+            offset,
+            limit,
+            chrono::Utc::now().timestamp(),
+        )
+    })
+    .await
+    {
+        Ok(Ok(Some(chunk))) => ToolResultEnvelope::Ok {
+            value: serde_json::json!({
+                "artifact_id": chunk.artifact_id, "sha256": chunk.sha256,
+                "offset": chunk.offset, "next_offset": chunk.next_offset,
+                "total_bytes": chunk.total_bytes, "content": chunk.content
+            }),
+        },
+        Ok(Ok(None)) => ToolResultEnvelope::Err {
+            failure: ToolFailure::new(
+                ToolFailureKind::PolicyDenied,
+                "artifact_unavailable",
+                "artifact is expired or outside this conversation and run scope",
+            ),
+        },
+        Ok(Err(error)) => ToolResultEnvelope::Err {
+            failure: ToolFailure::new(
+                ToolFailureKind::Permanent,
+                "artifact_read_failed",
+                error.to_string(),
+            ),
+        },
+        Err(error) => ToolResultEnvelope::Err {
+            failure: ToolFailure::new(
+                ToolFailureKind::Permanent,
+                "artifact_read_failed",
+                error.to_string(),
+            ),
+        },
+    }
+}
 
 impl TurnExecutor {
     pub fn new(inference: InferenceClient, tool_dispatch: Arc<dyn ToolDispatch>) -> Self {
+        Self::new_with_retry_observer(inference, tool_dispatch, Arc::new(|_| {}))
+    }
+
+    /// Construct a turn executor with an observer for failed inference
+    /// attempts that are eligible for retry. The callback receives the
+    /// failed attempt duration; it never receives request content.
+    pub fn new_with_retry_observer(
+        inference: InferenceClient,
+        tool_dispatch: Arc<dyn ToolDispatch>,
+        retry_observer: Arc<dyn Fn(std::time::Duration) + Send + Sync>,
+    ) -> Self {
         Self {
             inference,
             tool_dispatch,
+            retry_observer,
+            cancel_flag: None,
+            asset_loadout: None,
         }
+    }
+
+    /// Attach the active chat-turn cancellation flag to inference waits.
+    pub fn with_cancel_flag(mut self, cancel_flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel_flag = Some(cancel_flag);
+        self
+    }
+
+    /// Attach the exact governed asset selection used in this turn's system prompt.
+    pub fn with_asset_loadout(
+        mut self,
+        receipt: Option<execlaw_core::memory_assets::TurnAssetLoadoutReceipt>,
+    ) -> Self {
+        self.asset_loadout = receipt;
+        self
     }
 
     async fn dispatch_with_retry(
@@ -360,18 +579,81 @@ impl TurnExecutor {
             }
         }
 
+        if !store.claim_run_effect(run_id, step_id, now_ms)? {
+            let mut failure = ToolFailure::new(
+                ToolFailureKind::Permanent,
+                "run_effect_budget_exhausted",
+                "durable run reached its effect budget",
+            );
+            failure.guidance = Some("finish without another tool effect".into());
+            store.complete_failure(run_id, step_id, &failure, now_ms)?;
+            return Ok(ToolResultEnvelope::Err { failure });
+        }
+
         while trace.attempts_used < trace.retry_budget_total {
             let now_ms = chrono::Utc::now().timestamp_millis();
+            let run_budget = execlaw_core::runs::RunStore::new(db)
+                .execution_budget(run_id)
+                .map_err(|error| execlaw_core::db::DbError::Invariant(error.to_string()))?;
+            let mut remaining_ms = run_budget
+                .map(|budget| budget.deadline_at_ms.saturating_sub(now_ms))
+                .unwrap_or(i64::MAX);
+            if remaining_ms <= 0 {
+                let failure = ToolFailure::new(
+                    ToolFailureKind::Timeout,
+                    "run_time_budget_exhausted",
+                    "durable run reached its time budget before tool dispatch",
+                );
+                store.complete_failure(run_id, step_id, &failure, now_ms)?;
+                return Ok(ToolResultEnvelope::Err { failure });
+            }
             if let Some(next_retry_at_ms) = trace.next_retry_at_ms
                 && next_retry_at_ms > now_ms
             {
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    u64::try_from(next_retry_at_ms - now_ms).unwrap_or(u64::MAX),
-                ))
-                .await;
+                let backoff = u64::try_from(next_retry_at_ms - now_ms).unwrap_or(u64::MAX);
+                if backoff >= u64::try_from(remaining_ms).unwrap_or(0) {
+                    let failure = ToolFailure::new(
+                        ToolFailureKind::Timeout,
+                        "run_time_budget_exhausted",
+                        "tool retry backoff would exceed the durable run time budget",
+                    );
+                    store.complete_failure(run_id, step_id, &failure, now_ms)?;
+                    return Ok(ToolResultEnvelope::Err { failure });
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                remaining_ms = run_budget
+                    .map(|budget| {
+                        budget
+                            .deadline_at_ms
+                            .saturating_sub(chrono::Utc::now().timestamp_millis())
+                    })
+                    .unwrap_or(i64::MAX);
+                if remaining_ms <= 0 {
+                    let failure = ToolFailure::new(
+                        ToolFailureKind::Timeout,
+                        "run_time_budget_exhausted",
+                        "durable run expired during tool retry backoff",
+                    );
+                    store.complete_failure(run_id, step_id, &failure, now_ms)?;
+                    return Ok(ToolResultEnvelope::Err { failure });
+                }
             }
             trace = store.begin_attempt(run_id, step_id, chrono::Utc::now().timestamp_millis())?;
-            let outcome = self.tool_dispatch.call_typed(tool_name, args).await;
+            let outcome = match tokio::time::timeout(
+                std::time::Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX)),
+                self.tool_dispatch.call_typed(tool_name, args),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => ToolResultEnvelope::Err {
+                    failure: ToolFailure::new(
+                        ToolFailureKind::Timeout,
+                        "run_time_budget_exhausted",
+                        "tool dispatch exceeded the durable run time budget",
+                    ),
+                },
+            };
             match outcome {
                 ToolResultEnvelope::Ok { value } => {
                     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -547,7 +829,22 @@ impl TurnExecutor {
             input_event_seq,
             None,
             chrono::Utc::now().timestamp(),
-        )?;
+        )?
+        .with_model_lease_seconds(
+            if self.inference.engine == execlaw_inference_api::InferenceEngine::Ollama {
+                150
+            } else {
+                60
+            },
+        );
+        if let Some(receipt) = &self.asset_loadout {
+            execlaw_core::memory_assets::MemoryAssetStore::new(db)
+                .record_turn_loadout(conversation_id.as_str(), input_event_seq.0, receipt)
+                .map_err(|error| TurnError::AssetLoadout(error.to_string()))?;
+        }
+        if let Some(contract) = cfg.completion_contract.as_ref() {
+            durable.set_completion_contract(contract, chrono::Utc::now().timestamp())?;
+        }
         if durable.is_completed()? {
             return replay_completed_turn(&log, conversation_id, input_event_seq);
         }
@@ -561,66 +858,186 @@ impl TurnExecutor {
         // 2. Assemble the chat messages from the event log.
         let history = log.replay_since(conversation_id, EventSeq(0))?;
         let mut messages: Vec<ChatMessage> = vec![ChatMessage::system(&cfg.system_prompt)];
-        messages.extend(hydrate_messages(&history, cfg.spotlight_delim.as_deref()));
+        let (hydrated_history, history_message_seqs) =
+            hydrate_messages_with_seq(&history, cfg.spotlight_delim.as_deref());
+        messages.extend(hydrated_history);
 
         // Context-window management (§9 + §14). Apply the configured policy
         // to trim the message list to fit within the model's context
         // budget before the first inference call. The system prompt is
         // always preserved by the policy implementation.
         //
-        // If a summarizer client is configured and the policy actually
-        // drops messages, summarize the dropped segment and inject a
-        // compact digest at position 1 (after the system prompt) so the
-        // model retains awareness of discarded context.
-        let cw_policy = execlaw_context_window::parse_policy(&cfg.context_window_policy);
-        if cfg.summarizer_client.is_some() {
-            // Clone before trim so we can diff what was removed.
-            let before_trim = messages.clone();
-            execlaw_context_window::apply(&cw_policy, &mut messages);
-            // Determine the dropped prefix (everything that was removed
-            // from the non-system portion of `before_trim`).
-            let conv_start = before_trim
-                .iter()
-                .position(|m| m.role != Role::System)
-                .unwrap_or(before_trim.len());
-            let kept_count = messages.len();
-            let before_count = before_trim.len();
-            if kept_count < before_count {
-                let dropped_count = before_count - kept_count;
-                let dropped = &before_trim[conv_start..conv_start + dropped_count];
-                if !dropped.is_empty() {
-                    let (client, model_id) =
-                        cfg.summarizer_client.as_ref().expect("checked Some above");
-                    match crate::history_summarizer::summarize_segment(dropped, client, model_id)
-                        .await
-                    {
-                        Ok(summary_msg) => {
-                            // Insert after the system prompt (position 1).
-                            let insert_pos =
-                                if messages.first().is_some_and(|m| m.role == Role::System) {
-                                    1
-                                } else {
-                                    0
-                                };
-                            messages.insert(insert_pos, summary_msg);
-                            tracing::debug!(
-                                dropped = dropped_count,
-                                "context-window: injected history summary",
-                            );
-                        }
-                        Err(e) => {
-                            // Non-fatal: proceed without summary rather
-                            // than aborting the turn.
-                            tracing::warn!(
-                                error = %e,
-                                "history summarizer failed; proceeding without summary",
-                            );
-                        }
-                    }
+        // A dropped source prefix is reusable only when its event fingerprint
+        // matches a validated receipt. Invalid summary output fails closed.
+        let configured_policy = execlaw_context_window::parse_policy(&cfg.context_window_policy);
+        let cw_policy = match configured_policy {
+            execlaw_context_window::ContextWindowPolicy::FullReplay => {
+                execlaw_context_window::ContextWindowPolicy::TokenBudget {
+                    max_tokens: cfg.qualified_context_tokens.unwrap_or(8_192) as usize,
+                    reserve_for_reply: cfg.max_tokens.unwrap_or(1_024) as usize,
                 }
             }
-        } else {
-            execlaw_context_window::apply(&cw_policy, &mut messages);
+            policy => policy,
+        };
+        let before_trim = messages.clone();
+        execlaw_context_window::apply(&cw_policy, &mut messages);
+        let conversation_start = usize::from(
+            before_trim
+                .first()
+                .is_some_and(|message| message.role == Role::System),
+        );
+        let dropped_count = before_trim.len().saturating_sub(messages.len());
+        if dropped_count > 0 {
+            let dropped = &before_trim[conversation_start..conversation_start + dropped_count];
+            let dropped_seqs = history_message_seqs
+                .iter()
+                .take(dropped_count)
+                .copied()
+                .collect::<Vec<_>>();
+            let source_start_seq = dropped_seqs.iter().map(|seq| seq.0).min().ok_or_else(|| {
+                TurnError::CompactionContract("trimmed messages have no source event range".into())
+            })?;
+            let source_end_seq = dropped_seqs
+                .iter()
+                .map(|seq| seq.0)
+                .max()
+                .unwrap_or(source_start_seq);
+            let source_events = history
+                .iter()
+                .filter(|event| event.seq.0 >= source_start_seq && event.seq.0 <= source_end_seq)
+                .collect::<Vec<_>>();
+            let receipt_store = execlaw_core::harness::HarnessStore::new(db);
+            let run_store = execlaw_core::runs::RunStore::new(db);
+            let mut pending_state = run_store
+                .list_steps(durable.run_id())
+                .map_err(|error| TurnError::CompactionContract(error.to_string()))?
+                .into_iter()
+                .filter(|step| step.status == execlaw_core::runs::RunStepStatus::Waiting)
+                .map(|step| match step.approval_id {
+                    Some(approval_id) => format!(
+                        "Unresolved approval {approval_id} for step {} ({})",
+                        step.step_id,
+                        step.kind.as_str()
+                    ),
+                    None => format!("Pending step {} ({})", step.step_id, step.kind.as_str()),
+                })
+                .collect::<Vec<_>>();
+            if let Some(report) = run_store
+                .completion_report(durable.run_id())
+                .map_err(|error| TurnError::CompactionContract(error.to_string()))?
+            {
+                pending_state.extend(report.contract.acceptance_criteria.iter().map(|criterion| {
+                    format!(
+                        "Acceptance criterion {} (required={}): {}",
+                        criterion.criterion_id, criterion.required, criterion.description
+                    )
+                }));
+                pending_state.extend(report.contract.required_artifacts.iter().map(|artifact| {
+                    format!(
+                        "Required artifact {}: {}",
+                        artifact.artifact_id, artifact.description
+                    )
+                }));
+                if report.contract.delivery_required && !report.delivery_confirmed {
+                    pending_state.push("External delivery remains unconfirmed".into());
+                }
+                pending_state.extend(report.unfinished);
+            }
+            let fingerprint =
+                execlaw_core::harness::HarnessStore::fingerprint(&(&source_events, &pending_state))
+                    .map_err(|error| TurnError::CompactionContract(error.to_string()))?;
+            let summary_profile = cfg
+                .summarizer_client
+                .as_ref()
+                .and_then(|(_, _, profile)| profile.as_ref())
+                .or(cfg.qualified_profile.as_ref());
+            let response_format = summary_profile.and_then(|profile| {
+                execlaw_core::harness::qualified_json_schema_format(
+                    profile,
+                    "compaction_summary",
+                    crate::history_summarizer::compaction_json_schema(),
+                )
+            });
+            let receipt = if let Some(receipt) = receipt_store
+                .active_compaction_receipt(conversation_id.as_str(), &fingerprint, 1)
+                .map_err(|error| TurnError::CompactionContract(error.to_string()))?
+            {
+                receipt
+            } else {
+                let summary = if let Some((client, model_id, _)) = &cfg.summarizer_client {
+                    crate::history_summarizer::summarize_segment_contract(
+                        dropped,
+                        &pending_state,
+                        response_format,
+                        client,
+                        model_id,
+                    )
+                    .await
+                } else {
+                    crate::history_summarizer::summarize_segment_contract(
+                        dropped,
+                        &pending_state,
+                        response_format,
+                        &self.inference,
+                        &cfg.model,
+                    )
+                    .await
+                }
+                .map_err(|error| TurnError::CompactionContract(error.safe_class().to_owned()))?;
+                let mut summary = summary;
+                for pending in &pending_state {
+                    if pending.starts_with("Unresolved approval")
+                        || pending.starts_with("Acceptance criterion")
+                        || pending.starts_with("Required artifact")
+                        || pending == "External delivery remains unconfirmed"
+                    {
+                        if !summary.retained_constraints.contains(pending) {
+                            summary.retained_constraints.push(pending.clone());
+                        }
+                    }
+                    if !summary.pending_work.contains(pending) {
+                        summary.pending_work.push(pending.clone());
+                    }
+                }
+                let receipt = execlaw_core::harness::CompactionReceipt {
+                    receipt_id: format!("compact:{}:{fingerprint}", conversation_id.as_str()),
+                    conversation_id: conversation_id.to_string(),
+                    source_start_seq,
+                    source_end_seq,
+                    source_fingerprint: fingerprint,
+                    summary_version: 1,
+                    retained_constraints: summary.retained_constraints,
+                    pending_work: summary.pending_work,
+                    discarded_content: summary.discarded_content,
+                    trust_class: "mixed_untrusted".into(),
+                    summary: summary.summary,
+                    created_at: chrono::Utc::now().timestamp_millis(),
+                };
+                receipt_store
+                    .save_compaction_receipt(&receipt)
+                    .map_err(|error| TurnError::CompactionContract(error.to_string()))?;
+                receipt
+            };
+            let summary_message = crate::history_summarizer::CompactionSummary {
+                summary: receipt.summary.clone(),
+                retained_constraints: receipt.retained_constraints.clone(),
+                pending_work: receipt.pending_work.clone(),
+                discarded_content: receipt.discarded_content.clone(),
+            }
+            .as_untrusted_message();
+            let insert_pos = usize::from(
+                messages
+                    .first()
+                    .is_some_and(|message| message.role == Role::System),
+            );
+            messages.insert(insert_pos, summary_message);
+            tracing::debug!(
+                dropped = dropped_count,
+                source_start_seq,
+                source_end_seq,
+                receipt_id = %receipt.receipt_id,
+                "context-window: persisted and inserted provenance-backed summary"
+            );
         }
 
         // 2026-05-15 — when the caller supplied image data URLs for
@@ -655,6 +1072,25 @@ impl TurnExecutor {
             ));
         }
 
+        let mut tools = cfg.tools.clone();
+        let mut pinned_tool_catalog = cfg.discoverable_tools.clone();
+        pinned_tool_catalog.extend(cfg.tools.iter().cloned());
+
+        // Store only hashes so replay can identify prompt, backend, and
+        // catalog drift without duplicating user content or tool schemas.
+        durable.record_input_manifest(
+            &messages,
+            &serde_json::json!({
+                "model": &cfg.model,
+                "temperature": cfg.temperature,
+                "max_tokens": cfg.max_tokens,
+                "reasoning_enabled": cfg.reasoning_enabled,
+                "context_window_policy": &cfg.context_window_policy,
+            }),
+            &pinned_tool_catalog,
+            chrono::Utc::now().timestamp(),
+        )?;
+
         // 3. Tool-call loop.
         let mut pending: Vec<PendingEvent> = Vec::new();
         let mut tool_ordinal: u32 = 0;
@@ -676,16 +1112,38 @@ impl TurnExecutor {
         tracing::debug!(
             target: "agent::turn_timing",
             conversation_id = %conversation_id_str,
-            tool_catalog_count = cfg.tools.len(),
+            tool_catalog_count = tools.len(),
             history_msg_count = messages.len(),
             "turn starting (in-process executor)"
         );
 
         loop {
-            let req = ChatRequest {
+            let execution_budget = durable.execution_budget()?;
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            let remaining_ms = execution_budget.deadline_at_ms.saturating_sub(now_ms);
+            if remaining_ms <= 0 {
+                return Err(TurnError::TimeBudgetExceeded);
+            }
+            let (policy_context_cap, policy_reserve) = match &cw_policy {
+                execlaw_context_window::ContextWindowPolicy::TokenBudget {
+                    max_tokens,
+                    reserve_for_reply,
+                } => (
+                    Some(u32::try_from(*max_tokens).unwrap_or(u32::MAX)),
+                    u32::try_from(*reserve_for_reply).unwrap_or(u32::MAX),
+                ),
+                _ => (None, 0),
+            };
+            let context_tokens = match cfg.qualified_context_tokens {
+                Some(qualified) => policy_context_cap
+                    .map(|limit| limit.min(qualified))
+                    .unwrap_or(qualified),
+                None => policy_context_cap.unwrap_or(8_192),
+            };
+            let mut req = ChatRequest {
                 model: cfg.model.clone(),
                 messages: messages.clone(),
-                tools: Some(cfg.tools.clone()),
+                tools: Some(tools.clone()),
                 stream: false,
                 temperature: cfg.temperature,
                 max_tokens: cfg.max_tokens,
@@ -696,8 +1154,25 @@ impl TurnExecutor {
                     "enable_thinking": cfg.reasoning_enabled,
                 })),
                 tool_choice: None,
+                response_format: None,
                 guided_decoding_backend: None,
             };
+            let estimated_prompt_tokens = execlaw_context_window::fit_chat_request(
+                &mut req,
+                context_tokens,
+                cfg.max_tokens.unwrap_or(1024).max(policy_reserve),
+                cfg.bytes_per_token_milli,
+            )
+            .map_err(TurnError::ContextBudget)?;
+            messages = req.messages.clone();
+            tracing::debug!(
+                target: "agent::turn_timing",
+                conversation_id = %conversation_id,
+                round = rounds + 1,
+                estimated_prompt_tokens,
+                context_tokens,
+                "round request compiled against configured budget"
+            );
             // Per-round inference call. Time it so the operator can
             // tell the model spent N seconds generating vs. N seconds
             // on prefill (when usage is reported). vLLM's non-streaming
@@ -706,7 +1181,7 @@ impl TurnExecutor {
             // queue + prefill + decode.
             let inference_started_at = std::time::Instant::now();
             let inference_messages_count = messages.len();
-            let inference_tools_count = cfg.tools.len();
+            let inference_tools_count = tools.len();
             let model_step_id = format!("model:{rounds}");
             let now = chrono::Utc::now().timestamp();
             let resp: ChatResponse = match durable.begin(
@@ -720,7 +1195,117 @@ impl TurnExecutor {
             )? {
                 StepDecision::Replay(response) => response,
                 StepDecision::Execute(_) => {
-                    let response = self.inference.chat_completions(&req).await?;
+                    let attempt_no = std::sync::atomic::AtomicU32::new(0);
+                    let attempt_started =
+                        Arc::new(std::sync::Mutex::new(std::time::Instant::now()));
+                    let retry_started = attempt_started.clone();
+                    let retry_observer = self.retry_observer.clone();
+                    let cancel_flag = self.cancel_flag.clone();
+                    let inference_remaining_ms = durable
+                        .execution_budget()?
+                        .deadline_at_ms
+                        .saturating_sub(chrono::Utc::now().timestamp_millis());
+                    if inference_remaining_ms <= 0 {
+                        return Err(TurnError::TimeBudgetExceeded);
+                    }
+                    let mut retry_policy = InferenceRetryPolicy::for_engine(self.inference.engine);
+                    retry_policy.deadline =
+                        retry_policy.deadline.min(std::time::Duration::from_millis(
+                            u64::try_from(inference_remaining_ms).unwrap_or(u64::MAX),
+                        ));
+                    let response = tokio::time::timeout(
+                        std::time::Duration::from_millis(
+                            u64::try_from(inference_remaining_ms).unwrap_or(u64::MAX),
+                        ),
+                        self.inference
+                            .chat_completions_with_retry_observed_cancelled(
+                                &req,
+                                &retry_policy,
+                                |_attempt| {
+                                    *attempt_started.lock().unwrap() = std::time::Instant::now();
+                                    let persisted_attempt = durable
+                                        .start_inference_attempt(
+                                            &model_step_id,
+                                            chrono::Utc::now().timestamp_millis(),
+                                        )
+                                        .map_err(|error| {
+                                            InferenceError::AttemptTracking(error.to_string())
+                                        })?;
+                                    attempt_no.store(persisted_attempt, Ordering::Relaxed);
+                                    Ok(())
+                                },
+                                |_attempt, error| {
+                                    let retry_allowed = execlaw_core::runs::RunStore::new(db)
+                                        .consume_execution_retry(
+                                            durable.run_id(),
+                                            chrono::Utc::now().timestamp_millis(),
+                                        )
+                                        .map_err(|tracking_error| {
+                                            InferenceError::AttemptTracking(
+                                                tracking_error.to_string(),
+                                            )
+                                        })?;
+                                    if !retry_allowed {
+                                        return Err(InferenceError::AttemptTracking(
+                                            "durable run retry or time budget exhausted".into(),
+                                        ));
+                                    }
+                                    let persisted_attempt = attempt_no.load(Ordering::Relaxed);
+                                    if persisted_attempt == 0 {
+                                        return Err(InferenceError::AttemptTracking(
+                                            "retry metadata does not match the active attempt"
+                                                .into(),
+                                        ));
+                                    }
+                                    durable
+                                        .mark_inference_attempt_retrying(
+                                            &model_step_id,
+                                            persisted_attempt,
+                                            inference_error_class(error),
+                                            chrono::Utc::now().timestamp_millis(),
+                                        )
+                                        .map_err(|tracking_error| {
+                                            InferenceError::AttemptTracking(
+                                                tracking_error.to_string(),
+                                            )
+                                        })?;
+                                    retry_observer(retry_started.lock().unwrap().elapsed());
+                                    Ok(())
+                                },
+                                || {
+                                    cancel_flag.as_ref().is_some_and(|flag| {
+                                        flag.load(std::sync::atomic::Ordering::SeqCst)
+                                    })
+                                },
+                            ),
+                    )
+                    .await
+                    .map_err(|_| TurnError::TimeBudgetExceeded)?;
+                    let response = match response {
+                        Ok(response) => {
+                            durable.finish_inference_attempt(
+                                &model_step_id,
+                                attempt_no.load(Ordering::Relaxed),
+                                true,
+                                None,
+                                chrono::Utc::now().timestamp_millis(),
+                            )?;
+                            response
+                        }
+                        Err(error) => {
+                            let attempt = attempt_no.load(Ordering::Relaxed);
+                            if attempt > 0 {
+                                durable.finish_inference_attempt(
+                                    &model_step_id,
+                                    attempt,
+                                    false,
+                                    Some(inference_error_class(&error)),
+                                    chrono::Utc::now().timestamp_millis(),
+                                )?;
+                            }
+                            return Err(error.into());
+                        }
+                    };
                     durable.complete(&model_step_id, &response, chrono::Utc::now().timestamp())?;
                     response
                 }
@@ -869,20 +1454,53 @@ impl TurnExecutor {
                     "tool_name": tc.function.name,
                     "args": args,
                 });
+                let turn_seq = durable
+                    .run_id()
+                    .rsplit(':')
+                    .next()
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or_default();
+                let outbox_key = self.tool_dispatch.outbox_idempotency_key(
+                    &tc.function.name,
+                    turn_seq,
+                    tool_ordinal,
+                );
                 let outcome: ToolResultEnvelope = match durable.begin(
                     tool_step_id.clone(),
                     durable_ordinal,
                     RunStepKind::ToolDispatch,
                     &tool_step_input,
                     None,
-                    None,
+                    outbox_key,
                     chrono::Utc::now().timestamp(),
                 )? {
                     StepDecision::Replay(outcome) => outcome,
                     StepDecision::Execute(_) => {
                         let outcome = match parsed_args {
                             Ok(args) => {
-                                if schema_failures
+                                if let Err(failure) =
+                                    validate_advertised_tool(&tools, &tc.function.name, &args)
+                                {
+                                    ToolResultEnvelope::Err { failure }
+                                } else if tc.function.name == "execlaw.discover_tool" {
+                                    ToolResultEnvelope::Ok {
+                                        value: discover_tools(
+                                            args.get("query")
+                                                .and_then(serde_json::Value::as_str)
+                                                .unwrap_or(""),
+                                            &cfg.discoverable_tools,
+                                        ),
+                                    }
+                                } else if tc.function.name == "execlaw.read_artifact" {
+                                    read_result_artifact(
+                                        db,
+                                        cfg.tool_result_artifacts_root.as_deref(),
+                                        conversation_id,
+                                        durable.run_id(),
+                                        &args,
+                                    )
+                                    .await
+                                } else if schema_failures
                                     .get(&tc.function.name)
                                     .copied()
                                     .unwrap_or_default()
@@ -900,11 +1518,14 @@ impl TurnExecutor {
                                     let (dispatch_input_hash, result_schema_hash) =
                                         self.tool_dispatch.schema_hashes(&tc.function.name).await;
                                     let input_schema_hash = dispatch_input_hash.or_else(|| {
-                                        cfg.tools
+                                        tools
                                             .iter()
                                             .find(|tool| tool.function.name == tc.function.name)
                                             .map(|tool| tool_schema_hash(&tool.function.parameters))
                                     });
+                                    self.tool_dispatch.set_effect_ordinal(
+                                        u32::try_from(tool_ordinal).unwrap_or(u32::MAX),
+                                    );
                                     self.dispatch_with_retry(
                                         db,
                                         durable.run_id(),
@@ -928,6 +1549,15 @@ impl TurnExecutor {
                                 ),
                             },
                         };
+                        let outcome = offload_large_result(
+                            db,
+                            cfg.tool_result_artifacts_root.as_deref(),
+                            conversation_id,
+                            durable.run_id(),
+                            &tc.function.name,
+                            outcome,
+                        )
+                        .await;
                         durable.complete(
                             &tool_step_id,
                             &outcome,
@@ -942,6 +1572,8 @@ impl TurnExecutor {
                         });
                     }
                 };
+                let visible_outcome =
+                    activate_discovered_schemas(&tc.function.name, &mut tools, &outcome);
                 durable.advance(durable_ordinal, chrono::Utc::now().timestamp())?;
                 durable_ordinal += 1;
                 if let ToolResultEnvelope::Err { failure } = &outcome
@@ -974,7 +1606,7 @@ impl TurnExecutor {
                         round = rounds,
                         ordinal = tool_ordinal,
                         tool = %tc.function.name,
-                        error = %failure.message,
+                        error_code = %failure.code,
                         failure_kind = ?failure.kind,
                         attempt = failure.attempt,
                         "tool failed",
@@ -983,7 +1615,7 @@ impl TurnExecutor {
 
                 let result_payload = ToolResultPayload {
                     ordinal: tool_ordinal,
-                    outcome: match &outcome {
+                    outcome: match &visible_outcome {
                         ToolResultEnvelope::Ok { value } => Ok(value.clone()),
                         ToolResultEnvelope::Err { failure } => Err(serde_json::to_string(failure)
                             .unwrap_or_else(|_| failure.message.clone())),
@@ -997,7 +1629,7 @@ impl TurnExecutor {
 
                 // Feed the tool result back into the chat history for the
                 // next round.
-                let feedback = serde_json::to_string(&outcome)
+                let feedback = serde_json::to_string(&visible_outcome)
                     .unwrap_or_else(|_| "{\"status\":\"err\"}".into());
                 messages.push(ChatMessage::tool_result(&tc.id, feedback));
 
@@ -1127,6 +1759,122 @@ fn parse_tool_arguments(raw: &str) -> Result<serde_json::Value, String> {
     Ok(value)
 }
 
+fn discover_tools(query: &str, catalog: &[ToolDeclaration]) -> serde_json::Value {
+    let needle = query.trim().to_lowercase();
+    if let Some(tool) = catalog.iter().find(|tool| tool.function.name == needle) {
+        return serde_json::json!({
+            "matches": [{"name":tool.function.name,"description":tool.function.description}],
+            "loaded": tool.function.name,
+            "_load_schemas": [tool],
+        });
+    }
+    let terms = needle.split_whitespace().collect::<Vec<_>>();
+    let mut matches = catalog
+        .iter()
+        .map(|tool| {
+            let text =
+                format!("{} {}", tool.function.name, tool.function.description).to_lowercase();
+            (
+                terms.iter().filter(|term| text.contains(**term)).count(),
+                tool,
+            )
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect::<Vec<_>>();
+    matches.sort_by(|(left_score, left), (right_score, right)| {
+        right_score
+            .cmp(left_score)
+            .then_with(|| left.function.name.cmp(&right.function.name))
+    });
+    serde_json::json!({"matches":matches.into_iter().take(8).map(|(_,tool)| {
+        serde_json::json!({"name":tool.function.name,"description":tool.function.description})
+    }).collect::<Vec<_>>()})
+}
+
+fn activate_discovered_schemas(
+    tool_name: &str,
+    tools: &mut Vec<ToolDeclaration>,
+    outcome: &ToolResultEnvelope,
+) -> ToolResultEnvelope {
+    if tool_name != "execlaw.discover_tool" {
+        return outcome.clone();
+    }
+    let ToolResultEnvelope::Ok { value } = outcome else {
+        return outcome.clone();
+    };
+    if let Some(schemas) = value
+        .get("_load_schemas")
+        .and_then(serde_json::Value::as_array)
+    {
+        for schema in schemas {
+            match serde_json::from_value::<ToolDeclaration>(schema.clone()) {
+                Ok(declaration)
+                    if !tools
+                        .iter()
+                        .any(|tool| tool.function.name == declaration.function.name) =>
+                {
+                    tools.push(declaration)
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "discovered tool schema failed host decoding"),
+            }
+        }
+    }
+    let mut visible = value.clone();
+    if let Some(object) = visible.as_object_mut() {
+        object.remove("_load_schemas");
+    }
+    ToolResultEnvelope::Ok { value: visible }
+}
+
+fn inference_error_class(error: &InferenceError) -> &'static str {
+    match error {
+        InferenceError::Http(_) => "connection",
+        InferenceError::Decode(_) => "decode",
+        InferenceError::BadStatus { status: 429, .. } => "rate_limited",
+        InferenceError::BadStatus {
+            status: 500..=599, ..
+        } => "backend_unavailable",
+        InferenceError::BadStatus { .. } => "request_rejected",
+        InferenceError::Timeout => "timeout",
+        InferenceError::Cancelled => "cancelled",
+        InferenceError::Admission(_) => "admission",
+        InferenceError::IncompleteStream => "incomplete_stream",
+        InferenceError::FrameTooLarge(_) => "frame_too_large",
+        InferenceError::EndpointPolicy(_) => "endpoint_policy",
+        InferenceError::AttemptTracking(_) => "attempt_tracking",
+    }
+}
+
+fn validate_advertised_tool(
+    tools: &[ToolDeclaration],
+    name: &str,
+    arguments: &serde_json::Value,
+) -> Result<(), ToolFailure> {
+    let Some(tool) = tools.iter().find(|tool| tool.function.name == name) else {
+        return Err(ToolFailure::new(
+            ToolFailureKind::PolicyDenied,
+            "tool_not_advertised",
+            "tool is not available for this turn",
+        ));
+    };
+    let validator = jsonschema::validator_for(&tool.function.parameters).map_err(|_| {
+        ToolFailure::new(
+            ToolFailureKind::Permanent,
+            "invalid_tool_schema",
+            "advertised tool schema cannot be validated",
+        )
+    })?;
+    if !validator.is_valid(arguments) {
+        return Err(ToolFailure::new(
+            ToolFailureKind::Validation,
+            "schema_mismatch",
+            "tool arguments do not match the advertised schema",
+        ));
+    }
+    Ok(())
+}
+
 /// Convert a span of event-log records into chat messages for the next
 /// model call. Phase 1 handles user_msg + model_turn + tool_use/tool_result
 /// pairs; richer event kinds (voice, etc.) are skipped over for text turns.
@@ -1153,8 +1901,12 @@ fn parse_tool_arguments(raw: &str) -> Result<serde_json::Value, String> {
 /// Loses the "parallel calls in one round" grouping (we emit one
 /// assistant per call); parallel calls at temp 0.3 are rare on
 /// Qwen3.5 27B-AWQ.
-fn hydrate_messages(events: &[EventRecord], spotlight_delim: Option<&str>) -> Vec<ChatMessage> {
+fn hydrate_messages_with_seq(
+    events: &[EventRecord],
+    spotlight_delim: Option<&str>,
+) -> (Vec<ChatMessage>, Vec<EventSeq>) {
     let mut out: Vec<ChatMessage> = Vec::new();
+    let mut source_seqs: Vec<EventSeq> = Vec::new();
 
     for ev in events {
         match ev.kind {
@@ -1165,6 +1917,7 @@ fn hydrate_messages(events: &[EventRecord], spotlight_delim: Option<&str>) -> Ve
                         None => p.text,
                     };
                     out.push(ChatMessage::user(text));
+                    source_seqs.push(ev.seq);
                 }
             }
             EventKind::ToolUse => {
@@ -1183,6 +1936,7 @@ fn hydrate_messages(events: &[EventRecord], spotlight_delim: Option<&str>) -> Ve
                     let mut m = ChatMessage::assistant(String::new());
                     m.tool_calls = vec![call];
                     out.push(m);
+                    source_seqs.push(ev.seq);
                 }
             }
             EventKind::ToolResult => {
@@ -1195,6 +1949,7 @@ fn hydrate_messages(events: &[EventRecord], spotlight_delim: Option<&str>) -> Ve
                         format!("call_{}", p.ordinal),
                         body,
                     ));
+                    source_seqs.push(ev.seq);
                 }
             }
             EventKind::ModelTurn => {
@@ -1203,12 +1958,13 @@ fn hydrate_messages(events: &[EventRecord], spotlight_delim: Option<&str>) -> Ve
                     // tool_calls (any preceding ToolUse events have
                     // already been materialised above).
                     out.push(ChatMessage::assistant(p.text));
+                    source_seqs.push(ev.seq);
                 }
             }
             _ => { /* other event kinds don't surface to the model */ }
         }
     }
-    out
+    (out, source_seqs)
 }
 
 // ---------------------------------------------------------------------------
@@ -1271,6 +2027,7 @@ mod tests {
                 .unwrap(),
             )
             .unwrap();
+        let started_at = chrono::Utc::now().timestamp();
         let durable = crate::durable::DurableRun::open(
             db,
             run_id,
@@ -1278,7 +2035,7 @@ mod tests {
             conversation_id,
             EventSeq(1),
             None,
-            1,
+            started_at,
         )
         .unwrap();
         durable
@@ -1338,7 +2095,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(matches!(result, ToolResultEnvelope::Ok { .. }));
+        assert!(
+            matches!(result, ToolResultEnvelope::Ok { .. }),
+            "unexpected bounded retry result: {result:?}"
+        );
         assert_eq!(probe.calls.load(Ordering::SeqCst), 3);
     }
 
@@ -1368,7 +2128,11 @@ mod tests {
         let ToolResultEnvelope::Err { failure } = result else {
             panic!("expected failure")
         };
-        assert_eq!(failure.kind, ToolFailureKind::PolicyDenied);
+        assert_eq!(
+            failure.kind,
+            ToolFailureKind::PolicyDenied,
+            "unexpected policy denial result: {failure:?}"
+        );
         assert!(!failure.retryable);
         assert_eq!(failure.attempt, 1);
         assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
@@ -1393,6 +2157,48 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn executor_cancel_flag_interrupts_non_streaming_inference_before_request() {
+        let db = fresh_db();
+        let conversation = ConversationId::from("cancel-inference");
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let executor = TurnExecutor::new(
+            InferenceClient::new("http://127.0.0.1:1/v1"),
+            Arc::new(NullTools),
+        )
+        .with_cancel_flag(cancel);
+        let config = TurnConfig {
+            model: ModelId("local".into()),
+            system_prompt: "test".into(),
+            temperature: None,
+            max_tokens: None,
+            max_tool_rounds: 2,
+            tools: Vec::new(),
+            discoverable_tools: Vec::new(),
+            event_log_hmac_key: None,
+            phase_observer: None,
+            reasoning_enabled: false,
+            inbound_channel_origin: None,
+            spotlight_delim: None,
+            context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
+            summarizer_client: None,
+            completion_contract: None,
+            session: None,
+        };
+        let error = executor
+            .run_turn(&db, &conversation, "cancel this", None, &config)
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            TurnError::Inference(InferenceError::Cancelled)
+        ));
+    }
+
     struct ChainedMockServer {
         responses: Vec<String>,
         served: AtomicUsize,
@@ -1414,6 +2220,10 @@ mod tests {
                     .get(idx)
                     .cloned()
                     .unwrap_or_else(|| server.responses.last().cloned().unwrap_or_default());
+                let (status, body) = match body.strip_prefix("503:") {
+                    Some(body) => (503, body.to_owned()),
+                    None => (200, body),
+                };
                 let mut buf = [0u8; 8192];
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(300),
@@ -1421,7 +2231,7 @@ mod tests {
                 )
                 .await;
                 let resp = format!(
-                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    "HTTP/1.1 {status} Test\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
                     body.len(),
                     body
                 );
@@ -1451,11 +2261,23 @@ mod tests {
         });
         let addr = run_mock_server(server.clone()).await;
 
+        let receipt = execlaw_core::memory_assets::TurnAssetLoadoutReceipt {
+            agent_scope: "default".into(),
+            conversation_trust_class: "Controller".into(),
+            readable_trust_classes: vec!["Controller".into()],
+            readable_owner_scopes: vec!["global".into(), "controller".into()],
+            resolved_at: 10,
+            retrieval_query_sha256: None,
+            assets: Vec::new(),
+            retrieved_assets: Vec::new(),
+        };
         let exec = TurnExecutor::new(
             InferenceClient::new(format!("http://{addr}/v1")),
             Arc::new(NullTools),
-        );
+        )
+        .with_asset_loadout(Some(receipt.clone()));
         let cid = ConversationId::from("conv-simple");
+        seed_conversation(&db, &cid);
         let cfg = TurnConfig {
             model: ModelId("QuantTrio/Qwen3.5-27B-AWQ".to_owned()),
             system_prompt: "test".into(),
@@ -1463,13 +2285,28 @@ mod tests {
             max_tokens: None,
             max_tool_rounds: 3,
             tools: vec![],
+            discoverable_tools: Vec::new(),
             event_log_hmac_key: None,
             phase_observer: None,
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
             context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
             summarizer_client: None,
+            completion_contract: Some(execlaw_core::runs::RunCompletionContractDraft {
+                acceptance_criteria: vec![execlaw_core::runs::AcceptanceCriterion {
+                    criterion_id: "answer-verified".into(),
+                    description: "The answer is checked against the requested source".into(),
+                    required: true,
+                    verifier: None,
+                }],
+                required_artifacts: Vec::new(),
+                delivery_required: false,
+            }),
             session: None,
         };
 
@@ -1487,6 +2324,111 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].kind, EventKind::UserMsg);
         assert_eq!(events[1].kind, EventKind::ModelTurn);
+        assert_eq!(
+            execlaw_core::memory_assets::MemoryAssetStore::new(&db)
+                .turn_loadout(cid.as_str(), 1)
+                .unwrap(),
+            Some(receipt)
+        );
+        let attempt_rows: Vec<(i64, String)> = db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT attempt_no, status FROM state_run_inference_attempts \
+                     WHERE run_id = 'turn:conv-simple:1' AND step_id = 'model:0' \
+                     ORDER BY attempt_no",
+                )?;
+                Ok(statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(attempt_rows, vec![(1, "succeeded".into())]);
+        let manifest = execlaw_core::runs::RunStore::new(&db)
+            .input_manifest("turn:conv-simple:1")
+            .unwrap()
+            .expect("every executed chat turn records input fingerprints");
+        assert_eq!(manifest.input_version, 1);
+        assert!(!manifest.prompt_hash.is_empty());
+        assert!(!manifest.model_settings_hash.is_empty());
+        assert!(!manifest.tool_catalog_hash.is_empty());
+        let report = execlaw_core::runs::RunStore::new(&db)
+            .completion_report("turn:conv-simple:1")
+            .unwrap()
+            .expect("the durable task stores its user-authored acceptance criteria");
+        assert_eq!(
+            report.status,
+            execlaw_core::runs::RunCompletionStatus::Incomplete,
+            "a successful model response must not certify an unverified task"
+        );
+    }
+
+    #[tokio::test]
+    async fn transient_inference_retry_is_persisted_before_success() {
+        let db = fresh_db();
+        let success = r#"{"id":"retry-ok","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}"#;
+        let server = Arc::new(ChainedMockServer {
+            responses: vec!["503:temporary unavailable".into(), success.into()],
+            served: AtomicUsize::new(0),
+        });
+        let address = run_mock_server(server.clone()).await;
+        let retry_count = Arc::new(AtomicUsize::new(0));
+        let observed_retries = retry_count.clone();
+        let executor = TurnExecutor::new_with_retry_observer(
+            InferenceClient::new(format!("http://{address}/v1")),
+            Arc::new(NullTools),
+            Arc::new(move |_| {
+                observed_retries.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        let conversation = ConversationId::from("conv-inference-retry");
+        let config = TurnConfig {
+            model: ModelId("m".into()),
+            system_prompt: "test".into(),
+            temperature: None,
+            max_tokens: None,
+            max_tool_rounds: 0,
+            tools: Vec::new(),
+            discoverable_tools: Vec::new(),
+            event_log_hmac_key: None,
+            phase_observer: None,
+            reasoning_enabled: false,
+            inbound_channel_origin: None,
+            spotlight_delim: None,
+            context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
+            summarizer_client: None,
+            session: None,
+            completion_contract: None,
+        };
+        let summary = executor
+            .run_turn(&db, &conversation, "hello", None, &config)
+            .await
+            .unwrap();
+        assert_eq!(summary.assistant_text, "recovered");
+        assert_eq!(server.served.load(Ordering::SeqCst), 2);
+        assert_eq!(retry_count.load(Ordering::SeqCst), 1);
+        let attempts: Vec<(i64, String, Option<String>)> = db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT attempt_no, status, error_class FROM state_run_inference_attempts \
+                 WHERE run_id = 'turn:conv-inference-retry:1' AND step_id = 'model:0' \
+                 ORDER BY attempt_no",
+                )?;
+                Ok(statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(
+            attempts,
+            vec![
+                (1, "retrying".into(), Some("backend_unavailable".into())),
+                (2, "succeeded".into(), None),
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1516,14 +2458,20 @@ mod tests {
             max_tokens: None,
             max_tool_rounds: 0,
             tools: vec![],
+            discoverable_tools: Vec::new(),
             event_log_hmac_key: None,
             phase_observer: None,
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
             context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
             summarizer_client: None,
             session: None,
+            completion_contract: None,
         };
 
         let summary = exec
@@ -1611,14 +2559,20 @@ mod tests {
                 "echo the arg",
                 serde_json::json!({"type":"object"}),
             )],
+            discoverable_tools: Vec::new(),
             event_log_hmac_key: None,
             phase_observer: None,
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
             context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
             summarizer_client: None,
             session: None,
+            completion_contract: None,
         };
 
         let summary = exec
@@ -1741,14 +2695,20 @@ mod tests {
                 "echo",
                 serde_json::json!({"type":"object"}),
             )],
+            discoverable_tools: Vec::new(),
             event_log_hmac_key: None,
             phase_observer: None,
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
             context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
             summarizer_client: None,
             session: None,
+            completion_contract: None,
         };
 
         let first = executor
@@ -1821,14 +2781,20 @@ mod tests {
                 "echo",
                 serde_json::json!({"type":"object"}),
             )],
+            discoverable_tools: Vec::new(),
             event_log_hmac_key: None,
             phase_observer: None,
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
             context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
             summarizer_client: None,
             session: None,
+            completion_contract: None,
         };
         let first_executor = TurnExecutor::new(
             InferenceClient::new(format!("http://{first_addr}/v1")),
@@ -1945,14 +2911,20 @@ mod tests {
                 "always fails",
                 serde_json::json!({"type":"object"}),
             )],
+            discoverable_tools: Vec::new(),
             event_log_hmac_key: None,
             phase_observer: None,
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
             context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
             summarizer_client: None,
             session: None,
+            completion_contract: None,
         };
         let _ = exec
             .run_turn(&db, &cid, "try it", None, &cfg)
@@ -2024,14 +2996,20 @@ mod tests {
                 "infinite",
                 serde_json::json!({"type":"object"}),
             )],
+            discoverable_tools: Vec::new(),
             event_log_hmac_key: None,
             phase_observer: None,
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
             context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
             summarizer_client: None,
             session: None,
+            completion_contract: None,
         };
         let err = exec
             .run_turn(&db, &cid, "go", None, &cfg)
@@ -2115,14 +3093,20 @@ mod tests {
                 "write a value",
                 serde_json::json!({"type":"object"}),
             )],
+            discoverable_tools: Vec::new(),
             event_log_hmac_key: None,
             phase_observer: None,
             reasoning_enabled: false,
             inbound_channel_origin: None,
             spotlight_delim: None,
             context_window_policy: String::new(),
+            qualified_context_tokens: None,
+            bytes_per_token_milli: 3_000,
+            qualified_profile: None,
+            tool_result_artifacts_root: None,
             summarizer_client: None,
             session: None,
+            completion_contract: None,
         };
 
         let summary = exec
@@ -2153,6 +3137,57 @@ mod tests {
             matches!(result_payload.outcome, Err(ref error) if error.contains("invalid tool arguments JSON")),
             "the model must receive a structured parse failure",
         );
+    }
+
+    #[test]
+    fn supported_model_tool_call_fixtures_obey_advertised_schema() {
+        let tools = vec![ToolDeclaration::function(
+            "calendar.create",
+            "Create a calendar event.",
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "title": { "type": "string", "minLength": 1 },
+                    "start": { "type": "string", "minLength": 1 }
+                },
+                "required": ["title", "start"],
+                "additionalProperties": false
+            }),
+        )];
+        let fixtures = [
+            (
+                "qwen",
+                r#"{"title":"Planning","start":"2026-09-26T10:00:00Z"}"#,
+                true,
+            ),
+            (
+                "llama",
+                r#"{"title":"Planning","start":"2026-09-26T10:00:00Z"}"#,
+                true,
+            ),
+            (
+                "openai-compatible",
+                r#"{"title":"Planning","start":"2026-09-26T10:00:00Z"}"#,
+                true,
+            ),
+            ("qwen-invalid", r#"{"title":"Planning"}"#, false),
+            ("llama-invalid", r#"{"title":7,"start":"now"}"#, false),
+            (
+                "openai-compatible-invalid",
+                r#"{"title":"Planning","start":"now","extra":true}"#,
+                false,
+            ),
+        ];
+
+        for (family, raw_arguments, expected_valid) in fixtures {
+            let arguments = parse_tool_arguments(raw_arguments)
+                .unwrap_or_else(|error| panic!("{family} fixture did not parse: {error}"));
+            assert_eq!(
+                validate_advertised_tool(&tools, "calendar.create", &arguments).is_ok(),
+                expected_valid,
+                "{family} fixture validation did not match expectation",
+            );
+        }
     }
 
     /// 2026-05-16 — fix #P1a (Codex review): `hydrate_messages` must
@@ -2222,8 +3257,11 @@ mod tests {
         )
         .unwrap();
 
-        let messages =
-            super::hydrate_messages(&[user_ev, tool_use_ev, tool_result_ev, model_turn_ev], None);
+        let messages = super::hydrate_messages_with_seq(
+            &[user_ev, tool_use_ev, tool_result_ev, model_turn_ev],
+            None,
+        )
+        .0;
         assert_eq!(messages.len(), 4);
         // OpenAI-compliant: user → assistant(tool_calls) → tool → assistant(final).
         assert!(matches!(messages[0].role, Role::User));
@@ -2290,7 +3328,7 @@ mod tests {
         .unwrap();
 
         // No spotlight: user content is verbatim.
-        let plain = super::hydrate_messages(&[user_ev.clone(), asst_ev.clone()], None);
+        let plain = super::hydrate_messages_with_seq(&[user_ev.clone(), asst_ev.clone()], None).0;
         let user_plain = plain
             .iter()
             .find(|m| matches!(m.role, Role::User))
@@ -2307,7 +3345,7 @@ mod tests {
 
         // With spotlight: user content is bookended with the delimiter.
         let delim = "<<<UNTRUSTED:deadbeef>>>";
-        let wrapped = super::hydrate_messages(&[user_ev, asst_ev], Some(delim));
+        let wrapped = super::hydrate_messages_with_seq(&[user_ev, asst_ev], Some(delim)).0;
         let user_wrapped = wrapped
             .iter()
             .find(|m| matches!(m.role, Role::User))

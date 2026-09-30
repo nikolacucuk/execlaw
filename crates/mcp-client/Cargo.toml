@@ -10,6 +10,7 @@ description = "MCP (Model Context Protocol) client for execlaw — talks to exte
 
 [dependencies]
 tokio = { workspace = true, features = ["process", "io-util", "sync", "macros", "rt", "time"] }
+tokio-util.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

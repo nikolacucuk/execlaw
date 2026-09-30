@@ -49,7 +49,7 @@ struct SearxResult {
 }
 
 pub struct SearxNGSearchApi {
-    client: reqwest::Client,
+    client: super::tool_apis_search::SearchHttpClient,
     base_url: String,
 }
 
@@ -70,19 +70,39 @@ impl SearxNGSearchApi {
         // doesn't bot-detect, but the engines IT proxies (Google,
         // Bing) sometimes do — and SearxNG forwards the UA through
         // to those upstreams.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_S))
-            .user_agent(crate::tool_apis_http::DEFAULT_USER_AGENT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let endpoint = format!("{}/search", base_url);
+        let client = super::tool_apis_search::SearchHttpClient::public(
+            endpoint,
+            Duration::from_secs(DEFAULT_TIMEOUT_S),
+        );
+        Self { client, base_url }
+    }
+
+    pub fn new_private_integration(
+        base_url: impl Into<String>,
+        db: execlaw_core::Database,
+    ) -> Self {
+        let raw = base_url.into();
+        let base_url = normalize_base_url(&raw);
+        let endpoint = format!("{}/search", base_url);
+        let client = super::tool_apis_search::SearchHttpClient::private_integration(
+            endpoint,
+            Duration::from_secs(DEFAULT_TIMEOUT_S),
+            db,
+        );
         Self { client, base_url }
     }
 
     /// Test seam: bring your own client. Production uses `new`.
+    #[cfg(test)]
     pub fn with_client(base_url: impl Into<String>, client: reqwest::Client) -> Self {
         let raw = base_url.into();
         Self {
-            client,
+            client: super::tool_apis_search::SearchHttpClient::with_client(
+                format!("{}/search", normalize_base_url(&raw)),
+                Duration::from_secs(DEFAULT_TIMEOUT_S),
+                client,
+            ),
             base_url: normalize_base_url(&raw),
         }
     }
@@ -120,8 +140,8 @@ impl WebSearchApi for SearxNGSearchApi {
             ("safesearch", "0"),
             ("pageno", "1"),
         ];
-        let resp = self
-            .client
+        let client = self.client.build()?;
+        let resp = client
             .post(&url)
             .form(&body)
             .send()

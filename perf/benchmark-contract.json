@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "statistic": "mean",
+  "confidence_level": 0.95,
+  "benchmarks": [
+    { "id": "replay_since_0_of_500", "criterion_path": "replay_since_0_of_500", "regression_tolerance_percent": 12.0 },
+    { "id": "memory_asset_search/trust_filtered_256_assets", "criterion_path": "memory_asset_search_trust_filtered_256_assets", "regression_tolerance_percent": 15.0 },
+    { "id": "catalog/assemble_64_authorized_builtins", "criterion_path": "catalog_assemble_64_authorized_builtins", "regression_tolerance_percent": 15.0 },
+    { "id": "runner_frame_decode_token_delta", "criterion_path": "runner_frame_decode_token_delta", "regression_tolerance_percent": 12.0 },
+    { "id": "inference/queue_wait_contended", "criterion_path": "inference_queue_wait_contended", "regression_tolerance_percent": 20.0 },
+    { "id": "streaming_publish/4mb_blob", "criterion_path": "streaming_publish/4mb_blob", "regression_tolerance_percent": 15.0 }
+  ]
+}

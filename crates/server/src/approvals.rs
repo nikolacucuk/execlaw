@@ -15,8 +15,10 @@
 //! EdDSA-signed JWT per §2.11.
 
 use axum::Json;
+use axum::extract::FromRequestParts;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
+use axum::http::request::Parts;
 use axum::response::IntoResponse;
 use axum::{
     Router,
@@ -25,13 +27,34 @@ use axum::{
 use execlaw_core::conversation::{ConversationStore, Phase};
 use execlaw_core::events::{EventKind, EventLog, PendingEvent};
 use execlaw_core::ids::{ConversationId, EventSeq, PrincipalId};
+use execlaw_core::memory_lifecycle::{PromotionProposal, PromotionStore};
 use execlaw_core::principal::{PrincipalStore, TrustLevel as CoreTrustLevel};
+use execlaw_core::users::UserRole;
 use execlaw_policy::sideband::{ApprovalClaims, ApprovalReason, ApprovalVerb};
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use std::convert::Infallible;
 
 use crate::auth::JwtSigner;
 use crate::events::UiEvent;
 use crate::state::AppState;
+
+pub struct MaybeAuthedUser(Option<crate::auth_extract::AuthedUser>);
+
+impl FromRequestParts<AppState> for MaybeAuthedUser {
+    type Rejection = Infallible;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<Self, Self::Rejection> {
+        Ok(Self(
+            crate::auth_extract::AuthedUser::from_request_parts(parts, state)
+                .await
+                .ok(),
+        ))
+    }
+}
 
 /// Look up the conversation's originating-transport channel by
 /// asking the host's transport-binding store + transport registry.
@@ -102,6 +125,8 @@ pub fn issue_approval_token(
     approval_id: &str,
     conversation_id: &ConversationId,
     reason: &str,
+    principal_id: Option<String>,
+    effect_hash: Option<String>,
 ) -> String {
     use jsonwebtoken::{Algorithm, Header, encode};
 
@@ -112,6 +137,7 @@ pub fn issue_approval_token(
         "sensitive_tool_call" => ApprovalReason::SensitiveToolCall,
         "ask_controller" => ApprovalReason::AskController,
         "anomaly_tripwire" => ApprovalReason::AnomalyTripwire,
+        "effectful_chain" => ApprovalReason::EffectfulChain,
         _ => ApprovalReason::ColdContact,
     };
     let claims = ApprovalClaims {
@@ -120,6 +146,8 @@ pub fn issue_approval_token(
         conversation_id: conversation_id.as_str().to_owned(),
         reason: reason_enum,
         tool_call_id: None,
+        principal_id,
+        effect_hash,
         iat: now,
         exp: now + 24 * 3600, // 24h window for the controller to respond
     };
@@ -196,36 +224,43 @@ pub struct ApprovalResponse {
         (status = 401, description = "Missing or invalid signed approval token"),
         (status = 404, description = "Unknown approval id"),
     ),
+    security(("bearer_jwt" = [])),
     tag = "approvals"
 )]
 pub async fn respond_handler(
     State(state): State<AppState>,
     Path(approval_id): Path<String>,
+    user: MaybeAuthedUser,
     Json(req): Json<ApprovalRequest>,
 ) -> impl IntoResponse {
     // Verify the signed approval token if one is supplied. An
     // attacker who guesses the approval_id but doesn't have the
     // server's signing key can't forge a matching token (§2.11).
-    if let Some(token) = &req.approval_token {
-        if let Err(e) = verify_approval_token(&state.signer, token, &approval_id) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "error": {
-                        "code": "bad_approval_token",
-                        "message": e,
-                    }
-                })),
-            )
-                .into_response();
+    let claims = if let Some(token) = &req.approval_token {
+        match verify_approval_token(&state.signer, token, &approval_id) {
+            Ok(claims) => Some(claims),
+            Err(e) => {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({
+                        "error": {
+                            "code": "bad_approval_token",
+                            "message": e,
+                        }
+                    })),
+                )
+                    .into_response();
+            }
         }
-    }
+    } else {
+        None
+    };
 
     // Chain approvals reuse this endpoint so the existing approvals
     // UI feed + action path can drive both cold-contact and chain-run
     // decisions.
     if find_cold_contact_event(&state, &approval_id).is_none() {
-        return respond_chain_approval(state, approval_id, req).await;
+        return respond_chain_approval(state, approval_id, req, claims, user.0).await;
     }
 
     // Look up the ColdContactArrived event that minted this
@@ -463,30 +498,65 @@ async fn respond_chain_approval(
     state: AppState,
     approval_id: String,
     req: ApprovalRequest,
+    claims: Option<ApprovalClaims>,
+    user: Option<crate::auth_extract::AuthedUser>,
 ) -> axum::response::Response {
-    let exists = state
-        .db
-        .with_conn(|c| {
-            let mut stmt = c.prepare(
-                "SELECT 1 FROM state_chain_runs \
+    let pending = match state.db.with_conn(|c| {
+        let mut stmt = c.prepare(
+            "SELECT approval_effect_hash, conversation_id FROM state_chain_runs \
                  WHERE approval_id = ?1 AND status = 'awaiting_approval' \
                  LIMIT 1",
-            )?;
-            let mut rows = stmt.query(rusqlite::params![approval_id.as_str()])?;
-            Ok(rows.next()?.is_some())
-        })
-        .unwrap_or(false);
-    if !exists {
+        )?;
+        Ok(stmt
+            .query_row(rusqlite::params![approval_id.as_str()], |row| {
+                Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+            })
+            .optional()?)
+    }) {
+        Ok(Some((Some(hash), conversation_id))) => (hash, conversation_id),
+        Ok(Some((None, _))) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": {"code": "approval_effect_unbound", "message": "pending chain approval has no effect fingerprint"}})),
+            ).into_response();
+        }
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": {"code": "approval_not_found", "message": "no pending approval matches this approval_id"}})),
+            ).into_response();
+        }
+        Err(error) => return internal_error(&format!("chain approval lookup: {error}")),
+    };
+
+    let Some(claims) = claims else {
         return (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({
-                "error": {
-                    "code": "approval_not_found",
-                    "message": "no pending approval matches this approval_id",
-                }
-            })),
-        )
-            .into_response();
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": {"code": "approval_token_required", "message": "effect-bound chain approval requires its signed token"}})),
+        ).into_response();
+    };
+    let Some(user) = user else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": {"code": "controller_auth_required", "message": "chain effect approval requires an authenticated Controller"}})),
+        ).into_response();
+    };
+    if user.role != UserRole::Controller
+        || claims.principal_id.as_deref() != Some(user.user_id.as_str())
+    {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": {"code": "approval_principal_mismatch", "message": "signed approval belongs to a different Controller"}})),
+        ).into_response();
+    }
+    if claims.reason != ApprovalReason::EffectfulChain
+        || claims.conversation_id != pending.1
+        || claims.effect_hash.as_deref() != Some(pending.0.as_str())
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": {"code": "approval_effect_mismatch", "message": "signed approval does not match the pending effect"}})),
+        ).into_response();
     }
 
     let decision = match req.verb {
@@ -526,6 +596,13 @@ async fn respond_chain_approval(
                         "message": "no pending chain approval matches this approval_id",
                     }
                 })),
+            )
+                .into_response();
+        }
+        Err(e) if e == "approval_effect_mismatch" => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": {"code": "approval_effect_mismatch", "message": "the pending plan changed after approval was issued"}})),
             )
                 .into_response();
         }
@@ -1116,15 +1193,154 @@ pub async fn list_principals_handler(
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PendingApprovalSummary {
+    pub kind: String,
     pub approval_id: String,
     pub conversation_id: String,
     pub sender_principal_id: String,
     pub original_text: String,
+    pub scope: String,
+    pub reason: String,
+    /// A controller-readable description of the exact action being authorized.
+    pub requested_action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub approval_token: Option<String>,
+}
+
+fn chain_effect_action(plan_json: &[u8]) -> String {
+    let Ok(plan) = serde_json::from_slice::<serde_json::Value>(plan_json) else {
+        return "Effect details are unavailable; reject until the plan can be inspected.".into();
+    };
+    let effects: Vec<serde_json::Value> = plan
+        .get("steps")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|step| step.get("effect_kind").is_some_and(|kind| !kind.is_null()))
+        .cloned()
+        .collect();
+    serde_json::to_string_pretty(&effects).unwrap_or_else(|_| "[]".into())
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PendingApprovalsResponse {
     pub approvals: Vec<PendingApprovalSummary>,
+    pub memory_promotions: Vec<MemoryPromotionSummary>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct MemoryPromotionSummary {
+    pub id: i64,
+    pub scope: String,
+    pub trust_class: String,
+    pub key: String,
+    pub from_tier: String,
+    pub to_tier: String,
+    pub reason: String,
+    pub proposed_by: String,
+    pub proposed_at: i64,
+    pub evidence_ref: String,
+}
+
+impl From<PromotionProposal> for MemoryPromotionSummary {
+    fn from(proposal: PromotionProposal) -> Self {
+        let evidence_ref = format!(
+            "memory://{}/{}/{}",
+            proposal.scope, proposal.trust_class, proposal.key
+        );
+        Self {
+            id: proposal.id,
+            scope: proposal.scope,
+            trust_class: proposal.trust_class,
+            key: proposal.key,
+            from_tier: serde_json::to_value(proposal.from_tier)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            to_tier: serde_json::to_value(proposal.to_tier)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            reason: serde_json::to_value(proposal.reason)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            proposed_by: serde_json::to_value(proposal.proposed_by)
+                .ok()
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default(),
+            proposed_at: proposal.proposed_at,
+            evidence_ref,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryPromotionDecisionRequest {
+    Approve,
+    Reject,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct MemoryPromotionDecisionBody {
+    pub decision: MemoryPromotionDecisionRequest,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/memory-promotions/{proposal_id}/respond",
+    params(("proposal_id" = i64, Path, description = "Pending memory promotion proposal")),
+    request_body = MemoryPromotionDecisionBody,
+    responses(
+        (status = 200, description = "Memory tier proposal decided"),
+        (status = 403, description = "Caller is not a Controller"),
+        (status = 404, description = "Proposal not found"),
+        (status = 409, description = "Proposal already decided")
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "approvals"
+)]
+pub async fn decide_memory_promotion_handler(
+    State(state): State<AppState>,
+    user: crate::auth_extract::AuthedUser,
+    Path(proposal_id): Path<i64>,
+    Json(body): Json<MemoryPromotionDecisionBody>,
+) -> impl IntoResponse {
+    if user.role != UserRole::Controller {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": {"code": "forbidden", "message": "only Controllers can decide memory promotions"}})),
+        )
+            .into_response();
+    }
+    let store = PromotionStore::new(&state.db);
+    let now = chrono::Utc::now().timestamp();
+    let result = match body.decision {
+        MemoryPromotionDecisionRequest::Approve => {
+            store.approve(proposal_id, now, body.note.as_deref())
+        }
+        MemoryPromotionDecisionRequest::Reject => {
+            store.reject(proposal_id, now, body.note.as_deref())
+        }
+    };
+    match result {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"proposal_id": proposal_id, "decision": match body.decision { MemoryPromotionDecisionRequest::Approve => "approved", MemoryPromotionDecisionRequest::Reject => "rejected" }}))).into_response(),
+        Err(execlaw_core::memory_lifecycle::LifecycleError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": {"code": "promotion_not_found", "message": "memory promotion proposal not found"}})),
+        ).into_response(),
+        Err(execlaw_core::memory_lifecycle::LifecycleError::AlreadyDecided(_)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": {"code": "promotion_already_decided", "message": "memory promotion proposal was already decided"}})),
+        ).into_response(),
+        Err(execlaw_core::memory_lifecycle::LifecycleError::StaleTarget(_)) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": {"code": "promotion_stale", "message": "memory tier changed after this proposal was created; refresh the queue"}})),
+        ).into_response(),
+        Err(error) => internal_error(&format!("memory promotion decision: {error}")),
+    }
 }
 
 /// `GET /api/admin/approvals` — every cold-contact arrival whose
@@ -1142,7 +1358,7 @@ pub struct PendingApprovalsResponse {
 )]
 pub async fn list_pending_approvals_handler(
     State(state): State<AppState>,
-    _user: crate::auth_extract::AuthedUser,
+    user: crate::auth_extract::AuthedUser,
 ) -> impl IntoResponse {
     let principals = PrincipalStore::new(&state.db);
 
@@ -1207,47 +1423,90 @@ pub async fn list_pending_approvals_handler(
                 continue;
             }
             approvals.push(PendingApprovalSummary {
+                kind: "cold_contact".into(),
                 approval_id: p.approval_id,
                 conversation_id: cid_str.clone(),
-                sender_principal_id: p.sender_principal_id,
+                sender_principal_id: p.sender_principal_id.clone(),
                 original_text: p.text,
+                scope: format!("Trust record for principal {}", p.sender_principal_id),
+                reason: "A new sender has no approved trust level.".into(),
+                requested_action: "Choose a trust decision. Trust or limited trust also replays the queued first message; Block prevents future messages; Ignore once only dismisses this message.".into(),
+                approval_token: None,
             });
         }
     }
 
     // Bridge phase-2 tool-chain approvals into the same feed so the
     // operator can act from one approvals surface.
-    if let Ok(chain_rows) = state.db.with_conn(|c| {
-        let mut stmt = c.prepare(
-            "SELECT r.approval_id, r.conversation_id, p.objective \
+    if user.role == UserRole::Controller {
+        if let Ok(chain_rows) = state.db.with_conn(|c| {
+            let mut stmt = c.prepare(
+                "SELECT r.approval_id, r.conversation_id, r.plan_id, p.objective, \
+                 p.plan_json, r.approval_effect_hash \
              FROM state_chain_runs r \
              JOIN state_chain_plans p ON p.id = r.plan_id \
              WHERE r.status = 'awaiting_approval' \
                AND r.approval_id IS NOT NULL",
-        )?;
-        let rows = stmt.query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-            ))
-        })?;
-        let out: Result<Vec<(String, String, String)>, _> = rows.collect();
-        Ok(out?)
-    }) {
-        for (approval_id, conversation_id, objective) in chain_rows {
-            approvals.push(PendingApprovalSummary {
-                approval_id,
-                conversation_id,
-                sender_principal_id: "tool-chain".to_string(),
-                original_text: format!("Tool-chain execution awaiting approval: {objective}"),
-            });
+            )?;
+            let rows = stmt.query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, Vec<u8>>(4)?,
+                    r.get::<_, Option<String>>(5)?,
+                ))
+            })?;
+            let out: Result<Vec<(String, String, String, String, Vec<u8>, Option<String>)>, _> =
+                rows.collect();
+            Ok(out?)
+        }) {
+            for (approval_id, conversation_id, plan_id, objective, plan_json, effect_hash) in
+                chain_rows
+            {
+                let cid = ConversationId::from(conversation_id.clone());
+                let approval_token = effect_hash.map(|hash| {
+                    issue_approval_token(
+                        &state.signer,
+                        &approval_id,
+                        &cid,
+                        "effectful_chain",
+                        Some(user.user_id.clone()),
+                        Some(hash),
+                    )
+                });
+                approvals.push(PendingApprovalSummary {
+                    kind: "effectful_chain".into(),
+                    approval_id,
+                    conversation_id,
+                    sender_principal_id: "tool-chain".to_string(),
+                    original_text: format!("Tool-chain execution awaiting approval: {objective}"),
+                    scope: format!("External effect set in saved plan {plan_id}"),
+                    reason: "The plan contains external effects that require Controller approval."
+                        .into(),
+                    requested_action: chain_effect_action(&plan_json),
+                    approval_token,
+                });
+            }
         }
     }
 
+    let memory_promotions = if user.role == UserRole::Controller {
+        match PromotionStore::new(&state.db).list_pending(100) {
+            Ok(rows) => rows.into_iter().map(MemoryPromotionSummary::from).collect(),
+            Err(error) => return internal_error(&format!("memory promotion scan: {error}")),
+        }
+    } else {
+        Vec::new()
+    };
+
     (
         StatusCode::OK,
-        Json(serde_json::json!(PendingApprovalsResponse { approvals })),
+        Json(serde_json::json!(PendingApprovalsResponse {
+            approvals,
+            memory_promotions
+        })),
     )
         .into_response()
 }
@@ -1261,6 +1520,10 @@ pub fn approvals_router() -> Router<AppState> {
         .route(
             "/api/admin/approvals/{approval_id}/respond",
             post(respond_handler),
+        )
+        .route(
+            "/api/admin/memory-promotions/{proposal_id}/respond",
+            post(decide_memory_promotion_handler),
         )
         .route(
             "/api/admin/principals/{principal_id}/revoke",
@@ -1279,6 +1542,22 @@ mod tests {
     use axum::body::{self, Body};
     use axum::http::{Method, Request, header};
     use tower::ServiceExt;
+
+    #[test]
+    fn chain_approval_summary_contains_the_persisted_effect_action() {
+        let plan = serde_json::json!({
+            "steps": [
+                {"label": "inspect", "effect_kind": null, "payload": {"path": "report.md"}},
+                {"label": "send report", "effect_kind": "email.send", "payload": {"to": "operator@example.test", "subject": "Weekly report"}}
+            ]
+        });
+        let summary = chain_effect_action(&serde_json::to_vec(&plan).unwrap());
+        let effects: serde_json::Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(effects.as_array().unwrap().len(), 1);
+        assert_eq!(effects[0]["label"], "send report");
+        assert_eq!(effects[0]["effect_kind"], "email.send");
+        assert_eq!(effects[0]["payload"]["to"], "operator@example.test");
+    }
 
     async fn setup_get_token(app: &axum::Router) -> String {
         let body = serde_json::to_vec(&serde_json::json!({
@@ -1351,6 +1630,122 @@ mod tests {
         let (status, body) = read_json(&app, Some(&token), "/api/admin/approvals").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["approvals"].as_array().unwrap().len(), 0);
+        assert_eq!(body["memory_promotions"].as_array().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn memory_promotion_is_listed_and_controller_can_reject_it() {
+        use execlaw_core::memory::{MemoryEntry, MemoryStore, MemoryTier};
+        use execlaw_core::memory_lifecycle::{
+            PromotionDecision, PromotionReason, PromotionStore, ProposedBy,
+        };
+
+        let state = test_app_state();
+        let app = build_router(state.clone());
+        let token = setup_get_token(&app).await;
+        MemoryStore::new(&state.db)
+            .upsert(&MemoryEntry {
+                scope: "global".into(),
+                trust_class: "Controller".into(),
+                key: "preferred_language".into(),
+                value_blob: b"English".to_vec(),
+                ttl_expires: None,
+                updated_at: 100,
+                tier: MemoryTier::Warm,
+                hits: 4,
+                last_used_at: Some(100),
+                created_at: 100,
+            })
+            .unwrap();
+        let proposal_id = PromotionStore::new(&state.db)
+            .propose(
+                "global",
+                "Controller",
+                "preferred_language",
+                MemoryTier::Warm,
+                MemoryTier::Hot,
+                PromotionReason::Frequency,
+                ProposedBy::Sweeper,
+                100,
+            )
+            .unwrap();
+
+        let (status, feed) = read_json(&app, Some(&token), "/api/admin/approvals").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(feed["memory_promotions"][0]["id"], proposal_id);
+        assert_eq!(feed["memory_promotions"][0]["key"], "preferred_language");
+        assert_eq!(
+            feed["memory_promotions"][0]["evidence_ref"],
+            "memory://global/Controller/preferred_language"
+        );
+
+        let operator = crate::auth_extract::AuthedUser {
+            user_id: "operator-1".into(),
+            session_id: None,
+            username: "operator".into(),
+            display_name: "Operator".into(),
+            email: None,
+            role: UserRole::Operator,
+            last_login_at: None,
+        };
+        let operator_response = list_pending_approvals_handler(State(state.clone()), operator)
+            .await
+            .into_response();
+        let operator_body = body::to_bytes(operator_response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let operator_json: serde_json::Value = serde_json::from_slice(&operator_body).unwrap();
+        assert!(
+            operator_json["memory_promotions"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+
+        let operator = crate::auth_extract::AuthedUser {
+            user_id: "operator-1".into(),
+            session_id: None,
+            username: "operator".into(),
+            display_name: "Operator".into(),
+            email: None,
+            role: UserRole::Operator,
+            last_login_at: None,
+        };
+        let denied = decide_memory_promotion_handler(
+            State(state.clone()),
+            operator,
+            Path(proposal_id),
+            Json(MemoryPromotionDecisionBody {
+                decision: MemoryPromotionDecisionRequest::Approve,
+                note: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        assert!(
+            PromotionStore::new(&state.db)
+                .get(proposal_id)
+                .unwrap()
+                .unwrap()
+                .decided_at
+                .is_none()
+        );
+
+        let (status, _) = post_json(
+            &app,
+            Some(&token),
+            &format!("/api/admin/memory-promotions/{proposal_id}/respond"),
+            serde_json::json!({"decision": "reject", "note": "not useful"}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let proposal = PromotionStore::new(&state.db)
+            .get(proposal_id)
+            .unwrap()
+            .unwrap();
+        assert!(proposal.decided_at.is_some());
+        assert_eq!(proposal.decision, Some(PromotionDecision::Rejected));
     }
 
     #[tokio::test]

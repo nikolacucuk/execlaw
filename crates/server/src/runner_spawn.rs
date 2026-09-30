@@ -28,9 +28,11 @@
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 #[cfg(any(test, feature = "test-mock"))]
 use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::Mutex as AsyncMutex;
 #[cfg(any(test, feature = "test-mock"))]
 use tokio::sync::Mutex;
 
@@ -73,6 +75,8 @@ pub struct RunnerHandleId {
 pub enum LauncherError {
     #[error("docker error: {0}")]
     Docker(String),
+    #[error("runner container resource admission refused: {0}")]
+    ResourceAdmission(String),
     #[error("operation timed out")]
     Timeout,
 }
@@ -91,6 +95,15 @@ pub trait RunnerLauncher: Send + Sync {
     /// Returns the volume names currently tracked by the daemon
     /// that match the `execlaw-runner-` prefix.
     async fn list_runner_volumes(&self) -> Result<Vec<String>, LauncherError>;
+    /// Namespace prefix for volumes this launcher owns. Mock launchers keep
+    /// the historical unscoped names; production scopes names per database.
+    fn volume_prefix(&self) -> String {
+        "execlaw-runner-".to_owned()
+    }
+    /// Physical workspace volume name for a principal group.
+    fn volume_name_for(&self, group_id: &str) -> String {
+        format!("{}{group_id}", self.volume_prefix())
+    }
     /// True when the daemon already has a local image matching
     /// `image` (e.g. `execlaw/runner:dev`). Used at boot so the
     /// supervisor disables itself rather than failing every spawn
@@ -112,6 +125,18 @@ pub fn volume_name_for(group_id: &str) -> String {
 pub struct BollardRunnerLauncher {
     docker: bollard::Docker,
     provenance: Option<execlaw_core::artifact_provenance::ArtifactProvenanceStore>,
+    spawn_gate: AsyncMutex<()>,
+    memory_budget_bytes: i64,
+    installation_id: String,
+}
+
+const DEFAULT_RUNNER_MEMORY_BYTES: i64 = 1024 * 1024 * 1024;
+
+fn runner_memory_budget_bytes() -> i64 {
+    execlaw_container_manager::hardware::available_ram_mb()
+        .and_then(|available| available.checked_mul(1024 * 1024))
+        .and_then(|available| i64::try_from(available / 2).ok())
+        .unwrap_or(0)
 }
 
 impl BollardRunnerLauncher {
@@ -121,11 +146,15 @@ impl BollardRunnerLauncher {
         Ok(Self {
             docker,
             provenance: None,
+            spawn_gate: AsyncMutex::new(()),
+            memory_budget_bytes: runner_memory_budget_bytes(),
+            installation_id: uuid::Uuid::new_v4().simple().to_string(),
         })
     }
 
     pub fn new_with_provenance(db: execlaw_core::Database) -> Result<Self, LauncherError> {
         let mut launcher = Self::new()?;
+        launcher.installation_id = load_or_create_runner_installation_id(&db)?;
         launcher.provenance =
             Some(execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(db));
         Ok(launcher)
@@ -135,15 +164,42 @@ impl BollardRunnerLauncher {
         Self {
             docker,
             provenance: None,
+            spawn_gate: AsyncMutex::new(()),
+            memory_budget_bytes: runner_memory_budget_bytes(),
+            installation_id: uuid::Uuid::new_v4().simple().to_string(),
         }
     }
+}
+
+fn load_or_create_runner_installation_id(
+    db: &execlaw_core::Database,
+) -> Result<String, LauncherError> {
+    let proposed = uuid::Uuid::new_v4().simple().to_string();
+    db.with_conn(|connection| {
+        connection.execute(
+            "INSERT OR IGNORE INTO config_runtime_settings(key,value) VALUES ('runner_installation_id',?1)",
+            [&proposed],
+        )?;
+        connection
+            .query_row(
+                "SELECT value FROM config_runtime_settings WHERE key='runner_installation_id'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(execlaw_core::db::DbError::from)
+    })
+    .map_err(|error| LauncherError::Docker(format!("runner installation id: {error}")))
 }
 
 #[async_trait]
 impl RunnerLauncher for BollardRunnerLauncher {
     async fn spawn(&self, spec: &RunnerSpec) -> Result<RunnerHandleId, LauncherError> {
-        use bollard::container::{Config, CreateContainerOptions, StartContainerOptions};
+        use bollard::container::{
+            Config, CreateContainerOptions, ListContainersOptions, StartContainerOptions,
+        };
         use bollard::secret::HostConfig;
+
+        let _spawn_guard = self.spawn_gate.lock().await;
 
         self.provenance
             .as_ref()
@@ -160,8 +216,77 @@ impl RunnerLauncher for BollardRunnerLauncher {
             )
             .map_err(|error| LauncherError::Docker(error.to_string()))?;
 
-        let volume = volume_name_for(&spec.group_id);
-        let container_name = format!("execlaw-runner-{}", &spec.group_id);
+        let volume = self.volume_name_for(&spec.group_id);
+        let container_name = volume.clone();
+        let memory_bytes = spec.memory_bytes.unwrap_or(DEFAULT_RUNNER_MEMORY_BYTES);
+        if memory_bytes <= 0 {
+            return Err(LauncherError::ResourceAdmission(
+                "runner memory limit must be positive".into(),
+            ));
+        }
+        let _ = self
+            .docker
+            .remove_container(
+                &container_name,
+                Some(bollard::container::RemoveContainerOptions {
+                    force: true,
+                    ..Default::default()
+                }),
+            )
+            .await;
+        let available_bytes = execlaw_container_manager::hardware::available_ram_mb()
+            .and_then(|available| available.checked_mul(1024 * 1024))
+            .and_then(|available| i64::try_from(available).ok())
+            .ok_or_else(|| {
+                LauncherError::ResourceAdmission("live host RAM sample is unavailable".into())
+            })?;
+        if self.memory_budget_bytes <= 0 || available_bytes < memory_bytes {
+            return Err(LauncherError::ResourceAdmission(format!(
+                "requested {memory_bytes} bytes with {available_bytes} available and a {} byte runner ceiling",
+                self.memory_budget_bytes
+            )));
+        }
+        let active = self
+            .docker
+            .list_containers(Some(ListContainersOptions::<String> {
+                all: false,
+                ..Default::default()
+            }))
+            .await
+            .map_err(|error| LauncherError::Docker(format!("list active runners: {error}")))?;
+        let reserved_bytes = active
+            .iter()
+            .filter_map(|container| {
+                let is_runner = container.labels.as_ref().is_some_and(|labels| {
+                    labels
+                        .get("execlaw.kind")
+                        .is_some_and(|kind| kind == "runner")
+                }) || container.names.as_ref().is_some_and(|names| {
+                    names
+                        .iter()
+                        .any(|name| name.starts_with("/execlaw-runner-"))
+                });
+                is_runner.then(|| {
+                    container
+                        .labels
+                        .as_ref()
+                        .map(|labels| {
+                            labels
+                                .get("execlaw.memory_bytes")
+                                .and_then(|value| value.parse::<i64>().ok())
+                                .unwrap_or(DEFAULT_RUNNER_MEMORY_BYTES)
+                        })
+                        .unwrap_or(DEFAULT_RUNNER_MEMORY_BYTES)
+                })
+            })
+            .fold(0_i64, i64::saturating_add);
+        if reserved_bytes.saturating_add(memory_bytes) > self.memory_budget_bytes {
+            return Err(LauncherError::ResourceAdmission(format!(
+                "runner reservations would reach {} bytes, above the {} byte ceiling",
+                reserved_bytes.saturating_add(memory_bytes),
+                self.memory_budget_bytes
+            )));
+        }
 
         // Create the workspace volume (idempotent — ignore "already exists").
         let _ = self
@@ -173,6 +298,10 @@ impl RunnerLauncher for BollardRunnerLauncher {
                 labels: [
                     ("execlaw.group_id".into(), spec.group_id.clone()),
                     ("execlaw.kind".into(), "runner-workspace".into()),
+                    (
+                        "execlaw.installation_id".into(),
+                        self.installation_id.clone(),
+                    ),
                 ]
                 .into_iter()
                 .collect(),
@@ -198,15 +327,25 @@ impl RunnerLauncher for BollardRunnerLauncher {
         // vLLM / our WS endpoint on the host's loopback).
         let host_cfg = HostConfig {
             binds: Some(vec![format!("{}:/workspace", volume)]),
-            memory: spec.memory_bytes,
+            memory: Some(memory_bytes),
             network_mode: spec.network.clone(),
             extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_owned()]),
             ..Default::default()
         };
 
+        let labels = HashMap::from([
+            ("execlaw.kind".to_owned(), "runner".to_owned()),
+            ("execlaw.group_id".to_owned(), spec.group_id.clone()),
+            ("execlaw.memory_bytes".to_owned(), memory_bytes.to_string()),
+            (
+                "execlaw.installation_id".to_owned(),
+                self.installation_id.clone(),
+            ),
+        ]);
         let cfg = Config {
             image: Some(spec.image.clone()),
             env: Some(env),
+            labels: Some(labels),
             host_config: Some(host_cfg),
             ..Default::default()
         };
@@ -215,17 +354,6 @@ impl RunnerLauncher for BollardRunnerLauncher {
         // name (e.g. from a server crash mid-spawn) before trying
         // create. A name conflict 409 surfaces as Docker; we pre-
         // empt it.
-        let _ = self
-            .docker
-            .remove_container(
-                &container_name,
-                Some(bollard::container::RemoveContainerOptions {
-                    force: true,
-                    ..Default::default()
-                }),
-            )
-            .await;
-
         let create = self
             .docker
             .create_container(
@@ -271,7 +399,7 @@ impl RunnerLauncher for BollardRunnerLauncher {
     }
 
     async fn wipe_volume(&self, group_id: &str) -> Result<Option<u64>, LauncherError> {
-        let name = volume_name_for(group_id);
+        let name = self.volume_name_for(group_id);
         // Ignore 404 — the volume might already be gone.
         let _ = self.docker.remove_volume(&name, None).await;
         Ok(None)
@@ -288,7 +416,9 @@ impl RunnerLauncher for BollardRunnerLauncher {
             .unwrap_or_default()
             .into_iter()
             .filter_map(|v| {
-                if v.name.starts_with("execlaw-runner-") {
+                if v.name.starts_with(&self.volume_prefix())
+                    && v.labels.get("execlaw.installation_id") == Some(&self.installation_id)
+                {
                     Some(v.name)
                 } else {
                     None
@@ -296,6 +426,13 @@ impl RunnerLauncher for BollardRunnerLauncher {
             })
             .collect();
         Ok(names)
+    }
+
+    fn volume_prefix(&self) -> String {
+        // Legacy installations sweep every `execlaw-runner-*` volume. Use a
+        // disjoint prefix so an older control plane cannot erase this one's
+        // workspace when both installations share a Docker daemon.
+        format!("execlaw-install-{}-runner-", self.installation_id)
     }
 
     async fn image_present(&self, image: &str) -> bool {
@@ -420,6 +557,29 @@ mod tests {
     #[test]
     fn volume_name_uses_prefix() {
         assert_eq!(volume_name_for("abc"), "execlaw-runner-abc");
+    }
+
+    #[test]
+    fn runner_installation_id_is_stable_per_database_and_distinct_between_databases() {
+        use execlaw_core::db::{Database, DbConfig};
+        use execlaw_core::migrations::MigrationRunner;
+
+        let first = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&first).apply_all().unwrap();
+        let second = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&second).apply_all().unwrap();
+
+        let first_id = load_or_create_runner_installation_id(&first).unwrap();
+        assert_eq!(
+            load_or_create_runner_installation_id(&first).unwrap(),
+            first_id
+        );
+        let second_id = load_or_create_runner_installation_id(&second).unwrap();
+        assert_ne!(first_id, second_id);
+        assert_ne!(
+            format!("execlaw-install-{first_id}-runner-controller"),
+            format!("execlaw-install-{second_id}-runner-controller")
+        );
     }
 
     #[tokio::test]

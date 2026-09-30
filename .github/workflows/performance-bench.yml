@@ -1,0 +1,118 @@
+name: Stable-hardware performance gate
+
+on:
+  pull_request:
+    branches: ["**"]
+    paths:
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "crates/**"
+      - "perf/**"
+      - "scripts/performance_gate.py"
+      - ".github/workflows/performance-bench.yml"
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      replace_baseline:
+        description: "Replace the stable baseline after reviewing a deliberate platform/toolchain change"
+        type: boolean
+        required: false
+        default: false
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  criterion:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, x64, execlaw-bench]
+    timeout-minutes: 60
+    env:
+      CARGO_TERM_COLOR: always
+      EXECLAW_BENCH_RUNNER: ${{ runner.name }}
+      EXECLAW_BENCH_COMMIT: ${{ github.sha }}
+      EXECLAW_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore stable-hardware baseline
+        id: baseline
+        uses: actions/cache/restore@v4
+        with:
+          path: perf/.baseline
+          key: execlaw-performance-execlaw-bench-${{ github.sha }}
+          restore-keys: |
+            execlaw-performance-execlaw-bench-
+
+      - name: Run required Criterion samples
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo bench --locked -p execlaw-core --bench core_hot_paths -- replay_since_0_of_500
+          cargo bench --locked -p execlaw-core --bench core_hot_paths -- memory_asset_search/trust_filtered_256_assets
+          cargo bench --locked -p execlaw-server --bench server_hot_paths -- catalog/assemble_64_authorized_builtins
+          cargo bench --locked -p execlaw-server --bench server_hot_paths -- runner_frame_decode_token_delta
+          cargo bench --locked -p execlaw-server --bench server_hot_paths -- inference/queue_wait_contended
+          cargo bench --locked -p execlaw-server --bench python_sandbox_hot_paths -- streaming_publish/4mb_blob
+
+      - name: Collect Criterion estimates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p perf/results
+          python3 scripts/performance_gate.py collect \
+            --contract perf/benchmark-contract.json \
+            --criterion-dir target/criterion \
+            --output perf/results/current.json \
+            --runner-name "$EXECLAW_BENCH_RUNNER" \
+            --commit "$EXECLAW_BENCH_COMMIT"
+
+      - name: Compare against the pinned runner baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(compare --baseline perf/.baseline/baseline.json --current perf/results/current.json --report perf/results/report.json)
+          if [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" && "${{ inputs.replace_baseline }}" == "true" ]]; then
+            if [[ "$GITHUB_REF" != "refs/heads/$EXECLAW_DEFAULT_BRANCH" ]]; then
+              echo "Baseline replacement is allowed only on the default branch." >&2
+              exit 2
+            fi
+            args+=(--replace-baseline)
+          elif [[ "$GITHUB_EVENT_NAME" == "pull_request" && "${{ steps.baseline.outputs.cache-hit }}" != "true" ]]; then
+            # The first PR that introduces the gate has no default-branch
+            # cache to compare. Record it as an explicit bootstrap report;
+            # the default-branch run then saves the persistent baseline.
+            args+=(--bootstrap-if-missing)
+          elif [[ "$GITHUB_REF" == "refs/heads/$EXECLAW_DEFAULT_BRANCH" ]]; then
+            args+=(--bootstrap-if-missing)
+          fi
+          python3 scripts/performance_gate.py "${args[@]}"
+
+      - name: Promote the passing default-branch result
+        if: (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (github.event_name == 'workflow_dispatch' && inputs.replace_baseline && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        shell: bash
+        run: cp perf/results/current.json perf/.baseline/baseline.json
+
+      - name: Save the stable-hardware baseline
+        if: (github.event_name == 'push' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)) || (github.event_name == 'workflow_dispatch' && inputs.replace_baseline && github.ref == format('refs/heads/{0}', github.event.repository.default_branch))
+        uses: actions/cache/save@v4
+        with:
+          path: perf/.baseline
+          key: execlaw-performance-execlaw-bench-${{ github.sha }}
+
+      - name: Store comparison report and raw estimates
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: execlaw-performance-${{ github.sha }}
+          path: perf/results/
+          if-no-files-found: warn
+          retention-days: 90

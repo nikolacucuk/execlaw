@@ -5,7 +5,7 @@
 
 use crate::db::{Database, DbError};
 use crate::ids::{AttachmentId, ConversationId, ResearchJobId};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
@@ -59,6 +59,17 @@ pub struct PluginArtifactCreated {
     pub attachment_id: String,
     pub sha256: String,
     pub size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultArtifactChunk {
+    pub artifact_id: String,
+    pub sha256: String,
+    pub mime_type: String,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub total_bytes: u64,
+    pub content: String,
 }
 
 /// Compute the standard on-disk path for a plugin artifact, given the
@@ -162,6 +173,54 @@ impl<'db> AttachmentStore<'db> {
         })
     }
 
+    /// Remove one attachment row and delete its file only when no other
+    /// attachment or artifact row still references the same path.
+    pub fn purge_attachment(&self, id: &AttachmentId) -> Result<bool, DbError> {
+        let attachment_id = id.as_str().to_owned();
+        let removed = self.db.transaction(|tx| {
+            let path: Option<String> = tx
+                .query_row(
+                    "SELECT path FROM state_attachments WHERE id = ?1",
+                    params![attachment_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(path) = path else {
+                return Ok(None);
+            };
+            tx.execute(
+                "DELETE FROM state_attachments WHERE id = ?1",
+                params![attachment_id],
+            )?;
+            let references: i64 = tx.query_row(
+                "SELECT (SELECT COUNT(*) FROM state_attachments WHERE path = ?1) + \
+                        (SELECT COUNT(*) FROM state_artifacts WHERE path = ?1)",
+                params![path],
+                |row| row.get(0),
+            )?;
+            Ok(Some((path, references == 0)))
+        })?;
+        if let Some((path, no_references)) = removed {
+            if no_references {
+                // Missing files are already purged; other I/O failures are
+                // returned so a durable caller can retry the cleanup.
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => {
+                        return Err(DbError::Migration(format!(
+                            "purge attachment file {}: {error}",
+                            path
+                        )));
+                    }
+                }
+            }
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
     pub fn insert_artifact(&self, row: &ArtifactRow) -> Result<(), DbError> {
         self.db.with_conn(|c| {
             c.execute(
@@ -183,6 +242,199 @@ impl<'db> AttachmentStore<'db> {
             )?;
             Ok(())
         })
+    }
+
+    /// Persist a large JSON tool result under a conversation/run-scoped ID.
+    pub fn insert_tool_result_artifact(
+        &self,
+        artifacts_root: &Path,
+        conversation_id: &ConversationId,
+        run_id: &str,
+        bytes: &[u8],
+        now: i64,
+    ) -> Result<PluginArtifactCreated, DbError> {
+        self.insert_tool_result_artifact_with_id(
+            artifacts_root,
+            conversation_id,
+            run_id,
+            &uuid::Uuid::new_v4().to_string(),
+            bytes,
+            now,
+        )
+    }
+
+    /// Persist a run-scoped result under a stable id. Retrying after a kill
+    /// returns the same artifact only when its owner and bytes still match.
+    ///
+    /// ```ignore
+    /// store.insert_tool_result_artifact_with_id(root, &conversation, run_id, "child-result", bytes, now)?;
+    /// ```
+    pub fn insert_tool_result_artifact_with_id(
+        &self,
+        artifacts_root: &Path,
+        conversation_id: &ConversationId,
+        run_id: &str,
+        artifact_id: &str,
+        bytes: &[u8],
+        now: i64,
+    ) -> Result<PluginArtifactCreated, DbError> {
+        if bytes.len() > 50 * 1024 * 1024 {
+            return Err(DbError::Invariant(
+                "tool result exceeds the 50 MiB artifact limit".into(),
+            ));
+        }
+        if artifact_id.is_empty()
+            || artifact_id.len() > 128
+            || !artifact_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return Err(DbError::Invariant(
+                "tool result artifact id is invalid".into(),
+            ));
+        }
+        let sha256 = hex::encode(Sha256::digest(bytes));
+        let path = plugin_artifact_path(artifacts_root, &sha256);
+        std::fs::create_dir_all(artifacts_root).map_err(|error| {
+            DbError::Migration(format!(
+                "tool result artifact directory {}: {error}",
+                artifacts_root.display()
+            ))
+        })?;
+        if !path.exists() {
+            let temporary = artifacts_root.join(format!(".{sha256}.{}.tmp", uuid::Uuid::new_v4()));
+            std::fs::write(&temporary, bytes).map_err(|error| {
+                DbError::Migration(format!(
+                    "tool result artifact write {}: {error}",
+                    temporary.display()
+                ))
+            })?;
+            if let Err(error) = std::fs::rename(&temporary, &path) {
+                let _ = std::fs::remove_file(&temporary);
+                if !path.exists() {
+                    return Err(DbError::Migration(format!(
+                        "tool result artifact rename {}: {error}",
+                        path.display()
+                    )));
+                }
+            }
+        }
+        match std::fs::read(&path) {
+            Ok(on_disk) if on_disk == bytes => {}
+            _ => {
+                return Err(DbError::Invariant(
+                    "tool result artifact bytes differ from the content digest".into(),
+                ));
+            }
+        }
+        let expires_at = now.saturating_add(30 * 24 * 60 * 60);
+        self.db.transaction(|tx| {
+            let inserted = tx.execute(
+                "INSERT OR IGNORE INTO state_artifacts(id,research_job_id,kind,mime_type,path,sha256,bytes,created_at,plugin_id,filename,expires_at) \
+                 VALUES (?1,NULL,'tool_result','application/json; charset=utf-8',?2,?3,?4,?5,NULL,'tool-result.json',?6)",
+                params![artifact_id, path.to_string_lossy(), sha256, bytes.len() as i64, now, expires_at],
+            )?;
+            if inserted == 0 {
+                let existing: (String, String, i64, String) = tx.query_row(
+                    "SELECT path,sha256,bytes,kind FROM state_artifacts WHERE id=?1",
+                    [artifact_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                if existing != (path.to_string_lossy().into_owned(), sha256.clone(), bytes.len() as i64, "tool_result".into()) {
+                    return Err(DbError::Invariant("artifact id was reused with different bytes or kind".into()));
+                }
+            }
+            let linked = tx.execute(
+                "INSERT OR IGNORE INTO state_tool_result_artifacts(artifact_id,conversation_id,run_id,sha256,byte_length,mime_type,created_at,expires_at) \
+                 VALUES (?1,?2,?3,?4,?5,'application/json; charset=utf-8',?6,?7)",
+                params![artifact_id, conversation_id.as_str(), run_id, sha256, bytes.len() as i64, now, expires_at],
+            )?;
+            if linked == 0 {
+                let existing: (String, String, String, i64) = tx.query_row(
+                    "SELECT conversation_id,run_id,sha256,byte_length FROM state_tool_result_artifacts WHERE artifact_id=?1",
+                    [artifact_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                if existing != (conversation_id.as_str().to_owned(), run_id.to_owned(), sha256.clone(), bytes.len() as i64) {
+                    return Err(DbError::Invariant("artifact id belongs to another run or digest".into()));
+                }
+            }
+            Ok(())
+        })?;
+        Ok(PluginArtifactCreated {
+            attachment_id: artifact_id.to_owned(),
+            sha256,
+            size_bytes: bytes.len() as u64,
+        })
+    }
+
+    /// Read at most 8 KiB from an unexpired artifact belonging to this run.
+    pub fn read_tool_result_artifact(
+        &self,
+        artifacts_root: &Path,
+        artifact_id: &str,
+        conversation_id: &ConversationId,
+        run_id: &str,
+        offset: u64,
+        limit: u32,
+        now: i64,
+    ) -> Result<Option<ToolResultArtifactChunk>, DbError> {
+        let metadata = self.db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT sha256,byte_length,mime_type FROM state_tool_result_artifacts \
+             WHERE artifact_id=?1 AND conversation_id=?2 AND run_id=?3 AND expires_at>?4",
+                params![artifact_id, conversation_id.as_str(), run_id, now],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, u64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(DbError::from)
+        })?;
+        let Some((sha256, total_bytes, mime_type)) = metadata else {
+            return Ok(None);
+        };
+        let path = plugin_artifact_path(artifacts_root, &sha256);
+        let bytes = std::fs::read(&path).map_err(|error| {
+            DbError::Migration(format!(
+                "tool result artifact read {}: {error}",
+                path.display()
+            ))
+        })?;
+        if hex::encode(Sha256::digest(&bytes)) != sha256 || bytes.len() as u64 != total_bytes {
+            return Err(DbError::Invariant(
+                "tool result artifact integrity check failed".into(),
+            ));
+        }
+        let text = std::str::from_utf8(&bytes).map_err(|error| {
+            DbError::Invariant(format!("tool result artifact is not UTF-8 JSON: {error}"))
+        })?;
+        let mut start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(text.len());
+        while start < text.len() && !text.is_char_boundary(start) {
+            start += 1;
+        }
+        let max_end = start
+            .saturating_add(limit.clamp(1, 8192) as usize)
+            .min(text.len());
+        let mut end = max_end;
+        while end > start && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Ok(Some(ToolResultArtifactChunk {
+            artifact_id: artifact_id.to_owned(),
+            sha256,
+            mime_type,
+            offset: start as u64,
+            next_offset: end as u64,
+            total_bytes,
+            content: text[start..end].to_owned(),
+        }))
     }
 
     /// Look up an artifact row by id. Returns `None` for missing rows;
@@ -547,7 +799,103 @@ impl<'db> AttachmentStore<'db> {
 mod tests {
     use super::*;
     use crate::db::{Database, DbConfig};
+    use crate::ids::EventSeq;
     use crate::migrations::MigrationRunner;
+    use crate::runs::{NewRun, RunStore};
+
+    #[test]
+    fn stable_tool_result_artifact_reuses_only_same_run_and_digest() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_conversations(conversation_id,kind,phase,trust_class,modality) \
+                 VALUES('artifact-scope','ControllerDM','idle','Controller','Text')",
+                [],
+            )?;
+            connection.execute(
+                "INSERT INTO state_events(conversation_id,seq,kind,payload,committed_at,actor) \
+                 VALUES('artifact-scope',1,'user_msg',X'00',1,'controller')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let conversation = ConversationId::from("artifact-scope");
+        let runs = RunStore::new(&db);
+        let first = runs
+            .create_run(&NewRun {
+                conversation_id: conversation.clone(),
+                parent_run_id: None,
+                input_event_seq: EventSeq(1),
+                started_at: 1,
+                deadline_at: None,
+            })
+            .unwrap();
+        let second = runs
+            .create_run(&NewRun {
+                conversation_id: conversation.clone(),
+                parent_run_id: None,
+                input_event_seq: EventSeq(1),
+                started_at: 2,
+                deadline_at: None,
+            })
+            .unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let store = AttachmentStore::new(&db);
+        let a = store
+            .insert_tool_result_artifact_with_id(
+                directory.path(),
+                &conversation,
+                &first,
+                "child-result-1",
+                b"{}",
+                10,
+            )
+            .unwrap();
+        let b = store
+            .insert_tool_result_artifact_with_id(
+                directory.path(),
+                &conversation,
+                &first,
+                "child-result-1",
+                b"{}",
+                11,
+            )
+            .unwrap();
+        assert_eq!(a.attachment_id, b.attachment_id);
+        assert!(
+            store
+                .insert_tool_result_artifact_with_id(
+                    directory.path(),
+                    &conversation,
+                    &second,
+                    "child-result-1",
+                    b"{}",
+                    12,
+                )
+                .is_err()
+        );
+        assert!(
+            store
+                .insert_tool_result_artifact_with_id(
+                    directory.path(),
+                    &conversation,
+                    &first,
+                    "child-result-1",
+                    b"{\"changed\":true}",
+                    12,
+                )
+                .is_err()
+        );
+        let count: i64 = db.with_conn(|connection| {
+            Ok(connection.query_row(
+                "SELECT COUNT(*) FROM state_tool_result_artifacts WHERE artifact_id='child-result-1'",
+                [], |row| row.get(0),
+            )?)
+        }).unwrap();
+        assert_eq!(count, 1);
+    }
 
     #[test]
     fn attachment_and_artifact_insert() {

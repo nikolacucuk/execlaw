@@ -14,7 +14,7 @@ For generic plugin creation and packaging instructions, read
 ## Current version and layout
 
 The current source manifest is `plugins/whatsapp/plugin.toml`. Its plugin id
-is `whatsapp` and its current version is `0.2.16`.
+is `whatsapp` and its current version is `0.2.18`.
 
 ```text
 plugins/whatsapp/
@@ -165,6 +165,14 @@ An event-only agent must not run an interval-based "no new mailbox messages"
 turn. It becomes due only when `generic_inbound::enqueue_triggered_agents`
 receives a matching inbound webhook event. The supervisor wake signal is an
 internal scheduling notification, not a WhatsApp polling mechanism.
+
+## Release 0.2.18: Stable specialist event identity
+
+The webhook decoder passes WuzAPI's `Info.ID` as `source_event_id` to the host.
+The host deduplicates matching specialist mailbox admission by that ID and
+retains it with the run and review draft. A retry of the same webhook can no
+longer create a second specialist proposal. The callback remains asynchronous
+and the upstream acknowledgement behavior is unchanged.
 
 ## Release 0.2.16: Import operator phone messages
 

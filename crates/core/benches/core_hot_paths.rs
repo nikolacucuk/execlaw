@@ -219,7 +219,62 @@ fn bench_replay_since(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
+fn bench_memory_asset_search(c: &mut Criterion) {
+    use execlaw_core::memory_assets::{
+        AssetType, AssetVisibility, InjectionMode, MemoryAssetStore, NewMemoryAsset,
+    };
+
+    let db = fresh_db();
+    let store = MemoryAssetStore::new(&db);
+    for index in 0..256 {
+        let asset_id = format!("bench-search-{index:04}");
+        let name = format!("Project notes {index}");
+        store
+            .create(NewMemoryAsset {
+                asset_id: &asset_id,
+                asset_type: AssetType::Memory,
+                name: &name,
+                description: "local project planning notes",
+                owner_scope: "global",
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: None,
+                content_ref: Some("alpha project retrieval benchmark"),
+                source_hash: Some("bench-source-v1"),
+                now_unix: 100,
+            })
+            .unwrap();
+        store
+            .bind(
+                &asset_id,
+                "default",
+                InjectionMode::Discoverable,
+                0,
+                256,
+                101,
+            )
+            .unwrap();
+    }
+    c.bench_function("memory_asset_search/trust_filtered_256_assets", |b| {
+        b.iter(|| {
+            let hits = store
+                .search_eligible(
+                    black_box("alpha project"),
+                    None,
+                    None,
+                    "default",
+                    &["Controller"],
+                    &["global"],
+                    &[InjectionMode::Discoverable],
+                    1_000,
+                    20,
+                )
+                .unwrap();
+            black_box(hits);
+        })
+    });
+}
+
 // HMAC-signed vs keyless EventLog — measure the cost of the tamper-evidence
 // axiom (§7.8) added in Phase 1.
 // ---------------------------------------------------------------------------
@@ -481,6 +536,8 @@ fn fresh_conv_row(id: &str) -> ConversationRow {
         is_pinned: false,
         is_ephemeral: false,
         ephemeral_expires_at: None,
+        last_activity_at: 0,
+        context_window_policy: None,
     }
 }
 
@@ -910,7 +967,6 @@ fn bench_tool_access_store(c: &mut Criterion) {
                     description: None,
                     input_schema: None,
                     default_allowed_classes: vec!["Controller".into(), "KnownTrusted".into()],
-                    sensitive: false,
                 },
                 100,
             )
@@ -944,7 +1000,6 @@ fn bench_tool_access_store(c: &mut Criterion) {
                             description: None,
                             input_schema: None,
                             default_allowed_classes: vec!["Controller".into()],
-                            sensitive: false,
                         },
                         100,
                     )
@@ -1257,6 +1312,7 @@ fn fixture_notes(n: usize) -> Vec<ResearchNote> {
                 title: Some(format!("Source {i}")),
                 fetched_ok: true,
                 error: None,
+                ..ResearchSource::default()
             }],
             tokens_used: Some(123),
             error: None,
@@ -1354,27 +1410,25 @@ fn bench_research_gather_paths(c: &mut Criterion) {
     group.finish();
 }
 
-// C6 — retention purge. Runs hourly; budget is generous because
-// the sweep is a background task, but we want the cost to scale
-// linearly with the candidate set so a backlog doesn't OOM.
+// C6 — retention candidate discovery. Runs hourly; budget is generous
+// because the sweep is a background task, but the durable deletion
+// queue scan must scale linearly without materializing external payloads.
 //
 // Budgets:
-//   * purge/empty-db          ≤ 100µs  (fast SELECT-then-no-DELETE)
-//   * purge/16-terminal       ≤ 1ms    (txn + 16 DELETEs)
-//   * purge/256-terminal      ≤ 10ms   (txn + 256 DELETEs — backlog)
-fn bench_research_purge_terminal(c: &mut Criterion) {
+//   * candidates/empty-db          ≤ 100µs
+//   * candidates/16-terminal       ≤ 1ms
+//   * candidates/256-terminal      ≤ 10ms
+fn bench_research_retention_candidates(c: &mut Criterion) {
     use execlaw_core::research::{ResearchJobStatus, ResearchJobStore};
 
-    let mut group = c.benchmark_group("research_purge_terminal");
+    let mut group = c.benchmark_group("research_retention_candidates");
 
     group.bench_function("empty_db", |b| {
         b.iter_batched(
             fresh_db,
             |db| {
                 let store = ResearchJobStore::new(&db);
-                let n = store
-                    .purge_terminal_older_than(black_box(1_000_000_000))
-                    .unwrap();
+                let n = store.terminal_older_than(black_box(1_000_000_000)).unwrap();
                 black_box(n);
             },
             criterion::BatchSize::SmallInput,
@@ -1410,9 +1464,7 @@ fn bench_research_purge_terminal(c: &mut Criterion) {
                 },
                 |db| {
                     let store = ResearchJobStore::new(&db);
-                    let purged = store
-                        .purge_terminal_older_than(black_box(1_000_000))
-                        .unwrap();
+                    let purged = store.terminal_older_than(black_box(1_000_000)).unwrap();
                     black_box(purged);
                 },
                 criterion::BatchSize::SmallInput,
@@ -1708,6 +1760,7 @@ criterion_group!(
     bench_event_record_encode_decode,
     bench_commit_turn,
     bench_replay_since,
+    bench_memory_asset_search,
     bench_event_log_append,
     bench_event_log_replay_keyed,
     bench_outbox,
@@ -1724,7 +1777,7 @@ criterion_group!(
     bench_research_config_store,
     bench_research_plan_codec,
     bench_research_gather_paths,
-    bench_research_purge_terminal,
+    bench_research_retention_candidates,
     bench_transport_binding_store,
 );
 criterion_main!(benches);

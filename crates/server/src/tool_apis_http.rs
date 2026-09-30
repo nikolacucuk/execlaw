@@ -14,11 +14,10 @@
 //!
 //!   * Scheme allowlist: `http` / `https` only. `file://`,
 //!     `gopher://`, `data://`, etc. — all rejected up front.
-//!   * Host check (IP literal): if the URL's host is an IP
-//!     literal, it must not be loopback / private / link-local /
-//!     multicast / broadcast / documentation. Default-deny.
-//!   * Host check (`localhost`): rejected unless the impl was
-//!     constructed with `allow_loopback(true)` (tests only).
+//!   * Host check: DNS results and IP literals must be globally routable;
+//!     checked addresses are pinned to the HTTP connection.
+//!   * Redirect check: each redirect target is validated and pinned before
+//!     following it. Environment proxies are disabled to prevent remote DNS.
 //!   * Content-Type allowlist: only `text/*`, `application/json`,
 //!     `application/xml`, `application/ld+json`, `application/atom+xml`,
 //!     `application/rss+xml`. Binary content is rejected before we
@@ -28,17 +27,17 @@
 //!     `true` so the LLM knows the body is incomplete.
 //!   * Timeout: 30 s on the whole request.
 //!
-//! Known limitation (documented in the audit doc): DNS-based hosts
-//! that resolve to private IPs aren't pre-resolved here. A future
-//! iteration can add pre-resolve + reject-if-private. The current
-//! implementation relies on the operator's network layer (firewall /
-//! egress proxy) to enforce the harder boundary.
+//! Every hostname answer is checked and pinned at connection time. Redirects
+//! are followed manually so each destination passes the same policy before
+//! the next connection is made.
 //!
 //! 2026-04-29.
 
 use async_trait::async_trait;
 use execlaw_core::tool::{ApiError, WebFetchApi, WebFetchResponse};
+#[cfg(test)]
 use std::net::IpAddr;
+#[cfg(test)]
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -59,10 +58,8 @@ pub const DEFAULT_TIMEOUT_S: u64 = 30;
 /// about "looks like a real browser" much more than precise version
 /// matching.
 ///
-/// Operators uneasy about UA-spoofing can override via
-/// `HttpWebFetchApi::with_client(...)` and pass their own configured
-/// reqwest client. The default is "stop the silent gather-failure
-/// surface that motivated this fix"; the override is for purists.
+/// Public requests use this stable identity while each destination is
+/// resolved and pinned by the host egress policy.
 pub const DEFAULT_USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0";
 
@@ -80,52 +77,58 @@ pub const ALLOWED_CONTENT_TYPE_PREFIXES: &[&str] = &[
 ];
 
 pub struct HttpWebFetchApi {
+    #[cfg(test)]
     client: reqwest::Client,
     max_bytes: usize,
     timeout: Duration,
+    #[cfg(test)]
     allow_loopback: bool,
 }
 
 impl HttpWebFetchApi {
-    /// Production constructor: SSRF guard on, 1 MiB cap, 30 s
-    /// timeout, fresh reqwest client with no redirect surprises
-    /// (10-redirect cap, default).
+    /// Production constructor: public-egress checks, 1 MiB cap, and a 30 s
+    /// timeout. A DNS-pinned client is created for each checked destination.
     ///
     /// Sets a realistic browser User-Agent. Without one, the default
     /// reqwest UA (`reqwest/0.12.x`) is recognized as a bot by most
     /// CDN / WAF stacks (Cloudflare, Akamai, Fastly bot-protect) and
     /// returns 403/406 — which silently torpedoed the deep-research
     /// gather phase (every URL fetch failed, every note ended up
-    /// empty). Operator can override via `with_client` if they need
-    /// a different identity (e.g. a corporate-policy UA).
+    /// empty). The outbound identity and accepted MIME types stay stable.
     ///
     /// Also sets `Accept` and `Accept-Language` headers since some
     /// sites also bot-detect on those being absent.
     pub fn new() -> Self {
-        use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue};
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            ACCEPT,
-            HeaderValue::from_static(
-                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            ),
-        );
-        headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_S))
-            .user_agent(DEFAULT_USER_AGENT)
-            .default_headers(headers)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        #[cfg(test)]
+        let client = {
+            use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue};
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                ACCEPT,
+                HeaderValue::from_static(
+                    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                ),
+            );
+            headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(DEFAULT_TIMEOUT_S))
+                .user_agent(DEFAULT_USER_AGENT)
+                .default_headers(headers)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        };
         Self {
+            #[cfg(test)]
             client,
             max_bytes: DEFAULT_MAX_BYTES,
             timeout: Duration::from_secs(DEFAULT_TIMEOUT_S),
+            #[cfg(test)]
             allow_loopback: false,
         }
     }
 
-    /// Bring your own client (custom proxy, custom user agent, etc.).
+    /// Supply a loopback test client.
+    #[cfg(test)]
     pub fn with_client(client: reqwest::Client) -> Self {
         Self {
             client,
@@ -150,9 +153,40 @@ impl HttpWebFetchApi {
     /// Test seam — flip this `true` so unit tests can reach a
     /// `127.0.0.1:0`-bound local mock without the SSRF guard
     /// rejecting it. Production code never calls this.
+    #[cfg(test)]
     pub fn allow_loopback(mut self, yes: bool) -> Self {
         self.allow_loopback = yes;
         self
+    }
+
+    fn checked_client(&self, raw_url: &str) -> Result<(reqwest::Url, reqwest::Client), ApiError> {
+        #[cfg(test)]
+        if self.allow_loopback {
+            return Ok((validate_url(raw_url, true)?, self.client.clone()));
+        }
+
+        let policy = execlaw_local_endpoint_policy::PublicEgressPolicy;
+        let resolution = policy
+            .resolve(raw_url)
+            .map_err(|error| ApiError::Validation(error.to_string()))?;
+        let client = policy
+            .reqwest_client(&resolution, |builder| {
+                use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue};
+                let mut headers = HeaderMap::new();
+                headers.insert(
+                    ACCEPT,
+                    HeaderValue::from_static(
+                        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    ),
+                );
+                headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+                builder
+                    .timeout(self.timeout)
+                    .user_agent(DEFAULT_USER_AGENT)
+                    .default_headers(headers)
+            })
+            .map_err(|error| ApiError::Storage(format!("HTTP client build: {error}")))?;
+        Ok((resolution.url, client))
     }
 }
 
@@ -162,6 +196,7 @@ impl Default for HttpWebFetchApi {
     }
 }
 
+#[cfg(test)]
 fn is_private_or_local_ip(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
@@ -193,6 +228,7 @@ fn is_private_or_local_ip(ip: &IpAddr) -> bool {
 
 /// Validate a URL's scheme + host. Returns the parsed `Url` on
 /// success.
+#[cfg(test)]
 fn validate_url(url_str: &str, allow_loopback: bool) -> Result<reqwest::Url, ApiError> {
     let url = reqwest::Url::parse(url_str)
         .map_err(|e| ApiError::Validation(format!("invalid URL: {e}")))?;
@@ -260,19 +296,45 @@ fn content_type_allowed(ct: &str) -> bool {
 #[async_trait]
 impl WebFetchApi for HttpWebFetchApi {
     async fn get(&self, url: &str) -> Result<WebFetchResponse, ApiError> {
-        let parsed = validate_url(url, self.allow_loopback)?;
-        let resp = self
-            .client
-            .get(parsed)
-            .timeout(self.timeout)
-            .send()
-            .await
-            .map_err(|e| ApiError::Storage(format!("network error: {e}")))?;
+        const MAX_REDIRECTS: usize = 10;
+        let mut current_url = url.to_owned();
+        let mut final_response = None;
+        for redirect_count in 0..=MAX_REDIRECTS {
+            let (checked_url, client) = self.checked_client(&current_url)?;
+            let response = client
+                .get(checked_url)
+                .timeout(self.timeout)
+                .send()
+                .await
+                .map_err(|e| ApiError::Storage(format!("network error: {e}")))?;
+            if response.status().is_redirection()
+                && let Some(location) = response.headers().get(reqwest::header::LOCATION)
+            {
+                if redirect_count == MAX_REDIRECTS {
+                    return Err(ApiError::Validation(format!(
+                        "redirect limit of {MAX_REDIRECTS} exceeded"
+                    )));
+                }
+                let location = location.to_str().map_err(|error| {
+                    ApiError::Validation(format!("invalid redirect Location header: {error}"))
+                })?;
+                current_url = response
+                    .url()
+                    .join(location)
+                    .map_err(|error| {
+                        ApiError::Validation(format!("invalid redirect URL: {error}"))
+                    })?
+                    .to_string();
+                continue;
+            }
+            final_response = Some(response);
+            break;
+        }
+        let resp = final_response.ok_or_else(|| {
+            ApiError::Validation("redirect response did not produce a final URL".into())
+        })?;
         let status = resp.status().as_u16();
         let final_url = resp.url().to_string();
-        // Re-validate the FINAL url after redirects. Cheap defense
-        // against a server redirecting us into a private network.
-        validate_url(&final_url, self.allow_loopback)?;
         let content_type = resp
             .headers()
             .get(reqwest::header::CONTENT_TYPE)

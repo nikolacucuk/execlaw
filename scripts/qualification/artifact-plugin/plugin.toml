@@ -1,0 +1,18 @@
+[plugin]
+id = "qualification-artifact"
+name = "Qualification Artifact"
+version = "0.1.0"
+description = "Disposable H022 producer fixture for a run-owned plugin attachment."
+author = "execlaw"
+license = "Apache-2.0"
+
+[[tools]]
+name = "qualification_artifact.create"
+description = "Create the requested proof.txt attachment and return its attachment_id. Call this tool when asked to produce qualification proof."
+schema = "schemas/qualification_artifact.create.json"
+trust_floor = "Controller"
+latency = "low"
+
+[runtime]
+tier = "script"
+source = "main.rhai"

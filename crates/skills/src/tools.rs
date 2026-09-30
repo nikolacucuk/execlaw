@@ -780,6 +780,7 @@ mod tests {
     use execlaw_core::ids::ConversationId;
     use execlaw_core::migrations::MigrationRunner;
     use execlaw_core::tool::SystemClock;
+    use sha2::{Digest, Sha256};
 
     fn fresh() -> Arc<SkillStore> {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
@@ -939,10 +940,33 @@ mod tests {
         let create = SkillsCreateTool::new(store.clone());
         let promote = SkillsPromoteTool::new(store.clone());
         let archive = SkillsArchiveTool::new(store.clone());
-        let list = SkillsListTool::new(store);
+        let list = SkillsListTool::new(store.clone());
         let _ = create
             .invoke(ctx_for("Controller"), create_args("a/lifecycle", "body"))
             .await;
+        let skill = store.get("a/lifecycle").unwrap().unwrap();
+        let terms_json = "[\"answer\"]";
+        let suite = serde_json::to_vec(&vec![(
+            "heldout-1".to_owned(),
+            "task".to_owned(),
+            terms_json.to_owned(),
+        )])
+        .unwrap();
+        let suite_hash = hex::encode(Sha256::digest(suite));
+        store
+            .db()
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO state_skill_eval_cases (skill_name, case_id, prompt, required_terms_json) VALUES ('a/lifecycle', 'heldout-1', 'task', ?1)",
+                    [terms_json],
+                )?;
+                conn.execute(
+                    "INSERT INTO state_skill_eval_runs (skill_name, version_id, body_sha256, evaluator_version, passed, score, results_json, created_at, suite_sha256, model_id, backend_fingerprint) VALUES ('a/lifecycle', ?1, ?2, 'skill-eval-v1', 1, 1.0, '[]', 1, ?3, 'local-test-model', 'test-backend')",
+                    rusqlite::params![skill.current_version.id.0, skill.current_version.body_sha256, suite_hash],
+                )?;
+                Ok(())
+            })
+            .unwrap();
         let _ = promote
             .invoke(ctx_for("Controller"), json!({"name":"a/lifecycle"}))
             .await;

@@ -1,7 +1,7 @@
 [plugin]
 id = "finance-yahoo"
 name = "Yahoo Finance"
-version = "0.2.1"
+version = "0.2.2"
 # 0.2.1 (2026-05-16) — descriptions + tool-result _hint trimmed
 # hard. v0.2.0's verbose two-shape contract bloated the per-turn
 # tool catalog enough to push Qwen3.6-AWQ (with 100 tools loaded)
@@ -140,6 +140,7 @@ description = "Round-trip check: fetch quotes for AAPL + ^DJI + BTC-USD + EURUSD
 [[ui_panels]]
 mount = "admin/plugins/finance-yahoo"
 entry = "ui/panel.js"
+rpc_capabilities = ["plugin_admin_routes"]
 
 [runtime]
 tier = "script"

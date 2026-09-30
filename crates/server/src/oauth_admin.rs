@@ -94,7 +94,7 @@ pub struct OauthClientsResponse {
     pub clients: Vec<OauthClientView>,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
+#[derive(Deserialize, ToSchema)]
 pub struct UpsertClientRequest {
     pub provider: String,
     pub client_id: String,
@@ -106,19 +106,53 @@ pub struct UpsertClientRequest {
     pub scopes: Vec<String>,
 }
 
-#[derive(Debug, Serialize, ToSchema)]
+impl std::fmt::Debug for UpsertClientRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpsertClientRequest")
+            .field("provider", &self.provider)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scopes", &self.scopes)
+            .finish()
+    }
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct ConnectResponse {
     /// SPA opens this in a new tab. Google redirects back to the
     /// configured `redirect_uri` with `code=` and `state=`.
     pub authorize_url: String,
 }
 
-#[derive(Debug, Deserialize)]
+impl std::fmt::Debug for ConnectResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConnectResponse")
+            .field("authorize_url", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Deserialize)]
 pub struct CallbackQuery {
     pub code: Option<String>,
     pub state: Option<String>,
     pub error: Option<String>,
     pub error_description: Option<String>,
+}
+
+impl std::fmt::Debug for CallbackQuery {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallbackQuery")
+            .field("code", &self.code.as_ref().map(|_| "<redacted>"))
+            .field("state", &self.state.as_ref().map(|_| "<redacted>"))
+            .field("error", &self.error)
+            .field(
+                "error_description",
+                &self.error_description.as_ref().map(|_| "<redacted>"),
+            )
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -424,11 +458,10 @@ async fn callback_inner(
     q: CallbackQuery,
 ) -> Result<String, ApiError> {
     if let Some(err) = q.error.as_deref() {
-        let detail = q.error_description.as_deref().unwrap_or("");
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
             code: "oauth_provider_denied",
-            message: format!("provider denied: {err} {detail}"),
+            message: format!("provider denied OAuth authorization ({err})"),
         });
     }
     let code = q.code.ok_or_else(|| ApiError {
@@ -655,6 +688,32 @@ mod tests {
     use axum::body::{self, Body};
     use axum::http::{Method, Request, header};
     use tower::ServiceExt;
+
+    #[test]
+    fn oauth_admin_request_debug_output_redacts_secret_fields() {
+        let request = UpsertClientRequest {
+            provider: "google".into(),
+            client_id: "public-client".into(),
+            client_secret: "incident-client-secret-marker".into(),
+            redirect_uri: "http://localhost/callback".into(),
+            scopes: Vec::new(),
+        };
+        let request_debug = format!("{request:?}");
+        assert!(request_debug.contains("<redacted>"));
+        assert!(!request_debug.contains("incident-client-secret-marker"));
+
+        let callback = CallbackQuery {
+            code: Some("incident-authorization-code-marker".into()),
+            state: Some("incident-csrf-state-marker".into()),
+            error: Some("access_denied".into()),
+            error_description: Some("incident-provider-secret-marker".into()),
+        };
+        let callback_debug = format!("{callback:?}");
+        assert!(callback_debug.contains("<redacted>"));
+        assert!(!callback_debug.contains("incident-authorization-code-marker"));
+        assert!(!callback_debug.contains("incident-csrf-state-marker"));
+        assert!(!callback_debug.contains("incident-provider-secret-marker"));
+    }
 
     async fn setup_controller_token(app: &axum::Router) -> String {
         let body = serde_json::to_vec(&serde_json::json!({

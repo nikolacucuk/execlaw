@@ -59,7 +59,6 @@ export function AlertWatcher() {
         refreshCount();
 
         const client = new WsClient({
-            accessToken: getToken,
             onEvent: (ev: WsEvent) => {
                 if (ev.kind === "alert_fired" || ev.kind === "alert_resolved") {
                     refreshCount();

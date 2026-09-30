@@ -396,7 +396,8 @@ async fn classify_via_llm(
     let resolved = state
         .inference
         .resolve(&state.db, BackendPurpose::Small)
-        .or_else(|| state.inference.resolve(&state.db, BackendPurpose::Standard));
+        .or_else(|| state.inference.resolve(&state.db, BackendPurpose::Standard))
+        .map(|resolved| resolved.with_workload("chat"));
     let resolved = match resolved {
         Some(r) => r,
         None => {
@@ -455,6 +456,7 @@ async fn classify_via_llm(
         // models silently ignore the field.
         chat_template_kwargs: Some(serde_json::json!({"enable_thinking": false})),
         tool_choice: None,
+        response_format: None,
         guided_decoding_backend: None,
     };
 

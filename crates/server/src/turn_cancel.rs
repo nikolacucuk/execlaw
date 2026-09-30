@@ -35,6 +35,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Clone, Default)]
 pub struct TurnCancellationRegistry {
     inner: Arc<DashMap<String, Arc<AtomicBool>>>,
+    active: Arc<DashMap<String, ActiveTurn>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ActiveTurn {
+    pub turn_id: Option<String>,
+    pub group_id: Option<String>,
 }
 
 impl TurnCancellationRegistry {
@@ -51,7 +58,34 @@ impl TurnCancellationRegistry {
     pub fn register(&self, conversation_id: &str) -> Arc<AtomicBool> {
         let flag = Arc::new(AtomicBool::new(false));
         self.inner.insert(conversation_id.to_owned(), flag.clone());
+        self.active.insert(
+            conversation_id.to_owned(),
+            ActiveTurn {
+                turn_id: Some(uuid::Uuid::new_v4().to_string()),
+                group_id: None,
+            },
+        );
         flag
+    }
+
+    /// Bind a runner-mediated execution identity to the live conversation turn.
+    pub fn bind_runner(&self, conversation_id: &str, turn_id: &str, group_id: &str) {
+        if self.inner.contains_key(conversation_id) {
+            self.active.insert(
+                conversation_id.to_owned(),
+                ActiveTurn {
+                    turn_id: Some(turn_id.to_owned()),
+                    group_id: Some(group_id.to_owned()),
+                },
+            );
+        }
+    }
+
+    /// Inspect the active runner turn for authenticated control routing.
+    pub fn active_turn(&self, conversation_id: &str) -> Option<ActiveTurn> {
+        self.active
+            .get(conversation_id)
+            .map(|entry| entry.value().clone())
     }
 
     /// Set the cancel flag for `conversation_id`. Returns `true` if a
@@ -69,11 +103,19 @@ impl TurnCancellationRegistry {
         }
     }
 
+    /// Return the live cancellation flag for an in-flight conversation turn.
+    pub fn flag(&self, conversation_id: &str) -> Option<Arc<AtomicBool>> {
+        self.inner
+            .get(conversation_id)
+            .map(|entry| entry.value().clone())
+    }
+
     /// Remove the flag for `conversation_id`. Called by the turn owner
     /// (success and error paths both) via the [`TurnCancelGuard`]
     /// RAII. Idempotent — multiple drops are harmless.
     pub fn clear(&self, conversation_id: &str) {
         self.inner.remove(conversation_id);
+        self.active.remove(conversation_id);
     }
 
     /// Test helper: how many entries are live.

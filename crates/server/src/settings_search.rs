@@ -4,7 +4,7 @@
 
 use crate::auth_extract::AuthedUser;
 use crate::routes::ApiError;
-use crate::search_resolver::construct_from_row;
+use crate::search_resolver::construct_from_row_with_db;
 use crate::state::AppState;
 use axum::Router;
 use axum::extract::{Path, State};
@@ -266,7 +266,7 @@ pub async fn test_search_handler(
             code: "search_provider_not_found",
             message: format!("no provider row for kind {}", kind_enum.as_str()),
         })?;
-    let provider = construct_from_row(&row);
+    let provider = construct_from_row_with_db(&row, &state.db);
     let started = std::time::Instant::now();
     let results = provider.search(&req.query, 5).await.map_err(|e| ApiError {
         status: StatusCode::BAD_GATEWAY,

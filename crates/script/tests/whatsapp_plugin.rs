@@ -111,6 +111,7 @@ async fn decode_canonical_dm_text_event() {
         "type": "Message",
         "event": {
             "Info": {
+                "ID": "wamid-test-dm-1",
                 "Chat": "15551112222@s.whatsapp.net",
                 "Sender": "15553334444@s.whatsapp.net",
                 "PushName": "Alice",
@@ -124,6 +125,7 @@ async fn decode_canonical_dm_text_event() {
     });
     let out = invoke_map(&plugin, "decode_event_map", event).await;
     assert_eq!(out["channel"], "whatsapp");
+    assert_eq!(out["source_event_id"], "wamid-test-dm-1");
     assert_eq!(out["reuse_conversation"], true);
     assert_eq!(out["conversation_scope"], "whatsapp");
     // E.164 prefix added by `native_id_from_jid` so the principal

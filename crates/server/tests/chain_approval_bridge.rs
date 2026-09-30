@@ -141,6 +141,12 @@ fn seed_chain_pending(
         ]
     }))
     .unwrap();
+    let effect_hash = execlaw_core::tool::tool_schema_hash(&json!([{
+        "step_index": 0,
+        "label": "effect",
+        "effect_kind": effect_kind,
+        "payload": {"text": "hello"}
+    }]));
 
     db.with_conn(|c| {
         c.execute(
@@ -158,9 +164,9 @@ fn seed_chain_pending(
         )?;
         c.execute(
             "INSERT INTO state_chain_runs \
-             (id, plan_id, conversation_id, run_seq, status, approval_id, next_step_index, created_at, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, 'awaiting_approval', ?5, 0, ?6, ?6)",
-            rusqlite::params![run_id, plan_id, conversation_id.as_str(), run_seq, approval_id, now],
+             (id, plan_id, conversation_id, run_seq, status, approval_id, next_step_index, created_at, updated_at, approval_effect_hash) \
+             VALUES (?1, ?2, ?3, ?4, 'awaiting_approval', ?5, 0, ?6, ?6, ?7)",
+            rusqlite::params![run_id, plan_id, conversation_id.as_str(), run_seq, approval_id, now, effect_hash],
         )?;
         Ok(())
     })
@@ -185,13 +191,16 @@ async fn respond(
     app: &axum::Router,
     approval_id: &str,
     verb: &str,
+    approval_token: &str,
+    user_token: &str,
 ) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method(Method::POST)
         .uri(format!("/api/admin/approvals/{approval_id}/respond"))
         .header(header::CONTENT_TYPE, "application/json")
+        .header(header::AUTHORIZATION, format!("Bearer {user_token}"))
         .body(Body::from(
-            serde_json::to_vec(&json!({"verb": verb})).unwrap(),
+            serde_json::to_vec(&json!({"verb": verb, "approval_token": approval_token})).unwrap(),
         ))
         .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
@@ -226,6 +235,8 @@ async fn chain_pending_approvals_show_in_existing_feed() {
         .find(|a| a["approval_id"] == "chain-appr-feed-1")
         .expect("chain approval should be present in feed");
     assert_eq!(item["sender_principal_id"], "tool-chain");
+    assert_eq!(item["kind"], "effectful_chain");
+    assert!(item["approval_token"].as_str().is_some());
     assert!(
         item["original_text"]
             .as_str()
@@ -238,6 +249,7 @@ async fn chain_pending_approvals_show_in_existing_feed() {
 async fn chain_approval_approve_via_http_completes_run_and_enqueues_outbox() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, state) = build_app(tmp.path().to_path_buf());
+    let user_token = setup_get_token(&app).await;
 
     let cid = ConversationId::from("chain-feed-2");
     seed_conversation(&state.db, &cid);
@@ -250,7 +262,53 @@ async fn chain_approval_approve_via_http_completes_run_and_enqueues_outbox() {
         "transport.send",
     );
 
-    let (status, body) = respond(&app, "chain-appr-approve-1", "approve").await;
+    let (_, pending) = get_pending(&app, &user_token).await;
+    let token = pending["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["approval_id"] == "chain-appr-approve-1")
+        .unwrap()["approval_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let effect_hash: String = state.db.with_conn(|connection| {
+            Ok(connection.query_row(
+                "SELECT approval_effect_hash FROM state_chain_runs WHERE approval_id = 'chain-appr-approve-1'",
+                [],
+                |row| row.get(0),
+            )?)
+        }).unwrap();
+    let wrong_principal_token = execlaw_server::approvals::issue_approval_token(
+        &state.signer,
+        "chain-appr-approve-1",
+        &cid,
+        "effectful_chain",
+        Some("different-controller".into()),
+        Some(effect_hash),
+    );
+    let (denied_status, _) = respond(
+        &app,
+        "chain-appr-approve-1",
+        "approve",
+        &wrong_principal_token,
+        &user_token,
+    )
+    .await;
+    assert_eq!(denied_status, StatusCode::FORBIDDEN);
+    let still_waiting: String = state
+        .db
+        .with_conn(|connection| {
+            Ok(connection.query_row(
+                "SELECT status FROM state_chain_runs WHERE approval_id = 'chain-appr-approve-1'",
+                [],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(still_waiting, "awaiting_approval");
+    let (status, body) =
+        respond(&app, "chain-appr-approve-1", "approve", &token, &user_token).await;
     assert_eq!(status, StatusCode::OK, "body={body}");
     assert_eq!(body["outcome"], "completed");
 
@@ -265,6 +323,10 @@ async fn chain_approval_approve_via_http_completes_run_and_enqueues_outbox() {
         })
         .unwrap();
     assert_eq!(run_status, "completed");
+
+    let (duplicate_status, _) =
+        respond(&app, "chain-appr-approve-1", "approve", &token, &user_token).await;
+    assert_eq!(duplicate_status, StatusCode::NOT_FOUND);
 
     let outbox_count: i64 = state
         .db
@@ -290,6 +352,7 @@ async fn chain_approval_approve_via_http_completes_run_and_enqueues_outbox() {
 async fn chain_approval_reject_via_http_marks_denied_and_skips_outbox() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, state) = build_app(tmp.path().to_path_buf());
+    let user_token = setup_get_token(&app).await;
 
     let cid = ConversationId::from("chain-feed-3");
     seed_conversation(&state.db, &cid);
@@ -302,7 +365,17 @@ async fn chain_approval_reject_via_http_marks_denied_and_skips_outbox() {
         "transport.send",
     );
 
-    let (status, body) = respond(&app, "chain-appr-reject-1", "reject").await;
+    let (_, pending) = get_pending(&app, &user_token).await;
+    let token = pending["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["approval_id"] == "chain-appr-reject-1")
+        .unwrap()["approval_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, body) = respond(&app, "chain-appr-reject-1", "reject", &token, &user_token).await;
     assert_eq!(status, StatusCode::OK, "body={body}");
     assert_eq!(body["outcome"], "denied");
 
@@ -329,6 +402,7 @@ async fn chain_approval_reject_via_http_marks_denied_and_skips_outbox() {
 async fn chain_approval_unsupported_verb_returns_400_with_expected_error_payload() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, state) = build_app(tmp.path().to_path_buf());
+    let user_token = setup_get_token(&app).await;
 
     let cid = ConversationId::from("chain-feed-4");
     seed_conversation(&state.db, &cid);
@@ -341,7 +415,24 @@ async fn chain_approval_unsupported_verb_returns_400_with_expected_error_payload
         "transport.send",
     );
 
-    let (status, body) = respond(&app, "chain-appr-unsupported-1", "trust").await;
+    let (_, pending) = get_pending(&app, &user_token).await;
+    let token = pending["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["approval_id"] == "chain-appr-unsupported-1")
+        .unwrap()["approval_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let (status, body) = respond(
+        &app,
+        "chain-appr-unsupported-1",
+        "trust",
+        &token,
+        &user_token,
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
     assert_eq!(body["error"]["code"], "unsupported_verb");
     assert!(
@@ -358,6 +449,140 @@ async fn chain_approval_unsupported_verb_returns_400_with_expected_error_payload
                 "SELECT status FROM state_chain_runs WHERE approval_id = ?1",
                 rusqlite::params!["chain-appr-unsupported-1"],
                 |r| r.get(0),
+            )?)
+        })
+        .unwrap();
+    assert_eq!(run_status, "awaiting_approval");
+}
+
+#[tokio::test]
+async fn signed_chain_approval_cannot_authorize_changed_plan_arguments() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, state) = build_app(tmp.path().to_path_buf());
+    let user_token = setup_get_token(&app).await;
+    let cid = ConversationId::from("chain-effect-binding");
+    seed_conversation(&state.db, &cid);
+    seed_chain_pending(
+        &state.db,
+        "chain-appr-bound-1",
+        &cid,
+        13,
+        "Send report",
+        "transport.send",
+    );
+
+    let (_, pending) = get_pending(&app, &user_token).await;
+    let token = pending["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["approval_id"] == "chain-appr-bound-1")
+        .unwrap()["approval_token"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    state
+        .db
+        .with_conn(|connection| {
+            let plan_id: String = connection.query_row(
+                "SELECT plan_id FROM state_chain_runs WHERE approval_id = 'chain-appr-bound-1'",
+                [],
+                |row| row.get(0),
+            )?;
+            let mut plan: serde_json::Value =
+                serde_json::from_slice(&connection.query_row::<Vec<u8>, _, _>(
+                    "SELECT plan_json FROM state_chain_plans WHERE id = ?1",
+                    [&plan_id],
+                    |row| row.get(0),
+                )?)
+                .unwrap();
+            plan["steps"][0]["payload"]["text"] = json!("changed after approval");
+            connection.execute(
+                "UPDATE state_chain_plans SET plan_json = ?1 WHERE id = ?2",
+                rusqlite::params![serde_json::to_vec(&plan).unwrap(), plan_id],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let (status, body) = respond(&app, "chain-appr-bound-1", "approve", &token, &user_token).await;
+    assert_eq!(status, StatusCode::CONFLICT, "body={body}");
+    assert_eq!(body["error"]["code"], "approval_effect_mismatch");
+    let (run_status, outbox_count): (String, i64) = state
+        .db
+        .with_conn(|connection| {
+            Ok((
+                connection.query_row(
+                    "SELECT status FROM state_chain_runs WHERE approval_id = 'chain-appr-bound-1'",
+                    [],
+                    |row| row.get(0),
+                )?,
+                connection.query_row("SELECT COUNT(*) FROM state_outbox", [], |row| row.get(0))?,
+            ))
+        })
+        .unwrap();
+    assert_eq!(run_status, "failed");
+    assert_eq!(outbox_count, 0);
+}
+
+#[tokio::test]
+async fn expired_chain_approval_token_cannot_resolve_pending_run() {
+    use execlaw_policy::sideband::ApprovalClaims;
+    use jsonwebtoken::{Algorithm, Header, Validation, decode, encode};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, state) = build_app(tmp.path().to_path_buf());
+    let user_token = setup_get_token(&app).await;
+    let cid = ConversationId::from("chain-expired-token");
+    seed_conversation(&state.db, &cid);
+    seed_chain_pending(
+        &state.db,
+        "chain-appr-expired-1",
+        &cid,
+        15,
+        "Send after approval",
+        "transport.send",
+    );
+    let (_, feed) = get_pending(&app, &user_token).await;
+    let valid_token = feed["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["approval_id"] == "chain-appr-expired-1")
+        .unwrap()["approval_token"]
+        .as_str()
+        .unwrap();
+
+    let mut validation = Validation::new(Algorithm::EdDSA);
+    validation.validate_exp = false;
+    let mut claims =
+        decode::<ApprovalClaims>(valid_token, state.signer.decoding_key(), &validation)
+            .unwrap()
+            .claims;
+    claims.iat = chrono::Utc::now().timestamp() - 120;
+    claims.exp = chrono::Utc::now().timestamp() - 60;
+    let expired = encode(
+        &Header::new(Algorithm::EdDSA),
+        &claims,
+        state.signer.encoding_key(),
+    )
+    .unwrap();
+    let (status, body) = respond(
+        &app,
+        "chain-appr-expired-1",
+        "approve",
+        &expired,
+        &user_token,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "body={body}");
+    let run_status: String = state
+        .db
+        .with_conn(|connection| {
+            Ok(connection.query_row(
+                "SELECT status FROM state_chain_runs WHERE approval_id = 'chain-appr-expired-1'",
+                [],
+                |row| row.get(0),
             )?)
         })
         .unwrap();

@@ -10,6 +10,7 @@ description = "OpenAI-compatible inference client. The single internal LLM contr
 
 [dependencies]
 execlaw-local-endpoint-policy = { path = "../local-endpoint-policy" }
+url.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 reqwest.workspace = true

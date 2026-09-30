@@ -322,6 +322,37 @@ describe("SetupWizard — multi-step flow", () => {
         expect(body.model_spec).toEqual({ model: "Qwen3.5-27B-AWQ" });
     });
 
+    it("external Ollama requires a model tag and selects the native API", async () => {
+        fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+            calls.push({ url, init });
+            if (url === "/api/setup") return setupResponse();
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/setup/preflight") {
+                return new Response(JSON.stringify({ docker: { available: true }, gpus: [] }), { status: 200 });
+            }
+            return new Response("{}", { status: 200 });
+        });
+        mountWizard();
+        await fillAndSubmitAccount();
+        await screen.findByTestId("setup-docker-ok");
+        fireEvent.click(screen.getByTestId("setup-docker-continue"));
+        await screen.findByTestId("setup-backend-form");
+        fireEvent.change(screen.getByTestId("setup-backend-external-protocol"), { target: { value: "ollama" } });
+        fireEvent.change(screen.getByTestId("setup-backend-external-endpoint"), { target: { value: "http://localhost:11434" } });
+        fireEvent.click(screen.getByTestId("setup-backend-submit"));
+        expect(await screen.findByText(/Enter the Ollama model tag/)).toBeInTheDocument();
+        expect(calls.filter((call) => call.url === "/api/admin/backends/Standard")).toHaveLength(0);
+
+        fireEvent.change(screen.getByTestId("setup-backend-external-model"), { target: { value: "qwen3:8b" } });
+        fireEvent.click(screen.getByTestId("setup-backend-submit"));
+        await waitFor(() => expect(calls.some((call) => call.url === "/api/admin/backends/Standard" && call.init?.method === "PUT")).toBe(true));
+        const saved = calls.find((call) => call.url === "/api/admin/backends/Standard" && call.init?.method === "PUT")!;
+        const body = JSON.parse(saved.init?.body as string);
+        expect(body.mode).toBe("external");
+        expect(body.endpoint).toBe("http://localhost:11434");
+        expect(body.model_spec).toEqual({ model: "qwen3:8b", binary_hint: "ollama" });
+    });
+
     it("nvidia GPU → vLLM is the only serving method, model dropdown filters by VRAM", async () => {
         fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
             calls.push({ url, init });

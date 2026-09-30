@@ -12,15 +12,23 @@ use crate::error::{McpError, McpResult};
 use crate::protocol::{InboundFrame, RpcNotification, RpcRequest};
 use std::collections::HashMap;
 use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 use tracing::{debug, warn};
+
+/// Limit a single peer-controlled stdio frame before JSON decoding.
+pub const MAX_FRAME_BYTES: usize = 4 * 1024 * 1024;
 
 /// One-line JSON-RPC frame. Stdio MCP servers MUST emit one frame
 /// per line on stdout (per spec); we enforce the same on writes.
 fn frame_line(value: &impl serde::Serialize) -> McpResult<String> {
     let mut s = serde_json::to_string(value)
         .map_err(|e| McpError::Protocol(format!("encoding frame: {e}")))?;
+    if s.len() > MAX_FRAME_BYTES {
+        return Err(McpError::Protocol(format!(
+            "outbound stdio frame exceeds {MAX_FRAME_BYTES} bytes"
+        )));
+    }
     if s.contains('\n') {
         return Err(McpError::Protocol(
             "JSON frame contains an embedded newline; would corrupt the line stream".into(),
@@ -113,16 +121,24 @@ impl StdioTransport {
 
     /// Read one frame. Returns `None` on EOF (server exited cleanly).
     pub async fn read_frame(&mut self) -> McpResult<Option<InboundFrame>> {
-        let mut line = String::new();
-        let n = self
-            .stdout
-            .read_line(&mut line)
+        let mut line = Vec::with_capacity(4096);
+        let n = (&mut self.stdout)
+            .take((MAX_FRAME_BYTES + 1) as u64)
+            .read_until(b'\n', &mut line)
             .await
             .map_err(McpError::Io)?;
         if n == 0 {
             return Ok(None);
         }
-        debug!(target: "mcp_client::stdout", "{line}");
+        if n > MAX_FRAME_BYTES {
+            return Err(McpError::Protocol(format!(
+                "stdio frame exceeds {} bytes",
+                MAX_FRAME_BYTES
+            )));
+        }
+        debug!(target: "mcp_client::stdout", frame_bytes = n, "MCP frame received");
+        let line = std::str::from_utf8(&line)
+            .map_err(|_| McpError::Protocol("stdio frame is not UTF-8".into()))?;
         let frame: InboundFrame = serde_json::from_str(line.trim_end())
             .map_err(|e| McpError::Protocol(format!("decoding inbound frame: {e}")))?;
         Ok(Some(frame))

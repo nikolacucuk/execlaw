@@ -23,8 +23,8 @@
 //! `test-mock` feature).
 
 use execlaw_container_manager::{
-    DownloadEvent, GpuVendor, HfDownloader, HostMount, ServiceController, ServiceError,
-    ServiceHandle, ServiceSpec, ServiceStatus,
+    DownloadEvent, GpuVendor, HardwareProfile, HfDownloader, HostMount, ServiceController,
+    ServiceError, ServiceHandle, ServiceSpec, ServiceStatus, detect,
 };
 use execlaw_core::Database;
 use execlaw_core::alerts::{AlertRow, AlertStatus, AlertStore, Severity};
@@ -575,6 +575,136 @@ fn parse_gpu_vendor(s: &str) -> Option<GpuVendor> {
     }
 }
 
+fn vram_admission_error(
+    row: &BackendRow,
+    rows: &[BackendRow],
+    profile: &HardwareProfile,
+) -> Option<String> {
+    let required = row.model_spec_json.get("required_vram_mb")?.as_u64()?;
+    if required == 0 {
+        return None;
+    }
+    let selected_gpu = row.gpu_id.as_deref();
+    let capacity = match selected_gpu {
+        Some(gpu_id) => profile
+            .gpus
+            .iter()
+            .find(|gpu| gpu.id.0 == gpu_id || gpu.kernel_card_index.to_string() == gpu_id)
+            .and_then(|gpu| gpu.memory_mb)
+            .ok_or_else(|| format!("selected GPU '{gpu_id}' has no detected memory capacity")),
+        None => {
+            let total = profile
+                .gpus
+                .iter()
+                .filter_map(|gpu| gpu.memory_mb)
+                .sum::<u64>();
+            if total == 0 {
+                Err("GPU memory capacity is unavailable".to_owned())
+            } else {
+                Ok(total)
+            }
+        }
+    };
+    let capacity = match capacity {
+        Ok(capacity) => capacity,
+        Err(reason) => return Some(reason),
+    };
+    let reserved = rows
+        .iter()
+        .filter(|candidate| {
+            candidate.mode == BackendMode::Managed && candidate.gpu_id.as_deref() == selected_gpu
+        })
+        .filter_map(|candidate| {
+            candidate
+                .model_spec_json
+                .get("required_vram_mb")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .fold(0_u64, u64::saturating_add);
+    (reserved > capacity).then(|| {
+        format!(
+            "configured models reserve {reserved} MiB of VRAM, exceeding detected capacity {capacity} MiB"
+        )
+    })
+}
+
+fn ram_admission_error(row: &BackendRow, available_ram_mb: Option<u64>) -> Option<String> {
+    let required = row.model_spec_json.get("required_ram_mb")?.as_u64()?;
+    if required == 0 {
+        return None;
+    }
+    let Some(available) = available_ram_mb else {
+        return Some("host RAM availability could not be detected".to_owned());
+    };
+    (required > available).then(|| {
+        format!("model requires {required} MiB host RAM, but only {available} MiB is available")
+    })
+}
+
+fn nvidia_free_vram_admission_error(
+    row: &BackendRow,
+    profile: &HardwareProfile,
+    free_by_nvml_index: &[Option<u64>],
+) -> Option<String> {
+    let required = row.model_spec_json.get("required_vram_mb")?.as_u64()?;
+    if required == 0 {
+        return None;
+    }
+    let available = if let Some(selected_gpu) = row.gpu_id.as_deref() {
+        let Some((gpu_position, gpu)) = profile.gpus.iter().enumerate().find(|(_, gpu)| {
+            gpu.id.0 == selected_gpu || gpu.kernel_card_index.to_string() == selected_gpu
+        }) else {
+            return Some(format!(
+                "selected GPU '{selected_gpu}' disappeared before spawn"
+            ));
+        };
+        if gpu.vendor != GpuVendor::Nvidia {
+            return Some(format!(
+                "live free-VRAM admission is unavailable for selected {:?} device {}",
+                gpu.vendor, gpu.id.0
+            ));
+        }
+        let ordinal = profile.gpus[..gpu_position]
+            .iter()
+            .filter(|prior| prior.vendor == GpuVendor::Nvidia)
+            .count();
+        let Some(Some(available)) = free_by_nvml_index.get(ordinal).copied() else {
+            return Some(format!(
+                "live free-VRAM reading unavailable for selected NVIDIA device {}",
+                gpu.id.0
+            ));
+        };
+        available
+    } else {
+        let nvidia_count = profile
+            .gpus
+            .iter()
+            .filter(|gpu| gpu.vendor == GpuVendor::Nvidia)
+            .count();
+        if nvidia_count == 0 || nvidia_count != profile.gpus.len() {
+            return Some(
+                "live free-VRAM admission requires a selected, monitored NVIDIA device".to_owned(),
+            );
+        }
+        if free_by_nvml_index.len() < nvidia_count
+            || free_by_nvml_index[..nvidia_count]
+                .iter()
+                .any(Option::is_none)
+        {
+            return Some(
+                "live free-VRAM readings are incomplete for automatic GPU selection".to_owned(),
+            );
+        }
+        free_by_nvml_index[..nvidia_count]
+            .iter()
+            .flatten()
+            .copied()
+            .fold(0_u64, u64::saturating_add)
+    };
+    (required > available)
+        .then(|| format!("model requires {required} MiB VRAM, but only {available} MiB is free"))
+}
+
 fn downgrade_voice_cuda_spec(
     purpose: BackendPurpose,
     spec: &mut ServiceSpec,
@@ -891,6 +1021,37 @@ impl BackendSupervisor {
                         continue;
                     }
                 };
+
+                // Operators can provide a conservative per-model
+                // `required_vram_mb` estimate in model_spec_json. Check all
+                // managed reservations for the selected device before pulling
+                // weights or spawning another inference service.
+                let hardware = detect();
+                let admission_error = vram_admission_error(row, &rows, &hardware)
+                    .or_else(|| {
+                        nvidia_free_vram_admission_error(
+                            row,
+                            &hardware,
+                            &execlaw_container_manager::gpu_memory::nvidia_free_memory_mb_via_nvml(
+                            ),
+                        )
+                    })
+                    .or_else(|| {
+                        ram_admission_error(row, execlaw_container_manager::available_ram_mb())
+                    });
+                if let Some(reason) = admission_error {
+                    warn!(purpose = %key, %reason, "managed backend declined by resource admission");
+                    slot.status = ServiceStatus::Stopped;
+                    slot.stage = LifecycleStage::Failed;
+                    slot.last_log_line = Some(reason.clone());
+                    emit_crashloop_alert(
+                        &self.db,
+                        row.purpose,
+                        &spec.image,
+                        &format!("resource admission declined: {reason}"),
+                    );
+                    continue;
+                }
 
                 // Pre-spawn: ensure model is in the host cache.
                 // This branch is only taken when an HfDownloader is
@@ -1308,6 +1469,24 @@ impl BackendSupervisor {
                 }
             }
         }
+        let observed_at = chrono::Utc::now().timestamp();
+        for row in rows.iter().filter(|row| row.mode == BackendMode::Managed) {
+            if let Some(slot) = slots.get(row.purpose.as_str()) {
+                let model_id = if is_ollama_row(row) {
+                    extract_ollama_model_id(row)
+                } else {
+                    extract_model_id(row)
+                };
+                if let Err(error) = store.record_readiness(
+                    row.purpose,
+                    model_id.as_deref(),
+                    slot.stage.as_str(),
+                    observed_at,
+                ) {
+                    warn!(purpose = %row.purpose.as_str(), %error, "could not persist backend readiness");
+                }
+            }
+        }
     }
 
     /// Force-restart a single managed backend. Bound to
@@ -1670,6 +1849,21 @@ mod tests {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
         db
+    }
+
+    fn backend_row(purpose: BackendPurpose) -> BackendRow {
+        BackendRow {
+            purpose,
+            inference_backend: "service-vllm".into(),
+            model_spec_json: serde_json::json!({"image": "vllm:test"}),
+            gpu_id: None,
+            endpoint: None,
+            notes: None,
+            reasoning_enabled: false,
+            mode: BackendMode::Managed,
+            created_at: 0,
+            updated_at: 0,
+        }
     }
 
     fn ollama_row(model: &str) -> BackendRow {
@@ -2042,6 +2236,91 @@ mod tests {
             updated_at: 0,
         };
         assert!(spec_from_row(&row).is_err());
+    }
+
+    #[test]
+    fn resource_admission_declines_overcommit_and_recovers_after_reservation_releases() {
+        let mut requested = backend_row(BackendPurpose::Standard);
+        requested.gpu_id = Some("0".into());
+        requested.model_spec_json = serde_json::json!({"required_vram_mb": 6144});
+        let mut existing = backend_row(BackendPurpose::Vision);
+        existing.gpu_id = Some("0".into());
+        existing.model_spec_json = serde_json::json!({"required_vram_mb": 3072});
+        let profile = HardwareProfile {
+            gpus: vec![execlaw_container_manager::GpuDevice {
+                id: execlaw_container_manager::GpuId("0".into()),
+                vendor: GpuVendor::Nvidia,
+                pci_vendor_id: "10de".into(),
+                pci_device_id: "0001".into(),
+                device_files: Vec::new(),
+                kernel_card_index: 0,
+                model_name: Some("test GPU".into()),
+                memory_mb: Some(8192),
+            }],
+            source: execlaw_container_manager::SysfsSource::Mock,
+        };
+        assert!(
+            vram_admission_error(&requested, &[requested.clone(), existing.clone()], &profile)
+                .is_some()
+        );
+        existing.model_spec_json["required_vram_mb"] = serde_json::json!(1024);
+        assert!(
+            vram_admission_error(&requested, &[requested.clone(), existing.clone()], &profile)
+                .is_none()
+        );
+        let missing_device = HardwareProfile {
+            gpus: Vec::new(),
+            source: execlaw_container_manager::SysfsSource::Mock,
+        };
+        assert!(
+            vram_admission_error(&requested, &[requested.clone(), existing], &missing_device)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn host_ram_admission_declines_unknown_or_insufficient_capacity_and_recovers() {
+        let mut row = backend_row(BackendPurpose::Standard);
+        row.model_spec_json = serde_json::json!({"required_ram_mb": 8192});
+        assert!(ram_admission_error(&row, None).is_some());
+        assert!(ram_admission_error(&row, Some(4096)).is_some());
+        assert!(ram_admission_error(&row, Some(8192)).is_none());
+        assert!(ram_admission_error(&row, Some(12_288)).is_none());
+    }
+
+    #[test]
+    fn nvidia_runtime_admission_uses_free_vram_and_fails_closed_without_probe() {
+        let mut row = backend_row(BackendPurpose::Standard);
+        row.gpu_id = Some("0".into());
+        row.model_spec_json = serde_json::json!({"required_vram_mb": 6000});
+        let profile = HardwareProfile {
+            gpus: vec![execlaw_container_manager::GpuDevice {
+                id: execlaw_container_manager::GpuId("10de:gpu".into()),
+                vendor: GpuVendor::Nvidia,
+                pci_vendor_id: "10de".into(),
+                pci_device_id: "0001".into(),
+                device_files: Vec::new(),
+                kernel_card_index: 0,
+                model_name: Some("test GPU".into()),
+                memory_mb: Some(8192),
+            }],
+            source: execlaw_container_manager::SysfsSource::Mock,
+        };
+        assert!(nvidia_free_vram_admission_error(&row, &profile, &[]).is_some());
+        assert!(nvidia_free_vram_admission_error(&row, &profile, &[None]).is_some());
+        assert!(nvidia_free_vram_admission_error(&row, &profile, &[Some(4096)]).is_some());
+        assert!(nvidia_free_vram_admission_error(&row, &profile, &[Some(6144)]).is_none());
+
+        row.gpu_id = None;
+        assert!(nvidia_free_vram_admission_error(&row, &profile, &[Some(4096)]).is_some());
+        assert!(nvidia_free_vram_admission_error(&row, &profile, &[Some(6144)]).is_none());
+        assert!(nvidia_free_vram_admission_error(&row, &profile, &[None]).is_some());
+
+        let mut unsupported_profile = profile;
+        unsupported_profile.gpus[0].vendor = GpuVendor::Amd;
+        assert!(
+            nvidia_free_vram_admission_error(&row, &unsupported_profile, &[Some(8192)]).is_some()
+        );
     }
 
     #[test]

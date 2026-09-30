@@ -2,6 +2,21 @@
 
 This rubric standardizes how to decide between a plugin, MCP server, or host-core change.
 
+## Implementation commitment
+
+All H001-H130 are accepted work in the [implementation plan](implementation-plan.md).
+Apply this rubric to placement and implementation design; it does not authorize
+dropping a requirement from that plan. A poor placement score means redesign
+the placement while retaining the intended outcome and acceptance gate.
+Use [H040 workspace plugins](llm-harness-roadmap.md#enhancement-040),
+[H065 effect contracts](llm-harness-roadmap.md#enhancement-065),
+[H079 conformance](llm-harness-roadmap.md#enhancement-079),
+[H080 API compatibility](llm-harness-roadmap.md#enhancement-080), and
+[H083 hook semantics](llm-harness-roadmap.md#enhancement-083) when adding
+surfaces. H084/H085 remain planned qualification trials. Record the owning
+component, dependencies, and evidence in the ledger; retain host policy,
+SQLite state, local inference, and outbox guarantees across every adapter.
+
 ## 1) Placement rubric: plugin vs MCP vs host core
 
 Use a plugin when any answer below is yes:
@@ -16,6 +31,7 @@ Use an MCP server when all answers below are yes:
 
 - Stateless request/response tool calls are enough.
 - No trust-class semantics are required inside the integration.
+- Host-side trust/capability enforcement still applies; MCP is not an exemption.
 - No host-managed OAuth flow is required.
 - The integration is third-party and operator-optional.
 

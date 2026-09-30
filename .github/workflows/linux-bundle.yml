@@ -134,6 +134,9 @@ jobs:
           EXECLAW_REUSE_NODE_MODULES: "1"
         run: ./scripts/build-linux.sh
 
+      - name: Smoke-test release SQLCipher binary
+        run: target/x86_64-unknown-linux-gnu/release/execlaw doctor
+
       - name: Locate bundle outputs
         id: outputs
         run: |
@@ -146,11 +149,63 @@ jobs:
           fi
           echo "deb=$DEB" >> "$GITHUB_OUTPUT"
 
+      - name: Sign release artifact and prepare offline provenance
+        env:
+          ARTIFACT: ${{ steps.outputs.outputs.deb }}
+        run: python3 scripts/prepare-release-provenance.py --artifact-type desktop_release "$ARTIFACT"
+
+      - name: Download previous installer for rollback bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: previous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          PREVIOUS=$(python3 scripts/fetch-previous-release-artifact.py \
+            --pattern 'execlaw_*_amd64.deb' \
+            --output-dir "$RUNNER_TEMP/execlaw-previous")
+          echo "artifact=$PREVIOUS" >> "$GITHUB_OUTPUT"
+
+      - name: Package offline update bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          ARTIFACT: ${{ steps.outputs.outputs.deb }}
+          ROLLBACK_ARTIFACT: ${{ steps.previous.outputs.artifact }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          args=(--artifact "$ARTIFACT" --platform linux-x86_64 --version "$RELEASE_VERSION" \
+            --output "dist/execlaw-offline-update-linux-x86_64-${RELEASE_VERSION}.zip")
+          if [[ -n "$ROLLBACK_ARTIFACT" ]]; then args+=(--rollback-artifact "$ROLLBACK_ARTIFACT"); fi
+          python3 scripts/package-offline-update.py "${args[@]}"
+          python3 scripts/prepare-release-provenance.py --artifact-type desktop_release \
+            "dist/execlaw-offline-update-linux-x86_64-${RELEASE_VERSION}.zip"
+
+      - name: Install and smoke-test packaged .deb
+        env:
+          DEB: ${{ steps.outputs.outputs.deb }}
+        run: |
+          sudo apt-get install -y "$DEB"
+          execlaw doctor
+
       - name: Upload .deb
         uses: actions/upload-artifact@v4
         with:
           name: execlaw-deb-amd64
-          path: ${{ steps.outputs.outputs.deb }}
+          path: |
+            ${{ steps.outputs.outputs.deb }}
+            ${{ steps.outputs.outputs.deb }}.sigstore.json
+            ${{ steps.outputs.outputs.deb }}.provenance.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload offline update bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: execlaw-offline-update-linux-amd64
+          path: |
+            dist/execlaw-offline-update-linux-x86_64-${{ github.ref_name }}.zip
+            dist/execlaw-offline-update-linux-x86_64-${{ github.ref_name }}.zip.sigstore.json
+            dist/execlaw-offline-update-linux-x86_64-${{ github.ref_name }}.zip.provenance.json
           if-no-files-found: error
           retention-days: 90
 
@@ -212,7 +267,12 @@ jobs:
           # release without overwriting the macOS-side notes.
           files: |
             ${{ steps.outputs.outputs.deb }}
+            ${{ steps.outputs.outputs.deb }}.sigstore.json
+            ${{ steps.outputs.outputs.deb }}.provenance.json
             ${{ steps.checksum.outputs.sha_file }}
+            dist/execlaw-offline-update-linux-x86_64-${{ github.ref_name }}.zip
+            dist/execlaw-offline-update-linux-x86_64-${{ github.ref_name }}.zip.sigstore.json
+            dist/execlaw-offline-update-linux-x86_64-${{ github.ref_name }}.zip.provenance.json
             dist/*.zip
             dist/*.zip.sha256
             dist/*.zip.spdx.json

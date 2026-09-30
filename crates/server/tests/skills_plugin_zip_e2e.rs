@@ -121,11 +121,16 @@ fn build_app(stage_root: PathBuf) -> (axum::Router, AppState) {
     (execlaw_server::routes::build_router(state.clone()), state)
 }
 
-async fn post_zip(app: axum::Router, bytes: Vec<u8>) -> (StatusCode, serde_json::Value) {
+async fn post_zip(
+    app: axum::Router,
+    bytes: Vec<u8>,
+    bearer: &str,
+) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method(Method::POST)
         .uri("/api/admin/plugins/install?allow_unsigned_local_development=true")
         .header(header::CONTENT_TYPE, "application/zip")
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
         .body(Body::from(bytes))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -239,11 +244,21 @@ async fn installing_skill_plugin_zips_exposes_plugin_shipped_skills_in_admin_lis
     let (app, _state) = build_app(stage_dir.path().to_path_buf());
     let token = setup_and_get_access_token(&app).await;
 
-    let (status, body) = post_zip(app.clone(), load_humanizer_plugin_zip_from_workspace()).await;
+    let (status, body) = post_zip(
+        app.clone(),
+        load_humanizer_plugin_zip_from_workspace(),
+        &token,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "install body: {body}");
     assert_eq!(body["plugin_id"], HUMANIZER_PLUGIN_ID);
 
-    let (status, body) = post_zip(app.clone(), load_obsidian_plugin_zip_from_workspace()).await;
+    let (status, body) = post_zip(
+        app.clone(),
+        load_obsidian_plugin_zip_from_workspace(),
+        &token,
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "install body: {body}");
     assert_eq!(body["plugin_id"], OBSIDIAN_PLUGIN_ID);
 

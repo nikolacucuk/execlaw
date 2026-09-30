@@ -12,9 +12,10 @@
 
 use crate::auth::{AuthError, JwtSigner, RefreshStore};
 use crate::state::{AppState, ServerConfig};
-use axum::extract::State;
+use axum::extract::{FromRequestParts, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-use axum::response::IntoResponse;
+use axum::middleware::{Next, from_fn_with_state};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use execlaw_container_manager::{HardwareProfile, detect};
@@ -45,7 +46,7 @@ const ACCESS_COOKIE_NAME: &str = "execlaw_access";
 /// browser clients that can take advantage of automatic cookie handling.
 ///
 /// `max_age_secs = 0` produces an *expiry* cookie (browser deletes it).
-fn build_access_cookie(token: &str, max_age_secs: i64) -> HeaderValue {
+pub(crate) fn build_access_cookie(token: &str, max_age_secs: i64) -> HeaderValue {
     // SameSite=Strict prevents CSRF. HttpOnly prevents XSS exfiltration.
     // Secure is included so the browser only transmits the cookie over
     // TLS in production; modern browsers allow localhost without TLS.
@@ -470,6 +471,7 @@ pub async fn admin_me(user: crate::auth_extract::AuthedUser) -> Json<MeResponse>
     responses(
         (status = 200, description = "Detected GPU + CPU + memory profile (Tier-1)"),
     ),
+    security(("bearer_jwt" = [])),
     tag = "admin"
 )]
 pub async fn admin_hardware() -> impl IntoResponse {
@@ -490,7 +492,7 @@ pub async fn admin_hardware() -> impl IntoResponse {
 pub async fn setup(
     State(state): State<AppState>,
     Json(req): Json<SetupRequest>,
-) -> Result<Json<SetupResponse>, ApiError> {
+) -> Result<Response, ApiError> {
     use execlaw_core::users::{UserRole, UserRow, UserStore, normalize_username};
 
     if req.admin_password.len() < 8 {
@@ -558,11 +560,20 @@ pub async fn setup(
         state.config.refresh_token_ttl_secs,
     )?;
 
-    Ok(Json(SetupResponse {
-        principal_id,
-        access_token: access,
-        refresh_token: refresh,
-    }))
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::SET_COOKIE,
+        build_access_cookie(&access, state.config.access_token_ttl_secs),
+    );
+    Ok((
+        headers,
+        Json(SetupResponse {
+            principal_id,
+            access_token: access,
+            refresh_token: refresh,
+        }),
+    )
+        .into_response())
 }
 
 #[utoipa::path(
@@ -833,6 +844,7 @@ async fn security_headers(
              img-src 'self' data: blob:; \
              font-src 'self'; \
              connect-src 'self'; \
+             frame-src 'self'; \
              frame-ancestors 'none'; \
              object-src 'none'",
         ));
@@ -879,11 +891,26 @@ pub fn build_router(state: AppState) -> Router {
             "/api/chats/{conversation_id}/cards",
             get(crate::chats::list_cards),
         )
-        .route("/api/chats/{conversation_id}/nexus", get(crate::chats::list_nexus_organization))
-        .route("/api/chats/{conversation_id}/nexus/annotation", post(crate::chats::save_nexus_annotation))
-        .route("/api/chats/{conversation_id}/nexus/views", post(crate::chats::save_nexus_view))
-        .route("/api/chats/{conversation_id}/nexus/views/{name}", axum::routing::delete(crate::chats::delete_nexus_view))
-        .route("/api/chats/{conversation_id}/messages/search", get(crate::chats::search_nexus_messages))
+        .route(
+            "/api/chats/{conversation_id}/nexus",
+            get(crate::chats::list_nexus_organization),
+        )
+        .route(
+            "/api/chats/{conversation_id}/nexus/annotation",
+            post(crate::chats::save_nexus_annotation),
+        )
+        .route(
+            "/api/chats/{conversation_id}/nexus/views",
+            post(crate::chats::save_nexus_view),
+        )
+        .route(
+            "/api/chats/{conversation_id}/nexus/views/{name}",
+            axum::routing::delete(crate::chats::delete_nexus_view),
+        )
+        .route(
+            "/api/chats/{conversation_id}/messages/search",
+            get(crate::chats::search_nexus_messages),
+        )
         .route(
             "/api/chats/{conversation_id}/transport-reply",
             post(crate::chats::send_transport_reply),
@@ -914,6 +941,7 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/chats", get(crate::chats::list_threads))
         .route("/api/stream", get(crate::events::stream_handler))
+        .merge(crate::client_contract::router())
         // Phase 16 — runner WebSocket. Each runner container
         // connects here at startup carrying its one-time bearer
         // secret in the Authorization header. The handler 401s
@@ -928,6 +956,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::plugin_admin_routes::admin_routes_router())
         .merge(crate::plugin_webhook_routes::webhook_routes_router())
         .merge(crate::approvals::approvals_router())
+        .merge(crate::memory_assets_admin::router())
         .merge(crate::attachments_admin::attachments_router())
         .merge(crate::downloads_admin::downloads_router())
         .merge(crate::observability::observability_router())
@@ -937,6 +966,9 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::my_identities::my_identities_router())
         .merge(crate::routines::routines_router())
         .merge(crate::agents_admin::router())
+        .merge(crate::runs_admin::router())
+        .merge(crate::turn_controls_admin::router())
+        .merge(crate::workspace_coding::router())
         .merge(crate::automations_admin::router())
         .merge(crate::inference_admin::router())
         .merge(crate::personality::personality_router())
@@ -955,6 +987,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::skills_admin::skills_admin_router())
         .merge(crate::mcp_admin::mcp_admin_router())
         .merge(crate::settings_general::settings_router())
+        .merge(crate::network_egress_admin::router())
         .merge(crate::factory_reset::factory_reset_router())
         .merge(crate::settings_research::settings_research_router())
         .merge(crate::settings_search::settings_search_router())
@@ -962,8 +995,9 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::oauth_admin::oauth_admin_router())
         .merge(crate::plugin_settings_admin::plugin_settings_admin_router())
         .merge(crate::setup_preflight::setup_preflight_router())
+        .merge(crate::diagnostics::router())
         .merge(crate::docs::docs_router())
-        .with_state(state)
+        .with_state(state.clone())
         // SPA fallback — merged LAST so every `/api/*` route above
         // matches first. `crate::spa::spa_router()` owns `/` and
         // `/{*path}`, embedding `web/dist/` so a Tauri webview
@@ -972,6 +1006,10 @@ pub fn build_router(state: AppState) -> Router {
         // implements React-Router-style deep-link rewrite to
         // `index.html` for any extension-less miss.
         .merge(crate::spa::spa_router())
+        // Every `/api/admin/*` path is private by construction. Individual
+        // handlers still enforce Controller or scoped-role policy; this
+        // boundary prevents a newly-added handler from accidentally being public.
+        .layer(from_fn_with_state(state, require_private_session))
         // Diagnostic layers, applied last so they wrap everything.
         //
         // CatchPanicLayer converts a panic in any handler into a
@@ -1024,6 +1062,39 @@ pub fn build_router(state: AppState) -> Router {
         // 'unsafe-inline' for styles (Bootstrap/React) but locks down
         // scripts, frames, and object embeds.
         .layer(axum::middleware::from_fn(security_headers))
+}
+
+async fn require_private_session(
+    State(state): State<AppState>,
+    request: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let admin_path = path == "/api/admin" || path.starts_with("/api/admin/");
+    let chat_path = path == "/api/chats" || path.starts_with("/api/chats/");
+    let controller_stream = path == "/api/stream";
+    let operator_user_list =
+        path == "/api/admin/users" && request.method() == axum::http::Method::GET;
+    let controller_required = (admin_path && !operator_user_list) || chat_path || controller_stream;
+    if !admin_path && !chat_path && !controller_stream {
+        return next.run(request).await;
+    }
+    let (mut parts, body) = request.into_parts();
+    match crate::auth_extract::AuthedUser::from_request_parts(&mut parts, &state).await {
+        Ok(user) => {
+            if controller_required && user.role != execlaw_core::users::UserRole::Controller {
+                return ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "controller_required",
+                    message: "Controller role required for private operations".into(),
+                }
+                .into_response();
+            }
+            parts.extensions.insert(user);
+            next.run(axum::http::Request::from_parts(parts, body)).await
+        }
+        Err(rejection) => rejection.into_response(),
+    }
 }
 
 /// Build a fresh `AppState` for a unit test (in-memory DB, freshly
@@ -1139,6 +1210,159 @@ mod tests {
     use axum::body::{self, Body};
     use axum::http::{HeaderValue, Method, Request, header};
     use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn admin_prefix_requires_auth_even_if_a_handler_omits_the_extractor() {
+        let state = test_app_state();
+        let plugin_count = state
+            .db
+            .with_conn(|connection| {
+                connection
+                    .query_row("SELECT COUNT(*) FROM state_plugins", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(execlaw_core::db::DbError::from)
+            })
+            .unwrap();
+        let app = build_router(state.clone());
+        let matrix = [
+            (Method::GET, "/api/admin/unannotated-future-route"),
+            (Method::GET, "/api/admin/plugins"),
+            (Method::POST, "/api/admin/plugins/install"),
+            (Method::GET, "/api/admin/settings/general"),
+            (Method::GET, "/api/chats/unannotated-future-route"),
+            (Method::GET, "/api/chats"),
+            (Method::POST, "/api/downloads/sign"),
+            (Method::GET, "/api/attachments/attachment-id"),
+            (Method::GET, "/api/stream"),
+        ];
+        for matrix in matrix {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(matrix.0.clone())
+                        .uri(matrix.1)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{} {}",
+                matrix.0,
+                matrix.1
+            );
+        }
+        let plugin_count_after = state
+            .db
+            .with_conn(|connection| {
+                connection
+                    .query_row("SELECT COUNT(*) FROM state_plugins", [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .map_err(execlaw_core::db::DbError::from)
+            })
+            .unwrap();
+        assert_eq!(
+            plugin_count_after, plugin_count,
+            "unauthorized lifecycle requests must not mutate plugin state"
+        );
+        let health = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn lower_role_cannot_reach_controller_route_matrix() {
+        let state = test_app_state();
+        let now = chrono::Utc::now().timestamp();
+        for (user_id, username, role) in [
+            (
+                "viewer-route-matrix",
+                "viewer",
+                execlaw_core::users::UserRole::Viewer,
+            ),
+            (
+                "operator-route-matrix",
+                "operator",
+                execlaw_core::users::UserRole::Operator,
+            ),
+        ] {
+            execlaw_core::users::UserStore::new(&state.db)
+                .insert(&execlaw_core::users::UserRow {
+                    user_id: user_id.into(),
+                    username: username.into(),
+                    display_name: username.into(),
+                    email: None,
+                    password_hash: "unused-test-hash".into(),
+                    role,
+                    created_at: now,
+                    last_login_at: None,
+                })
+                .unwrap();
+            let session_id = format!("{user_id}-session");
+            state
+                .refresh_store
+                .issue(user_id, &session_id, 3600)
+                .unwrap();
+            let access = state
+                .signer
+                .issue_access_token(user_id, &session_id, 3600)
+                .unwrap();
+            let app = build_router(state.clone());
+
+            for (method, uri) in [
+                (Method::GET, "/api/admin/plugins"),
+                (Method::POST, "/api/admin/plugins/install"),
+                (Method::PUT, "/api/admin/settings/general"),
+                (Method::GET, "/api/chats"),
+                (Method::GET, "/api/stream"),
+            ] {
+                let request = Request::builder()
+                    .method(method.clone())
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {access}"));
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::FORBIDDEN,
+                    "{role:?}: {method} {uri}"
+                );
+            }
+
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri("/api/admin/users")
+                        .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "{role:?} can read the user list"
+            );
+        }
+    }
 
     async fn send_json(
         app: &axum::Router,
@@ -1676,6 +1900,20 @@ mod tests {
         let j: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
         // Two sessions × one refresh row each = 2 revoked.
         assert_eq!(j["revoked_session_count"], 2);
+
+        // Access JWTs from both sessions lose authority immediately too,
+        // not only after their encoded expiration time.
+        for access in [&access1, login_body_json["access_token"].as_str().unwrap()] {
+            let request = Request::builder()
+                .uri("/api/admin/me")
+                .header(header::AUTHORIZATION, format!("Bearer {access}"))
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.clone().oneshot(request).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
 
         // Both refresh tokens now fail to refresh.
         for tok in [&refresh1, &refresh2] {

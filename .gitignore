@@ -3,6 +3,10 @@
 debug
 target
 
+# Cargo target directories created for local verification runs.
+/target-*/
+/web/target-*/
+
 # Python bytecode caches — produced when running
 # plugins/python-sandbox/smoke_execute.py from the host. Cached
 # .pyc files are not stable across interpreter versions.
@@ -58,3 +62,5 @@ crates/server/blobs/
 /web/target-verify-3
 /web/target-verify-4
 /target-verify-7
+perf/.baseline/
+perf/results/

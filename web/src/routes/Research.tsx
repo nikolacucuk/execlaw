@@ -16,9 +16,12 @@ import { Navigate, useNavigate, useParams } from "react-router-dom";
 import {
     advanceResearchJob,
     cancelResearchJob,
+    deleteResearchJob,
+    getResearchDeletion,
     getResearchReport,
     listResearchJobs,
     RESEARCH_TERMINAL_STATUSES,
+    type ResearchDeletionJobView,
     type ResearchJobSummaryView,
 } from "../api/endpoints";
 import { useAuth } from "../auth/AuthContext";
@@ -36,6 +39,7 @@ export function Research() {
     const params = useParams<{ jobId?: string }>();
     const getToken = auth.getAccessToken;
     const [jobs, setJobs] = useState<ResearchJobSummaryView[] | null>(null);
+    const [deletionJob, setDeletionJob] = useState<ResearchDeletionJobView | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [filter, setFilter] = useState<StatusFilter>("all");
 
@@ -77,6 +81,18 @@ export function Research() {
         return () => window.clearInterval(id);
     }, [hasActive, canView, refresh]);
 
+    useEffect(() => {
+        if (deletionJob?.status !== "pending" || !canView) return;
+        const id = window.setInterval(() => {
+            void getResearchDeletion(deletionJob.deletion_id, getToken)
+                .then(setDeletionJob)
+                .catch((error: unknown) => {
+                    setError(error instanceof Error ? error.message : String(error));
+                });
+        }, POLL_INTERVAL_MS);
+        return () => window.clearInterval(id);
+    }, [deletionJob?.deletion_id, deletionJob?.status, canView, getToken]);
+
     const onNewThread = useCallback(() => {
         setActiveThread(null);
         navigate("/chat");
@@ -116,6 +132,20 @@ export function Research() {
                         onDismiss={() => setError(null)}
                         className="m-3"
                     />
+                    {deletionJob && (
+                        <div
+                            className={`alert alert-${deletionJob.status === "complete" ? "success" : "info"} m-3`}
+                            role="status"
+                            data-testid="research-deletion-status"
+                        >
+                            {deletionJob.status === "complete"
+                                ? "Live research data and projections were deleted. Existing backups may retain older copies."
+                                : "Research deletion is queued and will retry until all live projections are removed."}
+                            {deletionJob.last_error && (
+                                <div className="small mt-1">Last cleanup error: {deletionJob.last_error}</div>
+                            )}
+                        </div>
+                    )}
                     {!canView ? (
                         <div className="m-3 execlaw-muted small">
                             Read-only research surface is Controller-only
@@ -139,6 +169,8 @@ export function Research() {
                             }
                             filter={filter}
                             onFilter={setFilter}
+                            onRefresh={refresh}
+                            onDeletionAccepted={setDeletionJob}
                         />
                     )}
                 </div>
@@ -153,12 +185,16 @@ function ResearchTwoPane({
     onSelect,
     filter,
     onFilter,
+    onRefresh,
+    onDeletionAccepted,
 }: {
     jobs: ResearchJobSummaryView[];
     selectedId: string | null;
     onSelect: (id: string) => void;
     filter: StatusFilter;
     onFilter: (f: StatusFilter) => void;
+    onRefresh: () => void;
+    onDeletionAccepted: (job: ResearchDeletionJobView) => void;
 }) {
     const filtered = useMemo(
         () => jobs.filter((j) => matchesFilter(j, filter)),
@@ -275,7 +311,11 @@ function ResearchTwoPane({
                             <div>Select a job on the left to view its plan and report.</div>
                         </div>
                     ) : (
-                        <ResearchJobDetail job={selected} />
+                        <ResearchJobDetail
+                            job={selected}
+                            onRefresh={onRefresh}
+                            onDeletionAccepted={onDeletionAccepted}
+                        />
                     )}
                 </section>
             </div>
@@ -313,12 +353,20 @@ function badgeColor(status: ResearchJobSummaryView["status"]): string {
     }
 }
 
-function ResearchJobDetail({ job }: { job: ResearchJobSummaryView }) {
+function ResearchJobDetail({
+    job,
+    onRefresh,
+    onDeletionAccepted,
+}: {
+    job: ResearchJobSummaryView;
+    onRefresh: () => void;
+    onDeletionAccepted: (job: ResearchDeletionJobView) => void;
+}) {
     const auth = useAuth();
     const getToken = auth.getAccessToken;
     const [report, setReport] = useState<string | null>(null);
     const [reportLoaded, setReportLoaded] = useState(false);
-    const [busy, setBusy] = useState<"advance" | "cancel" | null>(null);
+    const [busy, setBusy] = useState<"advance" | "cancel" | "delete" | null>(null);
     const [actionError, setActionError] = useState<string | null>(null);
 
     /// `Planned` and `Gathering` rows have an Approve button; any
@@ -328,6 +376,7 @@ function ResearchJobDetail({ job }: { job: ResearchJobSummaryView }) {
     const canAdvance =
         job.status === "planned" || job.status === "gathering";
     const canCancel = !RESEARCH_TERMINAL_STATUSES.has(job.status);
+    const canDelete = RESEARCH_TERMINAL_STATUSES.has(job.status);
 
     const onAdvance = useCallback(async () => {
         setBusy("advance");
@@ -354,6 +403,23 @@ function ResearchJobDetail({ job }: { job: ResearchJobSummaryView }) {
             setBusy(null);
         }
     }, [job.id, job.query, getToken]);
+
+    const onDelete = useCallback(async () => {
+        if (!window.confirm(
+            `Delete this research job and its live report, notes, and Graphify snapshot?\n\n${job.query}\n\nExisting backups may retain older copies.`,
+        )) return;
+        setBusy("delete");
+        setActionError(null);
+        try {
+            const deletion = await deleteResearchJob(job.id, getToken);
+            onDeletionAccepted(deletion);
+            await onRefresh();
+        } catch (error) {
+            setActionError(error instanceof Error ? error.message : String(error));
+        } finally {
+            setBusy(null);
+        }
+    }, [getToken, job.id, job.query, onDeletionAccepted, onRefresh]);
 
     useEffect(() => {
         // Only fetch the report when the job has actually completed —
@@ -429,6 +495,17 @@ function ResearchJobDetail({ job }: { job: ResearchJobSummaryView }) {
                                 data-testid="research-detail-cancel"
                             >
                                 {busy === "cancel" ? "Cancelling…" : "Cancel"}
+                            </button>
+                        )}
+                        {canDelete && (
+                            <button
+                                type="button"
+                                className="btn btn-outline-danger btn-sm"
+                                disabled={busy !== null}
+                                onClick={() => void onDelete()}
+                                data-testid="research-detail-delete"
+                            >
+                                {busy === "delete" ? "Deleting…" : "Delete live data"}
                             </button>
                         )}
                     </div>
@@ -515,6 +592,20 @@ function ResearchJobDetail({ job }: { job: ResearchJobSummaryView }) {
                                                         >
                                                             {src.title ?? src.url}
                                                         </a>
+                                                    )}
+                                                    {src.fetched_ok && (src.source_id || src.retrieved_at || src.content_sha256) && (
+                                                        <div className="execlaw-muted small">
+                                                            {src.source_id && <span>Source {src.source_id} </span>}
+                                                            {src.retrieved_at && <span>Fetched {new Date(src.retrieved_at * 1000).toLocaleString()} </span>}
+                                                            {src.content_sha256 && <code>SHA-256 {src.content_sha256}</code>}
+                                                            {src.snapshot_truncated && <span> Snapshot truncated.</span>}
+                                                        </div>
+                                                    )}
+                                                    {src.snapshot_text && (
+                                                        <details className="small">
+                                                            <summary>Locally retained source excerpt (untrusted)</summary>
+                                                            <pre className="small text-wrap">{src.snapshot_text}</pre>
+                                                        </details>
                                                     )}
                                                 </li>
                                             ))}

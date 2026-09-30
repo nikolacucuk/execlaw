@@ -19,8 +19,9 @@ use utoipa::OpenApi;
 
 use crate::alerts::{AlertCountResponse, AlertListResponse, AlertView};
 use crate::approvals::{
-    IdentifierSummary, PendingApprovalSummary, PendingApprovalsResponse, PrincipalListResponse,
-    PrincipalSummary,
+    IdentifierSummary, MemoryPromotionDecisionBody, MemoryPromotionDecisionRequest,
+    MemoryPromotionSummary, PendingApprovalSummary, PendingApprovalsResponse,
+    PrincipalListResponse, PrincipalSummary,
 };
 use crate::automation_runtime::{DryRunResult, ExecOutcome};
 use crate::automations_admin::{
@@ -32,6 +33,12 @@ use crate::backends::{
     BackendListEntry, BackendListResponse, BackendLogsResponse, BackendStatusResponse, BackendView,
     UpsertBackendRequest,
 };
+use crate::chats::{CompletionContractInput, CompletionCriterionInput, RequiredArtifactInput};
+use crate::diagnostics::{
+    ApplicationDiagnostic, AuthorityDiagnostic, BackendDiagnostic, CorrectiveAction,
+    DatabaseDiagnostic, GpuDiagnostic, HardwareDiagnostic, ProtocolDiagnostic, RecoveryDiagnostic,
+    StatusCount, SupportBundle,
+};
 use crate::graphify_api::GraphPageResponse;
 use crate::graphiti_admin::{
     GraphitiConfigRequest, GraphitiConfigResponse, GraphitiHealthResponse, GraphitiTestCallRequest,
@@ -39,16 +46,24 @@ use crate::graphiti_admin::{
 };
 use crate::inference_metrics::{ConsumerSnapshot, InferenceConsumer, MetricsSnapshot};
 use crate::mcp_admin::{McpServerListResponse, McpServerView, McpServerWriteRequest};
+use crate::memory_assets_admin::{
+    AgentScopeView, BindAssetRequest, MemoryAssertionAdminView, MemoryAssertionReviewAdminView,
+    MemoryAssetAdminView, MemoryAssetBindingView, MemoryAssetsAdminResponse,
+    MemoryEvidenceAdminView, MemoryEvidenceSourceView, RetractMemoryAssertionRequest,
+};
 use crate::my_identities::{
     AddIdentifierRequest, AvailableTransportView, AvailableTransportsResponse, IdentifierView,
     MyIdentitiesResponse,
+};
+use crate::network_egress_admin::{
+    EndpointApprovalList, EndpointApprovalView, EndpointApprovalWrite,
 };
 use crate::personality::{
     PersonalityListResponse, PersonalityPreviewResponse, PersonalityView, UpsertPersonalityRequest,
 };
 use crate::plugins::{
-    InstallResponse, PluginListResponse, PluginSummary, ToolSummary, UiPanelListResponse,
-    UiPanelSummary,
+    InstallResponse, PanelRpcRoute, PluginListResponse, PluginSummary, ToolSummary,
+    UiPanelListResponse, UiPanelSummary,
 };
 use crate::research_admin::{
     ResearchActiveCountResponse, ResearchAdvanceResponse, ResearchCancelRequest,
@@ -67,8 +82,10 @@ use crate::runners_admin::{GroupRunnerListResponse, GroupRunnerView};
 use crate::settings_general::{GeneralSettingsView, UpdateGeneralSettingsRequest};
 use crate::settings_research::{ResearchSettingsView, UpdateResearchSettingsRequest};
 use crate::setup_preflight::{DockerStatus, PreflightResponse};
+use crate::sidecars_admin::{SidecarListResponse, SidecarView};
 use crate::tools_admin::{ToolListResponse, ToolView, UpdateToolPolicyRequest};
 use crate::trust_policy::{TrustPolicyView, UpdateTrustPolicyRequest};
+use crate::turn_controls_admin::{SubmitTurnControl, TurnControlCursor};
 use crate::users::{
     ChangePasswordRequest, InviteUserRequest, ResetPasswordRequest, UserListResponse, UserView,
 };
@@ -78,7 +95,7 @@ use execlaw_core::automations::{
     AskAgentConfig, AutomationDef, EdgeDef, ExitToolDef, NodeDef, NodeKind, TriggerDef,
 };
 use utoipa::Modify;
-use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityRequirement, SecurityScheme};
 
 /// Adds the Bearer-JWT security scheme used by `[security(("bearer_jwt" = []))]`
 /// annotations on auth-gated routes.
@@ -100,6 +117,42 @@ impl Modify for SecurityAddon {
                     .build(),
             ),
         );
+
+        // The runtime router applies one Controller gate to these route
+        // prefixes. Mirror that centralized policy into generated OpenAPI
+        // so handlers cannot silently disappear from the authorization
+        // matrix when their local annotations are omitted.
+        for (path, item) in &mut openapi.paths.paths {
+            if path.starts_with("/api/admin/")
+                || path == "/api/chats"
+                || path.starts_with("/api/chats/")
+                || path == "/api/logout/all"
+            {
+                let bearer = || {
+                    vec![SecurityRequirement::new(
+                        "bearer_jwt",
+                        std::iter::empty::<&str>(),
+                    )]
+                };
+                for operation in [
+                    &mut item.get,
+                    &mut item.put,
+                    &mut item.post,
+                    &mut item.delete,
+                    &mut item.options,
+                    &mut item.head,
+                    &mut item.patch,
+                    &mut item.trace,
+                ]
+                .into_iter()
+                .flatten()
+                {
+                    if operation.security.is_none() {
+                        operation.security = Some(bearer());
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -122,9 +175,17 @@ impl Modify for SecurityAddon {
         crate::routes::logout_all,
         crate::routes::admin_me,
         crate::routes::admin_hardware,
+        crate::client_contract::contract,
+        crate::agents_admin::get_agent_completion_contract,
+        crate::agents_admin::set_agent_completion_contract,
+        crate::agents_admin::record_agent_criterion,
+        crate::agents_admin::record_agent_artifact,
+        crate::agents_admin::confirm_agent_delivery,
         // chats
         crate::chats::send_message,
         crate::chats::stop_turn,
+        crate::turn_controls_admin::submit,
+        crate::turn_controls_admin::list,
         crate::chats::generate_title,
         crate::chats::list_messages,
         crate::chats::patch_thread,
@@ -144,9 +205,14 @@ impl Modify for SecurityAddon {
         crate::observability::audit_handler,
         // approvals
         crate::approvals::respond_handler,
+        crate::approvals::decide_memory_promotion_handler,
         crate::approvals::revoke_handler,
         crate::approvals::list_principals_handler,
         crate::approvals::list_pending_approvals_handler,
+        crate::memory_assets_admin::list,
+        crate::memory_assets_admin::retract_assertion,
+        crate::memory_assets_admin::bind,
+        crate::memory_assets_admin::unbind,
         // backends (Phase 8.5 — replaces "deployments" CRUD)
         crate::backends::list_handler,
         crate::backends::upsert_handler,
@@ -161,6 +227,18 @@ impl Modify for SecurityAddon {
         crate::runners_admin::list_groups_handler,
         crate::runners_admin::restart_group_handler,
         crate::runners_admin::wipe_group_handler,
+        crate::sidecars_admin::list_plugin_handler,
+        crate::runs_admin::list_child_tasks,
+        crate::runs_admin::fork_run,
+        crate::workspace_coding::register_root,
+        crate::workspace_coding::list_roots,
+        crate::workspace_coding::read_file,
+        crate::workspace_coding::search_files,
+        crate::workspace_coding::create_checkpoint,
+        crate::workspace_coding::preview_run_diff,
+        crate::workspace_coding::apply_run_diff,
+        crate::workspace_coding::get_workspace_apply_state,
+        crate::workspace_coding::restore_run_workspace,
         // users (multi-controller) + Phase-8.6 password rotation
         crate::users::list_handler,
         crate::users::invite_handler,
@@ -182,6 +260,9 @@ impl Modify for SecurityAddon {
         crate::mcp_admin::create_handler,
         crate::mcp_admin::update_handler,
         crate::mcp_admin::delete_handler,
+        crate::network_egress_admin::list,
+        crate::network_egress_admin::create,
+        crate::network_egress_admin::revoke,
         // personality (Phase 9 — system-prompt fields, §5.5)
         crate::personality::list_handler,
         crate::personality::get_default_handler,
@@ -200,6 +281,7 @@ impl Modify for SecurityAddon {
         crate::trust_policy::put_handler,
         // my identities (Phase 9.3 — controller's per-transport handles, §7.1)
         crate::my_identities::list_handler,
+        crate::my_identities::panel_identifiers_handler,
         crate::my_identities::add_handler,
         crate::my_identities::delete_handler,
         crate::my_identities::list_transports_handler,
@@ -226,6 +308,7 @@ impl Modify for SecurityAddon {
         crate::research_admin::advance_job_handler,
         // setup preflight (Phase 14 — first-run wizard docker + gpu)
         crate::setup_preflight::get_handler,
+        crate::diagnostics::support_bundle,
         crate::setup_preflight::dismiss_handler,
         // automations (M1-M5 — event-triggered flows)
         crate::automations_admin::list,
@@ -263,12 +346,33 @@ impl Modify for SecurityAddon {
         InstallResponse,
         ToolSummary,
         UiPanelSummary,
+        PanelRpcRoute,
         UiPanelListResponse,
+        SidecarListResponse,
+        SidecarView,
         PrincipalSummary,
         PrincipalListResponse,
         IdentifierSummary,
+        CompletionCriterionInput,
+        RequiredArtifactInput,
+        CompletionContractInput,
         PendingApprovalSummary,
+        MemoryPromotionSummary,
+        MemoryPromotionDecisionBody,
+        MemoryPromotionDecisionRequest,
         PendingApprovalsResponse,
+        BindAssetRequest,
+        AgentScopeView,
+        MemoryAssetAdminView,
+        MemoryAssetBindingView,
+        MemoryAssertionAdminView,
+        MemoryAssertionReviewAdminView,
+        MemoryEvidenceAdminView,
+        MemoryEvidenceSourceView,
+        MemoryAssetsAdminResponse,
+        RetractMemoryAssertionRequest,
+        SubmitTurnControl,
+        TurnControlCursor,
         BackendView,
         BackendListResponse,
         BackendLogsResponse,
@@ -298,6 +402,9 @@ impl Modify for SecurityAddon {
         McpServerView,
         McpServerListResponse,
         McpServerWriteRequest,
+        EndpointApprovalList,
+        EndpointApprovalView,
+        EndpointApprovalWrite,
         PersonalityView,
         PersonalityListResponse,
         PersonalityPreviewResponse,
@@ -333,6 +440,17 @@ impl Modify for SecurityAddon {
         ResearchCancelRequest,
         PreflightResponse,
         DockerStatus,
+        SupportBundle,
+        ApplicationDiagnostic,
+        DatabaseDiagnostic,
+        GpuDiagnostic,
+        HardwareDiagnostic,
+        BackendDiagnostic,
+        ProtocolDiagnostic,
+        AuthorityDiagnostic,
+        StatusCount,
+        RecoveryDiagnostic,
+        CorrectiveAction,
         // automations (M1-M5)
         AutomationDto,
         CreateAutomationRequest,
@@ -536,6 +654,8 @@ mod tests {
             ("/api/admin/plugins/{plugin_id}/enable", &["post"]),
             ("/api/admin/plugins/{plugin_id}/disable", &["post"]),
             ("/api/admin/plugins/{plugin_id}", &["delete"]),
+            ("/api/admin/plugins/{plugin_id}/sidecars", &["get"]),
+            ("/api/admin/plugins/{plugin_id}/identifiers", &["get"]),
             ("/api/admin/logs", &["get"]),
             ("/api/admin/eval/flags", &["get"]),
             ("/api/admin/audit", &["get"]),
@@ -558,6 +678,15 @@ mod tests {
             ("/api/admin/mcp/servers/{id}/delete", &["post"]),
             ("/api/admin/approvals", &["get"]),
             ("/api/admin/approvals/{approval_id}/respond", &["post"]),
+            (
+                "/api/admin/memory-promotions/{proposal_id}/respond",
+                &["post"],
+            ),
+            ("/api/admin/memory-assets", &["get"]),
+            (
+                "/api/admin/memory-assets/{asset_id}/binding",
+                &["put", "delete"],
+            ),
             ("/api/admin/principals", &["get"]),
             ("/api/admin/principals/{principal_id}/revoke", &["post"]),
         ];
@@ -588,6 +717,114 @@ mod tests {
         assert_eq!(bearer["type"], "http");
         assert_eq!(bearer["scheme"], "bearer");
         assert_eq!(bearer["bearerFormat"], "JWT");
+    }
+
+    /// Generate the REST portion of the authorization route matrix from
+    /// the same OpenAPI paths that clients consume. Every Controller
+    /// operation must declare bearer auth; the router's private-prefix
+    /// middleware remains the runtime backstop for undocumented routes.
+    #[test]
+    fn generated_authorization_matrix_covers_documented_controller_routes() {
+        let spec: serde_json::Value = serde_json::from_str(&openapi_json_string()).unwrap();
+        let paths = spec["paths"].as_object().expect("OpenAPI paths object");
+        let http_methods = ["get", "put", "post", "delete", "patch", "options", "head"];
+        let public_exceptions = [
+            ("get", "/api/health"),
+            ("get", "/api/ping"),
+            ("post", "/api/setup"),
+            ("post", "/api/login"),
+            ("post", "/api/token/refresh"),
+            ("post", "/api/logout"),
+            ("get", "/api/client-contract"),
+        ];
+        let mut matrix = Vec::new();
+        let mut generated_public_exceptions = Vec::new();
+
+        for (path, path_item) in paths {
+            for method in http_methods {
+                let Some(operation) = path_item.get(method).filter(|item| item.is_object()) else {
+                    continue;
+                };
+                let role = if path == "/api/admin/users" && method == "get" {
+                    "authenticated_session"
+                } else if path.starts_with("/api/admin/")
+                    || path == "/api/chats"
+                    || path.starts_with("/api/chats/")
+                    || path == "/api/logout/all"
+                {
+                    "controller"
+                } else if operation["security"]
+                    .as_array()
+                    .is_some_and(|requirements| {
+                        requirements
+                            .iter()
+                            .any(|requirement| requirement.get("bearer_jwt").is_some())
+                    })
+                {
+                    "active_session"
+                } else {
+                    assert!(
+                        public_exceptions.contains(&(method, path.as_str())),
+                        "unclassified route {method} {path}; authenticate it or add an explicit public-route exception"
+                    );
+                    generated_public_exceptions.push((method, path.as_str()));
+                    "public_exception"
+                };
+                if role == "controller" {
+                    let has_bearer = operation["security"]
+                        .as_array()
+                        .is_some_and(|requirements| {
+                            requirements
+                                .iter()
+                                .any(|requirement| requirement.get("bearer_jwt").is_some())
+                        });
+                    assert!(
+                        has_bearer,
+                        "generated route/role matrix: {method} {path} is Controller-only but lacks bearer security metadata"
+                    );
+                }
+                matrix.push((method, path.as_str(), role));
+            }
+        }
+
+        for required in [
+            ("get", "/api/admin/plugins", "controller"),
+            ("post", "/api/admin/plugins/install", "controller"),
+            ("get", "/api/admin/backends", "controller"),
+            ("get", "/api/admin/approvals", "controller"),
+            ("get", "/api/admin/users", "authenticated_session"),
+            ("post", "/api/logout/all", "controller"),
+        ] {
+            assert!(
+                matrix.contains(&required),
+                "authorization matrix missing {required:?}"
+            );
+        }
+        generated_public_exceptions.sort_unstable();
+        let mut expected_public_exceptions = public_exceptions.to_vec();
+        expected_public_exceptions.sort_unstable();
+        assert_eq!(
+            generated_public_exceptions, expected_public_exceptions,
+            "generated public-route exceptions differ from the explicit allowlist"
+        );
+        // Non-REST authority surfaces are maintained in their dedicated
+        // specs and middleware/extractor tests.
+        let special_surfaces = [
+            (
+                "/api/attachments/{attachment_id}",
+                "signed_url_or_active_session",
+            ),
+            ("/api/stream", "controller_active_session"),
+        ];
+        for (path, role) in special_surfaces {
+            matrix.push(("get", path, role));
+        }
+        assert!(matrix.contains(&(
+            "get",
+            "/api/attachments/{attachment_id}",
+            "signed_url_or_active_session"
+        )));
+        assert!(matrix.contains(&("get", "/api/stream", "controller_active_session")));
     }
 
     #[test]

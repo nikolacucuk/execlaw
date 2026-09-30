@@ -33,6 +33,15 @@ const TICK_INTERVAL_SECS: i64 = 60;
 pub fn spawn(state: AppState) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let inner = Arc::new(Inner { state });
+        match execlaw_core::routines::RoutineStore::new(&inner.state.db).reset_pending_run_claims()
+        {
+            Ok(recovered) if recovered > 0 => info!(
+                recovered_pending_routine_runs = recovered,
+                "recovered routine runs interrupted by the previous process"
+            ),
+            Ok(_) => {}
+            Err(error) => warn!("could not recover pending routine runs: {error}"),
+        }
         info!(
             "routine scheduler running; interval_secs={}",
             TICK_INTERVAL_SECS
@@ -69,12 +78,27 @@ impl Inner {
     async fn tick_once(&self) -> Result<(), execlaw_core::routines::RoutineError> {
         let store = RoutineStore::new(&self.state.db);
         let now = Utc::now().timestamp();
+        for (run_id, routine_id) in store.list_pending_run_ids(500)? {
+            let Some(routine) = store.get(&routine_id)? else {
+                continue;
+            };
+            if !routine.enabled {
+                continue;
+            }
+            if let Err(error) = self.fire_one(&store, &routine, now, Some(&run_id)).await {
+                warn!(
+                    run_id,
+                    routine_id = %routine.id,
+                    "routine recovery failed: {error}"
+                );
+            }
+        }
         let due = store.list_due(now)?;
         if due.is_empty() {
             return Ok(());
         }
         for routine in due {
-            if let Err(e) = self.fire_one(&store, &routine, now).await {
+            if let Err(e) = self.fire_one(&store, &routine, now, None).await {
                 warn!(
                     "routine fire failed for '{}' ({}): {}",
                     routine.id, routine.name, e
@@ -89,12 +113,19 @@ impl Inner {
         store: &RoutineStore<'_>,
         routine: &execlaw_core::routines::RoutineRow,
         now: i64,
+        existing_run_id: Option<&str>,
     ) -> Result<(), execlaw_core::routines::RoutineError> {
         // Insert a Pending run row first so the operator sees the
         // attempt even if dispatch fails. Publish a Pending event
         // immediately so the SPA's run-history drawer reflects the
         // attempt without polling.
-        let run_id = store.insert_run_pending(&routine.id, now)?;
+        let run_id = match existing_run_id {
+            Some(run_id) => run_id.to_owned(),
+            None => store.insert_run_pending(&routine.id, now)?,
+        };
+        if !store.claim_pending_run(&run_id, now)? {
+            return Ok(());
+        }
         self.state.events.publish(UiEvent::RoutineRunChanged {
             routine_id: routine.id.clone(),
             run_id: run_id.clone(),
@@ -106,9 +137,10 @@ impl Inner {
         // turn when no inference backend is wired so routines still
         // produce success/failure history rows in dev/test
         // environments without a live LLM.
-        let outcome = crate::chats::dispatch_routine_turn(
+        let outcome = crate::chats::dispatch_routine_run(
             &self.state,
             &routine.id,
+            &run_id,
             routine.target_conversation_id.as_deref(),
             &routine.prompt,
         )
@@ -202,6 +234,7 @@ mod tests {
                     prompt: "do the thing".into(),
                     target_conversation_id: None,
                     enabled: true,
+                    completion_contract: None,
                 },
                 now,
             )
@@ -256,6 +289,7 @@ mod tests {
                     prompt: "do".into(),
                     target_conversation_id: None,
                     enabled: false,
+                    completion_contract: None,
                 },
                 now,
             )

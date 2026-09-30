@@ -82,6 +82,74 @@ pub async fn list_handler(
     Ok(Json(SidecarListResponse { sidecars }))
 }
 
+/// `GET /api/admin/plugins/{plugin_id}/sidecars` returns only one
+/// plugin's sidecars so plugin panels do not need the global inventory.
+#[utoipa::path(
+    get,
+    path = "/api/admin/plugins/{plugin_id}/sidecars",
+    params(("plugin_id" = String, Path, description = "Installed plugin id")),
+    responses(
+        (status = 200, description = "This plugin's sidecar status", body = SidecarListResponse),
+        (status = 404, description = "Plugin is not installed"),
+        (status = 503, description = "Sidecar supervisor not configured"),
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "sidecars"
+)]
+pub async fn list_plugin_handler(
+    State(state): State<AppState>,
+    _user: AuthedUser,
+    AxumPath(plugin_id): AxumPath<String>,
+) -> Result<Json<SidecarListResponse>, ApiError> {
+    let row = state
+        .plugin_host
+        .get_row(&plugin_id)
+        .map_err(|error| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "db_error",
+            message: error.to_string(),
+        })?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "plugin_not_installed",
+            message: format!("plugin '{plugin_id}' is not installed"),
+        })?;
+    let manifest =
+        execlaw_plugin_sdk::PluginManifest::parse(&row.manifest_toml).map_err(|error| {
+            ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "plugin_manifest_unreadable",
+                message: error.to_string(),
+            }
+        })?;
+    if !manifest.ui_panels.iter().any(|panel| {
+        panel
+            .rpc_capabilities
+            .contains(&execlaw_plugin_sdk::manifest::PanelRpcCapability::OwnSidecarStatus)
+    }) {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "panel_rpc_not_declared",
+            message: "this plugin has no panel grant for sidecar status".into(),
+        });
+    }
+    let Some(supervisor) = state.sidecar_supervisor.as_ref() else {
+        return Err(ApiError {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code: "sidecars_disabled",
+            message: "sidecar supervisor not configured".into(),
+        });
+    };
+    let sidecars = supervisor
+        .snapshot_status()
+        .await
+        .into_iter()
+        .filter(|sidecar| sidecar.plugin_id == plugin_id)
+        .map(view_from_status)
+        .collect();
+    Ok(Json(SidecarListResponse { sidecars }))
+}
+
 /// `POST /api/admin/sidecars/:name/reset` — clear a parked
 /// `CrashLooping` slot's restart counter and let the next reconcile
 /// re-attempt the spawn. Controller-only because the operator is
@@ -183,6 +251,10 @@ fn require_controller(state: &AppState, user: &AuthedUser) -> Result<(), ApiErro
 pub fn sidecars_admin_router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/sidecars", get(list_handler))
+        .route(
+            "/api/admin/plugins/{plugin_id}/sidecars",
+            get(list_plugin_handler),
+        )
         .route("/api/admin/sidecars/{name}/reset", post(reset_handler))
 }
 
@@ -219,6 +291,43 @@ mod tests {
         let bytes = body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         v["access_token"].as_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn plugin_sidecar_status_requires_its_panel_capability() {
+        let state = test_app_state();
+        let app = build_router(state.clone());
+        let token = setup_token(&app).await;
+        for (plugin_id, granted) in [("panel-sidecar", true), ("panel-other", false)] {
+            let stage = state.plugin_host.stage_root().join(plugin_id);
+            std::fs::create_dir_all(stage.join("ui")).unwrap();
+            std::fs::write(stage.join("ui/panel.js"), "panel").unwrap();
+            let capability = if granted {
+                "rpc_capabilities = [\"own_sidecar_status\"]\n"
+            } else {
+                ""
+            };
+            let manifest = format!(
+                "[plugin]\nid = \"{plugin_id}\"\nname = \"Panel\"\nversion = \"0.1.0\"\n\n[[ui_panels]]\nmount = \"admin/plugins/{plugin_id}\"\nentry = \"ui/panel.js\"\n{capability}"
+            );
+            std::fs::write(stage.join("plugin.toml"), &manifest).unwrap();
+            state.plugin_host.install(&stage).await.unwrap();
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/admin/plugins/{plugin_id}/sidecars"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                if granted {
+                    StatusCode::SERVICE_UNAVAILABLE
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+        }
     }
 
     /// Build an AppState with a SidecarSupervisor wired against a

@@ -3,7 +3,9 @@
 // match the server's ApprovalVerb enum (snake_case); see
 // `crates/policy/src/sideband.rs`.
 
+import { useState } from "react";
 import Button from "react-bootstrap/Button";
+import Form from "react-bootstrap/Form";
 import type { ApprovalVerb, PendingApprovalSummary } from "../api/endpoints";
 
 const VERBS: ReadonlyArray<{
@@ -25,7 +27,7 @@ const VERBS: ReadonlyArray<{
         label: "Limited",
         icon: "bi-shield-shaded",
         variant: "outline-warning",
-        title: "Admit as KnownLimited: agent can reply on this transport only",
+        title: "Admit as KnownLimited with the selected topic scope",
     },
     {
         verb: "claim_as_me",
@@ -53,11 +55,13 @@ const VERBS: ReadonlyArray<{
 interface Props {
     approval: PendingApprovalSummary | null;
     busy?: boolean;
-    onRespond?: (approvalId: string, verb: ApprovalVerb) => void;
+    onRespond?: (approvalId: string, verb: ApprovalVerb, allowedTopics?: string[]) => void;
 }
 
 export function ApprovalCard({ approval, busy, onRespond }: Props) {
+    const [limitedScope, setLimitedScope] = useState("");
     if (!approval) return null;
+    const topics = limitedScope.split(",").map((topic) => topic.trim()).filter(Boolean);
     return (
         <div className="execlaw-approval-card" data-testid="approval-card">
             <div className="execlaw-approval-card__title">
@@ -71,6 +75,25 @@ export function ApprovalCard({ approval, busy, onRespond }: Props) {
             <div className="execlaw-muted small">
                 Sender: <code>{approval.sender_principal_id}</code>
             </div>
+            <dl className="row small mb-2" data-testid="approval-card-context">
+                <dt className="col-3">Scope</dt>
+                <dd className="col-9">{approval.scope}</dd>
+                <dt className="col-3">Reason</dt>
+                <dd className="col-9">{approval.reason}</dd>
+                <dt className="col-3">Requested action</dt>
+                <dd className="col-9">{approval.requested_action}</dd>
+            </dl>
+            <Form.Group className="mb-2" controlId={`approval-card-scope-${approval.approval_id}`}>
+                <Form.Label className="small mb-1">Limited-trust topic scope</Form.Label>
+                <Form.Control
+                    size="sm"
+                    value={limitedScope}
+                    onChange={(event) => setLimitedScope(event.target.value)}
+                    placeholder="Comma-separated topics; blank means no topic exceptions"
+                    aria-label={`Limited-trust topic scope for ${approval.sender_principal_id}`}
+                    data-testid="approval-card-limited-scope"
+                />
+            </Form.Group>
             <div className="d-flex gap-2 flex-wrap">
                 {VERBS.map((v) => (
                     <Button
@@ -79,7 +102,13 @@ export function ApprovalCard({ approval, busy, onRespond }: Props) {
                         variant={v.variant}
                         disabled={busy}
                         title={v.title}
-                        onClick={() => onRespond?.(approval.approval_id, v.verb)}
+                        onClick={() => {
+                            if (v.verb === "trust_limited") {
+                                onRespond?.(approval.approval_id, v.verb, topics);
+                            } else {
+                                onRespond?.(approval.approval_id, v.verb);
+                            }
+                        }}
                         data-testid={`approval-verb-${v.verb}`}
                     >
                         <i className={`bi ${v.icon} me-2`} aria-hidden />

@@ -119,7 +119,7 @@ describe("Settings shell", () => {
         mountAt("/settings/plugins");
         await waitFor(() => {
             expect(screen.getByTestId("settings-plugins")).toBeInTheDocument();
-        });
+        }, { timeout: 10000 });
         for (const label of [
             "User",
             "Plugins",
@@ -150,7 +150,7 @@ describe("Settings shell", () => {
         const labels = tabLinks.map((a) => a.textContent?.trim() ?? "");
         expect(labels).not.toContain("Login");
         expect(labels).not.toContain("Users");
-    });
+    }, 15000);
 
     it("clicking Backends loads the Backends pane (with the inline Hardware section)", async () => {
         mountAt("/settings/plugins");

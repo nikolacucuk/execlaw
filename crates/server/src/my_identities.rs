@@ -211,6 +211,61 @@ pub async fn list_handler(
     }))
 }
 
+/// Panel-scoped identity read. A panel receives this view only when its
+/// manifest explicitly declares the `controller_identifiers` capability.
+#[utoipa::path(
+    get,
+    path = "/api/admin/plugins/{plugin_id}/identifiers",
+    params(("plugin_id" = String, Path, description = "Installed plugin id")),
+    responses(
+        (status = 200, description = "Controller identifiers granted to this plugin panel", body = MyIdentitiesResponse),
+        (status = 403, description = "Panel lacks the identity-read capability"),
+        (status = 404, description = "Plugin is not installed"),
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "my-identities"
+)]
+pub async fn panel_identifiers_handler(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    AxumPath(plugin_id): AxumPath<String>,
+) -> Result<Json<MyIdentitiesResponse>, ApiError> {
+    let row = state
+        .plugin_host
+        .get_row(&plugin_id)
+        .map_err(|error| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "db_error",
+            message: error.to_string(),
+        })?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "plugin_not_installed",
+            message: format!("plugin '{plugin_id}' is not installed"),
+        })?;
+    let manifest =
+        execlaw_plugin_sdk::PluginManifest::parse(&row.manifest_toml).map_err(|error| {
+            ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "plugin_manifest_unreadable",
+                message: error.to_string(),
+            }
+        })?;
+    let granted = manifest.ui_panels.iter().any(|panel| {
+        panel
+            .rpc_capabilities
+            .contains(&execlaw_plugin_sdk::manifest::PanelRpcCapability::ControllerIdentifiers)
+    });
+    if !granted {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "panel_rpc_not_declared",
+            message: "this plugin panel has no controller-identifiers grant".into(),
+        });
+    }
+    list_handler(State(state), user).await
+}
+
 #[utoipa::path(
     post,
     path = "/api/admin/me/identifiers",
@@ -439,6 +494,10 @@ pub fn my_identities_router() -> Router<AppState> {
             "/api/admin/me/identifiers/{transport}/{handle}",
             axum::routing::delete(delete_handler),
         )
+        .route(
+            "/api/admin/plugins/{plugin_id}/identifiers",
+            get(panel_identifiers_handler),
+        )
         .route("/api/admin/me/transports", get(list_transports_handler))
 }
 
@@ -467,6 +526,42 @@ mod tests {
         let bytes = body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         v["access_token"].as_str().unwrap().to_owned()
+    }
+
+    #[tokio::test]
+    async fn panel_identifier_endpoint_requires_the_manifest_capability() {
+        let state = test_app_state();
+        let app = build_router(state.clone());
+        let token = setup_controller_token(&app).await;
+
+        for (plugin_id, granted) in [("panel-identities", true), ("panel-no-identities", false)] {
+            let stage = state.plugin_host.stage_root().join(plugin_id);
+            std::fs::create_dir_all(stage.join("ui")).unwrap();
+            std::fs::write(stage.join("ui/panel.js"), "panel").unwrap();
+            let capability = if granted {
+                "rpc_capabilities = [\"controller_identifiers\"]\n"
+            } else {
+                ""
+            };
+            let manifest = format!(
+                "[plugin]\nid = \"{plugin_id}\"\nname = \"Panel\"\nversion = \"0.1.0\"\n\n[[ui_panels]]\nmount = \"admin/plugins/{plugin_id}\"\nentry = \"ui/panel.js\"\n{capability}"
+            );
+            std::fs::write(stage.join("plugin.toml"), &manifest).unwrap();
+            state.plugin_host.install(&stage).await.unwrap();
+
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri(format!("/api/admin/plugins/{plugin_id}/identifiers"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap();
+            let response = app.clone().oneshot(request).await.unwrap();
+            if granted {
+                assert_eq!(response.status(), StatusCode::OK);
+            } else {
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            }
+        }
     }
 
     #[tokio::test]

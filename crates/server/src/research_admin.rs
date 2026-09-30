@@ -28,7 +28,8 @@ use axum::routing::{get, post};
 use execlaw_core::cards::{CardClosedPayload, CardState};
 use execlaw_core::ids::{ConversationId, ResearchJobId};
 use execlaw_core::research::{
-    PhaseGates, ResearchConfigStore, ResearchJobStatus, ResearchJobStore, ResearchJobSummary,
+    PhaseGates, ResearchConfigStore, ResearchDeletionJob, ResearchJobStatus, ResearchJobStore,
+    ResearchJobSummary,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -112,6 +113,33 @@ pub struct ResearchActiveCountResponse {
     pub conversation_id: Option<String>,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ResearchDeletionJobView {
+    pub deletion_id: String,
+    pub resource_id: String,
+    pub status: String,
+    pub attempt_count: u32,
+    pub last_error: Option<String>,
+    pub requested_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
+}
+
+impl From<ResearchDeletionJob> for ResearchDeletionJobView {
+    fn from(job: ResearchDeletionJob) -> Self {
+        Self {
+            deletion_id: job.deletion_id,
+            resource_id: job.resource_id.as_str().to_owned(),
+            status: job.status,
+            attempt_count: job.attempt_count,
+            last_error: job.last_error,
+            requested_at: job.requested_at,
+            updated_at: job.updated_at,
+            completed_at: job.completed_at,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ActiveCountQuery {
     /// When present, scopes the count to this conversation. Drives
@@ -171,6 +199,93 @@ pub async fn get_job_handler(
             message: format!("no research job '{job_id}'"),
         })?;
     Ok(Json(ResearchJobSummaryView::from(row.to_summary())))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/admin/research/jobs/{job_id}",
+    params(("job_id" = String, Path, description = "Terminal research job to delete")),
+    responses(
+        (status = 200, description = "Deletion queued or completed", body = ResearchDeletionJobView),
+        (status = 403, description = "Caller is not a Controller"),
+        (status = 404, description = "Research job not found"),
+        (status = 409, description = "Active research jobs must be cancelled first")
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "research"
+)]
+pub async fn delete_job_handler(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(job_id): Path<String>,
+) -> Result<Json<ResearchDeletionJobView>, ApiError> {
+    require_controller(&state, &user)?;
+    let store = ResearchJobStore::new(&state.db);
+    let resource_id = ResearchJobId::from(job_id.as_str());
+    if let Some(row) = store.get(&resource_id)?
+        && !row.status.is_terminal()
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "research_delete_active",
+            message: "cancel the active research job before deleting it".into(),
+        });
+    }
+    let deletion_id = store.request_deletion(
+        &resource_id,
+        &format!("controller:{}", user.user_id),
+        "controller",
+        chrono::Utc::now().timestamp(),
+    )?;
+    let db = state.db.clone();
+    let workspace =
+        crate::research::ResearchWorkspace::new(crate::research::ResearchWorkspace::default_root());
+    let now = chrono::Utc::now().timestamp();
+    tokio::task::spawn_blocking(move || {
+        crate::research::process_deletion_queue(&db, &workspace, now)
+    })
+    .await
+    .map_err(|error| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "research_delete_worker_failed",
+        message: error.to_string(),
+    })??;
+    let job = store
+        .get_deletion_job(&deletion_id)?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "research_deletion_job_missing",
+            message: "deletion request disappeared from its durable queue".into(),
+        })?;
+    Ok(Json(ResearchDeletionJobView::from(job)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/research/deletions/{deletion_id}",
+    params(("deletion_id" = String, Path, description = "Durable deletion request ID")),
+    responses(
+        (status = 200, description = "Deletion status and retry details", body = ResearchDeletionJobView),
+        (status = 403, description = "Caller is not a Controller"),
+        (status = 404, description = "Deletion request not found")
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "research"
+)]
+pub async fn get_deletion_job_handler(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(deletion_id): Path<String>,
+) -> Result<Json<ResearchDeletionJobView>, ApiError> {
+    require_controller(&state, &user)?;
+    let job = ResearchJobStore::new(&state.db)
+        .get_deletion_job(&deletion_id)?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "research_deletion_not_found",
+            message: "research deletion request not found".into(),
+        })?;
+    Ok(Json(ResearchDeletionJobView::from(job)))
 }
 
 #[utoipa::path(
@@ -449,6 +564,7 @@ pub async fn advance_job_handler(
     let resolved = state
         .inference
         .resolve(&state.db, execlaw_core::backends::BackendPurpose::Standard)
+        .map(|resolved| resolved.with_workload("research"))
         .ok_or_else(|| ApiError {
             status: StatusCode::SERVICE_UNAVAILABLE,
             code: "no_inference_backend",
@@ -625,7 +741,14 @@ fn require_controller(state: &AppState, user: &AuthedUser) -> Result<(), ApiErro
 pub fn research_admin_router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/research/jobs", get(list_jobs_handler))
-        .route("/api/admin/research/jobs/{job_id}", get(get_job_handler))
+        .route(
+            "/api/admin/research/jobs/{job_id}",
+            get(get_job_handler).delete(delete_job_handler),
+        )
+        .route(
+            "/api/admin/research/deletions/{deletion_id}",
+            get(get_deletion_job_handler),
+        )
         .route(
             "/api/admin/research/jobs/{job_id}/report",
             get(get_report_handler),

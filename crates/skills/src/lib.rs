@@ -28,8 +28,8 @@
 //! - Plugin registration (`PluginContext::register_skill`) — Phase B.
 //! - Auto-capture worker (≥5-tool-call trajectory summarization) — Phase C.
 //! - Admin UI editor / version diff view — Phase D.
-//! - DSPy/GEPA-style offline optimizer — placeholder; reserved for
-//!   `state_skill_eval_runs` (not yet migrated).
+//! - Held-out promotion evaluation runs through the Controller admin surface
+//!   in `execlaw-server`, using only the configured local Standard backend.
 //!
 //! See `MEMORY.md` and the design conversation locked at 2026-05-02 for
 //! the rationale behind every shape choice.
@@ -45,6 +45,10 @@ pub mod scanner;
 pub mod store;
 pub mod summarizer;
 pub mod tools;
+
+/// Version of the deterministic held-out skill evaluator contract.
+/// Increment when its prompt, rubric scoring, or inference settings change.
+pub const SKILL_EVAL_VERSION: &str = "skill-eval-v1";
 
 pub use capture::{AutoCaptureSink, AutoCaptureWorker, CaptureOutcome, CaptureRequest};
 pub use filesystem::import_filesystem_skills;

@@ -89,7 +89,7 @@ impl ToolFailure {
 /// mismatch at handshake time and surfaces a clear error in the
 /// supervisor's spawn log instead. If you ship a new runner image,
 /// rebuild `execlaw/runner:dev` from the matching source tree.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 pub fn current_version() -> u32 {
     PROTOCOL_VERSION
@@ -140,7 +140,24 @@ pub enum ServerToRunner {
     /// Cancel an in-flight turn. The runner aborts its current
     /// model+tool loop and emits a final `Error { reason:
     /// "cancelled" }` for that `turn_id`. The runner stays alive.
-    CancelTurn { turn_id: String },
+    CancelTurn {
+        turn_id: String,
+        #[serde(default)]
+        control_id: Option<String>,
+    },
+
+    /// Add operator guidance at the next safe model-round boundary.
+    SteerTurn {
+        turn_id: String,
+        control_id: String,
+        text: String,
+    },
+
+    /// Pause a turn after the current model/tool boundary.
+    PauseTurn { turn_id: String, control_id: String },
+
+    /// Resume a turn parked by `PauseTurn`.
+    ResumeTurn { turn_id: String, control_id: String },
 
     /// Reply to a tool call the runner issued. `call_id` matches a
     /// prior `RunnerToServer::ToolCallRequest`.
@@ -202,6 +219,15 @@ pub struct TurnRequest {
     /// `assemble_system_prompt` so personality edits propagate
     /// without a runner restart.
     pub system_prompt: String,
+    /// Bounded plan produced from trusted framework metadata before an
+    /// untrusted-content executor pass. The plan is carried as data and is
+    /// never interpreted as a tool authorization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planner_handoff: Option<String>,
+    /// Extracted untrusted attachment text. Split turns deliver this in a
+    /// user message rather than elevating it into the system prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub untrusted_context: Option<String>,
     /// Replayed conversation history, oldest-first. The supervisor
     /// hydrated this from the event log; the runner just appends
     /// the new user_text and feeds the lot to the model.
@@ -216,15 +242,41 @@ pub struct TurnRequest {
     /// supervisor resolves this per turn (so a backend re-spawn
     /// takes effect immediately) and passes it down.
     pub inference_url: String,
+    /// Wire protocol selected by the host for this backend. Omitted by older
+    /// hosts, which retain the OpenAI-compatible default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_engine: Option<String>,
+    /// Host-approved DNS answers for `inference_url`. The runner resolves
+    /// the URL again in its network namespace and rejects any answer outside
+    /// this set before opening the inference connection.
+    #[serde(default)]
+    pub inference_allowed_addresses: Vec<std::net::IpAddr>,
+    /// When set, the URL host is the supervisor-authorized Docker host-gateway
+    /// alias for a host-loopback inference service. The runner resolves it in
+    /// its own namespace, requires private gateway addresses, and pins them.
+    #[serde(default)]
+    pub inference_gateway_host: Option<String>,
     /// Inference model id (e.g. `QuantTrio/Qwen3.5-27B-AWQ`).
     pub model: String,
     /// Optional sampling overrides. None = let the inference server
     /// use its defaults.
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    /// Qualified context ceiling for the selected local model. Older
+    /// supervisors omit this and receive the conservative default.
+    #[serde(default = "default_context_tokens")]
+    pub context_tokens: u32,
+    /// Measured serialized bytes per tokenizer token, scaled by 1,000.
+    /// Unqualified models use the conservative 3,000 fallback.
+    #[serde(default = "default_bytes_per_token_milli")]
+    pub bytes_per_token_milli: u32,
     /// Forwarded into `chat_template_kwargs.enable_thinking` to
     /// suppress / unlock Qwen's `<think>` blocks.
     pub reasoning_enabled: bool,
+    /// Optional OpenAI-compatible reasoning level for this exact backend.
+    /// Older supervisors omit it and retain backend defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
     /// §7.4 spotlighting delimiter for wrapping untrusted-content
     /// user messages. None = spotlighting off for this turn.
     pub spotlight: Option<String>,
@@ -255,6 +307,17 @@ pub struct TurnRequest {
     /// Global model-round ordinal retained across runner restarts.
     #[serde(default)]
     pub round_offset: u32,
+    /// Durable controls not yet acknowledged for this conversation. Used to
+    /// reconnect steering/pause intent after a runner process restart.
+    #[serde(default)]
+    pub initial_controls: Vec<InitialTurnControl>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitialTurnControl {
+    pub control_id: String,
+    pub kind: String,
+    pub text: Option<String>,
 }
 
 /// Conservative default mirroring `crate::server::state::ServerConfig`'s
@@ -263,6 +326,14 @@ pub struct TurnRequest {
 /// in-process executor's tests use.
 fn default_max_tool_rounds() -> u32 {
     16
+}
+
+fn default_context_tokens() -> u32 {
+    8_192
+}
+
+fn default_bytes_per_token_milli() -> u32 {
+    3_000
 }
 
 /// Server → runner reply to a `ToolCallRequest`.
@@ -352,6 +423,15 @@ pub enum RunnerToServer {
         phase: String,
     },
 
+    /// One inference retry charged against the owning durable run.
+    InferenceRetry {
+        turn_id: String,
+        conversation_id: String,
+        round: u32,
+        attempt: u32,
+        error_class: String,
+    },
+
     /// One model request finished and can be checkpointed before effects run.
     ModelRoundCheckpoint {
         turn_id: String,
@@ -408,6 +488,12 @@ pub enum RunnerToServer {
         turn_id: String,
         conversation_id: String,
         message: String,
+        /// Bounded classification for terminal stream/runner failures.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_kind: Option<String>,
+        /// Output already made visible before an incomplete stream ended.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial_text: Option<String>,
         /// True when this error is the runner honouring a
         /// `CancelTurn`. Lets the supervisor distinguish "operator
         /// stopped this turn" from "runner crashed" in metrics +
@@ -418,6 +504,14 @@ pub enum RunnerToServer {
     /// Reply to a `ServerToRunner::Heartbeat`. The supervisor uses
     /// the round-trip time as a cheap liveness signal.
     HeartbeatAck { nonce: u64 },
+
+    /// Durable acknowledgement for a steering or stop control.
+    ControlAcknowledged {
+        turn_id: String,
+        control_id: String,
+        status: String,
+        detail: Option<String>,
+    },
 }
 
 /// Replayable output of one completed model request.
@@ -428,6 +522,9 @@ pub struct ModelRoundCheckpoint {
     pub text: String,
     pub finish_reason: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    /// Control ids incorporated into this prompt before its model response.
+    #[serde(default)]
+    pub applied_control_ids: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -455,7 +552,7 @@ mod tests {
         // workspace pin it as a tripwire — if you bump it,
         // double-check both sides handle the bump AND rebuild
         // the runner Docker image from the matching source tree.
-        assert_eq!(PROTOCOL_VERSION, 3);
+        assert_eq!(PROTOCOL_VERSION, 5);
     }
 
     #[test]
@@ -468,6 +565,8 @@ mod tests {
             sender_principal_id: "controller".into(),
             sender_trust_class: "Controller".into(),
             system_prompt: "you are execlaw".into(),
+            planner_handoff: None,
+            untrusted_context: None,
             history: vec![ChatMessage {
                 role: Role::User,
                 content: Some(execlaw_inference_api::MessageContent::Text("prior".into())),
@@ -478,15 +577,22 @@ mod tests {
             }],
             tool_catalog: vec![],
             inference_url: "http://127.0.0.1:8101/v1".into(),
+            inference_engine: Some("ollama".into()),
+            inference_allowed_addresses: vec!["127.0.0.1".parse().unwrap()],
+            inference_gateway_host: None,
             model: "qwen3.5".into(),
             temperature: Some(0.2),
             max_tokens: None,
+            context_tokens: 32_768,
+            bytes_per_token_milli: 3_000,
             reasoning_enabled: false,
+            reasoning_effort: Some("none".into()),
             spotlight: None,
             user_image_urls: Vec::new(),
             max_tool_rounds: 8,
             resume: false,
             round_offset: 0,
+            initial_controls: Vec::new(),
         };
         let s1 = serde_json::to_string(&req).unwrap();
         let back: TurnRequest = serde_json::from_str(&s1).unwrap();
@@ -495,6 +601,8 @@ mod tests {
         let s2 = serde_json::to_string(&back).unwrap();
         assert_eq!(s1, s2);
         assert_eq!(back.max_tool_rounds, 8);
+        assert_eq!(back.reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(back.inference_engine.as_deref(), Some("ollama"));
     }
 
     /// 2026-05-16 — fix #5 backward compat: a supervisor that doesn't
@@ -526,12 +634,15 @@ mod tests {
             parsed.max_tool_rounds, 16,
             "missing max_tool_rounds must default to 16 for backward compat"
         );
+        assert_eq!(parsed.reasoning_effort, None);
+        assert_eq!(parsed.inference_engine, None);
     }
 
     #[test]
     fn server_to_runner_tags_variants() {
         let v = ServerToRunner::CancelTurn {
             turn_id: "t-1".into(),
+            control_id: None,
         };
         let s = serde_json::to_string(&v).unwrap();
         // The tagged-enum format must wire-encode `kind`.

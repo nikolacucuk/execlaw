@@ -379,6 +379,8 @@ pub async fn eval_flags_handler(
 
 #[derive(Debug, Deserialize, Default)]
 pub struct AuditQuery {
+    /// Exact audit id for a completion attestation link.
+    pub id: Option<i64>,
     /// Inclusive lower bound on `ts` (unix seconds).
     pub since_ts: Option<i64>,
     /// Hard cap; default 200, max 1000.
@@ -408,6 +410,7 @@ pub struct AuditResponse {
     get,
     path = "/api/admin/audit",
     params(
+        ("id" = Option<i64>, Query, description = "Exact audit id"),
         ("since_ts" = Option<i64>, Query, description = "Inclusive lower bound on ts (unix seconds)"),
         ("limit" = Option<i64>, Query, description = "1..=1000, default 200"),
     ),
@@ -425,7 +428,11 @@ pub async fn audit_handler(
 ) -> impl IntoResponse {
     let store = AuditStore::new(&state.db);
     let limit = q.limit.unwrap_or(200);
-    let rows = match store.list(q.since_ts, limit) {
+    let rows = match q.id {
+        Some(id) => store.get(id).map(|entry| entry.into_iter().collect()),
+        None => store.list(q.since_ts, limit),
+    };
+    let rows = match rows {
         Ok(r) => r,
         Err(e) => {
             tracing::error!("audit list: {e}");
@@ -657,6 +664,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn audit_exact_id_returns_only_that_attestation() {
+        let state = test_app_state();
+        let app = build_router(state.clone());
+        let token = setup_get_token(&app).await;
+        let id = AuditStore::new(&state.db)
+            .insert(
+                "controller-1",
+                "run_completion_verification",
+                "run-1/review",
+                None,
+                Some(&serde_json::json!({"status":"passed"})),
+            )
+            .unwrap();
+        let (status, body) =
+            read_json(&app, Some(&token), &format!("/api/admin/audit?id={id}")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(body["entries"][0]["id"], id);
     }
 
     #[tokio::test]

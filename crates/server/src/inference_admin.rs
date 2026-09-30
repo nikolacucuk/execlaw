@@ -2,23 +2,109 @@
 //!
 //! Single endpoint:
 //!
-//!   `GET /api/admin/inference/metrics` — JSON snapshot of the
-//!   per-consumer inference metrics (in_flight, total_calls,
-//!   total_failures, p50/p95 latency). Backs the `/admin/inference`
-//!   SPA page.
+//!   `GET /api/admin/inference/metrics` — bounded per-consumer and
+//!   per-phase latency distributions plus numeric context-size estimates.
+//!   Backs the `/admin/inference` SPA page.
 //!
 //! Read-only; no mutations. Anyone with controller auth can hit it.
 
+use crate::auth_extract::AuthedUser;
 use crate::inference_metrics::MetricsSnapshot;
 use crate::routes::ApiError;
 use crate::state::AppState;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::response::Json;
 use axum::routing::get;
+use execlaw_core::users::UserRole;
+use serde::Deserialize;
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/api/admin/inference/metrics", get(metrics))
+    Router::new()
+        .route("/api/admin/inference/metrics", get(metrics))
+        .route(
+            "/api/admin/inference/capability-profile/current",
+            get(get_current_capability_profile),
+        )
+        .route(
+            "/api/admin/inference/capability-profile",
+            get(get_capability_profile),
+        )
+}
+
+pub async fn get_current_capability_profile(
+    State(state): State<AppState>,
+    user: AuthedUser,
+) -> Result<Json<Option<execlaw_core::harness::ModelCapabilityProfile>>, ApiError> {
+    require_controller(&user)?;
+    let Some(resolved) = state
+        .inference
+        .resolve(&state.db, execlaw_core::backends::BackendPurpose::Standard)
+    else {
+        return Ok(Json(None));
+    };
+    let Some(identity) = crate::inference_probe::current_model_identity(
+        &state.db,
+        execlaw_core::backends::BackendPurpose::Standard,
+        &resolved.model_id,
+    ) else {
+        return Ok(Json(None));
+    };
+    execlaw_core::harness::HarnessStore::new(&state.db)
+        .get_profile(&identity)
+        .map(Json)
+        .map_err(|error| ApiError {
+            status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            code: "model_profile_error",
+            message: error.to_string(),
+        })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CapabilityProfileQuery {
+    pub model_id: String,
+    pub quantization: String,
+    pub chat_template: String,
+    pub backend_version: String,
+    pub parser_version: String,
+}
+
+fn require_controller(user: &AuthedUser) -> Result<(), ApiError> {
+    if user.role == UserRole::Controller {
+        Ok(())
+    } else {
+        Err(ApiError {
+            status: axum::http::StatusCode::FORBIDDEN,
+            code: "controller_required",
+            message: "Controller role required".into(),
+        })
+    }
+}
+
+fn profile_identity(query: CapabilityProfileQuery) -> execlaw_core::harness::ModelIdentity {
+    execlaw_core::harness::ModelIdentity {
+        model_id: query.model_id,
+        quantization: query.quantization,
+        chat_template: query.chat_template,
+        backend_version: query.backend_version,
+        parser_version: query.parser_version,
+    }
+}
+
+pub async fn get_capability_profile(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Query(query): Query<CapabilityProfileQuery>,
+) -> Result<Json<Option<execlaw_core::harness::ModelCapabilityProfile>>, ApiError> {
+    require_controller(&user)?;
+    execlaw_core::harness::HarnessStore::new(&state.db)
+        .get_profile(&profile_identity(query))
+        .map(Json)
+        .map_err(|error| ApiError {
+            status: axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            code: "model_profile_error",
+            message: error.to_string(),
+        })
 }
 
 #[utoipa::path(
@@ -97,5 +183,7 @@ mod tests {
         let chat = consumers.iter().find(|c| c["consumer"] == "chat").unwrap();
         assert_eq!(auto["total_calls"], 2);
         assert_eq!(chat["total_calls"], 1);
+        assert!(v["phases"].is_array());
+        assert!(v["contexts"].is_array());
     }
 }

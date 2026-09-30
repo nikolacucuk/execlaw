@@ -10,6 +10,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:browser": "playwright test",
     "test:watch": "vitest",
     "test:appearance": "node scripts/check-chat-appearance.mjs",
     "lint": "tsc --noEmit",

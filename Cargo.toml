@@ -85,12 +85,10 @@ notify = "7"
 # SQLCipher (encrypted SQLite) via bundled build with vendored OpenSSL.
 # Per MIGRATION_PLAN §6.4 — one binary, one encrypted DB file, no system deps.
 #
-# The `bundled-sqlcipher-vendored-openssl` feature is enabled by the core
-# crate's `sqlcipher` feature (the default). A Windows-host developer can
-# pass `--no-default-features -F bundled-sqlite-plain` to core (via the
-# workspace command they run) to skip the OpenSSL build, which requires
-# Strawberry Perl; the Linux container image always builds with the
-# default SQLCipher feature.
+# The core crate's `sqlcipher` feature enables bundled SQLCipher with
+# vendored OpenSSL. Workspace builds default to bundled plaintext SQLite for
+# development; release scripts must explicitly select the CLI's `sqlcipher`
+# feature so the packaged binary cannot inherit that plaintext default.
 rusqlite = { version = "0.32", default-features = false }
 r2d2 = "0.8"
 r2d2_sqlite = "0.25"

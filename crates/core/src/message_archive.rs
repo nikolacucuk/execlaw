@@ -64,21 +64,26 @@ pub struct ArchiveSearchHit {
 /// The archive must remain useful when no inference backend is available.
 pub fn extract_topic_keywords(body: &str, limit: usize) -> String {
     let stopwords = [
-        "about", "after", "are", "been", "could", "from", "have", "into", "just",
-        "that", "the", "their", "there", "this", "what", "when", "where", "with",
-        "would", "your", "you", "and", "for", "not", "was", "were", "will",
+        "about", "after", "are", "been", "could", "from", "have", "into", "just", "that", "the",
+        "their", "there", "this", "what", "when", "where", "with", "would", "your", "you", "and",
+        "for", "not", "was", "were", "will",
     ];
     let mut counts = HashMap::<String, usize>::new();
     for raw in body.split(|c: char| !c.is_alphanumeric()) {
         let word = raw.trim().to_lowercase();
-        if word.len() < 3 || stopwords.contains(&word.as_str()) || word.chars().all(|c| c.is_numeric()) {
+        if word.len() < 3
+            || stopwords.contains(&word.as_str())
+            || word.chars().all(|c| c.is_numeric())
+        {
             continue;
         }
         *counts.entry(word).or_default() += 1;
     }
     let mut words = counts.into_iter().collect::<Vec<_>>();
     words.sort_by(|(left_word, left_count), (right_word, right_count)| {
-        right_count.cmp(left_count).then_with(|| left_word.cmp(right_word))
+        right_count
+            .cmp(left_count)
+            .then_with(|| left_word.cmp(right_word))
     });
     words
         .into_iter()
@@ -270,6 +275,34 @@ impl<'db> MessageArchiveStore<'db> {
         })
     }
 
+    pub fn get_conversation_by_remote_id(
+        &self,
+        channel: &str,
+        remote_id: &str,
+    ) -> Result<Option<ArchiveConversation>, DbError> {
+        self.db.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT archive_id, channel, remote_id, conversation_kind, display_name,
+                        conversation_id, first_seen_at, last_seen_at
+                 FROM message_archive_conversations WHERE channel = ?1 AND remote_id = ?2",
+                params![channel, remote_id],
+                |row| {
+                    Ok(ArchiveConversation {
+                        archive_id: row.get(0)?,
+                        channel: row.get(1)?,
+                        remote_id: row.get(2)?,
+                        conversation_kind: row.get(3)?,
+                        display_name: row.get(4)?,
+                        conversation_id: row.get(5)?,
+                        first_seen_at: row.get(6)?,
+                        last_seen_at: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?)
+        })
+    }
+
     pub fn search(&self, query: &str, limit: u32) -> Result<Vec<ArchiveSearchHit>, DbError> {
         self.db.with_conn(|c| {
             let mut stmt = c.prepare(
@@ -298,6 +331,50 @@ impl<'db> MessageArchiveStore<'db> {
         query_terms: &[String],
         limit: u32,
     ) -> Result<Vec<StoredArchiveMessage>, DbError> {
+        self.related_recent_messages_scoped(conversation_id, None, None, query_terms, limit)
+    }
+
+    /// Search archived messages for one transport recipient inside a shared conversation.
+    pub fn related_recent_messages_for_transport(
+        &self,
+        conversation_id: &str,
+        channel: &str,
+        remote_id: &str,
+        query_terms: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredArchiveMessage>, DbError> {
+        self.related_recent_messages_scoped(
+            conversation_id,
+            Some(channel),
+            Some(remote_id),
+            query_terms,
+            limit,
+        )
+    }
+
+    /// Read one archived message only when it belongs to the exact transport recipient.
+    pub fn message_for_transport(
+        &self,
+        conversation_id: &str,
+        channel: &str,
+        remote_id: &str,
+        message_id: &str,
+    ) -> Result<Option<StoredArchiveMessage>, DbError> {
+        self.db.with_conn(|connection| Ok(connection.query_row(
+            "SELECT m.archive_message_id,m.sender_id,m.sender_name,m.body,m.occurred_at,m.direction,m.delivery_status,m.reply_to_message_id FROM message_archive_messages m JOIN message_archive_conversations c ON c.archive_id=m.archive_id WHERE c.conversation_id=?1 AND c.channel=?2 AND c.remote_id=?3 AND m.archive_message_id=?4",
+            params![conversation_id,channel,remote_id,message_id],
+            |row| Ok(StoredArchiveMessage { archive_message_id: row.get(0)?, sender_id: row.get(1)?, sender_name: row.get(2)?, body: row.get(3)?, occurred_at: row.get(4)?, direction: row.get(5)?, delivery_status: row.get(6)?, reply_to_message_id: row.get(7)? }),
+        ).optional()?))
+    }
+
+    fn related_recent_messages_scoped(
+        &self,
+        conversation_id: &str,
+        channel: Option<&str>,
+        remote_id: Option<&str>,
+        query_terms: &[String],
+        limit: u32,
+    ) -> Result<Vec<StoredArchiveMessage>, DbError> {
         if query_terms.is_empty() || limit == 0 {
             return Ok(Vec::new());
         }
@@ -314,23 +391,33 @@ impl<'db> MessageArchiveStore<'db> {
                  JOIN message_archive_conversations c ON c.archive_id = m.archive_id
                  JOIN message_archive_search s ON s.archive_message_id = m.archive_message_id
                  WHERE c.conversation_id = ?1
+                   AND (?4 IS NULL OR (c.channel = ?4 AND c.remote_id = ?5))
                    AND message_archive_search MATCH ?2
                  ORDER BY m.occurred_at DESC, m.created_at DESC
                  LIMIT ?3",
             )?;
             Ok(stmt
-                .query_map(params![conversation_id, match_query, limit.min(200) as i64], |row| {
-                    Ok(StoredArchiveMessage {
-                        archive_message_id: row.get(0)?,
-                        sender_id: row.get(1)?,
-                        sender_name: row.get(2)?,
-                        body: row.get(3)?,
-                        occurred_at: row.get(4)?,
-                        direction: row.get(5)?,
-                        delivery_status: row.get(6)?,
-                        reply_to_message_id: row.get(7)?,
-                    })
-                })?
+                .query_map(
+                    params![
+                        conversation_id,
+                        match_query,
+                        limit.min(200) as i64,
+                        channel,
+                        remote_id
+                    ],
+                    |row| {
+                        Ok(StoredArchiveMessage {
+                            archive_message_id: row.get(0)?,
+                            sender_id: row.get(1)?,
+                            sender_name: row.get(2)?,
+                            body: row.get(3)?,
+                            occurred_at: row.get(4)?,
+                            direction: row.get(5)?,
+                            delivery_status: row.get(6)?,
+                            reply_to_message_id: row.get(7)?,
+                        })
+                    },
+                )?
                 .collect::<Result<Vec<_>, _>>()?)
         })
     }
@@ -385,5 +472,66 @@ mod tests {
                 .channel,
             "whatsapp"
         );
+        assert_eq!(
+            store
+                .get_conversation_by_remote_id("whatsapp", "group-1")
+                .unwrap()
+                .unwrap()
+                .display_name
+                .as_deref(),
+            Some("Family")
+        );
+    }
+
+    #[test]
+    fn shared_conversation_history_is_scoped_to_whatsapp_group() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let store = MessageArchiveStore::new(&db);
+        for (archive_id, remote_id, message_id, body) in [
+            ("group-a", "a@g.us", "msg-a", "camper dates for A"),
+            ("group-b", "b@g.us", "msg-b", "camper price for B"),
+        ] {
+            store
+                .upsert_conversation(
+                    archive_id,
+                    "whatsapp",
+                    remote_id,
+                    "group",
+                    None,
+                    Some("shared"),
+                    10,
+                )
+                .unwrap();
+            store
+                .append_message(&ArchiveMessage {
+                    archive_message_id: message_id,
+                    archive_id,
+                    source_event_seq: None,
+                    source_event_kind: "transport_inbound",
+                    direction: "inbound",
+                    sender_id: None,
+                    sender_name: None,
+                    body,
+                    topic_keywords: "camper",
+                    occurred_at: 10,
+                    source_message_id: None,
+                    created_at: 10,
+                    delivery_status: "delivered",
+                    reply_to_message_id: None,
+                })
+                .unwrap();
+        }
+        let hits = store
+            .related_recent_messages_for_transport(
+                "shared",
+                "whatsapp",
+                "a@g.us",
+                &["camper".into()],
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].body, "camper dates for A");
     }
 }

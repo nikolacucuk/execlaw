@@ -148,6 +148,15 @@ pub fn detect() -> HardwareProfile {
     }
 }
 
+/// Current available host RAM in MiB, or `None` if the OS probe fails.
+/// Managed model admission uses this live value only when a model declares
+/// `required_ram_mb`; legacy rows without an estimate retain prior behavior.
+pub fn available_ram_mb() -> Option<u64> {
+    hardware_query::MemoryInfo::query()
+        .ok()
+        .map(|memory| memory.available_mb)
+}
+
 /// Run `system_profiler` + `sysctl hw.memsize` on a live macOS host
 /// and parse the result through [`parse_macos_system_profiler`].
 ///

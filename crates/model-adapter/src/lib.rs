@@ -47,6 +47,10 @@ pub mod extract;
 pub mod families;
 pub mod family;
 
+/// Bump when parser or output-normalization behavior changes so qualified
+/// backend profiles cannot outlive the parser they measured.
+pub const PARSER_IDENTITY: &str = "model-adapter-v1";
+
 pub use adapter::{AdaptedResponse, ModelAdapter, OutputHint};
 pub use families::{
     DeepSeekR1Adapter, DeepSeekV3Adapter, GemmaAdapter, Llama3Adapter, MistralAdapter,

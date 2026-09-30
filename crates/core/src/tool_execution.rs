@@ -60,6 +60,12 @@ impl<'db> ToolExecutionStore<'db> {
     ) -> Result<(), DbError> {
         self.db.with_conn(|conn| {
             conn.execute(
+                "INSERT OR IGNORE INTO state_run_execution_budgets(
+                    run_id,time_limit_ms,deadline_at_ms,retry_limit,effect_limit,updated_at_ms
+                 ) VALUES (?1,3600000,?3+3600000,?2,64,?3)",
+                params![run_id, total_budget, now_ms],
+            )?;
+            conn.execute(
                 "INSERT OR IGNORE INTO state_tool_retry_budgets(\
                     run_id, total_budget, consumed_retries, updated_at_ms\
                  ) VALUES (?1, ?2, 0, ?3)",
@@ -81,14 +87,61 @@ impl<'db> ToolExecutionStore<'db> {
 
     /// Atomically reserve one retry from the run-wide budget.
     pub fn consume_run_retry(&self, run_id: &str, now_ms: i64) -> Result<bool, DbError> {
-        self.db.with_conn(|conn| {
-            let changed = conn.execute(
+        self.db.transaction(|tx| {
+            let changed = tx.execute(
+                "UPDATE state_run_execution_budgets SET retries_used=retries_used+1,updated_at_ms=?2
+                 WHERE run_id=?1 AND retries_used<retry_limit AND deadline_at_ms>?2",
+                params![run_id, now_ms],
+            )?;
+            if changed != 1 {
+                return Ok(false);
+            }
+            let retry_changed = tx.execute(
                 "UPDATE state_tool_retry_budgets \
                  SET consumed_retries = consumed_retries + 1, updated_at_ms = ?2 \
                  WHERE run_id = ?1 AND consumed_retries < total_budget",
                 params![run_id, now_ms],
             )?;
-            Ok(changed == 1)
+            if retry_changed != 1 {
+                tx.execute(
+                    "UPDATE state_run_execution_budgets SET retries_used=MAX(0,retries_used-1),updated_at_ms=?2 WHERE run_id=?1",
+                    params![run_id, now_ms],
+                )?;
+            }
+            Ok(retry_changed == 1)
+        })
+    }
+
+    /// Claim one unique dispatched tool step against the run-wide effect
+    /// budget. Replaying a durable step does not consume capacity twice.
+    pub fn claim_run_effect(
+        &self,
+        run_id: &str,
+        step_id: &str,
+        now_ms: i64,
+    ) -> Result<bool, DbError> {
+        self.db.transaction(|tx| {
+            let claimed: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_run_effect_claims WHERE run_id=?1 AND step_id=?2)",
+                params![run_id,step_id],
+                |row| row.get(0),
+            )?;
+            if claimed {
+                return Ok(true);
+            }
+            let changed = tx.execute(
+                "UPDATE state_run_execution_budgets SET effects_used=effects_used+1,updated_at_ms=?2
+                 WHERE run_id=?1 AND effects_used<effect_limit AND deadline_at_ms>?2",
+                params![run_id,now_ms],
+            )?;
+            if changed != 1 {
+                return Ok(false);
+            }
+            tx.execute(
+                "INSERT INTO state_run_effect_claims(run_id,step_id,claimed_at_ms) VALUES (?1,?2,?3)",
+                params![run_id,step_id,now_ms],
+            )?;
+            Ok(true)
         })
     }
 
@@ -182,6 +235,22 @@ impl<'db> ToolExecutionStore<'db> {
             )
             .optional()
             .map_err(DbError::from)
+        })
+    }
+
+    /// List retry metadata for an inspector without exposing arguments or results.
+    pub fn list_run_invocations(&self, run_id: &str) -> Result<Vec<ToolInvocationRecord>, DbError> {
+        self.db.with_conn(|conn| {
+            let mut statement = conn.prepare_cached(
+                "SELECT run_id, step_id, tool_name, integration_id, call_fingerprint, \
+                 repeated_call_count, input_schema_hash, result_schema_hash, retry_budget_total, \
+                 attempts_used, next_retry_at_ms, backoff_ms, status, failure_kind, failure_code, \
+                 failure_message, failure_retryable, failure_retry_after_ms, failure_guidance \
+                 FROM state_tool_invocations WHERE run_id=?1 ORDER BY step_id",
+            )?;
+            Ok(statement
+                .query_map([run_id], row_to_invocation)?
+                .collect::<Result<Vec<_>, _>>()?)
         })
     }
 

@@ -18,7 +18,7 @@
 //! `DeploymentPurpose` types are gone.
 
 use crate::db::{Database, DbError};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -142,6 +142,16 @@ pub struct BackendRow {
     pub updated_at: i64,
 }
 
+/// Last observed managed-backend readiness, derived from supervisor probes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendReadiness {
+    pub model_id: Option<String>,
+    pub stage: String,
+    pub last_observed_at: i64,
+    pub last_success_at: Option<i64>,
+    pub stage_changed_at: i64,
+}
+
 /// Operator-supplied form payload. Same shape as `BackendRow`
 /// minus the timestamps the store fills in.
 #[derive(Debug, Clone)]
@@ -175,6 +185,66 @@ pub struct BackendStore<'db> {
 impl<'db> BackendStore<'db> {
     pub fn new(db: &'db Database) -> Self {
         Self { db }
+    }
+
+    /// Record a supervisor observation without changing the operator's backend row.
+    /// For example, `record_readiness(Standard, Some("qwen3:8b"), "Healthy", now)`
+    /// timestamps success; switching model IDs clears prior success history.
+    pub fn record_readiness(
+        &self,
+        purpose: BackendPurpose,
+        model_id: Option<&str>,
+        stage: &str,
+        now: i64,
+    ) -> Result<(), BackendError> {
+        self.db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO state_backend_readiness \
+                   (purpose, model_id, stage, last_observed_at, last_success_at, stage_changed_at) \
+                 VALUES (?1, ?2, ?3, ?4, CASE WHEN ?3 = 'Healthy' THEN ?4 ELSE NULL END, ?4) \
+                 ON CONFLICT(purpose) DO UPDATE SET \
+                   model_id = excluded.model_id, stage = excluded.stage, \
+                   last_observed_at = excluded.last_observed_at, \
+                   last_success_at = CASE \
+                     WHEN excluded.stage = 'Healthy' THEN excluded.last_observed_at \
+                     WHEN state_backend_readiness.model_id IS excluded.model_id \
+                       THEN state_backend_readiness.last_success_at \
+                     ELSE NULL END, \
+                   stage_changed_at = CASE \
+                     WHEN state_backend_readiness.stage = excluded.stage \
+                       AND state_backend_readiness.model_id IS excluded.model_id \
+                       THEN state_backend_readiness.stage_changed_at \
+                     ELSE excluded.stage_changed_at END",
+                params![purpose.as_str(), model_id, stage, now],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Read the last persisted observation; absence means this backend has not been probed.
+    pub fn readiness(
+        &self,
+        purpose: BackendPurpose,
+    ) -> Result<Option<BackendReadiness>, BackendError> {
+        Ok(self.db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT model_id, stage, last_observed_at, last_success_at, stage_changed_at \
+                 FROM state_backend_readiness WHERE purpose = ?1",
+                params![purpose.as_str()],
+                |row| {
+                    Ok(BackendReadiness {
+                        model_id: row.get(0)?,
+                        stage: row.get(1)?,
+                        last_observed_at: row.get(2)?,
+                        last_success_at: row.get(3)?,
+                        stage_changed_at: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(DbError::from)
+        })?)
     }
 
     /// Upsert by purpose. Insert on first sight, update on
@@ -213,6 +283,10 @@ impl<'db> BackendStore<'db> {
                     payload.mode.as_str(),
                     now,
                 ],
+            )?;
+            c.execute(
+                "DELETE FROM state_backend_readiness WHERE purpose = ?1",
+                params![payload.purpose.as_str()],
             )?;
             Ok(())
         })?;
@@ -339,6 +413,75 @@ mod tests {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
         db
+    }
+
+    #[test]
+    fn readiness_survives_reopen_and_clears_on_model_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = DbConfig {
+            path: dir.path().join("backends.db"),
+            key: None,
+        };
+        {
+            let db = Database::open(&config).unwrap();
+            MigrationRunner::new(&db).apply_all().unwrap();
+            let store = BackendStore::new(&db);
+            store
+                .upsert(&upsert_payload(BackendPurpose::Standard), 100)
+                .unwrap();
+            store
+                .record_readiness(BackendPurpose::Standard, Some("model-a"), "Healthy", 101)
+                .unwrap();
+        }
+        let db = Database::open(&config).unwrap();
+        let store = BackendStore::new(&db);
+        let restored = store.readiness(BackendPurpose::Standard).unwrap().unwrap();
+        assert_eq!(restored.last_success_at, Some(101));
+        assert_eq!(restored.stage_changed_at, 101);
+        store
+            .record_readiness(
+                BackendPurpose::Standard,
+                Some("model-a"),
+                "LoadingModel",
+                102,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .readiness(BackendPurpose::Standard)
+                .unwrap()
+                .unwrap()
+                .last_success_at,
+            Some(101)
+        );
+        store
+            .record_readiness(
+                BackendPurpose::Standard,
+                Some("model-b"),
+                "LoadingModel",
+                103,
+            )
+            .unwrap();
+        let switched = store.readiness(BackendPurpose::Standard).unwrap().unwrap();
+        assert_eq!(switched.last_success_at, None);
+        assert_eq!(switched.stage_changed_at, 103);
+        store
+            .record_readiness(BackendPurpose::Standard, Some("model-b"), "Healthy", 104)
+            .unwrap();
+        assert_eq!(
+            store
+                .readiness(BackendPurpose::Standard)
+                .unwrap()
+                .unwrap()
+                .last_success_at,
+            Some(104)
+        );
+        store
+            .upsert(&upsert_payload(BackendPurpose::Standard), 105)
+            .unwrap();
+        assert!(store.readiness(BackendPurpose::Standard).unwrap().is_none());
+        store.clear(BackendPurpose::Standard).unwrap();
+        assert!(store.readiness(BackendPurpose::Standard).unwrap().is_none());
     }
 
     fn upsert_payload(purpose: BackendPurpose) -> BackendUpsert {

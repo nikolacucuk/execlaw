@@ -429,12 +429,11 @@ fn log_outcome(req: &ReuseUpdateRequest, outcome: &CaptureOutcome) {
         ),
         HadFailure => tracing::debug!(
             invocation_id = req.invocation_id,
-            outcome = %req.outcome,
             "reuse-update: outcome was non-success; skipping"
         ),
         Skipped { reason } => tracing::info!(
             invocation_id = req.invocation_id,
-            reason = %reason,
+            reason_chars = reason.chars().count(),
             "reuse-update: improvement evaluator returned SKIP"
         ),
         DryRun { proposal } => tracing::info!(
@@ -450,7 +449,7 @@ fn log_outcome(req: &ReuseUpdateRequest, outcome: &CaptureOutcome) {
         Blocked { name, reason } => tracing::warn!(
             invocation_id = req.invocation_id,
             skill = %name,
-            reason = %reason,
+            reason_chars = reason.chars().count(),
             "reuse-update: scanner blocked the proposal — sanitizer let something through"
         ),
         Conflict { name } => tracing::info!(
@@ -460,7 +459,7 @@ fn log_outcome(req: &ReuseUpdateRequest, outcome: &CaptureOutcome) {
         ),
         Error { message } => tracing::warn!(
             invocation_id = req.invocation_id,
-            error = %message,
+            error_chars = message.chars().count(),
             "reuse-update pipeline error"
         ),
     }

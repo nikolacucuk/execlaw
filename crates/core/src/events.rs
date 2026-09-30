@@ -1182,7 +1182,28 @@ impl<'db> EventLog<'db> {
         base_seq: EventSeq,
         events: Vec<PendingEvent>,
     ) -> Result<Vec<EventRecord>, DbError> {
+        self.commit_turn_with_projection(conversation_id, base_seq, events, |_tx, _events| Ok(()))
+    }
+
+    /// Commit a turn and an event-derived projection change in one transaction.
+    ///
+    /// The callback receives the final event sequences after the in-transaction
+    /// concurrency adjustment. It must only persist derived state; external
+    /// effects remain outside the event commit boundary.
+    pub fn commit_turn_with_projection<F>(
+        &self,
+        conversation_id: &ConversationId,
+        base_seq: EventSeq,
+        events: Vec<PendingEvent>,
+        projection: F,
+    ) -> Result<Vec<EventRecord>, DbError>
+    where
+        F: FnOnce(&rusqlite::Transaction<'_>, &[EventRecord]) -> Result<(), DbError>,
+    {
         let mut materialized = enforce_tool_pairing(conversation_id, base_seq, events)?;
+        let has_tool_result = materialized
+            .iter()
+            .any(|event| event.kind == EventKind::ToolResult);
 
         // Acquire the connection lock + open the write transaction
         // BEFORE re-validating the base_seq against actual state.
@@ -1219,6 +1240,10 @@ impl<'db> EventLog<'db> {
                             ev.actor,
                         ],
                     )?;
+                }
+                projection(tx, &materialized)?;
+                if has_tool_result {
+                    release_staged_transport_effects(tx, conversation_id, &materialized)?;
                 }
                 return Ok(());
             }
@@ -1276,6 +1301,10 @@ impl<'db> EventLog<'db> {
                 )?;
             }
             Self::write_integrity_head(tx, conversation_id, &head)?;
+            projection(tx, &materialized)?;
+            if has_tool_result {
+                release_staged_transport_effects(tx, conversation_id, &materialized)?;
+            }
             Ok(())
         })?;
 
@@ -1410,9 +1439,53 @@ impl PendingEvent {
     }
 }
 
-/// Walk the proposed event list; for every `tool_use(ordinal = N)` without
-/// a later `tool_result(ordinal = N)`, insert a synthesized cancellation
-/// result right after the `tool_use`.
+/// Release staged sends only for tool calls whose paired event batch was
+/// durably committed. The relay cannot cross the transport boundary before
+/// the conversation log records both sides of the tool call.
+fn release_staged_transport_effects(
+    tx: &rusqlite::Transaction<'_>,
+    conversation_id: &ConversationId,
+    committed: &[EventRecord],
+) -> Result<(), DbError> {
+    let latest_user_seq: Option<i64> = tx.query_row(
+        "SELECT MAX(seq) FROM state_events WHERE conversation_id=?1 AND kind='user_msg'",
+        [conversation_id.as_str()],
+        |row| row.get(0),
+    )?;
+    let active_run_source: Option<i64> = tx
+        .query_row(
+            "SELECT input_event_seq FROM state_runs WHERE conversation_id=?1 \
+             AND status IN ('pending','running','waiting') ORDER BY started_at DESC,run_id LIMIT 1",
+            [conversation_id.as_str()],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(source_seq) = active_run_source.or(latest_user_seq) {
+        let tool_results = committed
+            .iter()
+            .filter(|event| event.kind == EventKind::ToolResult)
+            .filter_map(|event| event.decode_payload::<ToolResultPayload>().ok())
+            .map(|payload| payload.ordinal)
+            .collect::<std::collections::HashSet<_>>();
+        for ordinal in committed
+            .iter()
+            .filter(|event| event.kind == EventKind::ToolUse)
+            .filter_map(|event| event.decode_payload::<ToolUsePayload>().ok())
+            .map(|payload| payload.ordinal)
+            .filter(|ordinal| tool_results.contains(ordinal))
+        {
+            let key = format!("{}:{}:{}", conversation_id.as_str(), source_seq, ordinal);
+            tx.execute(
+                "UPDATE state_outbox SET next_attempt_at=NULL \
+                 WHERE idempotency_key=?1 AND effect_kind IN ('transport.send','transport.send_attachments') AND status='pending' \
+                   AND next_attempt_at=9223372036854775807",
+                [key],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn enforce_tool_pairing(
     conversation_id: &ConversationId,
     base_seq: EventSeq,
@@ -1573,6 +1646,119 @@ mod tests {
         let synthetic: ToolResultPayload = written[2].decode_payload().unwrap();
         assert!(synthetic.outcome.is_err());
         assert_eq!(synthetic.ordinal, 0);
+    }
+
+    #[test]
+    fn paired_tool_commit_releases_staged_transport_effect() {
+        let db = fresh_db();
+        let log = EventLog::new(&db);
+        let cid = ConversationId::from("conv-staged-transport");
+        let user = log
+            .commit_turn(
+                &cid,
+                EventSeq(0),
+                vec![
+                    PendingEvent::encode(
+                        EventKind::UserMsg,
+                        &json!({"text":"send a reply"}),
+                        Some("controller".into()),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        let input_seq = user[0].seq;
+        let store = crate::outbox::OutboxStore::new(&db);
+        store
+            .enqueue(&crate::outbox::OutboxRow {
+                id: None,
+                idempotency_key: crate::ids::IdempotencyKey::mint(
+                    &cid,
+                    crate::ids::TurnSeq(input_seq.0),
+                    0,
+                ),
+                conversation_id: cid.clone(),
+                effect_kind: "transport.send".into(),
+                payload: b"staged".to_vec(),
+                status: crate::outbox::OutboxStatus::Pending,
+                attempts: 0,
+                next_attempt_at: Some(i64::MAX),
+                last_error: None,
+                enqueued_seq: input_seq,
+            })
+            .unwrap();
+        store
+            .enqueue(&crate::outbox::OutboxRow {
+                id: None,
+                idempotency_key: crate::ids::IdempotencyKey::mint(
+                    &cid,
+                    crate::ids::TurnSeq(input_seq.0),
+                    1,
+                ),
+                conversation_id: cid.clone(),
+                effect_kind: "transport.send_attachments".into(),
+                payload: b"staged attachment".to_vec(),
+                status: crate::outbox::OutboxStatus::Pending,
+                attempts: 0,
+                next_attempt_at: Some(i64::MAX),
+                last_error: None,
+                enqueued_seq: input_seq,
+            })
+            .unwrap();
+        assert!(store.ready_pending(100, 10).unwrap().is_empty());
+
+        let tool_use = PendingEvent::encode(
+            EventKind::ToolUse,
+            &ToolUsePayload {
+                ordinal: 0,
+                tool_name: "transport.send_message".into(),
+                args_json: json!({"to":"recipient","text":"reply"}),
+            },
+            Some("agent".into()),
+        )
+        .unwrap();
+        let tool_result = PendingEvent::encode(
+            EventKind::ToolResult,
+            &ToolResultPayload {
+                ordinal: 0,
+                outcome: Ok(json!({"queued":true})),
+            },
+            Some("agent".into()),
+        )
+        .unwrap();
+        let attachment_tool_use = PendingEvent::encode(
+            EventKind::ToolUse,
+            &ToolUsePayload {
+                ordinal: 1,
+                tool_name: "transport.send_with_attachments".into(),
+                args_json: json!({"to":"recipient","text":"report","attachments":["att-1"]}),
+            },
+            Some("agent".into()),
+        )
+        .unwrap();
+        let attachment_tool_result = PendingEvent::encode(
+            EventKind::ToolResult,
+            &ToolResultPayload {
+                ordinal: 1,
+                outcome: Ok(json!({"queued":true})),
+            },
+            Some("agent".into()),
+        )
+        .unwrap();
+        log.commit_turn(
+            &cid,
+            log.last_seq(&cid).unwrap(),
+            vec![
+                tool_use,
+                tool_result,
+                attachment_tool_use,
+                attachment_tool_result,
+            ],
+        )
+        .unwrap();
+        let ready = store.ready_pending(100, 10).unwrap();
+        assert_eq!(ready.len(), 2);
+        assert!(ready.iter().all(|row| row.next_attempt_at.is_none()));
     }
 
     #[test]

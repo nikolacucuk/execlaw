@@ -33,7 +33,7 @@ mod connect;
 mod turn_loop;
 
 use connect::{ConnectionDriver, RunnerConfig};
-use turn_loop::{CancelFlags, ToolResultRoutes};
+use turn_loop::{CancelFlags, ControlRoutes, RunnerControl, ToolResultRoutes};
 
 // mimalloc beats both glibc-malloc and musl-malloc on the runner's
 // concurrent JSON-parsing + buffer-churn workload. Load-bearing on
@@ -152,6 +152,7 @@ async fn async_main() -> Result<()> {
     // the task returns; the next ToolCallResult that lands for a
     // dropped turn logs + drops, no panic.
     let tool_routes: ToolResultRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let control_routes: ControlRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
 
     // Listen for ctrl-c / SIGTERM as a fallback (the supervisor's
     // happy-path is `Shutdown` over the WS). Either way we close
@@ -178,6 +179,7 @@ async fn async_main() -> Result<()> {
                     &driver,
                     cancel_flags.clone(),
                     tool_routes.clone(),
+                    control_routes.clone(),
                     frame,
                 ).await {
                     break;
@@ -198,6 +200,7 @@ async fn handle_frame(
     driver: &ConnectionDriver,
     cancel_flags: Arc<Mutex<CancelFlags>>,
     tool_routes: ToolResultRoutes,
+    control_routes: ControlRoutes,
     frame: ServerToRunner,
 ) -> bool {
     let _ = cfg; // reserved for future use (e.g. scoping a workspace dir)
@@ -212,9 +215,70 @@ async fn handle_frame(
             tracing::info!(?reason, "received shutdown");
             false
         }
-        ServerToRunner::CancelTurn { turn_id } => {
+        ServerToRunner::CancelTurn {
+            turn_id,
+            control_id,
+        } => {
             cancel_flags.lock().await.cancel(&turn_id);
+            if let Some(control_id) = control_id {
+                let _ = driver.tx().send(RunnerToServer::ControlAcknowledged {
+                    turn_id: turn_id.clone(),
+                    control_id,
+                    status: "cancelled".into(),
+                    detail: None,
+                });
+            }
             tracing::info!(turn_id = %turn_id, "cancel flag armed");
+            true
+        }
+        ServerToRunner::SteerTurn {
+            turn_id,
+            control_id,
+            text,
+        } => {
+            route_control(
+                &driver.tx(),
+                &control_routes,
+                &turn_id,
+                RunnerControl::Steer {
+                    control_id: control_id.clone(),
+                    text,
+                },
+                &control_id,
+            )
+            .await;
+            true
+        }
+        ServerToRunner::PauseTurn {
+            turn_id,
+            control_id,
+        } => {
+            route_control(
+                &driver.tx(),
+                &control_routes,
+                &turn_id,
+                RunnerControl::Pause {
+                    control_id: control_id.clone(),
+                },
+                &control_id,
+            )
+            .await;
+            true
+        }
+        ServerToRunner::ResumeTurn {
+            turn_id,
+            control_id,
+        } => {
+            route_control(
+                &driver.tx(),
+                &control_routes,
+                &turn_id,
+                RunnerControl::Resume {
+                    control_id: control_id.clone(),
+                },
+                &control_id,
+            )
+            .await;
             true
         }
         ServerToRunner::ToolCallResult(result) => {
@@ -238,39 +302,87 @@ async fn handle_frame(
         ServerToRunner::Turn(req) => {
             let turn_id = req.turn_id.clone();
             let conversation_id = req.conversation_id.clone();
+            let initial_controls = req.initial_controls.clone();
             let cancel = cancel_flags.lock().await.arm(&turn_id);
             // Allocate the per-turn tool-result mailbox before
             // spawning so the demux side's lookup is race-free.
             let (tool_tx, tool_rx) = tokio::sync::mpsc::unbounded_channel();
             tool_routes.lock().await.insert(turn_id.clone(), tool_tx);
+            let (control_tx, control_rx) = tokio::sync::mpsc::unbounded_channel();
+            for initial in initial_controls {
+                let control = match initial.kind.as_str() {
+                    "steer" => initial.text.map(|text| RunnerControl::Steer {
+                        control_id: initial.control_id,
+                        text,
+                    }),
+                    "pause" => Some(RunnerControl::Pause {
+                        control_id: initial.control_id,
+                    }),
+                    "resume" => Some(RunnerControl::Resume {
+                        control_id: initial.control_id,
+                    }),
+                    _ => None,
+                };
+                if let Some(control) = control {
+                    let _ = control_tx.send(control);
+                }
+            }
+            control_routes
+                .lock()
+                .await
+                .insert(turn_id.clone(), control_tx);
 
             let tx = driver.tx();
             let cancel_flags_for_drop = cancel_flags.clone();
             let tool_routes_for_drop = tool_routes.clone();
+            let control_routes_for_drop = control_routes.clone();
             tokio::spawn(async move {
-                let result = turn_loop::run_turn(tx.clone(), cancel, tool_rx, *req).await;
+                let result =
+                    turn_loop::run_turn(tx.clone(), cancel, tool_rx, control_rx, *req).await;
                 if let Err(e) = result {
-                    // `{e:#}` walks the full anyhow context chain
-                    // ("opening inference stream: 400 Bad Request: …")
-                    // — `{e}` would only show the topmost label and
-                    // hide the actual root cause.
                     tracing::error!(
                         turn_id = %turn_id,
-                        error = %format!("{e:#}"),
+                        failure_class = "runner_turn_error",
+                        error_chars = format!("{e:#}").chars().count(),
                         "turn failed",
                     );
                     let _ = tx.send(RunnerToServer::Error {
                         turn_id: turn_id.clone(),
                         conversation_id,
-                        message: format!("{e:#}"),
+                        message: "runner turn failed".to_owned(),
+                        failure_kind: Some("runner_failure".into()),
+                        partial_text: None,
                         cancelled: false,
                     });
                 }
                 cancel_flags_for_drop.lock().await.drop_turn(&turn_id);
                 tool_routes_for_drop.lock().await.remove(&turn_id);
+                control_routes_for_drop.lock().await.remove(&turn_id);
             });
             true
         }
+    }
+}
+
+async fn route_control(
+    tx: &connect::ConnectionTx,
+    routes: &ControlRoutes,
+    turn_id: &str,
+    control: RunnerControl,
+    control_id: &str,
+) {
+    let sent = routes
+        .lock()
+        .await
+        .get(turn_id)
+        .is_some_and(|route| route.send(control).is_ok());
+    if !sent {
+        let _ = tx.send(RunnerToServer::ControlAcknowledged {
+            turn_id: turn_id.to_owned(),
+            control_id: control_id.to_owned(),
+            status: "failed".into(),
+            detail: Some("turn is no longer active".into()),
+        });
     }
 }
 

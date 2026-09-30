@@ -47,6 +47,87 @@ const DDG_ANOMALY_FINGERPRINTS: &[&str] = &[
 /// keeping a 7-step plan well under 10 s of search time.
 const DDG_MIN_REQUEST_GAP: Duration = Duration::from_millis(600);
 
+#[derive(Clone)]
+enum SearchEgressPolicy {
+    Public,
+    PrivateIntegration(execlaw_core::Database),
+}
+
+/// Rebuild a DNS-pinned search client for each request so a changed DNS answer
+/// cannot rebind a provider hostname after it has been checked.
+#[derive(Clone)]
+pub(crate) struct SearchHttpClient {
+    endpoint: String,
+    timeout: Duration,
+    egress: SearchEgressPolicy,
+    injected: Option<reqwest::Client>,
+}
+
+impl SearchHttpClient {
+    pub(crate) fn public(endpoint: impl Into<String>, timeout: Duration) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            timeout,
+            egress: SearchEgressPolicy::Public,
+            injected: None,
+        }
+    }
+
+    pub(crate) fn private_integration(
+        endpoint: impl Into<String>,
+        timeout: Duration,
+        db: execlaw_core::Database,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            timeout,
+            egress: SearchEgressPolicy::PrivateIntegration(db),
+            injected: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_client(
+        endpoint: impl Into<String>,
+        timeout: Duration,
+        client: reqwest::Client,
+    ) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            timeout,
+            egress: SearchEgressPolicy::Public,
+            injected: Some(client),
+        }
+    }
+
+    pub(crate) fn build(&self) -> Result<reqwest::Client, ApiError> {
+        if let Some(client) = self.injected.as_ref() {
+            return Ok(client.clone());
+        }
+        let configure = |builder: reqwest::ClientBuilder| {
+            builder
+                .timeout(self.timeout)
+                .user_agent(crate::tool_apis_http::DEFAULT_USER_AGENT)
+        };
+        match &self.egress {
+            SearchEgressPolicy::Public => {
+                crate::local_endpoint_policy::checked_public_client(&self.endpoint, configure)
+            }
+            SearchEgressPolicy::PrivateIntegration(db) => {
+                crate::local_endpoint_policy::checked_client_for_scope(
+                    db,
+                    execlaw_core::local_endpoint_policy::EndpointApprovalScope::PrivateIntegration,
+                    "search:configured-private-endpoint",
+                    &self.endpoint,
+                    configure,
+                )
+                .map(|(client, _)| client)
+            }
+        }
+        .map_err(ApiError::Storage)
+    }
+}
+
 /// DuckDuckGo HTML-endpoint provider. The `q=...` POST returns an
 /// HTML document; we extract the result list with a constrained
 /// regex. The structure is well-defined enough for this to be
@@ -55,7 +136,7 @@ const DDG_MIN_REQUEST_GAP: Duration = Duration::from_millis(600);
 /// they change, the parser falls back to an empty list (no panic)
 /// and a follow-up PR can update the regex.
 pub struct DuckDuckGoSearchApi {
-    client: reqwest::Client,
+    client: SearchHttpClient,
     /// Last-request timestamp, used to enforce the min-gap rate
     /// limiter. `Mutex<Instant>` because we serialize all DDG
     /// calls on this gate; contention is bounded by
@@ -70,20 +151,22 @@ impl DuckDuckGoSearchApi {
         // page-fetch. Bot-flavored UAs ("execlaw-agent/0.1") get
         // the anomaly interstitial almost immediately on a busy
         // session; a real-browser UA flies through.
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_S))
-            .user_agent(crate::tool_apis_http::DEFAULT_USER_AGENT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client =
+            SearchHttpClient::public(DDG_HTML_ENDPOINT, Duration::from_secs(DEFAULT_TIMEOUT_S));
         Self {
             client,
             last_request: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
+    #[cfg(test)]
     pub fn with_client(client: reqwest::Client) -> Self {
         Self {
-            client,
+            client: SearchHttpClient::with_client(
+                DDG_HTML_ENDPOINT,
+                Duration::from_secs(DEFAULT_TIMEOUT_S),
+                client,
+            ),
             last_request: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
@@ -318,7 +401,8 @@ impl WebSearchApi for DuckDuckGoSearchApi {
             }
             self.rate_limit_gate().await;
             let body = [("q", query), ("kl", "us-en")];
-            let resp = match self.client.post(DDG_HTML_ENDPOINT).form(&body).send().await {
+            let client = self.client.build()?;
+            let resp = match client.post(DDG_HTML_ENDPOINT).form(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     last_err = Some(ApiError::Storage(format!("network: {e}")));

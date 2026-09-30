@@ -123,7 +123,7 @@ try {
 
     if ($IncludeSqlCipher) {
         Invoke-Step "SQLCipher workspace tests" {
-            & $cargoCommand test --workspace --no-default-features -F execlaw-core/sqlcipher
+            & $cargoCommand test --workspace --no-default-features -F execlaw/sqlcipher
             Assert-LastExitCode "SQLCipher tests"
         }
     } else {

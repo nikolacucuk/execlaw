@@ -13,7 +13,7 @@ import type {
     PluginPanelProps,
 } from "@execlaw/plugin-ui";
 
-const React = globalThis.execlawHost!.React;
+import * as React from "react";
 const { useCallback, useEffect, useState } = React;
 
 // --- API types ------------------------------------------------------
@@ -345,11 +345,7 @@ interface PairingBlockProps {
     bridge: PluginPanelProps["bridge"];
     sidecarRunning: boolean;
     onPaired: () => void;
-    Button: ReturnType<typeof currentButton>;
-}
-
-function currentButton() {
-    return globalThis.execlawHost!.components.Button;
+    Button: PluginPanelProps["bridge"]["components"]["Button"];
 }
 
 function PairingBlock({
@@ -511,7 +507,7 @@ interface PairedBlockProps {
     accounts: string[];
     busy: boolean;
     onUnregister: () => void;
-    Button: ReturnType<typeof currentButton>;
+    Button: PluginPanelProps["bridge"]["components"]["Button"];
 }
 
 function PairedBlock({

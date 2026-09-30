@@ -64,18 +64,17 @@ struct TavilyResult {
 }
 
 pub struct TavilySearchApi {
-    client: reqwest::Client,
+    client: super::tool_apis_search::SearchHttpClient,
     api_key: String,
     rate_limit: crate::search_rate_limit::RateLimitGate,
 }
 
 impl TavilySearchApi {
     pub fn new(api_key: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_S))
-            .user_agent(crate::tool_apis_http::DEFAULT_USER_AGENT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = super::tool_apis_search::SearchHttpClient::public(
+            TAVILY_ENDPOINT,
+            Duration::from_secs(DEFAULT_TIMEOUT_S),
+        );
         Self {
             client,
             api_key: api_key.into(),
@@ -83,9 +82,14 @@ impl TavilySearchApi {
         }
     }
 
+    #[cfg(test)]
     pub fn with_client(api_key: impl Into<String>, client: reqwest::Client) -> Self {
         Self {
-            client,
+            client: super::tool_apis_search::SearchHttpClient::with_client(
+                TAVILY_ENDPOINT,
+                Duration::from_secs(DEFAULT_TIMEOUT_S),
+                client,
+            ),
             api_key: api_key.into(),
             rate_limit: crate::search_rate_limit::RateLimitGate::new(TAVILY_MIN_REQUEST_GAP),
         }
@@ -116,8 +120,8 @@ impl WebSearchApi for TavilySearchApi {
             "include_raw_content": false,
             "include_images": false,
         });
-        let resp = self
-            .client
+        let client = self.client.build()?;
+        let resp = client
             .post(TAVILY_ENDPOINT)
             .bearer_auth(&self.api_key)
             .header("Accept", "application/json")

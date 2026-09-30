@@ -7,6 +7,9 @@ const sample = {
     conversation_id: "conv-x",
     sender_principal_id: "stranger-1",
     original_text: "hi can we talk",
+    scope: "Trust record for principal stranger-1",
+    reason: "A new sender has no approved trust level.",
+    requested_action: "Choose whether to grant trust and replay the queued message.",
 };
 
 describe("ApprovalCard", () => {
@@ -36,6 +39,18 @@ describe("ApprovalCard", () => {
         expect(screen.getByTestId("approval-card")).toHaveTextContent(
             "hi can we talk",
         );
+    });
+
+    it("shows approval context and sends the selected limited-trust scope", () => {
+        const onRespond = vi.fn();
+        render(<ApprovalCard approval={sample} onRespond={onRespond} />);
+        expect(screen.getByTestId("approval-card-context")).toHaveTextContent(sample.scope);
+        expect(screen.getByTestId("approval-card-context")).toHaveTextContent(sample.reason);
+        fireEvent.change(screen.getByTestId("approval-card-limited-scope"), {
+            target: { value: "gardening, home repair" },
+        });
+        fireEvent.click(screen.getByTestId("approval-verb-trust_limited"));
+        expect(onRespond).toHaveBeenCalledWith("appr-123", "trust_limited", ["gardening", "home repair"]);
     });
 
     it("clicking a verb button calls onRespond with verb + approval id", () => {

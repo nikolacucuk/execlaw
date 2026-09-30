@@ -241,8 +241,8 @@ describe("Sidebar", () => {
 
     it("plugin panels are NOT rendered in the sidebar even when supplied", () => {
         const panels = [
-            { plugin_id: "calendar", mount: "panels/calendar", entry: "ui.js" },
-            { plugin_id: "search", mount: "panels/search", entry: "ui.js" },
+            { plugin_id: "calendar", mount: "panels/calendar", entry: "ui.js", rpc_routes: [], oauth_accounts: [], rpc_capabilities: [] },
+            { plugin_id: "search", mount: "panels/search", entry: "ui.js", rpc_routes: [], oauth_accounts: [], rpc_capabilities: [] },
         ];
         rerender(<Sidebar onNewThread={() => {}} uiPanels={panels} />);
         fireEvent.click(screen.getByTestId("sidebar-more-toggle"));

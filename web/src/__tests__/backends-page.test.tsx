@@ -147,6 +147,31 @@ afterEach(() => {
 });
 
 describe("BackendsPage", () => {
+    it("shows text, streaming, and tool-call conformance independently", async () => {
+        fetchMock.mockImplementation(async (url: string) => {
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/backends") return emptyListResponse();
+            if (url === "/api/admin/hardware") return hardwareNoGpu();
+            if (url === "/api/admin/inference/conformance") {
+                return new Response(JSON.stringify({
+                    model: "local-model", protocol: "ollama",
+                    text: { passed: true, code: "ok" },
+                    streaming: { passed: true, code: "ok" },
+                    tools: { passed: false, code: "no_valid_tool_call" },
+                }), { status: 200 });
+            }
+            return new Response("{}", { status: 200 });
+        });
+        mountPage();
+        const button = await screen.findByTestId("backend-conformance");
+        fireEvent.click(button);
+        const result = await screen.findByTestId("backend-conformance-result");
+        expect(result).toHaveTextContent("local-model · Ollama native");
+        expect(result).toHaveTextContent("Text: Pass");
+        expect(result).toHaveTextContent("Streaming: Pass");
+        expect(result).toHaveTextContent("Tool calls: Fail (no_valid_tool_call)");
+    });
+
     it("renders one row per fixed purpose even when nothing is configured", async () => {
         fetchMock.mockImplementation(async (url: string) => {
             if (url === "/api/admin/me") return meResponse();
@@ -434,6 +459,8 @@ describe("BackendsPage", () => {
                         endpoint: "http://127.0.0.1:8101",
                         restart_attempts: 0,
                         supervisor_available: true,
+                        observed_model_id: "local-model",
+                        last_success_at: 1_700_000_000,
                     }),
                     { status: 200 },
                 );
@@ -450,6 +477,7 @@ describe("BackendsPage", () => {
                 screen.getByTestId("backend-status-pill"),
             ).toHaveTextContent("Healthy");
         });
+        expect(screen.getByTestId("backend-last-healthy")).toHaveTextContent("local-model");
     });
 
     it("renders 'Docker offline' when supervisor_available is false", async () => {
@@ -466,6 +494,8 @@ describe("BackendsPage", () => {
                         endpoint: null,
                         restart_attempts: 0,
                         supervisor_available: false,
+                        observed_model_id: "local-model",
+                        last_success_at: 1_700_000_000,
                     }),
                     { status: 200 },
                 );
@@ -479,6 +509,7 @@ describe("BackendsPage", () => {
                 screen.getByTestId("backend-status-pill"),
             ).toHaveTextContent("Docker offline");
         });
+        expect(screen.getByTestId("backend-last-healthy")).toHaveTextContent("Last healthy:");
     });
 
     it("PUTs mode=managed and null endpoint when toggle picks managed", async () => {

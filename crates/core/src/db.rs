@@ -107,6 +107,13 @@ impl Database {
     /// Applies `PRAGMA key` (when `key` is Some), `journal_mode = WAL`,
     /// `foreign_keys = ON`, and `synchronous = NORMAL`.
     pub fn open(config: &DbConfig) -> Result<Self, DbError> {
+        #[cfg(not(feature = "sqlcipher"))]
+        if config.key.is_some() {
+            return Err(DbError::Config(
+                "encrypted database requires a SQLCipher-enabled binary".into(),
+            ));
+        }
+
         let conn = if config.path == Path::new(":memory:") {
             Connection::open_in_memory()?
         } else {
@@ -150,6 +157,20 @@ impl Database {
                     let escaped = pass.replace('\'', "''");
                     let pragma = format!("PRAGMA key = '{}';", escaped);
                     conn.execute_batch(&pragma)?;
+                }
+            }
+
+            #[cfg(feature = "sqlcipher")]
+            {
+                let version: String = conn
+                    .query_row("PRAGMA cipher_version", [], |row| row.get(0))
+                    .map_err(|_| {
+                        DbError::Config("SQLCipher support is unavailable in this binary".into())
+                    })?;
+                if version.is_empty() {
+                    return Err(DbError::Config(
+                        "SQLCipher support is unavailable in this binary".into(),
+                    ));
                 }
             }
         }
@@ -209,6 +230,25 @@ impl Database {
                 Ok(())
             })?;
             Ok(got)
+        })
+    }
+
+    /// Re-encrypt an open SQLCipher database with a new raw 32-byte key.
+    /// The caller must stage and verify a recoverable backup before calling
+    /// this; keyring/file persistence is intentionally owned by the CLI.
+    #[cfg(feature = "sqlcipher")]
+    pub fn rekey_sqlcipher(&self, new_key: &[u8]) -> Result<(), DbError> {
+        if new_key.len() != 32 {
+            return Err(DbError::Config(format!(
+                "expected 32 raw key bytes, got {}",
+                new_key.len()
+            )));
+        }
+        let hex = hex::encode(new_key);
+        let pragma = format!("PRAGMA rekey = \"x'{hex}'\";");
+        self.with_conn(|conn| {
+            conn.execute_batch(&pragma)?;
+            Ok(())
         })
     }
 
@@ -360,6 +400,20 @@ mod tests {
         assert_eq!(val, 1, "foreign_keys must be ON on every new connection");
     }
 
+    #[cfg(not(feature = "sqlcipher"))]
+    #[test]
+    fn keyed_open_fails_closed_without_sqlcipher() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("must-not-be-plaintext.db");
+        let error = Database::open(&DbConfig {
+            path: path.clone(),
+            key: Some(SqlCipherKey::RawBytes(vec![0x71; 32])),
+        })
+        .unwrap_err();
+        assert!(matches!(error, DbError::Config(_)));
+        assert!(!path.exists());
+    }
+
     #[cfg(feature = "sqlcipher")]
     #[test]
     fn file_backed_db_with_passphrase_roundtrip() {
@@ -422,6 +476,108 @@ mod tests {
         assert!(
             result.is_err(),
             "wrong passphrase should NOT yield a readable DB"
+        );
+    }
+
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn encrypted_rotation_drill_preserves_backup_secrets_plugins_and_event_chain() {
+        use crate::events::{EventKind, EventLog, KeyRing, PendingEvent};
+        use crate::ids::{ConversationId, EventSeq};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rotate.db");
+        let backup_path = dir.path().join("rotate-before.db");
+        let old_key = [0x21_u8; 32];
+        let new_key = [0x73_u8; 32];
+        let event_hmac_key = [0x45_u8; 32];
+        let config = |key: [u8; 32], path: std::path::PathBuf| DbConfig {
+            path,
+            key: Some(SqlCipherKey::RawBytes(key.to_vec())),
+        };
+        let db = Database::open(&config(old_key, path.clone())).unwrap();
+        crate::migrations::MigrationRunner::new(&db)
+            .apply_all()
+            .unwrap();
+        db.with_conn(|conn| {
+            conn.execute("INSERT INTO vault_secrets (name, plugin_id, value_blob, created_at, updated_at) VALUES ('drill-secret', NULL, X'CAFE', 1, 1)", [])?;
+            conn.execute("INSERT INTO state_plugins (plugin_id, version, manifest_toml, stage_path, enabled, installed_at, updated_at) VALUES ('drill-plugin', '1.0.0', 'id = \\\"drill-plugin\\\"', 'fixture', 1, 1, 1)", [])?;
+            Ok(())
+        }).unwrap();
+        let cid = ConversationId::from("rotation-drill");
+        let log = EventLog::new(&db).with_key_ring(KeyRing::single(7, event_hmac_key.to_vec()));
+        log.commit_turn(
+            &cid,
+            EventSeq(0),
+            vec![
+                PendingEvent::encode(
+                    EventKind::UserMsg,
+                    &serde_json::json!({"text":"rotation drill"}),
+                    None,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+        let backup = backup_path.to_string_lossy().replace('\'', "''");
+        db.with_conn(|conn| {
+            conn.execute_batch(&format!("VACUUM INTO '{backup}'"))?;
+            Ok(())
+        })
+        .unwrap();
+        db.rekey_sqlcipher(&new_key).unwrap();
+        drop(db);
+
+        let reopened = Database::open(&config(new_key, path.clone())).unwrap();
+        reopened
+            .with_conn(|conn| {
+                let check: String =
+                    conn.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+                assert_eq!(check, "ok");
+                let secret: Vec<u8> = conn.query_row(
+                    "SELECT value_blob FROM vault_secrets WHERE name = 'drill-secret'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(secret, [0xCA, 0xFE]);
+                let plugin_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM state_plugins WHERE plugin_id = 'drill-plugin'",
+                    [],
+                    |row| row.get(0),
+                )?;
+                assert_eq!(plugin_count, 1);
+                Ok(())
+            })
+            .unwrap();
+        let rotated_log =
+            EventLog::new(&reopened).with_key_ring(KeyRing::single(7, event_hmac_key.to_vec()));
+        rotated_log
+            .commit_turn(
+                &cid,
+                EventSeq(1),
+                vec![
+                    PendingEvent::encode(
+                        EventKind::ModelTurn,
+                        &serde_json::json!({"text":"after rotation"}),
+                        None,
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            rotated_log.replay_since(&cid, EventSeq(0)).unwrap().len(),
+            2
+        );
+        drop(reopened);
+
+        let backup = Database::open(&config(old_key, backup_path)).unwrap();
+        assert_eq!(
+            EventLog::new(&backup)
+                .with_key_ring(KeyRing::single(7, event_hmac_key.to_vec()))
+                .replay_since(&cid, EventSeq(0))
+                .unwrap()
+                .len(),
+            1
         );
     }
 }

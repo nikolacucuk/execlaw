@@ -27,7 +27,7 @@ import type {
 //
 // `globalThis.execlawHost` is guaranteed to be installed before the
 // dynamic loader imports this file — see web/src/plugins/BridgeInstaller.tsx.
-const React = globalThis.execlawHost!.React;
+import * as React from "react";
 const { useCallback, useEffect, useState } = React;
 
 // --- API types ------------------------------------------------------

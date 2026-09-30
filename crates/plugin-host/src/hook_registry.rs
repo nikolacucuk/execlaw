@@ -335,6 +335,9 @@ pub struct RegisteredUiPanel {
     pub plugin_id: String,
     pub mount: String,
     pub entry: String,
+    pub rpc_routes: Vec<(String, String)>,
+    pub rpc_oauth_accounts: Vec<String>,
+    pub rpc_capabilities: Vec<execlaw_plugin_sdk::manifest::PanelRpcCapability>,
 }
 
 /// A transport connection (Signal, email, etc.).
@@ -752,12 +755,51 @@ impl HookRegistry {
             );
         }
         for p in &manifest.ui_panels {
+            let mut rpc_routes: Vec<(String, String)> = if p
+                .rpc_capabilities
+                .contains(&execlaw_plugin_sdk::manifest::PanelRpcCapability::PluginAdminRoutes)
+            {
+                manifest
+                    .admin_routes
+                    .iter()
+                    .map(|route| {
+                        let relative_path = if route.path.starts_with('/') {
+                            route.path.clone()
+                        } else {
+                            format!("/{}", route.path)
+                        };
+                        (
+                            route.method.to_ascii_uppercase(),
+                            format!("/api/admin/plugins/{plugin_id}{relative_path}"),
+                        )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            rpc_routes.sort();
+            rpc_routes.dedup();
+            let rpc_oauth_accounts = if p
+                .rpc_capabilities
+                .contains(&execlaw_plugin_sdk::manifest::PanelRpcCapability::OwnOauthAccounts)
+            {
+                manifest
+                    .oauth_accounts
+                    .iter()
+                    .map(|account| account.name.clone())
+                    .collect()
+            } else {
+                Vec::new()
+            };
             w.ui_panels_by_mount.insert(
                 p.mount.clone(),
                 RegisteredUiPanel {
                     plugin_id: plugin_id.clone(),
                     mount: p.mount.clone(),
                     entry: p.entry.clone(),
+                    rpc_routes,
+                    rpc_oauth_accounts,
+                    rpc_capabilities: p.rpc_capabilities.clone(),
                 },
             );
         }
@@ -1210,7 +1252,7 @@ mod tests {
         let mut t = format!("[plugin]\nid = \"{id}\"\nname = \"{id}\"\nversion = \"1.0.0\"\n");
         for name in tool_names {
             t.push_str(&format!(
-                "\n[[tools]]\nname = \"{name}\"\nschema = \"schemas/{name}.json\"\nlatency = \"low\"\nrequired_capabilities = []\n"
+                "\n[[tools]]\nname = \"{name}\"\nlatency = \"low\"\nrequired_capabilities = []\n"
             ));
         }
         PluginManifest::parse(&t).unwrap()
@@ -1371,7 +1413,19 @@ latency = "low"
             r#"{"type":"object","properties":{"x":{"$ref":"https://example.invalid/x.json"}}}"#,
         )
         .unwrap();
-        let manifest = manifest_with_tools("remote-ref", &["x"]);
+        let manifest = PluginManifest::parse(
+            r#"
+[plugin]
+id = "remote-ref"
+name = "remote-ref"
+version = "1.0.0"
+
+[[tools]]
+name = "x"
+schema = "schemas/x.json"
+"#,
+        )
+        .unwrap();
         let reg = HookRegistry::new();
         let error = reg
             .enable_with_stage(&manifest, Some(stage.path()))
@@ -1392,7 +1446,19 @@ latency = "low"
             r#"{"type":"object","$dynamicRef":"https:example.invalid/x.json"}"#,
         )
         .unwrap();
-        let manifest = manifest_with_tools("dynamic-ref", &["x"]);
+        let manifest = PluginManifest::parse(
+            r#"
+[plugin]
+id = "dynamic-ref"
+name = "dynamic-ref"
+version = "1.0.0"
+
+[[tools]]
+name = "x"
+schema = "schemas/x.json"
+"#,
+        )
+        .unwrap();
         let reg = HookRegistry::new();
         let error = reg
             .enable_with_stage(&manifest, Some(stage.path()))
@@ -1432,11 +1498,7 @@ schema = "../outside.json"
     }
 
     #[test]
-    fn enable_with_no_stage_path_skips_schema_loading() {
-        // Test path / hydrate-without-disk path: enable() (no stage)
-        // returns the same shape but with schema_json = None even
-        // when the manifest declared a schema. Description still
-        // carries through.
+    fn enable_without_stage_rejects_file_backed_schema_atomically() {
         let manifest = PluginManifest::parse(
             r#"
 [plugin]
@@ -1453,10 +1515,12 @@ latency = "low"
         )
         .unwrap();
         let reg = HookRegistry::new();
-        reg.enable(&manifest).unwrap();
-        let t = reg.tool("x").expect("tool registered");
-        assert_eq!(t.description.as_deref(), Some("still here"));
-        assert!(t.schema_json.is_none());
+        let error = reg
+            .enable(&manifest)
+            .expect_err("file-backed schema cannot be silently omitted");
+        assert!(error.contains("require an on-disk stage path"));
+        assert!(!reg.is_enabled("no-stage"));
+        assert!(reg.tool("x").is_none());
     }
 
     #[test]
@@ -1691,7 +1755,7 @@ version = "1.0.0"
 
 [[ui_panels]]
 mount = "/plugins/thing"
-entry = "index.js"
+entry = "ui/index.js"
 "#;
         let m2 = r#"[plugin]
 id = "p2"
@@ -1700,7 +1764,7 @@ version = "1.0.0"
 
 [[ui_panels]]
 mount = "/plugins/thing"
-entry = "other.js"
+entry = "ui/other.js"
 "#;
         let reg = HookRegistry::new();
         reg.enable(&PluginManifest::parse(m1).unwrap()).unwrap();

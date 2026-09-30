@@ -19,10 +19,14 @@
 //! coexist behind the new Rhai binding.
 
 use crate::state::AppState;
+use execlaw_core::agent_contract::{AgentEvent, AgentTriggerSpec};
+use execlaw_core::agent_ownership::AgentOwnershipStore;
+use execlaw_core::agents::{AgentSourceEvent, trigger_is_event_only};
 use execlaw_core::conversation::ConversationStore;
 use execlaw_core::ids::{ConversationId, PrincipalId};
 use execlaw_core::principal::{Identifier, PrincipalStore, TrustLevel as CoreTrustLevel};
 use execlaw_core::principal_groups::{GroupKey, PrincipalGroupStore};
+use execlaw_core::reply_drafts::ReplyDraftStore;
 use execlaw_core::transport_bindings::TransportBindingStore;
 use execlaw_core::transport_conversations::{ConversationResolver, ResolveInput};
 use execlaw_policy::trust::TrustLevel;
@@ -126,17 +130,22 @@ pub async fn route_inbound(
             cid = merge_scoped_conversation_if_needed(state, &plugin_id, scope, &cid, now)?;
         } else {
             let binding_store = TransportBindingStore::new(&state.db);
-            if let Ok(Some(group_id)) = PrincipalGroupStore::new(&state.db)
-                .principal_group_id_for(cid.as_str())
+            if let Ok(Some(group_id)) =
+                PrincipalGroupStore::new(&state.db).principal_group_id_for(cid.as_str())
             {
                 let mixed = binding_store
                     .bindings_for_group_any_channel(&group_id)
                     .map(|bindings| bindings.iter().any(|binding| binding.channel != channel))
                     .unwrap_or(false);
                 if mixed {
-                    if let Some(fresh) = execlaw_core::transport_conversations::TransportConversationStore::new(&state.db)
+                    if let Some(fresh) =
+                        execlaw_core::transport_conversations::TransportConversationStore::new(
+                            &state.db,
+                        )
                         .force_rotate_current(&plugin_id, scope, scope, now)
-                        .map_err(|e| HostCapError::new(format!("dedicated conversation rotate: {e}")))?
+                        .map_err(|e| {
+                            HostCapError::new(format!("dedicated conversation rotate: {e}"))
+                        })?
                     {
                         cid = fresh;
                     }
@@ -158,7 +167,11 @@ pub async fn route_inbound(
         .as_deref()
         .is_some_and(|scope| scope.ends_with("-dedicated"))
     {
-        let label = if channel == "whatsapp" { "WhatsApp" } else { "Signal" };
+        let label = if channel == "whatsapp" {
+            "WhatsApp"
+        } else {
+            "Signal"
+        };
         let _ = ConversationStore::new(&state.db).set_display_name(&cid, Some(label));
     }
     let pg_store = PrincipalGroupStore::new(&state.db);
@@ -273,21 +286,131 @@ pub async fn route_inbound(
         crate::chats::persist_inbound_attachments(state, &cid, channel, &msg.attachments).await;
 
     if msg.is_self_message || !msg.agent_handling_enabled {
-        if let Err(e) = crate::chats::commit_inbound_user_msg_silently(
+        let source_seq = crate::chats::commit_inbound_user_msg_silently(
             state,
             &cid,
             sender.id.as_str(),
             &msg.text,
             channel,
+            msg.group_id.as_deref().unwrap_or(&msg.native_id),
             attachment_ids,
         )
         .await
-        {
-            return Err(HostCapError::new(format!(
-                "persist inbound message with agent handling disabled: {e}"
-            )));
-        }
+        .map_err(|error| {
+            HostCapError::new(format!(
+                "persist inbound message with agent handling disabled: {error}"
+            ))
+        })?;
+        ReplyDraftStore::new(&state.db)
+            .stale_after_inbound(
+                cid.as_str(),
+                channel,
+                reply_recipient(&msg.native_id, msg.group_id.as_deref()),
+                source_seq,
+                now,
+            )
+            .map_err(|error| HostCapError::new(format!("stale earlier drafts: {error}")))?;
         return Ok(RouteOutcome::GroupNotAddressed);
+    }
+
+    let recipient = reply_recipient(&msg.native_id, msg.group_id.as_deref());
+    let ownership_store = AgentOwnershipStore::new(&state.db);
+    let owner = ownership_store
+        .get(cid.as_str(), channel, recipient)
+        .map_err(|error| HostCapError::new(format!("read agent owner: {error}")))?;
+    if owner
+        .as_ref()
+        .is_some_and(|owner| owner.owner_kind == "controller")
+    {
+        let source_seq = crate::chats::commit_inbound_user_msg_silently(
+            state,
+            &cid,
+            sender.id.as_str(),
+            &msg.text,
+            channel,
+            recipient,
+            attachment_ids,
+        )
+        .await
+        .map_err(|error| HostCapError::new(format!("persist Controller-owned inbound: {error}")))?;
+        ReplyDraftStore::new(&state.db)
+            .stale_after_inbound(cid.as_str(), channel, recipient, source_seq, now)
+            .map_err(|error| HostCapError::new(format!("stale earlier drafts: {error}")))?;
+        return Ok(RouteOutcome::ControllerOwned);
+    }
+
+    let mut triggered_agents = matching_triggered_agents(state, channel, &msg)
+        .map_err(|error| HostCapError::new(format!("match triggered agents: {error}")))?;
+    let lead_id = if let Some(owner) = owner.as_ref() {
+        triggered_agents
+            .iter()
+            .find(|agent| Some(agent.id.as_str()) == owner.agent_id.as_deref())
+            .map(|agent| agent.id.clone())
+    } else {
+        triggered_agents
+            .iter()
+            .find(|agent| {
+                !agent
+                    .trigger
+                    .get("observer")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false)
+            })
+            .map(|agent| agent.id.clone())
+    };
+    triggered_agents.retain(|agent| {
+        Some(agent.id.as_str()) == lead_id.as_deref()
+            || agent
+                .trigger
+                .get("observer")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+    });
+    if triggered_agents.iter().any(|agent| {
+        Some(agent.id.as_str()) == lead_id.as_deref() && trigger_is_event_only(&agent.trigger)
+    }) {
+        // A specialist owns this inbound. Persist it for the conversation UI
+        // before waking the worker, and avoid a second reply from the main turn.
+        let source_seq = crate::chats::commit_inbound_user_msg_silently(
+            state,
+            &cid,
+            sender.id.as_str(),
+            &msg.text,
+            channel,
+            msg.group_id.as_deref().unwrap_or(&msg.native_id),
+            attachment_ids,
+        )
+        .await
+        .map_err(|error| HostCapError::new(format!("persist specialist inbound: {error}")))?;
+        if let Some(lead_id) = lead_id.as_deref() {
+            let assigned = ownership_store
+                .assign_agent(cid.as_str(), channel, recipient, lead_id, now)
+                .map_err(|error| HostCapError::new(format!("assign agent owner: {error}")))?;
+            if assigned.agent_id.as_deref() != Some(lead_id) {
+                return Err(HostCapError::new(
+                    "agent ownership changed during inbound routing",
+                ));
+            }
+        }
+        ReplyDraftStore::new(&state.db)
+            .stale_after_inbound(
+                cid.as_str(),
+                channel,
+                reply_recipient(&msg.native_id, msg.group_id.as_deref()),
+                source_seq,
+                now,
+            )
+            .map_err(|error| HostCapError::new(format!("stale earlier drafts: {error}")))?;
+        enqueue_triggered_agents(
+            state,
+            channel,
+            &cid,
+            &msg,
+            &triggered_agents,
+            Some(source_seq),
+        )
+        .map_err(|error| HostCapError::new(format!("enqueue triggered agents: {error}")))?;
+        return Ok(RouteOutcome::SpecialistQueued);
     }
 
     // 6. Group address filter + group-context resolution. For DMs
@@ -331,26 +454,47 @@ pub async fn route_inbound(
             match decision {
                 crate::group_addressing::DispatchDecision::Skip => {
                     // Persist for context; skip dispatch.
-                    if let Err(e) = crate::chats::commit_inbound_user_msg_silently(
+                    match crate::chats::commit_inbound_user_msg_silently(
                         state,
                         &cid,
                         sender.id.as_str(),
                         &msg.text,
                         channel,
+                        msg.group_id.as_deref().unwrap_or(&msg.native_id),
                         attachment_ids.clone(),
                     )
                     .await
                     {
-                        tracing::warn!(
+                        Err(error) => tracing::warn!(
                             target: "generic_inbound",
-                            error = %e,
+                            error = %error,
                             conversation_id = %cid.as_str(),
                             "silent commit of unaddressed group message failed",
-                        );
-                    } else {
-                        enqueue_triggered_agents(state, channel, &cid, &msg).map_err(|e| {
-                            HostCapError::new(format!("enqueue triggered agents: {e}"))
-                        })?;
+                        ),
+                        Ok(source_seq) => {
+                            ReplyDraftStore::new(&state.db)
+                                .stale_after_inbound(
+                                    cid.as_str(),
+                                    channel,
+                                    recipient,
+                                    source_seq,
+                                    now,
+                                )
+                                .map_err(|error| {
+                                    HostCapError::new(format!("stale earlier drafts: {error}"))
+                                })?;
+                            enqueue_triggered_agents(
+                                state,
+                                channel,
+                                &cid,
+                                &msg,
+                                &triggered_agents,
+                                Some(source_seq),
+                            )
+                            .map_err(|e| {
+                                HostCapError::new(format!("enqueue triggered agents: {e}"))
+                            })?;
+                        }
                     }
                     return Ok(RouteOutcome::GroupNotAddressed);
                 }
@@ -371,7 +515,7 @@ pub async fn route_inbound(
         None
     };
 
-    enqueue_triggered_agents(state, channel, &cid, &msg)
+    enqueue_triggered_agents(state, channel, &cid, &msg, &triggered_agents, None)
         .map_err(|e| HostCapError::new(format!("enqueue triggered agents: {e}")))?;
 
     // 7. Dispatch the turn through the standard pipeline.
@@ -388,6 +532,17 @@ pub async fn route_inbound(
     )
     .await
     .map_err(|e| HostCapError::new(format!("dispatch_external_turn: {e}")))?;
+    if let Ok(seq) = crate::chats::event_log(state).last_seq(&cid) {
+        ReplyDraftStore::new(&state.db)
+            .stale_after_inbound(
+                cid.as_str(),
+                channel,
+                reply_recipient(&msg.native_id, msg.group_id.as_deref()),
+                seq.0,
+                now,
+            )
+            .map_err(|error| HostCapError::new(format!("stale earlier drafts: {error}")))?;
+    }
     Ok(RouteOutcome::Dispatched)
 }
 
@@ -456,42 +611,93 @@ fn enqueue_triggered_agents(
     channel: &str,
     conversation_id: &ConversationId,
     msg: &InboundMessage,
+    agents: &[execlaw_core::agents::AgentRow],
+    source_seq: Option<i64>,
 ) -> Result<(), String> {
     let store = execlaw_core::agents::AgentStore::new(&state.db);
     let now = chrono::Utc::now().timestamp();
-    let agents = store.list().map_err(|e| e.to_string())?;
     let mut queued = false;
-    for agent in agents
-        .into_iter()
-        .filter(|agent| agent.enabled && !agent.paused)
-    {
-        if !trigger_matches(
-            &agent.trigger,
-            channel,
-            msg.group_id.as_deref(),
-            msg.group_name.as_deref(),
-            &msg.text,
-        ) {
-            continue;
-        }
+    for agent in agents {
+        let source_event_id = msg
+            .source_event_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let recipient = reply_recipient(&msg.native_id, msg.group_id.as_deref());
         let envelope = serde_json::json!({
             "channel": channel,
             "conversation_id": conversation_id.as_str(),
-            "recipient": msg.native_id,
+            "recipient": recipient,
+            "source_event_id": source_event_id.clone(),
+            "source_occurred_at": msg.timestamp_ms.map(|timestamp| timestamp / 1000),
+            "source_event_seq": source_seq,
+            "definition_version": agent.definition_version,
             "display_name": msg.display_name,
             "text": msg.text,
             "group_id": msg.group_id,
             "group_name": msg.group_name,
         });
-        store
-            .enqueue_triggered(&agent.id, &envelope.to_string(), now)
+        let source_kind = format!("transport:{channel}");
+        let content = envelope.to_string();
+        let event = AgentSourceEvent {
+            source_kind: &source_kind,
+            source_event_id: &source_event_id,
+            occurred_at: msg
+                .timestamp_ms
+                .map(|timestamp| timestamp / 1000)
+                .unwrap_or(now),
+            conversation_id: conversation_id.as_str(),
+            recipient,
+            content: &content,
+        };
+        let (_, inserted) = store
+            .enqueue_triggered_event(&agent.id, &event, now)
             .map_err(|e| e.to_string())?;
-        queued = true;
+        queued |= inserted;
     }
     if queued {
         crate::agent_supervisor::AgentSupervisor::kick_global();
     }
     Ok(())
+}
+
+fn matching_triggered_agents(
+    state: &AppState,
+    channel: &str,
+    msg: &InboundMessage,
+) -> Result<Vec<execlaw_core::agents::AgentRow>, String> {
+    let agents = execlaw_core::agents::AgentStore::new(&state.db)
+        .list()
+        .map_err(|error| error.to_string())?;
+    let mut matches = agents
+        .into_iter()
+        .filter(|agent| {
+            agent.enabled
+                && !agent.paused
+                && trigger_matches(
+                    &agent.trigger,
+                    channel,
+                    msg.group_id.as_deref(),
+                    msg.group_name.as_deref(),
+                    &msg.text,
+                )
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(|left, right| {
+        let left_priority = AgentTriggerSpec::from_value(&left.trigger)
+            .map(|trigger| trigger.priority)
+            .unwrap_or(0);
+        let right_priority = AgentTriggerSpec::from_value(&right.trigger)
+            .map(|trigger| trigger.priority)
+            .unwrap_or(0);
+        right_priority
+            .cmp(&left_priority)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Ok(matches)
+}
+
+fn reply_recipient<'a>(native_id: &'a str, group_id: Option<&'a str>) -> &'a str {
+    group_id.unwrap_or(native_id)
 }
 
 fn trigger_matches(
@@ -501,44 +707,20 @@ fn trigger_matches(
     group_name: Option<&str>,
     text: &str,
 ) -> bool {
-    let configured_channel = trigger.get("channel").and_then(|v| v.as_str());
-    if configured_channel.is_some_and(|value| !value.eq_ignore_ascii_case(channel)) {
+    let Ok(trigger) = AgentTriggerSpec::from_value(trigger) else {
         return false;
-    }
-    if trigger
-        .get("group_only")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-        && group_id.is_none()
-    {
-        return false;
-    }
-    let group_matches = trigger
-        .get("group_titles")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|titles| {
-            let Some(group_name) = group_name else {
-                return false;
-            };
-            titles
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .any(|title| !title.trim().is_empty() && title.eq_ignore_ascii_case(group_name))
-        });
-    if group_matches {
-        return true;
-    }
-    let Some(keywords) = trigger.get("keywords").and_then(|v| v.as_array()) else {
-        return configured_channel.is_some();
     };
-    let normalized = format!(
-        "{} {}",
-        text.to_ascii_lowercase(),
-        group_name.unwrap_or_default().to_ascii_lowercase()
-    );
-    keywords.iter().filter_map(|v| v.as_str()).any(|keyword| {
-        !keyword.trim().is_empty() && normalized.contains(&keyword.to_ascii_lowercase())
-    })
+    let event = AgentEvent {
+        source: channel.to_owned(),
+        id: String::new(),
+        channel: channel.to_owned(),
+        recipient: group_id.unwrap_or_default().to_owned(),
+        group_id: group_id.map(str::to_owned),
+        group_name: group_name.map(str::to_owned),
+        text: text.to_owned(),
+        occurred_at: 0,
+    };
+    trigger.match_reason(&event).ok().flatten().is_some()
 }
 
 async fn resolve_group(
@@ -691,8 +873,61 @@ async fn resolve_dm(
 
 #[cfg(test)]
 mod tests {
-    use super::trigger_matches;
+    use super::{matching_triggered_agents, reply_recipient, trigger_matches};
+    use execlaw_core::agents::{AgentStore, AgentUpsert, trigger_is_event_only};
+    use execlaw_script::InboundMessage;
     use serde_json::json;
+
+    #[test]
+    fn group_agent_drafts_target_group_not_sender() {
+        assert_eq!(
+            reply_recipient("sender-phone", Some("group@g.us")),
+            "group@g.us"
+        );
+        assert_eq!(reply_recipient("sender-phone", None), "sender-phone");
+    }
+
+    #[test]
+    fn matching_event_only_specialist_owns_camper_group_inbound() {
+        let state = crate::routes::test_app_state();
+        AgentStore::new(&state.db)
+            .upsert(&AgentUpsert {
+                id: Some("camper_wha".into()),
+                name: "camper_wha".into(),
+                role_prompt: "Draft a reply".into(),
+                model: None,
+                backend_purpose: "standard".into(),
+                tools: Vec::new(),
+                trust_policy: json!({}),
+                interval_secs: 300,
+                token_budget: 1200,
+                max_runtime_secs: 120,
+                concurrency_limit: 1,
+                enabled: true,
+                trigger: json!({"channel":"whatsapp","group_only":true,"event_only":true,"keywords":["camper"]}),
+                reply_mode: "draft".into(),
+            }, 10)
+            .unwrap();
+        let inbound = InboundMessage {
+            channel: "whatsapp".into(),
+            source_event_id: Some("test-message".into()),
+            native_id: "sender".into(),
+            display_name: None,
+            group_id: Some("group@g.us".into()),
+            group_name: None,
+            text: "Is the camper available?".into(),
+            timestamp_ms: None,
+            attachments: Vec::new(),
+            mention_of_self: None,
+            reuse_conversation: true,
+            conversation_scope: Some("whatsapp".into()),
+            agent_handling_enabled: true,
+            is_self_message: false,
+        };
+        let matches = matching_triggered_agents(&state, "whatsapp", &inbound).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert!(trigger_is_event_only(&matches[0].trigger));
+    }
 
     #[test]
     fn trigger_matches_channel_and_keyword_case_insensitively() {
@@ -796,7 +1031,7 @@ mod tests {
     }
 
     #[test]
-    fn trigger_matches_explicit_group_title_without_broad_location_match() {
+    fn explicit_group_title_also_requires_relevant_text() {
         let trigger = json!({
             "channel": "whatsapp",
             "group_only": true,
@@ -809,6 +1044,13 @@ mod tests {
             "whatsapp",
             Some("group-123"),
             Some("1th Sept 2026, Luka Villa, Montenegro"),
+            "Is the camper available?"
+        ));
+        assert!(!trigger_matches(
+            &trigger,
+            "whatsapp",
+            Some("group-123"),
+            Some("1th Sept 2026, Luka Villa, Montenegro"),
             "I'm at the beach haha"
         ));
         assert!(!trigger_matches(
@@ -816,7 +1058,7 @@ mod tests {
             "whatsapp",
             Some("group-456"),
             Some("Another Montenegro group"),
-            "I'm at the beach haha"
+            "Is the camper available?"
         ));
     }
 

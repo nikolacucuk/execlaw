@@ -5,7 +5,7 @@ use axum::response::IntoResponse;
 use execlaw_core::db::DbError;
 use execlaw_core::ids::{ConversationId, EventSeq};
 use execlaw_core::users::UserRole;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 use crate::auth_extract::AuthedUser;
@@ -45,18 +45,127 @@ pub struct NexusFilters {
 }
 
 fn invalid(message: &str) -> axum::response::Response {
-    (StatusCode::BAD_REQUEST, Json(serde_json::json!({ "error": message }))).into_response()
+    (
+        StatusCode::BAD_REQUEST,
+        Json(serde_json::json!({ "error": message })),
+    )
+        .into_response()
 }
 
 fn failed(error: impl std::fmt::Display) -> axum::response::Response {
     tracing::warn!(%error, "nexus organization request failed");
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({ "error": "organization unavailable" }))).into_response()
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(serde_json::json!({ "error": "organization unavailable" })),
+    )
+        .into_response()
 }
 
 fn controller(user: &AuthedUser) -> Result<(), axum::response::Response> {
-    if user.role == UserRole::Controller { Ok(()) } else {
-        Err((StatusCode::FORBIDDEN, Json(serde_json::json!({ "error": "controller only" }))).into_response())
+    if user.role == UserRole::Controller {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({ "error": "controller only" })),
+        )
+            .into_response())
     }
+}
+
+fn fts_query(text: &str) -> Option<String> {
+    let terms: Vec<String> = text
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(|term| format!("\"{term}\""))
+        .collect();
+    (!terms.is_empty()).then(|| terms.join(" AND "))
+}
+
+fn rebuild_verified_search_index(
+    state: &AppState,
+    conversation_id: &ConversationId,
+) -> Result<(), DbError> {
+    let log = event_log(state);
+    let mut indexed_seq = state.db.with_conn(|conn| {
+        Ok(conn.query_row(
+            "SELECT indexed_seq FROM state_conversation_event_search_state WHERE conversation_id = ?1",
+            params![conversation_id.as_str()],
+            |row| row.get::<_, i64>(0),
+        ).optional()?)
+    })?.unwrap_or(0);
+    let log_tail_seq = log.last_seq(conversation_id)?.0;
+    let rebuild_from_start = indexed_seq > log_tail_seq;
+    if rebuild_from_start {
+        indexed_seq = 0;
+    }
+    // replay_since verifies the complete HMAC chain before returning this
+    // suffix. The derived FTS rows are therefore extended only from verified
+    // events; a missing watermark triggers a one-time backfill.
+    let events = log.replay_since(conversation_id, EventSeq(indexed_seq))?;
+    let last_seq = events
+        .last()
+        .map(|event| event.seq.0)
+        .unwrap_or(indexed_seq);
+    if events.is_empty() && indexed_seq == 0 {
+        return Ok(());
+    }
+    state.db.transaction(|tx| {
+        let stored_seq = tx
+            .query_row(
+                "SELECT indexed_seq FROM state_conversation_event_search_state WHERE conversation_id = ?1",
+                params![conversation_id.as_str()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?
+            .unwrap_or(0);
+        if !rebuild_from_start && stored_seq < indexed_seq {
+            return Err(DbError::Invariant(
+                "conversation search watermark moved backwards during indexing".to_owned(),
+            ));
+        }
+        if rebuild_from_start || stored_seq == 0 {
+            tx.execute("DELETE FROM state_conversation_event_search WHERE conversation_id = ?1", params![conversation_id.as_str()])?;
+        }
+        let current_seq = if rebuild_from_start { 0 } else { stored_seq };
+        for event in events {
+            // Another query may have indexed this suffix while replay was
+            // verifying it. Recheck the watermark under the writer lock so
+            // concurrent searches never duplicate FTS rows or regress it.
+            if event.seq.0 <= current_seq {
+                continue;
+            }
+            if event.actor.as_deref() == Some(SYSTEM_ORCHESTRATOR_ACTOR) {
+                continue;
+            }
+            let Some(text) = extract_text(&event) else {
+                continue;
+            };
+            let source = if event.kind == execlaw_core::events::EventKind::ModelTurn {
+                "execlaw".to_owned()
+            } else {
+                extract_channel_origin(&event).unwrap_or_else(|| "web".to_owned())
+            };
+            tx.execute(
+                "INSERT INTO state_conversation_event_search \
+                 (conversation_id, seq, source, committed_at, text) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    conversation_id.as_str(),
+                    event.seq.0,
+                    source,
+                    event.committed_at,
+                    text
+                ],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO state_conversation_event_search_state (conversation_id, indexed_seq, updated_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(conversation_id) DO UPDATE SET indexed_seq = excluded.indexed_seq, updated_at = excluded.updated_at",
+            params![conversation_id.as_str(), current_seq.max(last_seq), chrono::Utc::now().timestamp()],
+        )?;
+        Ok(())
+    })
 }
 
 pub async fn list_organization(
@@ -64,7 +173,9 @@ pub async fn list_organization(
     user: AuthedUser,
     Path(conversation_id): Path<String>,
 ) -> impl IntoResponse {
-    if let Err(response) = controller(&user) { return response; }
+    if let Err(response) = controller(&user) {
+        return response;
+    }
     let result = state.db.with_conn(|conn| {
         let mut annotations = Vec::new();
         let mut statement = conn.prepare("SELECT seq, branch_id FROM state_nexus_annotations WHERE conversation_id = ?1 ORDER BY seq")?;
@@ -93,7 +204,11 @@ pub async fn list_organization(
         Ok((annotations, views))
     });
     match result {
-        Ok((annotations, views)) => (StatusCode::OK, Json(serde_json::json!({ "annotations": annotations, "views": views }))).into_response(),
+        Ok((annotations, views)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "annotations": annotations, "views": views })),
+        )
+            .into_response(),
         Err(error) => failed(error),
     }
 }
@@ -104,13 +219,31 @@ pub async fn save_annotation(
     Path(conversation_id): Path<String>,
     Json(annotation): Json<NexusAnnotation>,
 ) -> impl IntoResponse {
-    if let Err(response) = controller(&user) { return response; }
-    let branch_id = annotation.branch_id.as_ref().map(|value| value.trim()).filter(|value| !value.is_empty());
-    if annotation.seq <= 0 || branch_id.is_some_and(|value| value.len() > 120)
-        || annotation.tags.len() > 8 || annotation.links.len() > 16
-        || annotation.tags.iter().any(|tag| tag.trim().is_empty() || tag.len() > 32)
-        || annotation.links.iter().any(|link| link.target_seq <= 0 || link.target_seq == annotation.seq
-            || !matches!(link.relation.as_str(), "replies_to" | "forwarded_from" | "mentions" | "generated_from")) {
+    if let Err(response) = controller(&user) {
+        return response;
+    }
+    let branch_id = annotation
+        .branch_id
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    if annotation.seq <= 0
+        || branch_id.is_some_and(|value| value.len() > 120)
+        || annotation.tags.len() > 8
+        || annotation.links.len() > 16
+        || annotation
+            .tags
+            .iter()
+            .any(|tag| tag.trim().is_empty() || tag.len() > 32)
+        || annotation.links.iter().any(|link| {
+            link.target_seq <= 0
+                || link.target_seq == annotation.seq
+                || !matches!(
+                    link.relation.as_str(),
+                    "replies_to" | "forwarded_from" | "mentions" | "generated_from"
+                )
+        })
+    {
         return invalid("invalid annotation");
     }
     let cid = ConversationId::from(conversation_id.as_str());
@@ -119,7 +252,11 @@ pub async fn save_annotation(
         Err(error) => return failed(error),
     };
     if !events.iter().any(|event| event.seq.0 == annotation.seq)
-        || annotation.links.iter().any(|link| !events.iter().any(|event| event.seq.0 == link.target_seq)) {
+        || annotation
+            .links
+            .iter()
+            .any(|link| !events.iter().any(|event| event.seq.0 == link.target_seq))
+    {
         return invalid("message or relationship target not found in this conversation");
     }
     let result = state.db.transaction(|tx| {
@@ -148,11 +285,21 @@ pub async fn save_view(
     Path(conversation_id): Path<String>,
     Json(view): Json<NexusView>,
 ) -> impl IntoResponse {
-    if let Err(response) = controller(&user) { return response; }
+    if let Err(response) = controller(&user) {
+        return response;
+    }
     let name = view.name.trim();
-    if name.is_empty() || name.len() > 48 ||
-        [&view.filters.source, &view.filters.tag, &view.filters.kind, &view.filters.query]
-            .iter().any(|value| value.as_ref().is_some_and(|text| text.len() > 128)) {
+    if name.is_empty()
+        || name.len() > 48
+        || [
+            &view.filters.source,
+            &view.filters.tag,
+            &view.filters.kind,
+            &view.filters.query,
+        ]
+        .iter()
+        .any(|value| value.as_ref().is_some_and(|text| text.len() > 128))
+    {
         return invalid("invalid saved view");
     }
     let json = match serde_json::to_string(&view.filters) {
@@ -174,9 +321,14 @@ pub async fn delete_view(
     user: AuthedUser,
     Path((conversation_id, name)): Path<(String, String)>,
 ) -> impl IntoResponse {
-    if let Err(response) = controller(&user) { return response; }
+    if let Err(response) = controller(&user) {
+        return response;
+    }
     match state.db.with_conn(|conn| {
-        conn.execute("DELETE FROM config_nexus_views WHERE conversation_id = ?1 AND name = ?2", params![conversation_id, name])?;
+        conn.execute(
+            "DELETE FROM config_nexus_views WHERE conversation_id = ?1 AND name = ?2",
+            params![conversation_id, name],
+        )?;
         Ok(())
     }) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
@@ -198,32 +350,259 @@ pub async fn search_messages(
     Path(conversation_id): Path<String>,
     Query(query): Query<SearchQuery>,
 ) -> impl IntoResponse {
-    if let Err(response) = controller(&user) { return response; }
+    if let Err(response) = controller(&user) {
+        return response;
+    }
     let needle = query.q.trim().to_lowercase();
     if needle.len() < 2 || needle.len() > 128 {
         return invalid("search text must contain 2 to 128 characters");
     }
     let cid = ConversationId::from(conversation_id.as_str());
-    let events = match event_log(&state).replay_since(&cid, EventSeq(0)) {
-        Ok(events) => events,
-        Err(error) => return failed(error),
+    if let Err(error) = rebuild_verified_search_index(&state, &cid) {
+        return failed(error);
+    }
+    let Some(fts) = fts_query(&needle) else {
+        return invalid("search text must contain searchable characters");
     };
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
-    let mut matches = events.into_iter().rev().filter_map(|event| {
-        if query.before.is_some_and(|before| event.seq.0 >= before) { return None; }
-        if event.actor.as_deref() == Some(SYSTEM_ORCHESTRATOR_ACTOR) { return None; }
-        let text = extract_text(&event)?;
-        if !text.to_lowercase().contains(&needle) { return None; }
-        let source = if event.kind == execlaw_core::events::EventKind::ModelTurn {
-            "execlaw".to_owned()
-        } else {
-            extract_channel_origin(&event).unwrap_or_else(|| "web".to_owned())
-        };
-        if query.source.as_deref().is_some_and(|requested| !requested.eq_ignore_ascii_case(&source)) { return None; }
-        Some(serde_json::json!({ "seq": event.seq.0, "text": text.chars().take(180).collect::<String>(),
-            "source": source, "committed_at": event.committed_at }))
-    }).take(limit + 1).collect::<Vec<_>>();
+    let mut matches = match state.db.with_conn(|conn| {
+        let mut statement = conn.prepare(
+            "SELECT seq, text, source, committed_at \
+             FROM state_conversation_event_search \
+             WHERE state_conversation_event_search MATCH ?1 \
+               AND conversation_id = ?2 \
+               AND (?3 IS NULL OR source = ?3 COLLATE NOCASE) \
+               AND (?4 IS NULL OR seq < ?4) \
+             ORDER BY seq DESC LIMIT ?5",
+        )?;
+        Ok(statement
+            .query_map(
+                params![
+                    fts,
+                    cid.as_str(),
+                    query.source,
+                    query.before,
+                    (limit + 1) as i64
+                ],
+                |row| {
+                    Ok(serde_json::json!({
+                        "seq": row.get::<_, i64>(0)?,
+                        "text": row.get::<_, String>(1)?.chars().take(180).collect::<String>(),
+                        "source": row.get::<_, String>(2)?,
+                        "committed_at": row.get::<_, i64>(3)?,
+                    }))
+                },
+            )?
+            .collect::<Result<Vec<_>, _>>()?)
+    }) {
+        Ok(matches) => matches,
+        Err(error) => return failed(error),
+    };
     let has_more = matches.len() > limit;
     matches.truncate(limit);
-    (StatusCode::OK, Json(serde_json::json!({ "matches": matches, "has_more": has_more }))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({ "matches": matches, "has_more": has_more })),
+    )
+        .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth_extract::AuthedUser;
+    use crate::chats::types::UserMessagePayload;
+    use crate::routes::test_app_state;
+    use axum::body::to_bytes;
+    use execlaw_core::events::{EventKind, EventLog, PendingEvent};
+    use execlaw_core::users::UserRole;
+
+    fn controller() -> AuthedUser {
+        AuthedUser {
+            user_id: "controller-1".into(),
+            session_id: None,
+            username: "controller".into(),
+            display_name: "Controller".into(),
+            email: None,
+            role: UserRole::Controller,
+            last_login_at: None,
+        }
+    }
+
+    fn viewer() -> AuthedUser {
+        AuthedUser {
+            user_id: "viewer-1".into(),
+            session_id: None,
+            username: "viewer".into(),
+            display_name: "Viewer".into(),
+            email: None,
+            role: UserRole::Viewer,
+            last_login_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn conversation_search_remains_controller_only() {
+        let response = search_messages(
+            State(test_app_state()),
+            viewer(),
+            Path("private-conversation".to_owned()),
+            Query(SearchQuery {
+                q: "private needle".into(),
+                source: None,
+                before: None,
+                limit: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    fn append_user_message(state: &AppState, conversation: &ConversationId, text: &str) {
+        let event = PendingEvent::encode(
+            EventKind::UserMsg,
+            &UserMessagePayload {
+                text: text.into(),
+                sender_principal_id: None,
+                channel_origin: None,
+                transport_recipient: None,
+                timezone: None,
+                attachment_ids: Vec::new(),
+                applied_skill_names: Vec::new(),
+            },
+            None,
+        )
+        .unwrap();
+        EventLog::new(&state.db)
+            .with_hmac_key((**state.event_log_hmac_key.as_ref().unwrap()).clone())
+            .commit_turn(conversation, EventSeq(0), vec![event])
+            .unwrap();
+    }
+
+    async fn response_json(response: axum::response::Response) -> (StatusCode, serde_json::Value) {
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap())
+    }
+
+    #[tokio::test]
+    async fn search_is_conversation_scoped_and_fails_closed_on_hmac_tampering() {
+        let state = test_app_state();
+        let first = ConversationId::from("search-first");
+        let second = ConversationId::from("search-second");
+        append_user_message(&state, &first, "orchid ledger phrase");
+        append_user_message(&state, &second, "orchid ledger phrase");
+
+        let (second_status, second_results) = response_json(
+            search_messages(
+                State(state.clone()),
+                controller(),
+                Path(second.as_str().to_owned()),
+                Query(SearchQuery {
+                    q: "orchid ledger".into(),
+                    source: None,
+                    before: None,
+                    limit: Some(10),
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(second_status, StatusCode::OK);
+        assert_eq!(second_results["matches"].as_array().unwrap().len(), 1);
+
+        let (status, first_results) = response_json(
+            search_messages(
+                State(state.clone()),
+                controller(),
+                Path(first.as_str().to_owned()),
+                Query(SearchQuery {
+                    q: "orchid ledger".into(),
+                    source: None,
+                    before: None,
+                    limit: Some(10),
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first_results["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(first_results["matches"][0]["seq"], 1);
+
+        let (_, filtered) = response_json(
+            search_messages(
+                State(state.clone()),
+                controller(),
+                Path(first.as_str().to_owned()),
+                Query(SearchQuery {
+                    q: "orchid ledger".into(),
+                    source: Some("signal".into()),
+                    before: None,
+                    limit: Some(10),
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert!(filtered["matches"].as_array().unwrap().is_empty());
+
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                "UPDATE state_events SET payload = X'00' WHERE conversation_id = ?1 AND seq = 1",
+                [first.as_str()],
+            )?;
+                Ok(())
+            })
+            .unwrap();
+        let (status, _) = response_json(
+            search_messages(
+                State(state),
+                controller(),
+                Path(first.as_str().to_owned()),
+                Query(SearchQuery {
+                    q: "orchid ledger".into(),
+                    source: None,
+                    before: None,
+                    limit: Some(10),
+                }),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn verified_search_projection_appends_only_after_its_watermark() {
+        let state = test_app_state();
+        let cid = ConversationId::from("incremental-search");
+        append_user_message(&state, &cid, "first searchable message");
+        rebuild_verified_search_index(&state, &cid).unwrap();
+        let indexed: i64 = state.db.with_conn(|conn| Ok(conn.query_row(
+            "SELECT indexed_seq FROM state_conversation_event_search_state WHERE conversation_id = ?1",
+            [cid.as_str()], |row| row.get(0))?)).unwrap();
+        assert_eq!(indexed, 1);
+        append_user_message(&state, &cid, "second searchable message");
+        rebuild_verified_search_index(&state, &cid).unwrap();
+        let rows: i64 = state
+            .db
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+            "SELECT COUNT(*) FROM state_conversation_event_search WHERE conversation_id = ?1",
+            [cid.as_str()], |row| row.get(0))?)
+            })
+            .unwrap();
+        let indexed: i64 = state.db.with_conn(|conn| Ok(conn.query_row(
+            "SELECT indexed_seq FROM state_conversation_event_search_state WHERE conversation_id = ?1",
+            [cid.as_str()], |row| row.get(0))?)).unwrap();
+        assert_eq!((rows, indexed), (2, 2));
+    }
 }

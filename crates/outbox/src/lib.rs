@@ -23,7 +23,7 @@ use async_trait::async_trait;
 use execlaw_core::db::Database;
 use execlaw_core::events::{EventKind, EventLog, EventRecord, PendingEvent, Snapshot};
 use execlaw_core::ids::{ConversationId, EventSeq};
-use execlaw_core::outbox::{OutboxRow, OutboxStore};
+use execlaw_core::outbox::{OutboxRow, OutboxStatus, OutboxStore};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -77,8 +77,56 @@ pub trait Dispatcher: Send + Sync {
     /// The effect_kind this dispatcher handles.
     fn effect_kind(&self) -> &'static str;
 
-    /// Deliver the effect. Errors trigger the retry budget logic.
-    async fn dispatch(&self, row: &OutboxRow) -> Result<(), String>;
+    /// State whether retries are idempotent or the remote effect can be queried.
+    fn delivery_safety(&self) -> DeliverySafety {
+        DeliverySafety::NoGuarantee
+    }
+
+    /// Deliver the effect and return only after the sink acknowledges it.
+    /// Errors trigger the retry budget logic; optional receipt IDs are persisted
+    /// in the outbox delivery timeline and must not contain credentials.
+    async fn dispatch(&self, row: &OutboxRow) -> Result<DispatchReceipt, DispatchError>;
+
+    /// Reconcile an ambiguous attempt when the sink supports status lookup.
+    async fn reconcile(&self, _row: &OutboxRow) -> Result<ReconciliationResult, String> {
+        Ok(ReconciliationResult::Unknown(
+            "dispatcher does not implement status lookup".into(),
+        ))
+    }
+}
+
+/// Recovery properties declared by a delivery sink.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliverySafety {
+    /// The framework key deduplicates repeated attempts at the sink.
+    IdempotencyKey,
+    /// The sink can report whether a prior attempt was accepted.
+    StatusLookup,
+    /// The sink offers neither deduplication nor reconciliation.
+    NoGuarantee,
+}
+
+/// A dispatch failure that distinguishes a safe retry from an uncertain effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DispatchError {
+    /// The sink confirms that it did not accept the effect.
+    NotAccepted(String),
+    /// The effect may have occurred before the error was observed.
+    OutcomeUnknown(String),
+}
+
+/// Result of asking a sink to reconcile an ambiguous dispatch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReconciliationResult {
+    Delivered(DispatchReceipt),
+    NotDelivered,
+    Unknown(String),
+}
+
+/// Opaque acknowledgment metadata returned by a delivery sink.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DispatchReceipt {
+    pub external_receipt: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,17 +159,17 @@ impl Dispatcher for WakeupDispatcher {
         "schedule.wakeup"
     }
 
-    async fn dispatch(&self, row: &OutboxRow) -> Result<(), String> {
+    async fn dispatch(&self, row: &OutboxRow) -> Result<DispatchReceipt, DispatchError> {
         let log = EventLog::new(&self.db);
         let last_seq = log
             .last_seq(&row.conversation_id)
-            .map_err(|e| format!("last_seq: {e}"))?;
+            .map_err(|e| DispatchError::NotAccepted(format!("last_seq: {e}")))?;
         let next_seq = last_seq.next();
 
         // Forward the original payload (already MessagePack-encoded) — but
         // also decode just enough to validate it's a proper WakeupPayload.
-        let _decoded: WakeupPayload =
-            rmp_serde::from_slice(&row.payload).map_err(|e| format!("decode wakeup: {e}"))?;
+        let _decoded: WakeupPayload = rmp_serde::from_slice(&row.payload)
+            .map_err(|e| DispatchError::NotAccepted(format!("decode wakeup: {e}")))?;
 
         let ev = EventRecord {
             conversation_id: row.conversation_id.clone(),
@@ -131,8 +179,9 @@ impl Dispatcher for WakeupDispatcher {
             committed_at: chrono::Utc::now().timestamp(),
             actor: Some("system".into()),
         };
-        log.append(&ev).map_err(|e| format!("append wakeup: {e}"))?;
-        Ok(())
+        log.append(&ev)
+            .map_err(|e| DispatchError::OutcomeUnknown(format!("append wakeup: {e}")))?;
+        Ok(DispatchReceipt::default())
     }
 }
 
@@ -205,7 +254,10 @@ pub async fn drain_once(
         };
 
         // Try to claim — if another drain instance got here first, skip.
-        let owned = store.claim(id).map_err(|e| format!("claim: {e}"))?;
+        let owner = format!("relay:{}:{}", std::process::id(), now_ts);
+        let owned = store
+            .claim_with_lease(id, &owner, now_ts, 120)
+            .map_err(|e| format!("claim: {e}"))?;
         if !owned {
             continue;
         }
@@ -228,34 +280,114 @@ pub async fn drain_once(
             }
         };
 
+        // An expired in-flight lease means the previous process may have
+        // crossed the remote boundary and died before persisting its receipt.
+        // Only a sink that deduplicates the framework key may be called again
+        // without first resolving that uncertainty.
+        if row.status == OutboxStatus::InFlight {
+            match dispatcher.delivery_safety() {
+                DeliverySafety::IdempotencyKey => {}
+                DeliverySafety::NoGuarantee => {
+                    store
+                        .mark_unknown(
+                            id,
+                            "relay restarted with an in-flight effect and the sink has no deduplication or status lookup",
+                        )
+                        .map_err(|error| format!("mark expired no-guarantee effect unknown: {error}"))?;
+                    processed += 1;
+                    continue;
+                }
+                DeliverySafety::StatusLookup => match dispatcher.reconcile(&row).await {
+                    Ok(ReconciliationResult::Delivered(receipt)) => {
+                        store
+                            .mark_delivered_with_receipt(id, receipt.external_receipt.as_deref())
+                            .map_err(|error| format!("record reconciled delivery: {error}"))?;
+                        processed += 1;
+                        continue;
+                    }
+                    Ok(ReconciliationResult::NotDelivered) => {}
+                    Ok(ReconciliationResult::Unknown(reason)) | Err(reason) => {
+                        store
+                            .mark_unknown(
+                                id,
+                                &format!("expired in-flight effect reconciliation: {reason}"),
+                            )
+                            .map_err(|error| {
+                                format!("mark unresolved expired effect unknown: {error}")
+                            })?;
+                        processed += 1;
+                        continue;
+                    }
+                },
+            }
+        }
+
         match dispatcher.dispatch(&row).await {
-            Ok(()) => {
+            Ok(receipt) => {
                 store
-                    .mark_delivered(id)
+                    .mark_delivered_with_receipt(id, receipt.external_receipt.as_deref())
                     .map_err(|e| format!("mark_delivered: {e}"))?;
                 debug!(id = id, effect_kind = %row.effect_kind, "delivered");
                 processed += 1;
             }
-            Err(e) => {
+            Err(DispatchError::NotAccepted(error)) => {
                 let attempt = (row.attempts + 1) as u32;
                 let backoff_secs = exp_backoff(attempt).as_secs() as i64;
                 let retrying = store
-                    .record_failure(id, &e, cfg.retry_budget.max_attempts, backoff_secs)
+                    .record_failure(id, &error, cfg.retry_budget.max_attempts, backoff_secs)
                     .map_err(|err| format!("record_failure: {err}"))?;
                 if retrying {
                     debug!(
                         id = id,
                         attempt = attempt,
-                        error = %e,
+                        error = %error,
                         "retry scheduled"
                     );
                 } else {
                     warn!(
                         id = id,
                         attempt = attempt,
-                        error = %e,
+                        error = %error,
                         "moved to dead_letter"
                     );
+                }
+                processed += 1;
+            }
+            Err(DispatchError::OutcomeUnknown(error)) => {
+                match dispatcher.delivery_safety() {
+                    DeliverySafety::IdempotencyKey => {
+                        let attempt = (row.attempts + 1) as u32;
+                        let backoff_secs = exp_backoff(attempt).as_secs() as i64;
+                        store
+                            .record_failure(id, &error, cfg.retry_budget.max_attempts, backoff_secs)
+                            .map_err(|err| format!("record_failure: {err}"))?;
+                    }
+                    DeliverySafety::StatusLookup => match dispatcher.reconcile(&row).await {
+                        Ok(ReconciliationResult::Delivered(receipt)) => store
+                            .mark_delivered_with_receipt(id, receipt.external_receipt.as_deref())
+                            .map_err(|err| format!("mark_delivered: {err}"))?,
+                        Ok(ReconciliationResult::NotDelivered) => {
+                            let attempt = (row.attempts + 1) as u32;
+                            let backoff_secs = exp_backoff(attempt).as_secs() as i64;
+                            store
+                                .record_failure(
+                                    id,
+                                    &error,
+                                    cfg.retry_budget.max_attempts,
+                                    backoff_secs,
+                                )
+                                .map_err(|err| format!("record_failure: {err}"))?;
+                        }
+                        Ok(ReconciliationResult::Unknown(reason)) => store
+                            .mark_unknown(id, &format!("{error}; reconciliation: {reason}"))
+                            .map_err(|err| format!("mark_unknown: {err}"))?,
+                        Err(reason) => store
+                            .mark_unknown(id, &format!("{error}; reconciliation failed: {reason}"))
+                            .map_err(|err| format!("mark_unknown: {err}"))?,
+                    },
+                    DeliverySafety::NoGuarantee => store
+                        .mark_unknown(id, &error)
+                        .map_err(|err| format!("mark_unknown: {err}"))?,
                 }
                 processed += 1;
             }
@@ -343,13 +475,145 @@ mod tests {
             self.kind
         }
 
-        async fn dispatch(&self, _row: &OutboxRow) -> Result<(), String> {
+        async fn dispatch(&self, _row: &OutboxRow) -> Result<DispatchReceipt, DispatchError> {
             let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
             if n <= self.fail_first_n {
-                Err(format!("synthetic failure #{n}"))
+                Err(DispatchError::NotAccepted(format!(
+                    "synthetic failure #{n}"
+                )))
             } else {
-                Ok(())
+                Ok(DispatchReceipt {
+                    external_receipt: Some("mock-receipt-1".into()),
+                })
             }
+        }
+    }
+
+    struct IdempotentSink {
+        records: Arc<std::sync::Mutex<HashMap<String, String>>>,
+        effects: Arc<AtomicUsize>,
+    }
+
+    struct FileIdempotentSink {
+        receipt_dir: std::path::PathBuf,
+    }
+
+    #[async_trait]
+    impl Dispatcher for FileIdempotentSink {
+        fn effect_kind(&self) -> &'static str {
+            "test.effect"
+        }
+
+        fn delivery_safety(&self) -> DeliverySafety {
+            DeliverySafety::IdempotencyKey
+        }
+
+        async fn dispatch(&self, row: &OutboxRow) -> Result<DispatchReceipt, DispatchError> {
+            std::fs::create_dir_all(&self.receipt_dir)
+                .map_err(|error| DispatchError::NotAccepted(error.to_string()))?;
+            let safe_key: String = row
+                .idempotency_key
+                .as_str()
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                        character
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let path = self.receipt_dir.join(format!("{safe_key}.receipt"));
+            let receipt = match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(b"sink-receipt-1")
+                        .map_err(|error| DispatchError::OutcomeUnknown(error.to_string()))?;
+                    "sink-receipt-1".to_owned()
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    std::fs::read_to_string(&path)
+                        .map_err(|error| DispatchError::OutcomeUnknown(error.to_string()))?
+                }
+                Err(error) => return Err(DispatchError::NotAccepted(error.to_string())),
+            };
+            Ok(DispatchReceipt {
+                external_receipt: Some(receipt),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl Dispatcher for IdempotentSink {
+        fn effect_kind(&self) -> &'static str {
+            "test.effect"
+        }
+
+        fn delivery_safety(&self) -> DeliverySafety {
+            DeliverySafety::IdempotencyKey
+        }
+
+        async fn dispatch(&self, row: &OutboxRow) -> Result<DispatchReceipt, DispatchError> {
+            let key = row.idempotency_key.as_str().to_owned();
+            let mut records = self.records.lock().unwrap();
+            let receipt = records.entry(key).or_insert_with(|| {
+                self.effects.fetch_add(1, Ordering::SeqCst);
+                "sink-receipt-1".to_owned()
+            });
+            Ok(DispatchReceipt {
+                external_receipt: Some(receipt.clone()),
+            })
+        }
+    }
+
+    struct AmbiguousSink {
+        safety: DeliverySafety,
+    }
+
+    #[async_trait]
+    impl Dispatcher for AmbiguousSink {
+        fn effect_kind(&self) -> &'static str {
+            "test.effect"
+        }
+
+        fn delivery_safety(&self) -> DeliverySafety {
+            self.safety
+        }
+
+        async fn dispatch(&self, _row: &OutboxRow) -> Result<DispatchReceipt, DispatchError> {
+            Err(DispatchError::OutcomeUnknown(
+                "connection dropped after send".into(),
+            ))
+        }
+
+        async fn reconcile(&self, _row: &OutboxRow) -> Result<ReconciliationResult, String> {
+            Ok(ReconciliationResult::Delivered(DispatchReceipt {
+                external_receipt: Some("sink-receipt-reconciled".into()),
+            }))
+        }
+    }
+
+    struct CountingNoGuaranteeSink {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Dispatcher for CountingNoGuaranteeSink {
+        fn effect_kind(&self) -> &'static str {
+            "test.effect"
+        }
+
+        fn delivery_safety(&self) -> DeliverySafety {
+            DeliverySafety::NoGuarantee
+        }
+
+        async fn dispatch(&self, _row: &OutboxRow) -> Result<DispatchReceipt, DispatchError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(DispatchReceipt::default())
         }
     }
 
@@ -380,7 +644,7 @@ mod tests {
     async fn drain_delivers_pending_row() {
         let db = fresh_db();
         let store = OutboxStore::new(&db);
-        let _id = enqueue_row(&store, "test.effect", 0);
+        let id = enqueue_row(&store, "test.effect", 0);
 
         let calls = Arc::new(AtomicUsize::new(0));
         let mut reg = DispatcherRegistry::new();
@@ -395,6 +659,295 @@ mod tests {
             .unwrap();
         assert_eq!(n, 1);
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let timeline = store.delivery_timeline(id).unwrap();
+        assert_eq!(timeline.last().unwrap().transition, "delivered");
+        assert_eq!(
+            timeline.last().unwrap().external_receipt.as_deref(),
+            Some("mock-receipt-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn restart_after_sink_acceptance_reuses_receipt_without_duplicate_effect() {
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("accepted-before-ack.db");
+        let db = Database::open(&DbConfig {
+            path: db_path.clone(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let store = OutboxStore::new(&db);
+        let id = enqueue_row(&store, "test.effect", 42);
+        let row = store.ready_pending(i64::MAX, 1).unwrap().remove(0);
+        assert!(
+            store
+                .claim_with_lease(id, "old-relay", chrono::Utc::now().timestamp(), 1)
+                .unwrap()
+        );
+
+        // The remote idempotent sink accepts the operation, then the relay
+        // process is lost before it can persist the receipt locally.
+        let effects = Arc::new(AtomicUsize::new(0));
+        let records = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let sink = Arc::new(IdempotentSink {
+            records: records.clone(),
+            effects: effects.clone(),
+        });
+        let receipt = sink.dispatch(&row).await.unwrap();
+        assert_eq!(receipt.external_receipt.as_deref(), Some("sink-receipt-1"));
+        drop(store);
+        drop(db);
+
+        std::thread::sleep(Duration::from_millis(1_100));
+        let reopened = Database::open(&DbConfig {
+            path: db_path,
+            key: None,
+        })
+        .unwrap();
+        let mut registry = DispatcherRegistry::new();
+        registry.register(sink);
+        assert_eq!(
+            drain_once(&reopened, &registry, &DrainConfig::default())
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(effects.load(Ordering::SeqCst), 1);
+        let timeline = OutboxStore::new(&reopened).delivery_timeline(id).unwrap();
+        assert_eq!(
+            timeline
+                .iter()
+                .filter(|event| event.transition == "send_requested")
+                .count(),
+            1
+        );
+        assert_eq!(
+            timeline
+                .iter()
+                .filter(|event| event.transition == "lease_reclaimed")
+                .count(),
+            1
+        );
+        assert_eq!(
+            timeline
+                .iter()
+                .filter(|event| event.transition == "delivered")
+                .count(),
+            1
+        );
+        assert_eq!(
+            timeline.last().unwrap().external_receipt.as_deref(),
+            Some("sink-receipt-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn process_kill_after_sink_acceptance_recovers_same_transport_receipt() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("accepted-before-ack-kill.db");
+        let receipt_dir = temp.path().join("sink-receipts");
+        let ready_path = temp.path().join("accepted");
+        let db = Database::open(&DbConfig {
+            path: db_path.clone(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let id = enqueue_row(&OutboxStore::new(&db), "test.effect", 43);
+        drop(db);
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::outbox_acceptance_crash_child_holds_claim_until_killed",
+                "--nocapture",
+            ])
+            .env("EXECLAW_OUTBOX_ACCEPT_CRASH_DB", &db_path)
+            .env("EXECLAW_OUTBOX_ACCEPT_CRASH_SINK", &receipt_dir)
+            .env("EXECLAW_OUTBOX_ACCEPT_CRASH_READY", &ready_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ready_path.exists(), "child did not reach remote acceptance");
+        child.kill().unwrap();
+        let _ = child.wait();
+
+        std::thread::sleep(Duration::from_millis(1_100));
+        let reopened = Database::open(&DbConfig {
+            path: db_path,
+            key: None,
+        })
+        .unwrap();
+        let sink = Arc::new(FileIdempotentSink {
+            receipt_dir: receipt_dir.clone(),
+        });
+        let mut registry = DispatcherRegistry::new();
+        registry.register(sink);
+        assert_eq!(
+            drain_once(&reopened, &registry, &DrainConfig::default())
+                .await
+                .unwrap(),
+            1
+        );
+        let receipts = std::fs::read_dir(&receipt_dir).unwrap().count();
+        assert_eq!(receipts, 1, "the external effect key must be applied once");
+        let timeline = OutboxStore::new(&reopened).delivery_timeline(id).unwrap();
+        assert_eq!(
+            timeline
+                .iter()
+                .filter(|event| event.transition == "send_requested")
+                .count(),
+            1
+        );
+        assert_eq!(
+            timeline
+                .iter()
+                .filter(|event| event.transition == "lease_reclaimed")
+                .count(),
+            1
+        );
+        assert_eq!(timeline.last().unwrap().transition, "delivered");
+        assert_eq!(
+            timeline.last().unwrap().external_receipt.as_deref(),
+            Some("sink-receipt-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn outbox_acceptance_crash_child_holds_claim_until_killed() {
+        let (Some(db_path), Some(sink_dir), Some(ready_path)) = (
+            std::env::var_os("EXECLAW_OUTBOX_ACCEPT_CRASH_DB"),
+            std::env::var_os("EXECLAW_OUTBOX_ACCEPT_CRASH_SINK"),
+            std::env::var_os("EXECLAW_OUTBOX_ACCEPT_CRASH_READY"),
+        ) else {
+            return;
+        };
+        let db = Database::open(&DbConfig {
+            path: db_path.into(),
+            key: None,
+        })
+        .unwrap();
+        let store = OutboxStore::new(&db);
+        let row = store.ready_pending(i64::MAX, 1).unwrap().remove(0);
+        let id = row.id.unwrap();
+        assert!(
+            store
+                .claim_with_lease(id, "killed-relay", chrono::Utc::now().timestamp(), 1)
+                .unwrap()
+        );
+        FileIdempotentSink {
+            receipt_dir: sink_dir.into(),
+        }
+        .dispatch(&row)
+        .await
+        .unwrap();
+        std::fs::write(ready_path, b"accepted").unwrap();
+        std::thread::park();
+    }
+
+    #[tokio::test]
+    async fn process_kill_after_non_idempotent_send_parks_unknown_without_replay() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let temp = tempfile::tempdir().unwrap();
+        let db_path = temp.path().join("non-idempotent-kill.db");
+        let effect_path = temp.path().join("external-effect");
+        let ready_path = temp.path().join("sent");
+        let db = Database::open(&DbConfig {
+            path: db_path.clone(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let id = enqueue_row(&OutboxStore::new(&db), "test.effect", 44);
+        drop(db);
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "tests::non_idempotent_crash_child_holds_after_send_until_killed",
+                "--nocapture",
+            ])
+            .env("EXECLAW_NON_IDEMPOTENT_CRASH_DB", &db_path)
+            .env("EXECLAW_NON_IDEMPOTENT_CRASH_EFFECT", &effect_path)
+            .env("EXECLAW_NON_IDEMPOTENT_CRASH_READY", &ready_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            ready_path.exists(),
+            "child did not send the external effect"
+        );
+        child.kill().unwrap();
+        let _ = child.wait();
+
+        std::thread::sleep(Duration::from_millis(1_100));
+        let reopened = Database::open(&DbConfig {
+            path: db_path,
+            key: None,
+        })
+        .unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = DispatcherRegistry::new();
+        registry.register(Arc::new(CountingNoGuaranteeSink {
+            calls: calls.clone(),
+        }));
+        assert_eq!(
+            drain_once(&reopened, &registry, &DrainConfig::default())
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(effect_path.exists());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(
+            OutboxStore::new(&reopened)
+                .unknown_effect(id)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn non_idempotent_crash_child_holds_after_send_until_killed() {
+        let (Some(db_path), Some(effect_path), Some(ready_path)) = (
+            std::env::var_os("EXECLAW_NON_IDEMPOTENT_CRASH_DB"),
+            std::env::var_os("EXECLAW_NON_IDEMPOTENT_CRASH_EFFECT"),
+            std::env::var_os("EXECLAW_NON_IDEMPOTENT_CRASH_READY"),
+        ) else {
+            return;
+        };
+        let db = Database::open(&DbConfig {
+            path: db_path.into(),
+            key: None,
+        })
+        .unwrap();
+        let store = OutboxStore::new(&db);
+        let row = store.ready_pending(i64::MAX, 1).unwrap().remove(0);
+        let id = row.id.unwrap();
+        assert!(
+            store
+                .claim_with_lease(id, "killed-relay", chrono::Utc::now().timestamp(), 1)
+                .unwrap()
+        );
+        std::fs::write(effect_path, b"sent once").unwrap();
+        std::fs::write(ready_path, b"sent").unwrap();
+        std::thread::park();
     }
 
     #[tokio::test]
@@ -475,6 +1028,85 @@ mod tests {
             .unwrap();
 
         assert_eq!(store.dead_letter_count().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn non_idempotent_ambiguous_effect_is_parked_until_operator_decides() {
+        let db = fresh_db();
+        let store = OutboxStore::new(&db);
+        let id = enqueue_row(&store, "test.effect", 91);
+        let mut registry = DispatcherRegistry::new();
+        registry.register(Arc::new(AmbiguousSink {
+            safety: DeliverySafety::NoGuarantee,
+        }));
+
+        assert_eq!(
+            drain_once(&db, &registry, &DrainConfig::default())
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store.ready_pending(i64::MAX, 10).unwrap().is_empty());
+        assert_eq!(
+            store
+                .delivery_timeline(id)
+                .unwrap()
+                .last()
+                .unwrap()
+                .transition,
+            "outcome_unknown"
+        );
+        store
+            .authorize_unknown_retry(id, "operator-1", "operator checked the remote endpoint")
+            .unwrap();
+        assert_eq!(store.ready_pending(i64::MAX, 10).unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_no_guarantee_lease_is_not_redispatched_after_restart() {
+        let db = fresh_db();
+        let store = OutboxStore::new(&db);
+        let id = enqueue_row(&store, "test.effect", 93);
+        assert!(store.claim_with_lease(id, "dead-process", 1, 1).unwrap());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut registry = DispatcherRegistry::new();
+        registry.register(Arc::new(CountingNoGuaranteeSink {
+            calls: calls.clone(),
+        }));
+
+        assert_eq!(
+            drain_once(&db, &registry, &DrainConfig::default())
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(store.unknown_effect(id).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn status_lookup_reconciles_ambiguous_effect_before_retry() {
+        let db = fresh_db();
+        let store = OutboxStore::new(&db);
+        let id = enqueue_row(&store, "test.effect", 92);
+        let mut registry = DispatcherRegistry::new();
+        registry.register(Arc::new(AmbiguousSink {
+            safety: DeliverySafety::StatusLookup,
+        }));
+
+        assert_eq!(
+            drain_once(&db, &registry, &DrainConfig::default())
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(store.ready_pending(i64::MAX, 10).unwrap().is_empty());
+        let timeline = store.delivery_timeline(id).unwrap();
+        assert_eq!(timeline.last().unwrap().transition, "delivered");
+        assert_eq!(
+            timeline.last().unwrap().external_receipt.as_deref(),
+            Some("sink-receipt-reconciled")
+        );
     }
 
     #[tokio::test]

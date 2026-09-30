@@ -70,8 +70,8 @@ fn openai_chat_url(base_url: &str) -> String {
 /// Ollama's `/api/chat` request body. Field set is intentionally
 /// narrow: only what the agent's `ChatRequest` carries today. Fields
 /// the OpenAI-compat side ships that Ollama silently ignores
-/// (`tool_choice`, `guided_decoding_backend`, `chat_template_kwargs`)
-/// are NOT forwarded — Ollama has no equivalent knobs.
+/// (`tool_choice`, `guided_decoding_backend`) are not forwarded.
+/// `chat_template_kwargs.enable_thinking` maps to Ollama's native `think`.
 #[derive(Debug, Serialize)]
 struct OllamaChatRequest<'a> {
     model: &'a str,
@@ -79,6 +79,10 @@ struct OllamaChatRequest<'a> {
     #[serde(skip_serializing_if = "<[_]>::is_empty")]
     tools: &'a [ToolDeclaration],
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    format: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "OllamaOptions::is_empty")]
     options: OllamaOptions,
 }
@@ -215,18 +219,40 @@ struct OllamaStreamFrame {
 /// Build the Ollama-native request body from the OpenAI-shaped
 /// `ChatRequest`. `stream` is overridden explicitly by the caller —
 /// the field on `ChatRequest` is advisory and changes per call site.
-fn build_request<'a>(req: &'a ChatRequest, stream: bool) -> OllamaChatRequest<'a> {
+fn build_request<'a>(
+    req: &'a ChatRequest,
+    stream: bool,
+    context_tokens: Option<u32>,
+) -> OllamaChatRequest<'a> {
     let messages = req.messages.iter().map(translate_message).collect();
     OllamaChatRequest {
         model: req.model.as_str(),
         messages,
         tools: req.tools.as_deref().unwrap_or(&[]),
         stream,
+        think: req
+            .chat_template_kwargs
+            .as_ref()
+            .and_then(|kwargs| kwargs.get("enable_thinking"))
+            .and_then(serde_json::Value::as_bool),
+        format: ollama_structured_format(req.response_format.as_ref()),
         options: OllamaOptions {
             temperature: req.temperature,
             num_predict: req.max_tokens,
-            num_ctx: Some(DEFAULT_NUM_CTX),
+            num_ctx: Some(context_tokens.unwrap_or(DEFAULT_NUM_CTX)),
         },
+    }
+}
+
+fn ollama_structured_format(format: Option<&serde_json::Value>) -> Option<serde_json::Value> {
+    let format = format?;
+    match format.get("type").and_then(serde_json::Value::as_str) {
+        Some("json_object") => Some(serde_json::Value::String("json".into())),
+        Some("json_schema") => format
+            .get("json_schema")
+            .and_then(|schema| schema.get("schema"))
+            .cloned(),
+        _ => None,
     }
 }
 
@@ -379,14 +405,13 @@ pub(crate) async fn chat_completions(
     base_url: &str,
     api_key: Option<&str>,
     req: &ChatRequest,
+    context_tokens: Option<u32>,
 ) -> Result<ChatResponse, InferenceError> {
     let url = format!("{}/api/chat", daemon_root(base_url));
-    let body = build_request(req, false);
-    // Log outgoing request for debugging: URL and body size.
+    let body = build_request(req, false, context_tokens);
+    // Probe and chat prompts can carry private user content; never log the body.
     if let Ok(text) = serde_json::to_string(&body) {
-        let preview: String = text.chars().take(800).collect();
-        tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), body_chars = text.chars().count(), body_preview = %preview, "ollama non-streaming request");
-        tracing::debug!(target: "inference_outgoing", request_body = %text, "ollama non-streaming request body");
+        tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), body_chars = text.chars().count(), "ollama non-streaming request");
     } else {
         tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), "ollama non-streaming request (body serialization failed)");
     }
@@ -397,7 +422,6 @@ pub(crate) async fn chat_completions(
     let resp = r.send().await?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
         // Some remote Ollama deployments expose only the OpenAI-compat
         // surface (`/v1/*`) and return 404 on native `/api/chat`.
         // Retry once through `/v1/chat/completions` to keep the chat
@@ -419,28 +443,24 @@ pub(crate) async fn chat_completions(
             let compat_resp = rr.send().await?;
             let compat_status = compat_resp.status();
             if !compat_status.is_success() {
-                let compat_body = compat_resp.text().await.unwrap_or_default();
                 return Err(InferenceError::BadStatus {
                     status: compat_status.as_u16(),
-                    body: compat_body,
+                    body: String::new(),
                 });
             }
             let compat_text = compat_resp.text().await?;
             return serde_json::from_str::<ChatResponse>(&compat_text).map_err(|e| {
-                InferenceError::Decode(format!(
-                    "bad /v1/chat/completions fallback response: {e} — body: {compat_text}"
-                ))
+                InferenceError::Decode(format!("bad /v1/chat/completions fallback response: {e}"))
             });
         }
         return Err(InferenceError::BadStatus {
             status: status.as_u16(),
-            body,
+            body: String::new(),
         });
     }
     let text = resp.text().await?;
-    let raw: OllamaChatResponse = serde_json::from_str(&text).map_err(|e| {
-        InferenceError::Decode(format!("bad /api/chat response: {e} — body: {text}"))
-    })?;
+    let raw: OllamaChatResponse = serde_json::from_str(&text)
+        .map_err(|e| InferenceError::Decode(format!("bad /api/chat response: {e}")))?;
     Ok(response_to_openai(raw, &req.model))
 }
 
@@ -453,17 +473,16 @@ pub(crate) async fn chat_completions_stream(
     base_url: &str,
     api_key: Option<&str>,
     req: &ChatRequest,
+    context_tokens: Option<u32>,
 ) -> Result<
     std::pin::Pin<Box<dyn futures::Stream<Item = Result<ChatStreamChunk, InferenceError>> + Send>>,
     InferenceError,
 > {
     let url = format!("{}/api/chat", daemon_root(base_url));
-    let body = build_request(req, true);
-    // Log outgoing streaming request for debugging: URL and body size.
+    let body = build_request(req, true, context_tokens);
+    // Never log prompt or tool arguments, even at debug level.
     if let Ok(text) = serde_json::to_string(&body) {
-        let preview: String = text.chars().take(800).collect();
-        tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), body_chars = text.chars().count(), body_preview = %preview, "ollama streaming request");
-        tracing::debug!(target: "inference_outgoing", request_body = %text, "ollama streaming request body");
+        tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), body_chars = text.chars().count(), "ollama streaming request");
     } else {
         tracing::info!(target: "inference_outgoing", url = %url, model = %req.model.as_str(), "ollama streaming request (body serialization failed)");
     }
@@ -474,7 +493,6 @@ pub(crate) async fn chat_completions_stream(
     let resp = r.send().await?;
     let status = resp.status();
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
         // Streaming fallback: if native `/api/chat` is absent,
         // request a non-streaming OpenAI-compat completion and emit
         // one synthetic chunk so callers still receive assistant text.
@@ -495,17 +513,14 @@ pub(crate) async fn chat_completions_stream(
             let compat_resp = rr.send().await?;
             let compat_status = compat_resp.status();
             if !compat_status.is_success() {
-                let compat_body = compat_resp.text().await.unwrap_or_default();
                 return Err(InferenceError::BadStatus {
                     status: compat_status.as_u16(),
-                    body: compat_body,
+                    body: String::new(),
                 });
             }
             let compat_text = compat_resp.text().await?;
             let full = serde_json::from_str::<ChatResponse>(&compat_text).map_err(|e| {
-                InferenceError::Decode(format!(
-                    "bad /v1/chat/completions fallback response: {e} — body: {compat_text}"
-                ))
+                InferenceError::Decode(format!("bad /v1/chat/completions fallback response: {e}"))
             })?;
 
             let choice = full.choices.into_iter().next().unwrap_or(Choice {
@@ -554,7 +569,7 @@ pub(crate) async fn chat_completions_stream(
         }
         return Err(InferenceError::BadStatus {
             status: status.as_u16(),
-            body,
+            body: String::new(),
         });
     }
 
@@ -591,26 +606,43 @@ where
     use futures::StreamExt;
     let state = NdjsonState::default();
     futures::stream::unfold(
-        (Box::pin(bytes_stream), state, stream_id, model, false),
-        |(mut s, mut state, id, model, mut emitted_role)| async move {
+        (
+            Box::pin(bytes_stream),
+            state,
+            stream_id,
+            model,
+            false,
+            false,
+        ),
+        |(mut s, mut state, id, model, mut emitted_role, saw_done)| async move {
+            if saw_done {
+                return None;
+            }
             loop {
                 // Try to emit a chunk from the buffer first.
-                if let Some(line) = state.next_line() {
+                let line = match state.next_line() {
+                    Ok(line) => line,
+                    Err(error) => {
+                        return Some((Err(error), (s, state, id, model, emitted_role, true)));
+                    }
+                };
+                if let Some(line) = line {
                     let trimmed = line.trim();
                     if trimmed.is_empty() {
                         continue;
                     }
                     match serde_json::from_str::<OllamaStreamFrame>(trimmed) {
                         Ok(frame) => {
+                            let done = frame.done;
                             let chunk = frame_to_chunk(frame, &id, &model, &mut emitted_role);
-                            return Some((Ok(chunk), (s, state, id, model, emitted_role)));
+                            return Some((Ok(chunk), (s, state, id, model, emitted_role, done)));
                         }
                         Err(e) => {
                             return Some((
                                 Err(InferenceError::Decode(format!(
-                                    "bad /api/chat NDJSON frame: {e} — line: {trimmed}"
+                                    "bad /api/chat NDJSON frame: {e}"
                                 ))),
-                                (s, state, id, model, emitted_role),
+                                (s, state, id, model, emitted_role, false),
                             ));
                         }
                     }
@@ -621,7 +653,7 @@ where
                     Some(Err(e)) => {
                         return Some((
                             Err(InferenceError::Http(e)),
-                            (s, state, id, model, emitted_role),
+                            (s, state, id, model, emitted_role, true),
                         ));
                     }
                     None => {
@@ -629,17 +661,48 @@ where
                         // happens to be a complete JSON object
                         // without trailing newline (Ollama always
                         // sends one, but be lenient).
-                        if let Some(line) = state.flush_tail() {
-                            let trimmed = line.trim();
-                            if !trimmed.is_empty() {
-                                if let Ok(frame) =
-                                    serde_json::from_str::<OllamaStreamFrame>(trimmed)
-                                {
-                                    let chunk =
-                                        frame_to_chunk(frame, &id, &model, &mut emitted_role);
-                                    return Some((Ok(chunk), (s, state, id, model, emitted_role)));
+                        match state.flush_tail() {
+                            Err(error) => {
+                                return Some((
+                                    Err(error),
+                                    (s, state, id, model, emitted_role, true),
+                                ));
+                            }
+                            Ok(Some(line)) => {
+                                let trimmed = line.trim();
+                                if !trimmed.is_empty() {
+                                    match serde_json::from_str::<OllamaStreamFrame>(trimmed) {
+                                        Ok(frame) => {
+                                            let done = frame.done;
+                                            let chunk = frame_to_chunk(
+                                                frame,
+                                                &id,
+                                                &model,
+                                                &mut emitted_role,
+                                            );
+                                            return Some((
+                                                Ok(chunk),
+                                                (s, state, id, model, emitted_role, done),
+                                            ));
+                                        }
+                                        Err(error) => {
+                                            return Some((
+                                                Err(InferenceError::Decode(format!(
+                                                    "bad /api/chat NDJSON frame: {error}"
+                                                ))),
+                                                (s, state, id, model, emitted_role, true),
+                                            ));
+                                        }
+                                    }
                                 }
                             }
+                            Ok(None) => {}
+                        }
+                        if !saw_done {
+                            return Some((
+                                Err(InferenceError::IncompleteStream),
+                                (s, state, id, model, emitted_role, true),
+                            ));
                         }
                         return None;
                     }
@@ -660,22 +723,39 @@ impl NdjsonState {
     fn extend(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
     }
-    fn next_line(&mut self) -> Option<String> {
-        let pos = self.buf.iter().position(|&b| b == b'\n')?;
+    fn next_line(&mut self) -> Result<Option<String>, InferenceError> {
+        let Some(pos) = self.buf.iter().position(|&b| b == b'\n') else {
+            if self.buf.len() > super::MAX_SSE_EVENT_BYTES {
+                self.buf.clear();
+                return Err(InferenceError::FrameTooLarge(super::MAX_SSE_EVENT_BYTES));
+            }
+            return Ok(None);
+        };
+        if pos > super::MAX_SSE_EVENT_BYTES {
+            self.buf.drain(..=pos);
+            return Err(InferenceError::FrameTooLarge(super::MAX_SSE_EVENT_BYTES));
+        }
         let mut line: Vec<u8> = self.buf.drain(..=pos).collect();
         // Drop trailing \n + optional \r.
         line.pop();
         if line.last() == Some(&b'\r') {
             line.pop();
         }
-        String::from_utf8(line).ok()
+        String::from_utf8(line).map(Some).map_err(|error| {
+            InferenceError::Decode(format!("NDJSON frame is not valid UTF-8: {error}"))
+        })
     }
-    fn flush_tail(&mut self) -> Option<String> {
+    fn flush_tail(&mut self) -> Result<Option<String>, InferenceError> {
         if self.buf.is_empty() {
-            return None;
+            return Ok(None);
         }
         let tail = std::mem::take(&mut self.buf);
-        String::from_utf8(tail).ok()
+        if tail.len() > super::MAX_SSE_EVENT_BYTES {
+            return Err(InferenceError::FrameTooLarge(super::MAX_SSE_EVENT_BYTES));
+        }
+        String::from_utf8(tail).map(Some).map_err(|error| {
+            InferenceError::Decode(format!("NDJSON frame is not valid UTF-8: {error}"))
+        })
     }
 }
 
@@ -756,6 +836,54 @@ mod tests {
     use super::*;
     use crate::FunctionDecl;
 
+    #[tokio::test]
+    async fn failed_requests_do_not_echo_upstream_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 4096];
+                let _ = socket.read(&mut request).await.unwrap();
+                let body = "fake-private-token";
+                socket.write_all(format!(
+                    "HTTP/1.1 401 Unauthorized\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                ).as_bytes()).await.unwrap();
+            }
+        });
+        let client = crate::InferenceClient::new(format!("http://{addr}"))
+            .with_engine(crate::InferenceEngine::Ollama);
+        let request = ChatRequest {
+            model: ModelId("local-test".into()),
+            messages: vec![ChatMessage::user("private prompt")],
+            tools: None,
+            stream: false,
+            temperature: None,
+            max_tokens: Some(16),
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let error = client
+            .chat_completions(&request)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("401"));
+        assert!(!error.contains("fake-private-token"));
+        let error = match client.chat_completions_stream(&request).await {
+            Ok(_) => panic!("401 must fail before streaming"),
+            Err(error) => error.to_string(),
+        };
+        assert!(error.contains("401"));
+        assert!(!error.contains("fake-private-token"));
+        server.await.unwrap();
+    }
+
     #[test]
     fn daemon_root_strips_v1_suffix() {
         assert_eq!(
@@ -798,9 +926,10 @@ mod tests {
             max_tokens: Some(256),
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
-        let ollama_req = build_request(&req, false);
+        let ollama_req = build_request(&req, false, None);
         let serialized = serde_json::to_value(&ollama_req).unwrap();
         assert_eq!(serialized["model"], "qwen2.5:7b");
         assert_eq!(serialized["stream"], false);
@@ -818,6 +947,25 @@ mod tests {
     }
 
     #[test]
+    fn native_request_uses_model_context_and_thinking_setting() {
+        let request = ChatRequest {
+            model: ModelId("qwen3:8b".into()),
+            messages: vec![ChatMessage::user("READY")],
+            tools: None,
+            stream: false,
+            temperature: None,
+            max_tokens: Some(64),
+            chat_template_kwargs: Some(serde_json::json!({"enable_thinking": false})),
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let body = serde_json::to_value(build_request(&request, false, Some(8_192))).unwrap();
+        assert_eq!(body["think"], false);
+        assert_eq!(body["options"]["num_ctx"], 8_192);
+    }
+
+    #[test]
     fn build_request_always_sets_num_ctx_to_keep_tools_in_window() {
         // Even when the caller doesn't specify temperature or
         // max_tokens, we must pin num_ctx so Ollama doesn't fall
@@ -832,9 +980,10 @@ mod tests {
             max_tokens: None,
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
-        let serialized = serde_json::to_value(build_request(&req, false)).unwrap();
+        let serialized = serde_json::to_value(build_request(&req, false, None)).unwrap();
         assert_eq!(
             serialized["options"]["num_ctx"], DEFAULT_NUM_CTX,
             "num_ctx must always be sent (default {DEFAULT_NUM_CTX}) — Ollama's 4096 default truncates tool schemas"

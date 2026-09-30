@@ -139,7 +139,7 @@ cargo test --workspace
 
 # Production SQLCipher path — slow because of OpenSSL vendoring;
 # use only when changing crypto / vault / migration code.
-cargo test --workspace --no-default-features -F execlaw-core/sqlcipher
+cargo test --workspace --no-default-features -F execlaw/sqlcipher
 
 # Fmt + clippy on everything you touched.
 cargo fmt

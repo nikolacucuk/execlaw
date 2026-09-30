@@ -74,6 +74,8 @@ pub async fn is_model_present(host_port: u16, model_id: &str) -> Result<bool> {
     let url = format!("http://127.0.0.1:{host_port}/api/tags");
     let client = reqwest::Client::builder()
         .timeout(TAGS_PROBE_TIMEOUT)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build reqwest client")?;
     let resp = client
@@ -129,6 +131,8 @@ where
     let body = serde_json::json!({ "name": model_id, "stream": true });
     let client = reqwest::Client::builder()
         .timeout(PULL_TIMEOUT)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build reqwest client")?;
     let resp = client

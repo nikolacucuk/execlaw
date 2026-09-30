@@ -11,11 +11,28 @@ Relationship to other docs:
 
 ---
 
+## Implementation delivery plan
+
+All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+Plugin work must implement [H027 transactional lifecycle/panel isolation](llm-harness-roadmap.md#enhancement-027),
+[H054 secret brokering](llm-harness-roadmap.md#enhancement-054),
+[H065 effect contracts](llm-harness-roadmap.md#enhancement-065),
+[H079 conformance](llm-harness-roadmap.md#enhancement-079),
+[H080 API compatibility](llm-harness-roadmap.md#enhancement-080),
+[H081 version pinning](llm-harness-roadmap.md#enhancement-081),
+[H082 revocation](llm-harness-roadmap.md#enhancement-082), and
+[H083 hook semantics](llm-harness-roadmap.md#enhancement-083).
+[H084 WebAssembly](llm-harness-roadmap.md#enhancement-084) is an accepted
+experimental work package with its own adoption gate, not a shipped third tier.
+Existing manifests and implementations require qualification; F01/F02/F14
+remain open lifecycle/authentication/UI findings. Extend shared contracts
+without hardcoded plugin identities, and route effects through the outbox.
+
 ## 1. What a plugin is
 
 > _"Every extension is a plugin."_ — Architecture principle #6.
 
-A plugin is a ZIP bundle the operator uploads to a running execlaw control plane. It declares (via TOML manifest) a set of capabilities the host should mount: agent-callable tools, sidecar containers, admin/webhook HTTP routes, identity providers, OAuth client metadata, skills, alert sources, transport bindings, UI panels. The host registers everything the manifest declares atomically at install time and unwires it atomically at uninstall. **No host code change is required to add, upgrade, or remove a plugin's manifest-declared capabilities** — that's the architectural contract. Host changes are still required when changing shared behavior such as transport routing, event projection, or policy semantics.
+A plugin is a ZIP bundle the operator uploads to a running execlaw control plane. It declares (via TOML manifest) a set of capabilities the host should mount: agent-callable tools, sidecar containers, admin/webhook HTTP routes, identity providers, OAuth client metadata, skills, alert sources, transport bindings, UI panels. The host registers and unwires those surfaces during lifecycle operations; atomic filesystem/registry/runtime upgrades and rollback remain H027 work (F02). **No host code change is required to add, upgrade, or remove a plugin's manifest-declared capabilities** — that's the architectural contract. Host changes are still required when changing shared behavior such as transport routing, event projection, or policy semantics.
 
 A plugin's runtime behaviour is one of two tiers (`crates/plugin-sdk/src/manifest.rs:535-591`):
 
@@ -82,7 +99,7 @@ Every plugin ships with `plugin.toml`. The full schema lives in `crates/plugin-s
 | -------------- | ------ | -------- | ------------------------------------------------------------------------- |
 | `id`           | string | yes      | Lowercase `[a-z0-9-_]+`. Globally unique. Becomes the URL slug.           |
 | `name`         | string | yes      | Display name in the SPA.                                                  |
-| `version`      | string | yes      | SemVer. Used by `if_existing=upgrade` install path.                       |
+| `version`      | string | yes      | Version string used by `if_existing=upgrade`; SemVer/path validation hardening remains H027 (F02). |
 | `description`  | string | no       | One-paragraph blurb, shown in the plugin list.                            |
 | `author`       | string | no       | Display only.                                                             |
 | `homepage`     | url    | no       | Link in the plugin list.                                                  |
@@ -283,6 +300,10 @@ Public surface is registered in `crates/script/src/primitives.rs`. Grouped by pu
 **Routing**
 - `host_route_inbound(inbound_map)` — synchronous: blocks until host runs the agent + dispatch; returns outcome string. Use only from background tasks (WS handlers).
 - `host_route_inbound_spawn(inbound_map)` — fire-and-forget. Use from webhook handlers where upstream HTTP timeouts matter (wuzapi's 30 s, etc.).
+  Supply the upstream's stable `source_event_id` in `inbound_map` whenever it
+  exists. The host uses `(agent_id, channel, source_event_id)` to deduplicate
+  specialist mailbox admission and retain draft/source lineage. A missing ID
+  remains compatible but cannot give the same retry guarantee.
 
 **JSON / data**
 - `parse_json(s)` / `to_json_string(value)` / `json_path(value, path)` / `base64_encode` / `base64_decode`
@@ -656,10 +677,13 @@ When the operator navigates to `/settings/plugins/<your-id>` the host:
    override** the chrome — every plugin gets the same lifecycle UI
    so an operator can always reach Uninstall, even if your panel
    crashes.
-2. Authenticated-fetches `GET /api/admin/plugins/<id>/ui/panel.js`
-   from your staged ZIP and turns it into a Blob URL.
-3. Dynamic `import()`s the Blob URL.
-4. Calls your default export with one prop:
+2. Authenticated-fetches the manifest-declared panel entry from the
+   plugin stage. Only that entry and manifest-listed sibling assets are
+   served.
+3. Places the bundle in an opaque-origin iframe with `sandbox="allow-scripts"`.
+   The frame has no parent DOM, local storage, cookies, or direct network RPC.
+4. Bundles a private React + ReactDOM runtime and calls your default export
+   with one prop:
 
    ```ts
    interface PluginPanelProps {
@@ -668,9 +692,9 @@ When the operator navigates to `/settings/plugins/<your-id>` the host:
    }
    ```
 
-5. Renders the returned React element inside a `PluginErrorBoundary`
-   so a render-time throw from your panel can't take down the host's
-   Danger Zone.
+5. The parent broker accepts only nonce- and source-checked messages that
+   match this panel's manifest-declared RPC capabilities. A frame render
+   error does not affect the host-owned Danger Zone.
 
 ### 11.2 Skeleton
 
@@ -678,11 +702,8 @@ When the operator navigates to `/settings/plugins/<your-id>` the host:
 // plugins/my-plugin/ui/panel.tsx
 import type { PluginPanelComponent, PluginPanelProps } from "@execlaw/plugin-ui";
 
-// React comes from the host bridge — DO NOT `import React from "react"`.
-// You'd ship a duplicate React copy and trigger the "Invalid hook
-// call" crash. The build's classic JSX transform compiles `<div>` to
-// `React.createElement('div', ...)` against this module-scope const.
-const React = globalThis.execlawHost!.React;
+// React is bundled into the panel's private frame runtime.
+import * as React from "react";
 const { useCallback, useEffect, useState } = React;
 
 const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
@@ -761,28 +782,31 @@ bridge types. To wire it into your plugin, drop a tiny
 
 ### 11.4 The bridge API
 
-Everything your panel can reach from the host is on `props.bridge`
-(also available as `globalThis.execlawHost`, but use the prop —
-testable, makes the dependency explicit). Full TypeScript contract
+The panel's RPC bridge is on `props.bridge`. It is frame-local; the panel receives no operator bearer credential and cannot issue arbitrary host requests. Full TypeScript contract
 lives in `web/src/plugins/types.ts`:
 
 | Field                            | What it is                                                                                                                                            |
 | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bridge.React`                   | The host's React instance. Use this for hooks (`useState`, `useEffect`, `useCallback`, `useRef`, etc.).                                              |
-| `bridge.ReactDOM`                | The host's ReactDOM (portals, `flushSync`).                                                                                                          |
-| `bridge.getAccessToken()`        | Sync: returns the operator's JWT or `null` if signed out. Already threaded into `fetchJson`; only call directly if you need to construct an `<img src>` with the token in a query string. |
-| `bridge.fetchJson(method, path, body?)` | Authenticated JSON helper. Throws on non-2xx with the response body in `.message`. The endpoint URL is whatever your plugin's `[[admin_routes]]` declared. |
+| `bridge.React`                   | The panel bundle's private React instance for hooks and elements.                                              |
+| `bridge.ReactDOM`                | The panel bundle's private ReactDOM client runtime.                                                                                                          |
+| `bridge.fetchJson(method, path, body?)` | Manifest-scoped RPC. The parent adds its credential after checking method/path against declared panel capabilities. |
 | `bridge.usePoll(fetcher, intervalMs)` | Convenience hook: poll a fetcher on an interval while the panel is mounted. Returns `{ value, error }`.                                  |
 | `bridge.components.ErrorBanner`  | Dismissable red banner. Props: `{ message, onDismiss, className? }`.                                                                                 |
 | `bridge.components.SidecarStatusBlock` | Health chip for sidecar-backed transport plugins. See Signal/WhatsApp panels for use.                                                          |
 | `bridge.components.Button`       | Bootstrap-styled button. Variants: `primary`, `secondary`, `danger`, `outline-primary`, `outline-secondary`, `outline-danger`. Sizes: `sm`, `lg`.       |
 
-If you need a UI component the bridge doesn't expose
-(`<Form>`, `<Spinner>`, `<Modal>`, etc.), **inline a plain HTML +
-Bootstrap-classes equivalent in your panel**. Don't `import` from
-`react-bootstrap` directly — esbuild's external rule will leave the
-import in the output and the dynamic loader will fail with a clear
-"cannot resolve module" error. Examples of inlined equivalents:
+Declare `rpc_capabilities` on `[[ui_panels]]` for optional services. Available
+scopes are `plugin_admin_routes` (only this plugin's declared
+`[[admin_routes]]`), `own_plugin_settings`, `own_sidecar_status`,
+`controller_identifiers`, and `own_oauth_accounts` (only accounts in this
+plugin manifest). The parent broker checks frame source, a fresh nonce,
+method, path, plugin id, and account name before attaching its credential.
+Panels cannot use `fetch` or load remote scripts; keep entry bundles
+self-contained and inline or bundle required assets.
+
+If you need a UI component the bridge does not expose (`<Form>`, `<Spinner>`,
+`<Modal>`, etc.), inline a plain HTML and Bootstrap-classes equivalent. This
+keeps each panel bundle small and reduces its dependency surface.
 
 ```tsx
 {/* Spinner — replaces react-bootstrap's Spinner */}
@@ -900,14 +924,7 @@ ship tests inside your plugin ZIP.
 
 ### 11.9 Common pitfalls
 
-- **Forgetting the `const React = globalThis.execlawHost!.React`** at
-  module top. JSX expands to `React.createElement(...)` which expects
-  a `React` identifier in scope; without it, you'll see a runtime
-  `ReferenceError`.
-- **Importing React** to use `useState` etc. You'd ship duplicate
-  React + cause "Invalid hook call" crashes. Always destructure
-  from the bridge: `const { useState } = bridge.React;` or
-  `const { useState } = React;` if you already have the module-scope const.
+- **Forgetting the React import**. JSX expands to `React.createElement(...)`; import React from `react`, which the build bundles in the panel frame.
 - **Importing from `web/src/...` or `../../web`**. Plugin code must be
   fully self-contained. Inline any helper you need or move it into
   `plugins/<id>/ui/` as a sibling file (esbuild will bundle siblings).

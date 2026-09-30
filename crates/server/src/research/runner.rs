@@ -91,9 +91,9 @@ pub struct JobRunCtx {
     /// registered transport bound to the conversation.
     pub host_transports: Option<crate::transport_registry::HostTransportRegistry>,
     /// Plugin host. Paired with `host_transports` so the
-    /// synthesize-phase auto-bridge can dispatch
-    /// `<channel>.send_with_attachments` directly into the
-    /// channel's plugin. None disables the auto-bridge (web-only
+    /// synthesize-phase auto-bridge can enqueue
+    /// `<channel>.send_with_attachments` through the durable relay.
+    /// None disables the auto-bridge (web-only
     /// research run).
     pub plugin_host: Option<execlaw_plugin_host::PluginHost>,
 }
@@ -519,8 +519,8 @@ pub struct PhaseDeps {
     /// boot, no edits here. `None` skips the bridge step.
     pub host_transports: Option<crate::transport_registry::HostTransportRegistry>,
     /// Plugin host. Required alongside `host_transports` for the
-    /// synthesize-phase auto-bridge to dispatch
-    /// `<channel>.send_with_attachments` into the channel's plugin.
+    /// synthesize-phase auto-bridge to enqueue
+    /// `<channel>.send_with_attachments` through the durable relay.
     /// `None` disables the bridge.
     pub plugin_host: Option<execlaw_plugin_host::PluginHost>,
 }
@@ -811,10 +811,10 @@ pub async fn run_synthesize_phase(
             registry,
             plugin_host_ref,
             conv_id,
+            job_id.as_str(),
             outcome.attachment_id.as_str(),
             query,
-        )
-        .await;
+        );
     }
 
     // 2026-05-04 (rev 9): the separate Attachment card emit is
@@ -839,7 +839,7 @@ pub async fn run_synthesize_phase(
     Ok(())
 }
 
-/// Best-effort dispatch of the completed research-report PDF + a
+/// Best-effort queueing of the completed research-report PDF + a
 /// one-line summary back through the conversation's originating
 /// transport. Channel-agnostic — walks the registry for any
 /// transport that has a factory for one of the conversation's
@@ -849,11 +849,12 @@ pub async fn run_synthesize_phase(
 /// marked Complete, the PDF is in the workspace, and the SPA's
 /// download chip still works. The bridge is a UX nicety, not a
 /// correctness step.
-async fn bridge_research_pdf_to_originating_transport(
+fn bridge_research_pdf_to_originating_transport(
     db: &Database,
     registry: &crate::transport_registry::HostTransportRegistry,
     plugin_host: &execlaw_plugin_host::PluginHost,
     conversation_id: &execlaw_core::ids::ConversationId,
+    job_id: &str,
     attachment_id: &str,
     query: &str,
 ) {
@@ -887,33 +888,77 @@ async fn bridge_research_pdf_to_originating_transport(
         truncate_for_error(query, 240)
     );
     let tool_name = format!("{}.send_with_attachments", resolved.channel);
-    let args = serde_json::json!({
-        "to": resolved.foreign_id,
-        "text": summary,
-        "attachments": [attachment_id],
-    });
-    match plugin_host
-        .call_tool(&tool_name, args, &["*"], Some("Controller"))
-        .await
-    {
+    let Some(tool) = plugin_host.registry().tool(&tool_name) else {
+        tracing::warn!(
+            target: "research::bridge",
+            conversation_id = %conversation_id.as_str(),
+            channel = %resolved.channel,
+            "transport has no registered send_with_attachments tool; report remains available in the SPA",
+        );
+        return;
+    };
+    if tool.plugin_id != resolved.plugin_id {
+        tracing::warn!(
+            target: "research::bridge",
+            conversation_id = %conversation_id.as_str(),
+            channel = %resolved.channel,
+            "attachment send tool belongs to a different plugin than the registered transport",
+        );
+        return;
+    }
+    let source_seq = match execlaw_core::EventLog::new(db).last_seq(conversation_id) {
+        Ok(seq) if seq.0 > 0 => seq.0,
         Ok(_) => {
+            tracing::warn!(
+                target: "research::bridge",
+                conversation_id = %conversation_id.as_str(),
+                job_id,
+                "research attachment has no durable event source",
+            );
+            return;
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "research::bridge",
+                conversation_id = %conversation_id.as_str(),
+                job_id,
+                error = %error,
+                "could not read source event for research attachment",
+            );
+            return;
+        }
+    };
+    let attachment_ids = vec![attachment_id.to_owned()];
+    let task_scope = format!("research-job:{job_id}");
+    match crate::transport_outbox::enqueue_task_attachments(
+        db,
+        conversation_id,
+        source_seq,
+        task_scope.as_bytes(),
+        &resolved.channel,
+        &resolved.foreign_id,
+        &summary,
+        &attachment_ids,
+    ) {
+        Ok((outbox_id, created)) => {
             tracing::info!(
                 target: "research::bridge",
                 conversation_id = %conversation_id.as_str(),
                 channel = %resolved.channel,
-                recipient = %resolved.foreign_id,
                 attachment_id = %attachment_id,
-                "auto-dispatched research PDF via originating transport",
+                outbox_id,
+                created,
+                "queued research PDF for delivery through the durable transport relay",
             );
         }
-        Err(e) => {
+        Err(error) => {
             tracing::warn!(
                 target: "research::bridge",
                 conversation_id = %conversation_id.as_str(),
                 channel = %resolved.channel,
-                recipient = %resolved.foreign_id,
-                error = %e,
-                "research PDF transport dispatch failed; SPA download chip remains the only deliverable",
+                job_id,
+                error = %error,
+                "research PDF transport effect could not be persisted; SPA download remains available",
             );
         }
     }
@@ -939,6 +984,7 @@ async fn call_planner(
         // for Qwen3); leave None here so the adapter's choice wins.
         chat_template_kwargs: None,
         tool_choice: None,
+        response_format: None,
         guided_decoding_backend: None,
     };
     let adapter =
@@ -982,6 +1028,7 @@ async fn call_planner(
             tools: None,
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
         let retry = adapter

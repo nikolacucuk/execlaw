@@ -5,6 +5,7 @@
 //! expected.
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::fmt;
 use uuid::Uuid;
 
@@ -141,6 +142,19 @@ impl IdempotencyKey {
     /// Build the canonical framework-minted form.
     pub fn mint(conversation_id: &ConversationId, turn_seq: TurnSeq, ordinal: u32) -> Self {
         Self(format!("{}:{}:{}", conversation_id.0, turn_seq.0, ordinal))
+    }
+
+    /// Build a framework-owned key for work whose stable identity is a
+    /// persisted source scope rather than a chat turn, such as an agent
+    /// mailbox batch. The opaque digest keeps raw message ids out of logs.
+    pub fn mint_scoped(conversation_id: &ConversationId, scope: &[u8], ordinal: u32) -> Self {
+        let digest = sha2::Sha256::digest(scope);
+        Self(format!(
+            "{}:scope:{}:{}",
+            conversation_id.0,
+            hex::encode(digest),
+            ordinal
+        ))
     }
 
     /// Wrap a pre-existing string. Normally only used by tests and by

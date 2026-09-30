@@ -54,6 +54,19 @@ pub fn sweep_once(
     let mut conversations_deleted = 0usize;
 
     db.with_conn(|c| {
+        // The FTS projection is derived from events and has no foreign-key
+        // cascade because FTS5 virtual tables cannot provide one.
+        c.execute(
+            "DELETE FROM state_conversation_event_search \
+             WHERE CAST(committed_at AS INTEGER) < ?1 \
+               AND conversation_id IN ( \
+                   SELECT conversation_id FROM state_conversations \
+                   WHERE COALESCE(is_pinned, 0) = 0 \
+                     AND COALESCE(is_ephemeral, 0) = 0 \
+               )",
+            params![cutoff],
+        )?;
+
         // 1. Delete events past the cutoff in non-pinned, non-ephemeral
         //    conversations.
         let n_events = c.execute(
@@ -272,11 +285,35 @@ mod tests {
         seed_event(&db, &cid, 1, 100); // old
         seed_event(&db, &cid, 2, 200); // old
         seed_event(&db, &cid, 3, 1500); // recent
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO state_conversation_event_search \
+                 (conversation_id, seq, source, committed_at, text) \
+                 VALUES (?1, 1, 'web', 100, 'expiredneedle'), \
+                        (?1, 2, 'web', 200, 'oldneedle'), \
+                        (?1, 3, 'web', 1500, 'recentneedle')",
+                params![cid.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
         // now=2000, retention=500 → cutoff=1500. 100 + 200 dropped;
         // 1500 stays (NOT strictly less).
         let r = sweep_once(&db, 2000, 500).unwrap();
         assert_eq!(r.events_deleted, 2);
         assert_eq!(count_events(&db), 1);
+        let indexed: i64 = db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM state_conversation_event_search \
+                     WHERE state_conversation_event_search MATCH 'expiredneedle'",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)
+            })
+            .unwrap();
+        assert_eq!(indexed, 0);
     }
 
     #[test]

@@ -15,11 +15,26 @@ hardware.
 
 ## Documentation
 
+The accepted implementation plan covers **all 130 enhancements (H001-H130)**.
+Use the [delivery ledger](docs/implementation-plan.md) for status, ownership,
+sequencing, and evidence, the [roadmap](docs/llm-harness-roadmap.md) for scope
+and acceptance criteria, and the [immediate queue](docs/remaining-improvements-todo.md)
+for current release blockers. Planned features are not claims of shipped
+support. The roadmap's F01-F19 findings remain open until verified remediation;
+in particular, production encryption and safe automation execution require
+the recorded release checks.
+
 | Doc | What it covers |
 |---|---|
+| [`docs/README.md`](docs/README.md) | Documentation map and the relationship between requirements, delivery tracking, and implementation references. |
+| [`docs/implementation-plan.md`](docs/implementation-plan.md) | Complete H001-H130 delivery ledger, workstreams, status rules, owners, evidence, and finding-to-work mapping. |
+| [`docs/remaining-improvements-todo.md`](docs/remaining-improvements-todo.md) | Immediate release-blocking work and unresolved validation; subordinate to the complete ledger. |
+| [`docs/h022-h025-qualification.md`](docs/h022-h025-qualification.md) | Local-model troubleshooting and H022-H025 acceptance evidence, process-kill safety, and remaining live/release gates. |
 | [`docs/architecture.md`](docs/architecture.md) | System topology, design principles, FSM, data model, recovery, observability — the **what**. |
 | [`docs/agent-model.md`](docs/agent-model.md) | TurnExecutor, memory layers, reflection loop, planner/executor split — the **how** of one turn. |
 | [`docs/memory-roadmap.md`](docs/memory-roadmap.md) | Governed memory assets, task/agent loadouts, hybrid retrieval, local Wiki, and CodeGraph implementation checklist. |
+| [`docs/llm-harness-roadmap.md`](docs/llm-harness-roadmap.md) | Accepted requirements and acceptance criteria for all 130 enhancements, competitive review, and F01-F19 findings. |
+| [`docs/adversarial-evaluations.md`](docs/adversarial-evaluations.md) | Offline deterministic attack-focused regression suite and run command. |
 | [`docs/plugins.md`](docs/plugins.md) | Plugin manifest schema, runtime tiers, sidecar model, Rhai primitives, and a step-by-step guide for writing a custom plugin. |
 | [`docs/operator-decision-rubric.md`](docs/operator-decision-rubric.md) | Structured rubric for placing features in plugins vs MCP vs host core, plus tool-chaining and learning-loop guidance. |
 | [`docs/hermes-porting-todo.md`](docs/hermes-porting-todo.md) | Historical completion checklist for Hermes-originated capabilities ported into execlaw. |
@@ -160,6 +175,13 @@ ZIP through **Settings → Plugins** or `POST /api/admin/plugins/install`.
 
 ## Optional Nexus chat appearance
 
+The [Nexus visual roadmap](docs/llm-harness-roadmap.md#nexus-visual-roadmap)
+records NX01-NX30 proposals for clearer multi-source messages, relationship
+views, responsive controls, accessibility, and safe draft review. The
+[Nexus delivery ledger](docs/implementation-plan.md#nexus-visual-extension)
+tracks them separately from H001-H130. These are planned changes, not a
+shipped redesign; the current implementation is described below.
+
 Choose **Settings -> General -> Chat appearance -> Nexus** for a source-aware
 timeline: colored source markers, explicit execlaw response labels, event
 sequence numbers, and a source selector with previous/next navigation.
@@ -192,7 +214,10 @@ proximity-based reply context, not an operator-confirmed relationship. Search
 and branch counts cover this conversation, not other conversations or archived
 transport copies.
 
-**Classic** remains the default and restores the original layout immediately.
+**Classic** remains the default and selects the original layout. The Nexus
+review reproduced a collapse-state bug (NXF01): switching to Classic can leave
+messages hidden if a Nexus branch/group is still collapsed. NX01 tracks full
+restoration; the visual switch is not a data-deletion or privacy control.
 The appearance preference is saved per browser and synchronized between tabs;
 it does not change server configuration, trust policy, or transport delivery.
 Existing tool visibility, streaming, attachments, and reply review controls
@@ -338,6 +363,10 @@ can pin each backend per-card via Settings → Runners.
   keyring is unavailable; the file fallback is also the durable sink
   on Windows where Credential Manager has documented drift issues
   (see [`docs/security.md`](docs/security.md) §5).
+  Event signing uses `~/.execlaw/event-hmac.key` so SQLCipher key rotation
+  preserves existing HMAC chains. See
+  [`docs/key-rotation-drill.md`](docs/key-rotation-drill.md) for backup,
+  rotation, and secret-incident recovery.
 
 ### Build-from-source dependencies
 
@@ -556,6 +585,25 @@ claims due work, processes durable mailbox messages, persists checkpoints
 and outputs, retries failures with backoff, and resumes scheduling after a
 restart. The page also provides pause/resume, controller-to-agent messages,
 and per-agent run history with failure details.
+Definitions are versioned per queued event. Event triggers can filter by
+channel, stable group ID, group title, and keywords. Optional five-field cron
+schedules use an IANA timezone, overlap and catch-up policy, and quiet hours.
+`read` and `search` capabilities query only the originating transport
+recipient's archived messages. `/agents` provides an effect-free trigger
+preview, optional explicitly requested local-model preview, and a reply-draft
+inbox with editing, rejection, and Controller takeover/hand-back controls.
+For transport-triggered agents, each inbound message gets its own run. An
+applicable review is also posted in the originating Chats thread under the
+agent definition name. The Controller reviews the report there; sending uses
+only its Suggested reply section and the inbound channel's recipient. Empty
+model output fails the run and keeps the mailbox item pending. A matching
+event-only specialist handles the inbound instead of also running the normal
+conversation agent.
+Drafts carry a source event, immutable definition version, recipient snapshot,
+and revision. A newer inbound for that recipient marks the proposal stale;
+the Controller's send is bound to the exact pending revision. Automatic sends
+are fenced by recipient ownership at outbox admission and checked again by
+the relay before dispatch.
 
 The controller API exposes the same lifecycle at `/api/admin/agents`:
 `POST` creates a definition, `GET` lists or reads definitions, `PUT` updates,
@@ -653,6 +701,18 @@ unsigned local plugin ZIPs; it is Controller-gated and should not be used as
 a production deployment default. Docker is required for runner containers and
 plugin sidecars, but the control plane, SPA, and sidecar-free plugins such as
 Discord can start without it.
+
+For a model hosted on another machine, set the Standard external backend to
+that machine's reachable URL and approve its IP for local inference. For
+example, a TrueNAS Ollama endpoint at `192.168.1.10:30068` uses
+`http://192.168.1.10:30068/v1` and a `192.168.1.10/32` approval.
+`host.docker.internal` resolves to the Docker host of the machine running
+execlaw; in this native Windows setup it points back to the laptop, not to
+TrueNAS. Check `<endpoint>/models` and qualify the exact model after changing
+the backend. For the 2026-09-30 H022-H025 qualification and recovery steps,
+see the [qualification runbook](docs/h022-h025-qualification.md). All four
+enhancements remain Partial until their real-task, cross-path, installed
+release, and live endpoint gates are recorded in the ledger.
 
 To stop this local deployment, press `Ctrl+C` in both terminals. If a stale
 process remains, use:

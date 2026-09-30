@@ -171,6 +171,171 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "nexus_organization",
         sql: include_str!("../migrations/0029_nexus_organization.sql"),
     },
+    Migration {
+        id: 30,
+        name: "backend_readiness",
+        sql: include_str!("../migrations/0030_backend_readiness.sql"),
+    },
+    Migration {
+        id: 31,
+        name: "chain_approval_effect_hash",
+        sql: include_str!("../migrations/0031_chain_approval_effect_hash.sql"),
+    },
+    Migration {
+        id: 32,
+        name: "conversation_event_search",
+        sql: include_str!("../migrations/0032_conversation_event_search.sql"),
+    },
+    Migration {
+        id: 33,
+        name: "inference_attempts",
+        sql: include_str!("../migrations/0033_inference_attempts.sql"),
+    },
+    Migration {
+        id: 34,
+        name: "run_input_manifest",
+        sql: include_str!("../migrations/0034_run_input_manifest.sql"),
+    },
+    Migration {
+        id: 35,
+        name: "search_index_watermarks",
+        sql: include_str!("../migrations/0035_search_index_watermarks.sql"),
+    },
+    Migration {
+        id: 36,
+        name: "skill_eval_runs",
+        sql: include_str!("../migrations/0036_skill_eval_runs.sql"),
+    },
+    Migration {
+        id: 37,
+        name: "skill_eval_comparison_identity",
+        sql: include_str!("../migrations/0037_skill_eval_comparison_identity.sql"),
+    },
+    Migration {
+        id: 38,
+        name: "outbox_delivery_timeline",
+        sql: include_str!("../migrations/0038_outbox_delivery_timeline.sql"),
+    },
+    Migration {
+        id: 39,
+        name: "automation_dispatch_leases",
+        sql: include_str!("../migrations/0039_automation_dispatch_leases.sql"),
+    },
+    Migration {
+        id: 40,
+        name: "run_completion_contracts",
+        sql: include_str!("../migrations/0040_run_completion_contracts.sql"),
+    },
+    Migration {
+        id: 41,
+        name: "chat_request_idempotency",
+        sql: include_str!("../migrations/0041_chat_request_idempotency.sql"),
+    },
+    Migration {
+        id: 42,
+        name: "harness_qualification_and_trace",
+        sql: include_str!("../migrations/0042_harness_qualification_and_trace.sql"),
+    },
+    Migration {
+        id: 43,
+        name: "compaction_receipt_invalidation",
+        sql: include_str!("../migrations/0043_compaction_receipt_invalidation.sql"),
+    },
+    Migration {
+        id: 44,
+        name: "automation_run_recovery",
+        sql: include_str!("../migrations/0044_automation_run_recovery.sql"),
+    },
+    Migration {
+        id: 45,
+        name: "scoped_tool_result_artifacts",
+        sql: include_str!("../migrations/0045_scoped_tool_result_artifacts.sql"),
+    },
+    Migration {
+        id: 46,
+        name: "memory_assertion_reviews",
+        sql: include_str!("../migrations/0046_memory_assertion_reviews.sql"),
+    },
+    Migration {
+        id: 47,
+        name: "durable_child_task_contracts",
+        sql: include_str!("../migrations/0047_durable_child_task_contracts.sql"),
+    },
+    Migration {
+        id: 48,
+        name: "durable_turn_controls",
+        sql: include_str!("../migrations/0048_durable_turn_controls.sql"),
+    },
+    Migration {
+        id: 49,
+        name: "turn_control_idempotency",
+        sql: include_str!("../migrations/0049_turn_control_idempotency.sql"),
+    },
+    Migration {
+        id: 50,
+        name: "workspace_checkpoints",
+        sql: include_str!("../migrations/0050_workspace_checkpoints.sql"),
+    },
+    Migration {
+        id: 51,
+        name: "run_workspace_bindings",
+        sql: include_str!("../migrations/0051_run_workspace_bindings.sql"),
+    },
+    Migration {
+        id: 52,
+        name: "workspace_apply_receipts",
+        sql: include_str!("../migrations/0052_workspace_apply_receipts.sql"),
+    },
+    Migration {
+        id: 53,
+        name: "privacy_deletion_jobs",
+        sql: include_str!("../migrations/0053_privacy_deletion_jobs.sql"),
+    },
+    Migration {
+        id: 54,
+        name: "memory_asset_deletion_tombstones",
+        sql: include_str!("../migrations/0054_memory_asset_deletion_tombstones.sql"),
+    },
+    Migration {
+        id: 55,
+        name: "capability_scoped_endpoint_approvals",
+        sql: include_str!("../migrations/0055_capability_scoped_endpoint_approvals.sql"),
+    },
+    Migration {
+        id: 56,
+        name: "outbox_unknown_outcome_resolution",
+        sql: include_str!("../migrations/0056_outbox_unknown_outcome_resolution.sql"),
+    },
+    Migration {
+        id: 57,
+        name: "turn_asset_loadout_receipts",
+        sql: include_str!("../migrations/0057_turn_asset_loadout_receipts.sql"),
+    },
+    Migration {
+        id: 58,
+        name: "hierarchical_execution_budgets",
+        sql: include_str!("../migrations/0058_hierarchical_execution_budgets.sql"),
+    },
+    Migration {
+        id: 59,
+        name: "agent_run_completion_contracts",
+        sql: include_str!("../migrations/0059_agent_run_completion_contracts.sql"),
+    },
+    Migration {
+        id: 60,
+        name: "routine_completion_contracts",
+        sql: include_str!("../migrations/0060_routine_completion_contracts.sql"),
+    },
+    Migration {
+        id: 61,
+        name: "agent_workflow_contracts",
+        sql: include_str!("../migrations/0061_agent_workflow_contracts.sql"),
+    },
+    Migration {
+        id: 62,
+        name: "agent_schedules",
+        sql: include_str!("../migrations/0062_agent_schedules.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

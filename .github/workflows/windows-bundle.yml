@@ -128,6 +128,11 @@ jobs:
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
       - name: Prepare offline plugin provenance
         shell: pwsh
         run: python scripts/prepare-release-provenance.py (Get-ChildItem dist -Filter '*.zip' | ForEach-Object FullName)
@@ -138,6 +143,10 @@ jobs:
           EXECLAW_PREPACKAGED_PLUGINS: "1"
           EXECLAW_REUSE_NODE_MODULES: "1"
         run: ./scripts/build-windows.ps1
+
+      - name: Smoke-test release SQLCipher binary
+        shell: pwsh
+        run: target/x86_64-pc-windows-msvc/release/execlaw.exe doctor
 
       - name: Locate bundle outputs
         id: outputs
@@ -157,11 +166,80 @@ jobs:
           }
           "exe=$($exe.FullName)" >> $env:GITHUB_OUTPUT
 
+      - name: Sign release artifact and prepare offline provenance
+        shell: pwsh
+        env:
+          ARTIFACT: ${{ steps.outputs.outputs.exe }}
+        run: python scripts/prepare-release-provenance.py --artifact-type desktop_release "$env:ARTIFACT"
+
+      - name: Download previous installer for rollback bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: previous
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $previous = & python scripts/fetch-previous-release-artifact.py `
+            --pattern 'execlaw_*-setup.exe' `
+            --output-dir (Join-Path $env:RUNNER_TEMP 'execlaw-previous')
+          if ($LASTEXITCODE -ne 0) { throw "previous installer lookup failed ($LASTEXITCODE)" }
+          "artifact=$previous" >> $env:GITHUB_OUTPUT
+
+      - name: Package offline update bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        env:
+          ARTIFACT: ${{ steps.outputs.outputs.exe }}
+          ROLLBACK_ARTIFACT: ${{ steps.previous.outputs.artifact }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          $arguments = @(
+            '--artifact', $env:ARTIFACT,
+            '--platform', 'windows-x64',
+            '--version', $env:RELEASE_VERSION,
+            '--output', "dist/execlaw-offline-update-windows-x64-$env:RELEASE_VERSION.zip"
+          )
+          if ($env:ROLLBACK_ARTIFACT) { $arguments += @('--rollback-artifact', $env:ROLLBACK_ARTIFACT) }
+          & python scripts/package-offline-update.py @arguments
+          if ($LASTEXITCODE -ne 0) { throw "offline update packaging failed ($LASTEXITCODE)" }
+          & python scripts/prepare-release-provenance.py --artifact-type desktop_release `
+            "dist/execlaw-offline-update-windows-x64-$env:RELEASE_VERSION.zip"
+          if ($LASTEXITCODE -ne 0) { throw "offline bundle signing failed ($LASTEXITCODE)" }
+
+      - name: Install and smoke-test packaged installer
+        shell: pwsh
+        env:
+          INSTALLER: ${{ steps.outputs.outputs.exe }}
+        run: |
+          $installRoot = Join-Path $env:RUNNER_TEMP 'execlaw-installed'
+          $arguments = "/S /D=$installRoot"
+          $process = Start-Process -FilePath $env:INSTALLER -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "NSIS installer failed ($($process.ExitCode))" }
+          $binary = Join-Path $installRoot 'execlaw.exe'
+          if (-not (Test-Path -LiteralPath $binary)) { throw "installed execlaw binary is missing: $binary" }
+          & $binary doctor
+          if ($LASTEXITCODE -ne 0) { throw "installed execlaw doctor failed ($LASTEXITCODE)" }
+
       - name: Upload installer
         uses: actions/upload-artifact@v4
         with:
           name: execlaw-windows-x64
-          path: ${{ steps.outputs.outputs.exe }}
+          path: |
+            ${{ steps.outputs.outputs.exe }}
+            ${{ steps.outputs.outputs.exe }}.sigstore.json
+            ${{ steps.outputs.outputs.exe }}.provenance.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload offline update bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: execlaw-offline-update-windows-x64
+          path: |
+            dist/execlaw-offline-update-windows-x64-${{ github.ref_name }}.zip
+            dist/execlaw-offline-update-windows-x64-${{ github.ref_name }}.zip.sigstore.json
+            dist/execlaw-offline-update-windows-x64-${{ github.ref_name }}.zip.provenance.json
           if-no-files-found: error
           retention-days: 90
 
@@ -238,7 +316,12 @@ jobs:
           # release without overwriting the macOS-side notes.
           files: |
             ${{ steps.outputs.outputs.exe }}
+            ${{ steps.outputs.outputs.exe }}.sigstore.json
+            ${{ steps.outputs.outputs.exe }}.provenance.json
             ${{ steps.checksum.outputs.sha_file }}
+            dist/execlaw-offline-update-windows-x64-${{ github.ref_name }}.zip
+            dist/execlaw-offline-update-windows-x64-${{ github.ref_name }}.zip.sigstore.json
+            dist/execlaw-offline-update-windows-x64-${{ github.ref_name }}.zip.provenance.json
             dist/*.zip
             dist/*.zip.sha256
             dist/*.zip.spdx.json

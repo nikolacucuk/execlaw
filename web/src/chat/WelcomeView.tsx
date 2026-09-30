@@ -44,13 +44,14 @@ const SUGGESTIONS: ReadonlyArray<SuggestionDef> = [
     },
 ];
 
-import type { InlineAttachment, SkillListEntry } from "../api/endpoints";
+import type { InlineAttachment, RunCompletionContractDraft, SkillListEntry } from "../api/endpoints";
 
 interface Props {
     onSend: (
         text: string,
         attachments: InlineAttachment[],
         skillNames: string[],
+        completionContract?: RunCompletionContractDraft,
     ) => Promise<void> | void;
     /**
      * Phase 13.A — voice mic button surfaces here too so the

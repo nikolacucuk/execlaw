@@ -44,7 +44,7 @@ pub enum OauthError {
 /// Operator-supplied OAuth client credentials. The plugin's
 /// manifest declares the provider + scopes; the operator supplies
 /// the secrets.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OauthClient {
     pub plugin_id: String,
     pub account_name: String,
@@ -60,6 +60,22 @@ pub struct OauthClient {
     pub updated_at: i64,
 }
 
+impl std::fmt::Debug for OauthClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OauthClient")
+            .field("plugin_id", &self.plugin_id)
+            .field("account_name", &self.account_name)
+            .field("provider", &self.provider)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scopes_json", &self.scopes_json)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
 impl OauthClient {
     pub fn scopes(&self) -> Vec<String> {
         serde_json::from_str(&self.scopes_json).unwrap_or_default()
@@ -70,7 +86,7 @@ impl OauthClient {
 /// short-lived bearer the plugin actually uses; `refresh_token` is
 /// the long-lived secret the sweeper exchanges for fresh access
 /// tokens before they expire.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OauthTokens {
     pub plugin_id: String,
     pub account_name: String,
@@ -84,6 +100,25 @@ pub struct OauthTokens {
     pub account_email: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+impl std::fmt::Debug for OauthTokens {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OauthTokens")
+            .field("plugin_id", &self.plugin_id)
+            .field("account_name", &self.account_name)
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("token_expires_at", &self.token_expires_at)
+            .field("scopes_granted", &self.scopes_granted)
+            .field("account_email", &self.account_email)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 impl OauthTokens {
@@ -104,7 +139,7 @@ impl OauthTokens {
 /// Short-lived CSRF state used to bind the authorize redirect to
 /// the eventual callback. Looked up by random `state_token` blob;
 /// expired entries get GC'd by the sweeper.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct OauthPending {
     pub state_token: String,
     pub plugin_id: String,
@@ -112,6 +147,19 @@ pub struct OauthPending {
     pub redirect_to: Option<String>,
     pub created_at: i64,
     pub expires_at: i64,
+}
+
+impl std::fmt::Debug for OauthPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OauthPending")
+            .field("state_token", &"<redacted>")
+            .field("plugin_id", &self.plugin_id)
+            .field("account_name", &self.account_name)
+            .field("redirect_to", &self.redirect_to)
+            .field("created_at", &self.created_at)
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +566,43 @@ mod tests {
         assert_eq!(got.client_secret, "GOCSPX-rotated");
         assert_eq!(got.updated_at, 200);
         assert_eq!(got.created_at, 100);
+    }
+
+    #[test]
+    fn oauth_secret_debug_output_is_redacted() {
+        let mut client = sample_client();
+        client.client_secret = "incident-client-secret-marker".into();
+        let client_debug = format!("{client:?}");
+        assert!(client_debug.contains("<redacted>"));
+        assert!(!client_debug.contains("incident-client-secret-marker"));
+
+        let tokens = OauthTokens {
+            plugin_id: "plugin-google-contacts".into(),
+            account_name: "controller".into(),
+            access_token: "incident-access-token-marker".into(),
+            refresh_token: Some("incident-refresh-token-marker".into()),
+            token_expires_at: 200,
+            scopes_granted: "[]".into(),
+            account_email: None,
+            created_at: 100,
+            updated_at: 100,
+        };
+        let token_debug = format!("{tokens:?}");
+        assert!(token_debug.contains("<redacted>"));
+        assert!(!token_debug.contains("incident-access-token-marker"));
+        assert!(!token_debug.contains("incident-refresh-token-marker"));
+
+        let pending = OauthPending {
+            state_token: "incident-oauth-state-marker".into(),
+            plugin_id: "plugin-google-contacts".into(),
+            account_name: "controller".into(),
+            redirect_to: None,
+            created_at: 100,
+            expires_at: 200,
+        };
+        let pending_debug = format!("{pending:?}");
+        assert!(pending_debug.contains("<redacted>"));
+        assert!(!pending_debug.contains("incident-oauth-state-marker"));
     }
 
     #[test]

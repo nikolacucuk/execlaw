@@ -32,7 +32,9 @@ use crate::voice_session::OrderedAudioChunk;
 use execlaw_voice_pipeline::traits::{AudioChunk, SttClient, SttEvent, TtsClient};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 /// Codec name used for outbound TTS frames. Kokoro emits PCM16 LE @
@@ -52,9 +54,6 @@ pub struct VoiceSessionState {
     /// Sample rate of the inbound PCM. Set on the first chunk; if it
     /// disagrees with later chunks we log + keep the first value.
     pub inbound_sample_rate: u32,
-    /// Optional cancel handle the runtime fires on `interrupt`. The
-    /// real `KokoroClient` exposes one; mocks may not.
-    pub interrupt: Option<InterruptHandle>,
     /// Outbound seq for `VoiceAudioOutbound` events. Bumped per
     /// emitted chunk so the SPA can reorder if the WS reorders
     /// (broadcast::Sender shouldn't, but be defensive).
@@ -62,6 +61,16 @@ pub struct VoiceSessionState {
     /// Inbound seq we've already pushed into the STT — defensive
     /// dedup in case the registry re-emits.
     pub last_inbound_seq: Option<u32>,
+}
+
+struct RuntimeVoiceSession {
+    /// Client methods serialize within one session; the server-wide map lock
+    /// is held only long enough to find this Arc.
+    state: Mutex<VoiceSessionState>,
+    /// Interrupts can fire this without waiting for a slow STT/TTS operation.
+    interrupt: Option<InterruptHandle>,
+    next_turn_generation: AtomicU64,
+    active_turn_cancel: Mutex<Option<(u64, CancellationToken)>>,
 }
 
 /// A factory pair lets the runtime construct fresh clients per
@@ -74,7 +83,7 @@ pub type TtsFactory = Arc<dyn Fn() -> (Box<dyn TtsClient>, Option<InterruptHandl
 /// Per-server runtime.
 #[derive(Clone)]
 pub struct VoiceRuntime {
-    inner: Arc<Mutex<HashMap<String, VoiceSessionState>>>,
+    inner: Arc<Mutex<HashMap<String, Arc<RuntimeVoiceSession>>>>,
     events: EventBus,
     stt_factory: SttFactory,
     tts_factory: TtsFactory,
@@ -199,13 +208,15 @@ impl VoiceRuntime {
             // narration). The empty-final path is logged.
             let url = (whisper_url)().unwrap_or_default();
             let client = match stt_policy_db.as_ref() {
-                Some(db) => {
-                    crate::local_endpoint_policy::checked_client(db, "voice:stt", &url, |builder| {
-                        builder
-                    })
-                    .map(|(http, _)| WhisperClient::with_client(url.clone(), http))
-                    .unwrap_or_else(|_| WhisperClient::new(url))
-                }
+                Some(db) => crate::local_endpoint_policy::checked_client_for_scope(
+                    db,
+                    execlaw_core::local_endpoint_policy::EndpointApprovalScope::LocalInference,
+                    "voice:stt",
+                    &url,
+                    |builder| builder,
+                )
+                .map(|(http, _)| WhisperClient::with_client(url.clone(), http))
+                .unwrap_or_else(|_| WhisperClient::new(url)),
                 None => WhisperClient::new(url),
             };
             Box::new(client) as Box<dyn SttClient>
@@ -215,13 +226,15 @@ impl VoiceRuntime {
             let url = (kokoro_url)().unwrap_or_default();
             let voice = (voice_id)();
             let client = match tts_policy_db.as_ref() {
-                Some(db) => {
-                    crate::local_endpoint_policy::checked_client(db, "voice:tts", &url, |builder| {
-                        builder
-                    })
-                    .map(|(http, _)| KokoroClient::with_client(url.clone(), voice.clone(), http))
-                    .unwrap_or_else(|_| KokoroClient::new(url, voice))
-                }
+                Some(db) => crate::local_endpoint_policy::checked_client_for_scope(
+                    db,
+                    execlaw_core::local_endpoint_policy::EndpointApprovalScope::LocalInference,
+                    "voice:tts",
+                    &url,
+                    |builder| builder,
+                )
+                .map(|(http, _)| KokoroClient::with_client(url.clone(), voice.clone(), http))
+                .unwrap_or_else(|_| KokoroClient::new(url, voice)),
                 None => KokoroClient::new(url, voice),
             };
             let handle = client.interrupt_handle();
@@ -236,6 +249,42 @@ impl VoiceRuntime {
         self.inner.lock().await.len()
     }
 
+    async fn get_session(&self, session_id: &str) -> Option<Arc<RuntimeVoiceSession>> {
+        self.inner.lock().await.get(session_id).cloned()
+    }
+
+    async fn get_or_create_session(
+        &self,
+        session_id: &str,
+        sample_rate: u32,
+    ) -> Arc<RuntimeVoiceSession> {
+        if let Some(session) = self.get_session(session_id).await {
+            return session;
+        }
+        // Client construction can resolve endpoint policy, so do it outside
+        // the shared map lock. Concurrent first frames may construct a
+        // losing candidate, but only one state is installed.
+        let (tts, interrupt) = (self.tts_factory)();
+        let candidate = Arc::new(RuntimeVoiceSession {
+            state: Mutex::new(VoiceSessionState {
+                stt: (self.stt_factory)(),
+                tts,
+                inbound_sample_rate: sample_rate,
+                outbound_seq: 0,
+                last_inbound_seq: None,
+            }),
+            interrupt,
+            next_turn_generation: AtomicU64::new(0),
+            active_turn_cancel: Mutex::new(None),
+        });
+        self.inner
+            .lock()
+            .await
+            .entry(session_id.to_owned())
+            .or_insert(candidate)
+            .clone()
+    }
+
     /// Push ordered chunks into the matching session's STT. Creates
     /// the per-session state on first chunk (lazy — saves construction
     /// cost when a session never plays).
@@ -243,19 +292,11 @@ impl VoiceRuntime {
         if chunks.is_empty() {
             return;
         }
-        let mut sessions = self.inner.lock().await;
         for chunk in chunks {
-            let state = sessions.entry(chunk.session.clone()).or_insert_with(|| {
-                let (tts, interrupt) = (self.tts_factory)();
-                VoiceSessionState {
-                    stt: (self.stt_factory)(),
-                    tts,
-                    inbound_sample_rate: chunk.sample_rate,
-                    interrupt,
-                    outbound_seq: 0,
-                    last_inbound_seq: None,
-                }
-            });
+            let session = self
+                .get_or_create_session(&chunk.session, chunk.sample_rate)
+                .await;
+            let mut state = session.state.lock().await;
 
             // De-dup defensively. The registry shouldn't replay seqs,
             // but a paranoid check here means a registry bug can't
@@ -295,6 +336,9 @@ impl VoiceRuntime {
                 end_ms: duration_ms,
                 samples,
             };
+            // The map lock is never held while the STT implementation awaits.
+            // This keeps one slow session from blocking another session's
+            // interrupt or audio ingestion.
             state.stt.push(&audio).await;
         }
     }
@@ -309,33 +353,46 @@ impl VoiceRuntime {
     /// the agent's full text. Kept as a callback so the runtime
     /// stays free of chat-routing dependencies.
     ///
-    /// Locking discipline: the per-session lock is acquired only to
-    /// (a) flush+reset STT, (b) take a clone of the
-    /// `InterruptHandle` for cancellation race-checks, and (c) bump
-    /// `outbound_seq` per chunk + emit. The agent callback and
-    /// `tts.synthesize` run lock-free so other sessions' ingest +
-    /// barge-in proceed in parallel; a `voice_interrupt` for *this*
-    /// session can also acquire the lock during synthesize and bump
-    /// the InterruptHandle, which the runtime checks before
-    /// publishing each outbound chunk.
+    /// The global map mutex is held only while finding/inserting a session.
+    /// STT operations serialize on that session's mutex, while agent inference
+    /// and TTS synthesis run without either mutex. Other sessions can ingest
+    /// or interrupt while this session waits on local STT/TTS.
     pub async fn finalize_utterance<F, Fut>(&self, session_id: &str, agent_reply: F)
     where
         F: FnOnce(String) -> Fut + Send,
         Fut: std::future::Future<Output = String> + Send,
     {
-        // Flush STT under the lock; capture the cancel handle for
-        // mid-synthesize race detection.
+        self.finalize_utterance_cancellable(session_id, move |text, _cancel| agent_reply(text))
+            .await;
+    }
+
+    /// Finalize a voice turn with a cancellation token that barge-in fires
+    /// immediately. Callbacks that own inference/tools should also observe
+    /// the token so their internal work stops rather than only dropping the
+    /// eventual spoken response.
+    pub async fn finalize_utterance_cancellable<F, Fut>(&self, session_id: &str, agent_reply: F)
+    where
+        F: FnOnce(String, CancellationToken) -> Fut + Send,
+        Fut: std::future::Future<Output = String> + Send,
+    {
+        // The session state lock protects only this session. The shared map
+        // lock is released before network-backed STT flush/reset awaits.
         let final_text: String;
         let cancel_handle: Option<InterruptHandle>;
-        {
-            let mut sessions = self.inner.lock().await;
-            let Some(state) = sessions.get_mut(session_id) else {
+        let session = match self.get_session(session_id).await {
+            Some(session) => session,
+            None => {
                 debug!(
                     session = session_id,
                     "finalize_utterance for unknown session"
                 );
                 return;
-            };
+            }
+        };
+        cancel_handle = session.interrupt.clone();
+        let cancel_epoch_before = cancel_handle.as_ref().map(|h| h.epoch_value()).unwrap_or(0);
+        {
+            let mut state = session.state.lock().await;
             match state.stt.flush().await {
                 SttEvent::Final { text } => {
                     final_text = text;
@@ -346,7 +403,17 @@ impl VoiceRuntime {
                 }
             }
             state.stt.reset().await;
-            cancel_handle = state.interrupt.clone();
+        }
+
+        if cancel_handle
+            .as_ref()
+            .is_some_and(|handle| handle.epoch_value() != cancel_epoch_before)
+        {
+            debug!(
+                session = session_id,
+                "finalize_utterance interrupted during STT flush"
+            );
+            return;
         }
 
         // Publish the final transcript regardless of length so the
@@ -365,12 +432,34 @@ impl VoiceRuntime {
             return;
         }
 
-        // Snapshot the cancel epoch BEFORE the agent reply so an
-        // interrupt that lands during the LLM turn is observed.
-        let cancel_epoch_before = cancel_handle.as_ref().map(|h| h.epoch_value()).unwrap_or(0);
-
-        // Run the agent callback OUTSIDE the lock.
-        let reply = agent_reply(final_text).await;
+        // Snapshot cancellation before inference. The callback receives the
+        // token too, allowing inference and pending tool waits to stop.
+        let turn_generation = session
+            .next_turn_generation
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let agent_cancel = CancellationToken::new();
+        *session.active_turn_cancel.lock().await = Some((turn_generation, agent_cancel.clone()));
+        let reply = tokio::select! {
+            _ = agent_cancel.cancelled() => String::new(),
+            reply = agent_reply(final_text, agent_cancel.clone()) => reply,
+        };
+        {
+            let mut active = session.active_turn_cancel.lock().await;
+            if active
+                .as_ref()
+                .is_some_and(|(generation, _)| *generation == turn_generation)
+            {
+                *active = None;
+            }
+        }
+        if agent_cancel.is_cancelled() {
+            debug!(
+                session = session_id,
+                "finalize_utterance: interrupted during agent reply"
+            );
+            return;
+        }
         if reply.trim().is_empty() {
             return;
         }
@@ -419,13 +508,8 @@ impl VoiceRuntime {
             }
         }
 
-        // Bump outbound_seq + publish under the lock. Re-check the
-        // cancel epoch on each iteration so a late interrupt halts
-        // the broadcast partway through.
-        let mut sessions = self.inner.lock().await;
-        let Some(state) = sessions.get_mut(session_id) else {
-            return;
-        };
+        // Recheck cancellation on every chunk and hold the per-session
+        // state lock only while minting its outbound sequence number.
         for chunk in audio.samples.chunks(OUTBOUND_CHUNK_SAMPLES) {
             if let Some(h) = &cancel_handle {
                 if h.epoch_value() != cancel_epoch_before {
@@ -433,11 +517,15 @@ impl VoiceRuntime {
                     return;
                 }
             }
-            state.outbound_seq = state.outbound_seq.wrapping_add(1);
+            let seq = {
+                let mut state = session.state.lock().await;
+                state.outbound_seq = state.outbound_seq.wrapping_add(1);
+                state.outbound_seq
+            };
             let payload = encode_pcm16_le(chunk);
             self.events.publish(UiEvent::VoiceAudioOutbound {
                 session: session_id.to_owned(),
-                seq: state.outbound_seq,
+                seq,
                 codec: TTS_CODEC.to_owned(),
                 audio_b64: base64_encode(&payload),
             });
@@ -448,8 +536,8 @@ impl VoiceRuntime {
     /// run lock-free. Returns `None` when the session was dropped
     /// while the caller was awaiting elsewhere (race-safe).
     async fn take_tts(&self, session_id: &str) -> Option<Box<dyn TtsClient>> {
-        let mut sessions = self.inner.lock().await;
-        let state = sessions.get_mut(session_id)?;
+        let session = self.get_session(session_id).await?;
+        let mut state = session.state.lock().await;
         let placeholder = Box::new(NoOpTts) as Box<dyn TtsClient>;
         Some(std::mem::replace(&mut state.tts, placeholder))
     }
@@ -458,31 +546,37 @@ impl VoiceRuntime {
     /// synthesize was running, the client is dropped here — its
     /// HTTP connection pool releases when the box does.
     async fn put_tts(&self, session_id: &str, tts: Box<dyn TtsClient>) {
-        let mut sessions = self.inner.lock().await;
-        if let Some(state) = sessions.get_mut(session_id) {
+        if let Some(session) = self.get_session(session_id).await {
+            let mut state = session.state.lock().await;
             state.tts = tts;
         }
     }
 
-    /// Operator (or VAD) interrupted the agent. Bumps the cancel
-    /// handle so an in-flight TTS drops its bytes; clears any
-    /// pending STT state. Publishes `VoiceInterrupted` so the SPA
-    /// flushes playback. Idempotent — calling on an unknown session
-    /// is a no-op.
+    /// Operator (or VAD) interrupted the agent. Fires the TTS epoch and active
+    /// agent cancellation token before waiting for client state, then publishes
+    /// `VoiceInterrupted` so the SPA flushes playback. A slow client in one
+    /// session does not hold the server-wide session map lock.
     pub async fn interrupt(&self, session_id: &str, reason: &str) -> bool {
-        let mut sessions = self.inner.lock().await;
-        let Some(state) = sessions.get_mut(session_id) else {
+        let Some(session) = self.get_session(session_id).await else {
             return false;
         };
-        if let Some(h) = &state.interrupt {
+        if let Some((_, token)) = session.active_turn_cancel.lock().await.as_ref() {
+            token.cancel();
+        }
+        if let Some(h) = &session.interrupt {
             h.fire();
         }
-        state.tts.cancel().await;
-        state.stt.reset().await;
         self.events.publish(UiEvent::VoiceInterrupted {
             session: session_id.to_owned(),
             reason: reason.to_owned(),
         });
+        // Do not wait behind a network-backed flush/synthesis on this
+        // session. The atomic interrupt epoch and playback event take effect
+        // immediately; client reset/cancel follows when the session lock is
+        // available.
+        let mut state = session.state.lock().await;
+        state.tts.cancel().await;
+        state.stt.reset().await;
         true
     }
 

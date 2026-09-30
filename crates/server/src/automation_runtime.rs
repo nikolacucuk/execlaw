@@ -160,35 +160,37 @@ pub fn build_handler(ctx: ExecutorContext) -> EventHandler {
             // spawn_blocking thread (cheap â€” the only awaiting work
             // is the semaphore acquire + the model HTTP round-trip,
             // both of which we want to serialize per-run anyway).
-            if let Err(e) = tokio::task::spawn_blocking(move || {
-                run_matching_automations(&ctx, &row);
-            })
-            .await
-            {
-                warn!(error = %e, "automation runtime: spawn_blocking failed");
-            }
+            tokio::task::spawn_blocking(move || run_matching_automations_checked(&ctx, &row))
+                .await
+                .map_err(|error| format!("automation worker panicked: {error}"))?
         })
     })
 }
 
 /// Top-level matcher: list enabled automations for the event's kind,
 /// filter by trigger predicate, run each that matches.
+#[cfg(test)]
 fn run_matching_automations(ctx: &ExecutorContext, evt: &BusEventRow) {
+    if let Err(error) = run_matching_automations_checked(ctx, evt) {
+        warn!(event_id = %evt.id, error = %error, "automation runtime: event processing will be retried");
+    }
+}
+
+fn run_matching_automations_checked(
+    ctx: &ExecutorContext,
+    evt: &BusEventRow,
+) -> Result<(), String> {
     let store = AutomationStore::new(&ctx.db);
-    let matched = match store.list_enabled_for_kind(evt.kind) {
-        Ok(rows) => rows,
-        Err(e) => {
-            warn!(error = %e, kind = %evt.kind.as_str(), "automation runtime: list_enabled_for_kind failed");
-            return;
-        }
-    };
+    let matched = store
+        .list_enabled_for_kind(evt.kind)
+        .map_err(|error| format!("list enabled automations: {error}"))?;
     if matched.is_empty() {
         debug!(
             event_id = %evt.id,
             kind = %evt.kind.as_str(),
             "automation runtime: no automations match event kind",
         );
-        return;
+        return Ok(());
     }
     let event_ctx = event_context(evt);
     for automation in matched {
@@ -200,8 +202,9 @@ fn run_matching_automations(ctx: &ExecutorContext, evt: &BusEventRow) {
             );
             continue;
         }
-        run_one(ctx, &automation, evt, &event_ctx);
+        run_one(ctx, &automation, evt, &event_ctx)?;
     }
+    Ok(())
 }
 
 /// Build the Rhai-facing event-shape map. We mirror the
@@ -240,21 +243,30 @@ fn run_one(
     automation: &AutomationRow,
     evt: &BusEventRow,
     event_ctx: &serde_json::Value,
-) {
+) -> Result<(), String> {
     let run_store = AutomationRunStore::new(&ctx.db);
     let started_at = chrono::Utc::now().timestamp_millis();
-    let run_id = match run_store.insert_pending(&automation.id, &evt.id, started_at) {
-        Ok(id) => id,
-        Err(e) => {
-            warn!(
-                error = %e,
-                automation_id = %automation.id,
-                event_id = %evt.id,
-                "automation runtime: failed to insert pending run row",
-            );
-            return;
-        }
-    };
+    let definition_json = serde_json::to_string(&automation.definition)
+        .map_err(|error| format!("serialize automation definition: {error}"))?;
+    let run_id = run_store
+        .insert_pending_with_definition(&automation.id, &evt.id, &definition_json, started_at)
+        .map_err(|error| format!("claim automation run: {error}"))?;
+    let run = run_store
+        .get(&run_id)
+        .map_err(|error| format!("load automation run: {error}"))?
+        .ok_or_else(|| format!("automation run '{run_id}' disappeared"))?;
+    if run.status.is_terminal() {
+        return Ok(());
+    }
+    let definition = run_store
+        .definition_snapshot(&run_id)
+        .map_err(|error| format!("load automation definition snapshot: {error}"))?
+        .map(|serialized| {
+            serde_json::from_str::<AutomationDef>(&serialized)
+                .map_err(|error| format!("decode automation definition snapshot: {error}"))
+        })
+        .transpose()?
+        .unwrap_or_else(|| automation.definition.clone());
 
     // Accumulated state: each completed node's output keyed by id,
     // plus `event` for the trigger payload. We also inject the
@@ -272,8 +284,10 @@ fn run_one(
     // is what lets the same executor body power both live runs (DB
     // checkpointing) and dry runs (in-memory Vec sink) without
     // duplication.
+    let mut trace_error = None;
     let mut trace_sink = |trace: StepTrace| {
         if let Err(e) = run_store.append_trace(&run_id, &trace) {
+            trace_error = Some(e.to_string());
             warn!(
                 error = %e,
                 run_id = %run_id,
@@ -282,20 +296,27 @@ fn run_one(
             );
         }
     };
-    let outcome = execute_graph(&automation.definition, &mut state, ctx, &mut trace_sink);
+    let outcome = execute_graph_resuming(
+        &definition,
+        &mut state,
+        ctx,
+        &run.step_traces,
+        &mut trace_sink,
+    );
+    drop(trace_sink);
+    if let Some(error) = trace_error {
+        return Err(format!("persist automation step trace: {error}"));
+    }
     let finished_at = chrono::Utc::now().timestamp_millis();
     let final_status = match outcome {
         ExecOutcome::Success => AutomationRunStatus::Success,
         ExecOutcome::Skipped => AutomationRunStatus::Skipped,
         ExecOutcome::Failed => AutomationRunStatus::Failed,
     };
-    if let Err(e) = run_store.finish(&run_id, final_status, finished_at) {
-        warn!(
-            error = %e,
-            run_id = %run_id,
-            "automation runtime: failed to finalize run row",
-        );
-    }
+    run_store
+        .finish(&run_id, final_status, finished_at)
+        .map_err(|error| format!("finalize automation run: {error}"))?;
+    Ok(())
 }
 
 /// Result of a [`dry_run`] â€” outcome + captured per-node trace.
@@ -367,7 +388,43 @@ fn execute_graph(
     ctx: &ExecutorContext,
     trace_sink: &mut dyn FnMut(StepTrace),
 ) -> ExecOutcome {
+    execute_graph_resuming(def, state, ctx, &[], trace_sink)
+}
+
+fn execute_graph_resuming(
+    def: &AutomationDef,
+    state: &mut HashMap<String, serde_json::Value>,
+    ctx: &ExecutorContext,
+    completed_traces: &[StepTrace],
+    trace_sink: &mut dyn FnMut(StepTrace),
+) -> ExecOutcome {
     let mut current = TRIGGER_SENTINEL.to_string();
+    if let Some(last) = completed_traces.last() {
+        for trace in completed_traces {
+            if trace.error.is_some() || trace.node_id.starts_with("edge-from:") {
+                return ExecOutcome::Failed;
+            }
+            if def.nodes.iter().any(|node| node.id == trace.node_id) {
+                state.insert(trace.node_id.clone(), trace.output.clone());
+            }
+        }
+        let Some(last_node) = def.nodes.iter().find(|node| node.id == last.node_id) else {
+            return ExecOutcome::Failed;
+        };
+        match last_node.kind {
+            NodeKind::Terminal => return ExecOutcome::Success,
+            NodeKind::Filter
+                if last
+                    .output
+                    .get("passed")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true) =>
+            {
+                return ExecOutcome::Skipped;
+            }
+            _ => current = last.node_id.clone(),
+        }
+    }
     // Defense in depth â€” refuse to walk pathologically long graphs.
     // The validator should already reject cycles in M3+, but for
     // now we cap at 256 hops.
@@ -851,35 +908,12 @@ fn execute_http_fetch(
         }
     };
 
-    let result = handle.block_on(async {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .map_err(|e| format!("HttpFetch: failed to build HTTP client: {e}"))?;
-
-        let mut builder = client.request(reqwest_method, parsed_url);
-
-        for (name, value) in &headers {
-            builder = builder.header(name.as_str(), value.as_str());
-        }
-
-        if let Some(body) = body_raw {
-            builder = builder.body(body);
-        }
-
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| format!("HttpFetch: request failed: {e}"))?;
-
-        let status = resp.status().as_u16();
-        let body = resp
-            .text()
-            .await
-            .unwrap_or_else(|e| format!("(failed to read body: {e})"));
-
-        Ok::<_, String>((status, body))
-    });
+    let result = handle.block_on(send_public_http_fetch(
+        parsed_url,
+        reqwest_method,
+        &headers,
+        body_raw.as_deref(),
+    ));
 
     match result {
         Ok((status, body)) => NodeOutcome::Output(serde_json::json!({
@@ -888,6 +922,102 @@ fn execute_http_fetch(
         })),
         Err(msg) => NodeOutcome::Error(msg),
     }
+}
+
+const HTTP_FETCH_MAX_REDIRECTS: usize = 10;
+const HTTP_FETCH_MAX_BODY_BYTES: usize = 1_048_576;
+
+async fn send_public_http_fetch(
+    start_url: reqwest::Url,
+    method: reqwest::Method,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<(u16, String), String> {
+    use execlaw_local_endpoint_policy::PublicEgressPolicy;
+    use futures::StreamExt;
+
+    let policy = PublicEgressPolicy;
+    let mut current_url = start_url;
+    let mut current_body = body.map(str::to_owned);
+    let mut current_headers = headers.to_vec();
+    for redirect_count in 0..=HTTP_FETCH_MAX_REDIRECTS {
+        let resolution = policy
+            .resolve(current_url.as_str())
+            .map_err(|error| format!("HttpFetch public egress denied: {error}"))?;
+        let client = policy
+            .reqwest_client(&resolution, |builder| {
+                builder.timeout(std::time::Duration::from_secs(30))
+            })
+            .map_err(|error| format!("HttpFetch failed to build egress-pinned client: {error}"))?;
+        let mut request = client.request(method.clone(), resolution.url.clone());
+        for (name, value) in &current_headers {
+            request = request.header(name.as_str(), value.as_str());
+        }
+        if let Some(body) = current_body.as_ref() {
+            request = request.body(body.clone());
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("HttpFetch request failed: {error}"))?;
+        let status = response.status();
+
+        // Only GET follows redirects. A mutating request returns the redirect
+        // response rather than repeating a potentially effectful operation.
+        if method == reqwest::Method::GET
+            && status.is_redirection()
+            && let Some(location) = response.headers().get(reqwest::header::LOCATION)
+        {
+            if redirect_count == HTTP_FETCH_MAX_REDIRECTS {
+                return Err(format!(
+                    "HttpFetch redirect limit of {HTTP_FETCH_MAX_REDIRECTS} exceeded"
+                ));
+            }
+            let location = location
+                .to_str()
+                .map_err(|error| format!("HttpFetch invalid redirect Location: {error}"))?;
+            let next_url = response
+                .url()
+                .join(location)
+                .map_err(|error| format!("HttpFetch invalid redirect URL: {error}"))?;
+            if !same_http_origin(response.url(), &next_url) {
+                current_headers.retain(|(name, _)| {
+                    !matches!(
+                        name.to_ascii_lowercase().as_str(),
+                        "authorization" | "cookie" | "proxy-authorization"
+                    )
+                });
+            }
+            current_url = next_url;
+            current_body = None;
+            continue;
+        }
+
+        let mut stream = response.bytes_stream();
+        let mut bytes = Vec::with_capacity(8192);
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|error| format!("HttpFetch response read failed: {error}"))?;
+            let remaining = HTTP_FETCH_MAX_BODY_BYTES.saturating_sub(bytes.len());
+            if chunk.len() > remaining {
+                return Err(format!(
+                    "HttpFetch response exceeded {HTTP_FETCH_MAX_BODY_BYTES} bytes"
+                ));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        return Ok((
+            status.as_u16(),
+            String::from_utf8_lossy(&bytes).into_owned(),
+        ));
+    }
+    Err("HttpFetch redirect loop ended without a response".into())
+}
+
+fn same_http_origin(left: &reqwest::Url, right: &reqwest::Url) -> bool {
+    left.scheme() == right.scheme()
+        && left.host() == right.host()
+        && left.port_or_known_default() == right.port_or_known_default()
 }
 
 /// AskAgent (M3) â€” delegates to the [`AutomationsAgentPool`]. The
@@ -1323,6 +1453,151 @@ mod tests {
     }
 
     #[test]
+    fn graph_restart_restores_checkpointed_node_output_and_continues_after_it() {
+        let db = fresh_db();
+        let ctx = noop_ctx(&db);
+        let evt = seed_bus_event(&db, "resume-event", serde_json::json!({"x": 1}));
+        let def = def_filter_pass("event.payload.x > 0");
+        let mut state = HashMap::from([
+            ("event".to_owned(), event_context(&evt)),
+            (
+                "__automation_id__".to_owned(),
+                serde_json::Value::String("resume-automation".to_owned()),
+            ),
+        ]);
+        let checkpoint = vec![StepTrace {
+            node_id: "f1".to_owned(),
+            input: serde_json::json!({"event": {"payload": {"x": 1}}}),
+            output: serde_json::json!({"passed": true}),
+            ms: 1,
+            error: None,
+        }];
+        let mut emitted = Vec::new();
+        let outcome = execute_graph_resuming(&def, &mut state, &ctx, &checkpoint, &mut |trace| {
+            emitted.push(trace)
+        });
+        assert_eq!(outcome, ExecOutcome::Success);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].node_id, "end");
+    }
+
+    #[test]
+    fn duplicate_bus_redelivery_reuses_terminal_automation_run() {
+        let db = fresh_db();
+        let evt = seed_bus_event(&db, "dedup-event", serde_json::json!({"x": 1}));
+        let store = AutomationStore::new(&db);
+        store
+            .upsert(
+                &AutomationUpsert {
+                    id: None,
+                    name: "dedup".into(),
+                    enabled: true,
+                    definition: def_filter_pass("event.payload.x > 0"),
+                },
+                1000,
+            )
+            .unwrap();
+        let ctx = noop_ctx(&db);
+        run_matching_automations_checked(&ctx, &evt).unwrap();
+        run_matching_automations_checked(&ctx, &evt).unwrap();
+        let rows = AutomationRunStore::new(&db)
+            .list_for_automation(&store.list_enabled_for_kind(evt.kind).unwrap()[0].id, 10)
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, AutomationRunStatus::Success);
+    }
+
+    #[test]
+    fn event_redelivery_resumes_saved_automation_graph_checkpoint() {
+        let db = fresh_db();
+        let event = seed_bus_event(&db, "resume-graph-event", serde_json::json!({"x": 4}));
+        let definition = AutomationDef {
+            trigger: TriggerDef {
+                kind: BusEventKind::WebhookReceived,
+                when: None,
+            },
+            nodes: vec![
+                NodeDef {
+                    id: "first".into(),
+                    kind: NodeKind::Transform,
+                    config: serde_json::json!({"expr": "event.payload.x + 1"}),
+                    position: None,
+                },
+                NodeDef {
+                    id: "second".into(),
+                    kind: NodeKind::Transform,
+                    config: serde_json::json!({"expr": "first + 1"}),
+                    position: None,
+                },
+                NodeDef {
+                    id: "end".into(),
+                    kind: NodeKind::Terminal,
+                    config: serde_json::json!({}),
+                    position: None,
+                },
+            ],
+            edges: vec![
+                EdgeDef {
+                    from: TRIGGER_SENTINEL.into(),
+                    to: "first".into(),
+                    when: None,
+                },
+                EdgeDef {
+                    from: "first".into(),
+                    to: "second".into(),
+                    when: None,
+                },
+                EdgeDef {
+                    from: "second".into(),
+                    to: "end".into(),
+                    when: None,
+                },
+            ],
+        };
+        let automation = AutomationStore::new(&db)
+            .upsert(
+                &AutomationUpsert {
+                    id: None,
+                    name: "restart graph".into(),
+                    enabled: true,
+                    definition: definition.clone(),
+                },
+                1000,
+            )
+            .unwrap();
+        let run_store = AutomationRunStore::new(&db);
+        let definition_json = serde_json::to_string(&definition).unwrap();
+        let run_id = run_store
+            .insert_pending_with_definition(&automation.id, &event.id, &definition_json, 1000)
+            .unwrap();
+        run_store
+            .append_trace(
+                &run_id,
+                &StepTrace {
+                    node_id: "first".into(),
+                    input: serde_json::json!({"event": {"payload": {"x": 4}}}),
+                    output: serde_json::json!(5),
+                    ms: 1,
+                    error: None,
+                },
+            )
+            .unwrap();
+
+        run_matching_automations_checked(&noop_ctx(&db), &event).unwrap();
+        let recovered = run_store.get(&run_id).unwrap().unwrap();
+        assert_eq!(recovered.status, AutomationRunStatus::Success);
+        assert_eq!(
+            recovered
+                .step_traces
+                .iter()
+                .map(|trace| trace.node_id.as_str())
+                .collect::<Vec<_>>(),
+            ["first", "second", "end"]
+        );
+        assert_eq!(recovered.step_traces[1].output, serde_json::json!(6));
+    }
+
+    #[test]
     fn execute_filter_pass_runs_to_success() {
         let db = fresh_db();
         let auto_store = AutomationStore::new(&db);
@@ -1651,16 +1926,16 @@ mod tests {
         // Poll for the run row â€” handler runs on spawn_blocking, so
         // we allow a generous deadline.
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        let mut found = None;
+        let mut completed = None;
         while std::time::Instant::now() < deadline {
             let runs = run_store.list_for_automation(&row.id, 10).unwrap();
-            if !runs.is_empty() {
-                found = Some(runs);
+            if runs.first().is_some_and(|run| run.status.is_terminal()) {
+                completed = Some(runs);
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        let runs = found.expect("expected the matcher to produce a run within 3s");
+        let runs = completed.expect("expected the matcher to complete a run within 3s");
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].status, AutomationRunStatus::Success);
         // The Transform node's output must have made it to the trace.
@@ -2627,5 +2902,18 @@ mod tests {
             err.contains("rate limit exceeded"),
             "expected rate-limit error, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn http_fetch_public_egress_rejects_loopback_before_connecting() {
+        let error = send_public_http_fetch(
+            reqwest::Url::parse("http://127.0.0.1:1/private").unwrap(),
+            reqwest::Method::GET,
+            &[],
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("public egress denied"), "error: {error}");
     }
 }

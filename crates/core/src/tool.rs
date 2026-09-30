@@ -600,6 +600,8 @@ pub enum ApiError {
     Validation(String),
     #[error("storage error: {0}")]
     Storage(String),
+    #[error("cancelled by the operator")]
+    Cancelled,
 }
 
 impl ApiError {
@@ -620,6 +622,10 @@ impl ApiError {
             Self::Storage(s) => ToolOutcome::Err {
                 code: "storage_error".into(),
                 message: s,
+            },
+            Self::Cancelled => ToolOutcome::Err {
+                code: "cancelled".into(),
+                message: "cancelled by the operator".into(),
             },
         }
     }
@@ -974,6 +980,10 @@ pub struct SubagentRequest {
     /// Token budget for the child's reply. Implementations cap to a
     /// reasonable upper bound regardless.
     pub max_tokens: Option<u32>,
+    /// Previously completed child task ids whose durable outputs this child
+    /// is allowed to depend on. Dependencies are metadata, not authority.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
 }
 
 /// Result of a [`SubagentApi::delegate`] call.
@@ -989,6 +999,9 @@ pub struct SubagentResponse {
     /// Tokens consumed (best-effort — the inference backend's
     /// usage block may be missing).
     pub tokens_used: Option<u32>,
+    /// Run-scoped result artifact for bounded downstream retrieval.
+    #[serde(default)]
+    pub artifact_id: Option<String>,
 }
 
 /// Subagent-spawn capability. Implementation makes a child LLM call

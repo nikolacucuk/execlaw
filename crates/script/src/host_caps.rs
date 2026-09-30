@@ -55,6 +55,8 @@ pub struct InboundMessage {
     /// / etc.). Lower-case, stable. The host uses this to key the
     /// transport binding row + drive routing.
     pub channel: String,
+    /// Stable upstream message ID for deduplication and review lineage.
+    pub source_event_id: Option<String>,
     /// Foreign id of the sender — E.164 phone for Signal, jid for
     /// WhatsApp, RFC-5322 address for email. The host's principal
     /// admit pipeline uses this as the routing key.
@@ -135,6 +137,11 @@ pub enum RouteOutcome {
     /// Sender is trusted and addressed the agent — host
     /// dispatched the turn through the normal pipeline.
     Dispatched,
+    /// An event-only specialist owns the inbound; it was persisted and queued
+    /// without running the normal conversation agent a second time.
+    SpecialistQueued,
+    /// Controller takeover is active for this transport recipient.
+    ControllerOwned,
     /// Group inbound where the LLM classifier decided the message
     /// wasn't directed at the agent. Persisted but no turn ran.
     GroupNotAddressed,
@@ -284,6 +291,29 @@ pub type WsKeepaliveCallback =
 /// dependency on AppState).
 #[async_trait::async_trait]
 pub trait HostCapabilities: Send + Sync {
+    /// Resolve and authorize one ordinary plugin HTTP destination at the
+    /// moment ureq opens a connection. Implementations return only checked
+    /// socket addresses; the script runtime pins the connection to them.
+    fn resolve_plugin_http_target(
+        &self,
+        _host_port: &str,
+    ) -> Result<Vec<std::net::SocketAddr>, HostCapError> {
+        Err(HostCapError::new(
+            "host does not provide an outbound HTTP egress policy",
+        ))
+    }
+
+    /// Resolve one registered sidecar HTTP destination. Implementations must
+    /// verify the host and published port, then return pinned socket addresses.
+    fn resolve_sidecar_http_target(
+        &self,
+        _host_port: &str,
+    ) -> Result<Vec<std::net::SocketAddr>, HostCapError> {
+        Err(HostCapError::new(
+            "host does not provide a registered-sidecar egress policy",
+        ))
+    }
+
     /// Resolve a supervised sidecar's host base URL by service
     /// name. Returns `None` when the supervisor hasn't published
     /// a port yet (sidecar still starting / crash-looping) — the

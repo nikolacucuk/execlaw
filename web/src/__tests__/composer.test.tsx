@@ -61,6 +61,34 @@ describe("Composer", () => {
         expect(onSend).toHaveBeenCalledWith("hello", [], []);
     });
 
+    it("attaches explicit completion criteria only when the operator adds them", async () => {
+        const onSend = vi.fn().mockResolvedValue(undefined);
+        render(<Composer onSend={onSend} />);
+        fireEvent.click(screen.getByText("Track task completion"));
+        fireEvent.change(screen.getByTestId("composer-completion-criteria"), {
+            target: { value: "The report exists" },
+        });
+        fireEvent.change(screen.getByTestId("composer-required-artifacts"), {
+            target: { value: "report.pdf" },
+        });
+        fireEvent.click(screen.getByTestId("composer-delivery-required"));
+        fireEvent.change(screen.getByTestId("composer-input"), {
+            target: { value: "Create and validate the report" },
+        });
+        await act(async () => {
+            fireEvent.submit(screen.getByTestId("composer-input").closest("form")!);
+        });
+        expect(onSend).toHaveBeenCalledWith("Create and validate the report", [], [], {
+            acceptance_criteria: [
+                { criterion_id: "criterion-1", description: "The report exists", required: true },
+            ],
+            required_artifacts: [
+                { artifact_id: "artifact-1", description: "report.pdf" },
+            ],
+            delivery_required: true,
+        });
+    });
+
     it("Enter submits, Shift+Enter does not", () => {
         const onSend = vi.fn();
         render(<Composer onSend={onSend} />);

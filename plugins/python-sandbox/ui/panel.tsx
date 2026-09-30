@@ -46,7 +46,7 @@ import type {
     PluginPanelProps,
 } from "@execlaw/plugin-ui";
 
-const React = globalThis.execlawHost!.React;
+import * as React from "react";
 const { useCallback, useEffect, useState } = React;
 
 // --- API types ------------------------------------------------------
@@ -124,7 +124,7 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
         try {
             const resp = await bridge.fetchJson<SidecarListResponse>(
                 "GET",
-                "/api/admin/sidecars",
+                "/api/admin/plugins/python-sandbox/sidecars",
             );
             const found = resp.sidecars.find(
                 (s) => s.plugin_id === identity.id && s.name === SIDECAR_NAME,

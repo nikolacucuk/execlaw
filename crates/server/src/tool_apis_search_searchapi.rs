@@ -63,18 +63,17 @@ struct SearchApiOrganicResult {
 }
 
 pub struct SearchApiSearchApi {
-    client: reqwest::Client,
+    client: super::tool_apis_search::SearchHttpClient,
     api_key: String,
     rate_limit: crate::search_rate_limit::RateLimitGate,
 }
 
 impl SearchApiSearchApi {
     pub fn new(api_key: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_S))
-            .user_agent(crate::tool_apis_http::DEFAULT_USER_AGENT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = super::tool_apis_search::SearchHttpClient::public(
+            SEARCHAPI_ENDPOINT,
+            Duration::from_secs(DEFAULT_TIMEOUT_S),
+        );
         Self {
             client,
             api_key: api_key.into(),
@@ -96,8 +95,8 @@ impl WebSearchApi for SearchApiSearchApi {
         }
         self.rate_limit.wait().await;
         let num = max_results.max(1).min(20).to_string();
-        let resp = self
-            .client
+        let client = self.client.build()?;
+        let resp = client
             .get(SEARCHAPI_ENDPOINT)
             .query(&[("engine", "google"), ("q", query), ("num", num.as_str())])
             .bearer_auth(&self.api_key)

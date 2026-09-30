@@ -619,7 +619,7 @@ fn log_outcome(req: &CaptureRequest, outcome: &CaptureOutcome) {
         Skipped { reason } => {
             tracing::info!(
                 conversation_id = %req.conversation_id.as_str(),
-                reason = %reason,
+                reason_chars = reason.chars().count(),
                 "auto-capture: summarizer returned SKIP"
             );
         }
@@ -641,7 +641,7 @@ fn log_outcome(req: &CaptureRequest, outcome: &CaptureOutcome) {
             tracing::warn!(
                 conversation_id = %req.conversation_id.as_str(),
                 skill = %name,
-                reason = %reason,
+                reason_chars = reason.chars().count(),
                 "auto-capture: scanner blocked the write — sanitizer let something through"
             );
         }
@@ -655,7 +655,7 @@ fn log_outcome(req: &CaptureRequest, outcome: &CaptureOutcome) {
         Error { message } => {
             tracing::warn!(
                 conversation_id = %req.conversation_id.as_str(),
-                error = %message,
+                error_chars = message.chars().count(),
                 "auto-capture pipeline error"
             );
         }

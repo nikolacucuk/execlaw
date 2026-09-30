@@ -45,6 +45,24 @@ const baseMsg = (
 });
 
 describe("MessageStream", () => {
+    it("labels a child-agent review and sends only its suggested WhatsApp reply", async () => {
+        const send = vi.fn().mockResolvedValue(undefined);
+        const report = "# Camper WhatsApp Reply Draft\n\n## Inbound message\n> Are you free?\n\n## Suggested reply\nPlease confirm your dates.\n\n## Review notes\nCheck availability.";
+        setMessages("camper-group", [{ ...baseMsg(1, report, "model_turn"), actor: "agent:camper_wha", channel_origin: "whatsapp", draft_id: "draft-1", draft_revision: 1, draft_status: "pending", draft_stale: false }]);
+        render(<MessageStream conversationId="camper-group" onSendTransportReply={send} />);
+        expect(screen.getByText(/Review document from camper_wha\.agent\.md/)).toBeInTheDocument();
+        fireEvent.click(screen.getByRole("button", { name: "Send to WhatsApp" }));
+        await waitFor(() => expect(send).toHaveBeenCalledWith("Please confirm your dates.", 1, "whatsapp", 1));
+    });
+
+    it("does not offer send for a stale agent draft", () => {
+        const report = "## Suggested reply\nPlease confirm your dates.";
+        setMessages("stale-camper", [{ ...baseMsg(1, report, "model_turn"), actor: "agent:camper_wha", channel_origin: "whatsapp", draft_id: "draft-1", draft_revision: 1, draft_status: "pending", draft_stale: true }]);
+        render(<MessageStream conversationId="stale-camper" onSendTransportReply={vi.fn()} />);
+        expect(screen.getByText(/draft is stale because a newer message arrived/)).toBeInTheDocument();
+        expect(screen.queryByRole("button", { name: "Send to WhatsApp" })).toBeNull();
+    });
+
     it("keeps the classic stream as the default", () => {
         setMessages("classic", [baseMsg(1, "hello")]);
         render(<MessageStream conversationId="classic" />);
@@ -353,6 +371,23 @@ describe("MessageStream", () => {
         // <svg> element with the official Signal blue when the
         // channel is signal.
         expect(origin.tagName.toLowerCase()).toBe("svg");
+    });
+
+    it("projects the append-only transport delivery timeline under its reply", () => {
+        appendMessage("conv-delivery-timeline", {
+            ...baseMsg(1, "sent through Signal", "model_turn"),
+            channel_origin: "signal",
+            delivery_timeline: [
+                { transition: "enqueued", occurred_at: 1_750_000_000, attempt: 0, external_receipt: null },
+                { transition: "delivered", occurred_at: 1_750_000_005, attempt: 1, external_receipt: "remote-123" },
+            ],
+        } as never);
+        render(<MessageStream conversationId="conv-delivery-timeline" />);
+        const timeline = screen.getByRole("list", { name: "Transport delivery timeline" });
+        expect(timeline).toHaveTextContent("enqueued");
+        expect(timeline).toHaveTextContent("delivered");
+        expect(timeline).toHaveTextContent("attempt 1");
+        expect(timeline).toHaveTextContent("remote-123");
     });
 
     it("renders WhatsApp messages with the WhatsApp bubble styling", () => {

@@ -54,8 +54,19 @@ pub enum PluginHostError {
     UnsupportedTier(String),
     #[error("plugin declares tools/transport but has no [runtime] table")]
     MissingRuntime,
+    #[error("plugin stage path is outside the configured root: {0}")]
+    StagePathOutsideRoot(String),
     #[error("artifact provenance: {0}")]
     Provenance(String),
+    #[error("plugin upgrade failed; previous version was restored: {0}")]
+    UpgradeRolledBack(String),
+    #[error(
+        "plugin upgrade failed ({upgrade_error}); restoring the previous version also failed ({rollback_error})"
+    )]
+    UpgradeRollbackFailed {
+        upgrade_error: String,
+        rollback_error: String,
+    },
     #[error("db: {0}")]
     Db(#[from] DbError),
     #[error("io: {0}")]
@@ -425,6 +436,18 @@ impl PluginHost {
         &self.inner.stage_root
     }
 
+    fn canonical_staged_path(&self, path: &Path) -> Result<PathBuf, PluginHostError> {
+        std::fs::create_dir_all(&self.inner.stage_root)?;
+        let root = self.inner.stage_root.canonicalize()?;
+        let candidate = path.canonicalize()?;
+        if candidate == root || !candidate.starts_with(&root) || !candidate.is_dir() {
+            return Err(PluginHostError::StagePathOutsideRoot(
+                path.display().to_string(),
+            ));
+        }
+        Ok(candidate)
+    }
+
     /// Database handle the host was constructed with. Used by Phase-8a
     /// callers (the `ChainedToolDispatch` access gate) that need to
     /// read `config_tool_access` rows alongside dispatching tools.
@@ -448,6 +471,8 @@ impl PluginHost {
     ///    a transport; if spawn fails, un-registers the hooks.
     /// 5. Persists the install row in `state_plugins`.
     pub async fn install(&self, stage_path: &Path) -> Result<PluginRow, PluginHostError> {
+        let stage_path = self.canonical_staged_path(stage_path)?;
+        let stage_path = stage_path.as_path();
         let manifest_path = stage_path.join("plugin.toml");
         let manifest_toml = std::fs::read_to_string(&manifest_path)
             .map_err(|e| PluginHostError::Manifest(format!("read plugin.toml: {e}")))?;
@@ -471,14 +496,25 @@ impl PluginHost {
         // about why. Validate at install time so the failure
         // surfaces during plugin upload, where the operator can
         // actually do something about it (fix the ZIP).
+        let panel_stage_root = stage_path.canonicalize().map_err(|error| {
+            PluginHostError::Manifest(format!("canonicalize plugin stage: {error}"))
+        })?;
         for panel in &manifest.ui_panels {
-            let entry_path = stage_path.join(&panel.entry);
-            if !entry_path.is_file() {
+            let candidate = panel_stage_root.join(&panel.entry);
+            let resolved = candidate.canonicalize().map_err(|error| {
+                PluginHostError::Manifest(format!(
+                    "plugin '{plugin_id}' [[ui_panels]] declares UI entry '{}' that is missing or unreadable: {error}",
+                    panel.entry
+                ))
+            })?;
+            if !resolved.starts_with(&panel_stage_root)
+                || !std::fs::metadata(&resolved)
+                    .map(|metadata| metadata.is_file())
+                    .unwrap_or(false)
+            {
                 return Err(PluginHostError::Manifest(format!(
-                    "plugin '{plugin_id}' declares [[ui_panels]] entry '{}' \
-                     but the file is missing from the staged ZIP at {}",
-                    panel.entry,
-                    entry_path.display(),
+                    "plugin '{plugin_id}' UI entry '{}' escapes the staged plugin or is not a file",
+                    panel.entry
                 )));
             }
         }
@@ -681,19 +717,118 @@ impl PluginHost {
     ///    bump. (Mismatched ids would silently drop the old install
     ///    and create a new one, which is a footgun.)
     /// 2. Tear down the old runtime: disable hooks, drop the
-    ///    subprocess / script engine, remove the staged dir.
+    ///    subprocess / script engine while retaining the prior staged dir.
     /// 3. Delete the old `state_plugins` row.
     /// 4. Run the install pipeline against the new stage_path.
     ///
-    /// Failure semantics: if step 4's hook registration or
-    /// subprocess spawn fails, the operator is left in
-    /// "uninstalled" state (their OAuth rows still survive in the
-    /// other tables). This is acceptable — the new ZIP is broken;
-    /// the operator can either fix it and retry, re-upload the
-    /// old version, or reconnect their OAuth account if they want
-    /// to start fresh. Restoring the old runtime mid-failure adds
-    /// a lot of edge-case surface for a path that should be rare.
+    /// If installing the candidate fails, the host reinstalls the retained
+    /// prior stage and restores its row. A failed rollback is returned
+    /// explicitly with both errors; the old stage is not deleted until the
+    /// candidate is installed successfully.
     pub async fn upgrade(&self, stage_path: &Path) -> Result<PluginRow, PluginHostError> {
+        let stage_path = self.canonical_staged_path(stage_path)?;
+        let stage_path = stage_path.as_path();
+        let manifest_path = stage_path.join("plugin.toml");
+        let manifest_toml = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| PluginHostError::Manifest(format!("read plugin.toml: {e}")))?;
+        let manifest = PluginManifest::parse(&manifest_toml)
+            .map_err(|e| PluginHostError::Manifest(e.to_string()))?;
+        let plugin_id = manifest.plugin.id.clone();
+        let existing = self
+            .get_row(&plugin_id)?
+            .ok_or_else(|| PluginHostError::NotInstalled(plugin_id.clone()))?;
+        self.inner
+            .registry
+            .validate_upgrade_schemas_with_stage(&manifest, stage_path)
+            .map_err(PluginHostError::HookConflict)?;
+
+        let new_stage = stage_path.canonicalize().ok();
+        let old_stage_path = Path::new(&existing.stage_path);
+        let old_stage = old_stage_path.canonicalize().ok();
+        if stage_path == old_stage_path
+            || matches!((&new_stage, &old_stage), (Some(new), Some(old)) if new == old)
+        {
+            return Err(PluginHostError::Manifest(
+                "upgrade input must use an isolated staging directory".into(),
+            ));
+        }
+
+        match self.upgrade_inner(stage_path).await {
+            Ok(row) => {
+                if old_stage_path.exists()
+                    && let Err(error) = std::fs::remove_dir_all(old_stage_path)
+                {
+                    warn!(
+                        plugin_id = %plugin_id,
+                        path = %old_stage_path.display(),
+                        %error,
+                        "new plugin is active but old stage cleanup failed"
+                    );
+                }
+                Ok(row)
+            }
+            Err(upgrade_error) => {
+                self.stop_runtime_for_upgrade(&plugin_id).await;
+                let _ = self.delete_row(&plugin_id);
+                if !old_stage_path.is_dir() {
+                    let restore_row = self.insert_row(&existing);
+                    let rollback_error = match restore_row {
+                        Ok(()) => "previous stage directory is missing; restored its quarantined database record".to_owned(),
+                        Err(error) => format!("previous stage is missing and row restore failed: {error}"),
+                    };
+                    return Err(PluginHostError::UpgradeRollbackFailed {
+                        upgrade_error: upgrade_error.to_string(),
+                        rollback_error,
+                    });
+                }
+                match self.install(old_stage_path).await {
+                    Ok(_) => {
+                        if !existing.enabled || existing.health_status != "healthy" {
+                            self.stop_runtime_for_upgrade(&plugin_id).await;
+                        }
+                        if let Err(error) = self.update_row(&existing) {
+                            return Err(PluginHostError::UpgradeRollbackFailed {
+                                upgrade_error: upgrade_error.to_string(),
+                                rollback_error: format!(
+                                    "previous version started but row restore failed: {error}"
+                                ),
+                            });
+                        }
+                        Err(PluginHostError::UpgradeRolledBack(
+                            upgrade_error.to_string(),
+                        ))
+                    }
+                    Err(rollback_error) => {
+                        self.stop_runtime_for_upgrade(&plugin_id).await;
+                        let _ = self.delete_row(&plugin_id);
+                        let _ = self.insert_row(&existing);
+                        Err(PluginHostError::UpgradeRollbackFailed {
+                            upgrade_error: upgrade_error.to_string(),
+                            rollback_error: rollback_error.to_string(),
+                        })
+                    }
+                }
+            }
+        }
+    }
+
+    async fn stop_runtime_for_upgrade(&self, plugin_id: &str) {
+        self.inner.registry.disable(plugin_id);
+        if let Some(plugin) = self.inner.subprocesses.write().await.remove(plugin_id) {
+            plugin.shutdown().await;
+        }
+        if let Some(plugin) = self.inner.script_plugins.write().await.remove(plugin_id) {
+            let cancelled = plugin.shutdown();
+            if cancelled > 0 {
+                info!(
+                    plugin_id,
+                    cancelled, "cancelled plugin subscriptions during upgrade"
+                );
+            }
+        }
+    }
+
+    async fn upgrade_inner(&self, stage_path: &Path) -> Result<PluginRow, PluginHostError> {
         let manifest_path = stage_path.join("plugin.toml");
         let manifest_toml = std::fs::read_to_string(&manifest_path)
             .map_err(|e| PluginHostError::Manifest(format!("read plugin.toml: {e}")))?;
@@ -741,26 +876,8 @@ impl PluginHost {
         // Best-effort remove the OLD staged directory. If it
         // happens to be the SAME path as the new one (operator
         // re-extracted in place), skip — we'd nuke the source.
-        let new_stage_canon = stage_path.canonicalize().ok();
-        let old_stage_canon = std::path::Path::new(&existing.stage_path)
-            .canonicalize()
-            .ok();
-        let same_dir = matches!((&new_stage_canon, &old_stage_canon), (Some(a), Some(b)) if a == b);
-        if !same_dir {
-            if let Err(e) = std::fs::remove_dir_all(&existing.stage_path) {
-                warn!(
-                    plugin_id = %new_id,
-                    path = %existing.stage_path,
-                    error = %e,
-                    "failed to remove old staged dir during upgrade",
-                );
-            }
-        }
-
-        // Now run the standard install pipeline against the new
-        // stage. This will register hooks + spawn runtime + insert
-        // a fresh state_plugins row. If it fails the operator is
-        // in uninstalled state (see method-level docs).
+        // The public upgrade wrapper restores the retained prior stage if
+        // this candidate install fails.
         self.install(stage_path).await
     }
 
@@ -1329,6 +1446,43 @@ impl PluginHost {
     /// the caller skipped the gate (legacy paths) — preserve the old
     /// behaviour and only enforce capabilities. New call sites should
     /// always pass `Some(_)`.
+    /// Validate a registered tool call without invoking the plugin runtime.
+    /// The production outbox uses this before accepting deferred transport work.
+    pub fn validate_tool_call(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+        caller_caps: &[&str],
+        caller_trust: Option<&str>,
+    ) -> Result<Arc<crate::hook_registry::RegisteredTool>, String> {
+        let Some(registered) = self.inner.registry.tool(tool_name) else {
+            return Err(format!("tool '{tool_name}' not registered"));
+        };
+        if !caller_caps.contains(&"*") {
+            for required in &registered.required_capabilities {
+                if !caller_caps.iter().any(|capability| capability == required) {
+                    return Err(format!(
+                        "tool '{tool_name}' requires capability '{required}' not in caller's set"
+                    ));
+                }
+            }
+        }
+        if let Some(floor) = registered.trust_floor.as_deref()
+            && caller_trust.map(trust_rank).unwrap_or(0) < trust_rank(floor)
+        {
+            return Err(format!(
+                "tool '{tool_name}' requires trust >= {floor} but caller is {}",
+                caller_trust.unwrap_or("<none>")
+            ));
+        }
+        if let Some(validator) = &registered.schema_validator {
+            validator.validate(args).map_err(|error| {
+                format!("tool '{tool_name}' arguments do not match its JSON Schema: {error}")
+            })?;
+        }
+        Ok(registered)
+    }
+
     pub async fn call_tool(
         &self,
         tool_name: &str,
@@ -1631,8 +1785,21 @@ impl PluginHost {
             .db
             .with_conn(|c| {
                 c.execute(
-                    "UPDATE state_plugins SET enabled = ?1, updated_at = ?2 WHERE plugin_id = ?3",
-                    params![row.enabled as i64, row.updated_at, row.plugin_id],
+                    "UPDATE state_plugins SET version = ?1, manifest_toml = ?2, stage_path = ?3, \
+                     enabled = ?4, installed_at = ?5, updated_at = ?6, health_status = ?7, \
+                     health_message = ?8, quarantined_at = ?9 WHERE plugin_id = ?10",
+                    params![
+                        row.version,
+                        row.manifest_toml,
+                        row.stage_path,
+                        row.enabled as i64,
+                        row.installed_at,
+                        row.updated_at,
+                        row.health_status,
+                        row.health_message,
+                        row.quarantined_at,
+                        row.plugin_id,
+                    ],
                 )?;
                 Ok(())
             })
@@ -2255,8 +2422,8 @@ source = "main.rhai"
     async fn install_imports_plugin_skills_with_namespaced_names() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
         let store = std::sync::Arc::new(execlaw_skills::SkillStore::new(db.clone()));
         host.attach_skill_store(store.clone());
 
@@ -2294,8 +2461,8 @@ source = "main.rhai"
         // callers that don't care about skills are unaffected.
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
         // No attach_skill_store call.
 
         let (_keep, stage) = stage_plugin_with_skills("p-noskills");
@@ -2311,8 +2478,8 @@ source = "main.rhai"
     async fn uninstall_archives_plugin_shipped_skills() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
         let store = std::sync::Arc::new(execlaw_skills::SkillStore::new(db.clone()));
         host.attach_skill_store(store.clone());
 
@@ -2482,8 +2649,8 @@ source = "main.rhai"
         // success contract from the import design.
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
         let store = std::sync::Arc::new(execlaw_skills::SkillStore::new(db.clone()));
         host.attach_skill_store(store.clone());
 
@@ -2533,8 +2700,8 @@ source = "main.rhai"
     async fn upgrade_replaces_version_and_preserves_oauth_client_and_tokens() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
 
         let (_v1_keep, v1_stage) = stage_script_plugin(
             "test-google",
@@ -2609,8 +2776,8 @@ source = "main.rhai"
     async fn upgrade_schema_preflight_preserves_working_version_on_failure() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db, registry.clone(), stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry.clone(), std::env::temp_dir());
         let (_v1_keep, v1_stage) = stage_schema_plugin(
             "schema-upgrade",
             "0.1.0",
@@ -2632,14 +2799,67 @@ source = "main.rhai"
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn failed_candidate_install_restarts_the_previous_plugin_from_its_saved_stage() {
+        let db = fresh_db();
+        let registry = HookRegistry::new();
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry.clone(), std::env::temp_dir());
+
+        let (_v1_keep, v1_stage) = stage_script_plugin("rollback-plugin", "0.1.0", "scope-a");
+        let mut v1_manifest = std::fs::read_to_string(v1_stage.join("plugin.toml")).unwrap();
+        v1_manifest.push_str("\n[[tools]]\nname = \"rollback-plugin.lookup\"\nlatency = \"low\"\n");
+        std::fs::write(v1_stage.join("plugin.toml"), v1_manifest).unwrap();
+        let installed = host.install(&v1_stage).await.unwrap();
+        let previous_main = std::fs::read(v1_stage.join("main.rhai")).unwrap();
+
+        let (_v2_keep, v2_stage) = stage_script_plugin("rollback-plugin", "0.2.0", "scope-b");
+        let mut v2_manifest = std::fs::read_to_string(v2_stage.join("plugin.toml")).unwrap();
+        v2_manifest.push_str("\n[[tools]]\nname = \"rollback-plugin.lookup\"\nlatency = \"low\"\n");
+        std::fs::write(v2_stage.join("plugin.toml"), v2_manifest).unwrap();
+        std::fs::remove_file(v2_stage.join("main.rhai")).unwrap();
+
+        let error = host.upgrade(&v2_stage).await.unwrap_err();
+        assert!(matches!(error, PluginHostError::UpgradeRolledBack(_)));
+        let restored = host
+            .get_row("rollback-plugin")
+            .unwrap()
+            .expect("old plugin record remains installed");
+        assert_eq!(restored.version, "0.1.0");
+        assert_eq!(restored.stage_path, installed.stage_path);
+        assert_eq!(
+            std::fs::read(v1_stage.join("main.rhai")).unwrap(),
+            previous_main
+        );
+        assert!(registry.tool("rollback-plugin.lookup").is_some());
+        assert!(host.script_plugin("rollback-plugin").await.is_some());
+
+        drop(host);
+        let restarted_registry = HookRegistry::new();
+        let restarted_host = PluginHost::new(db, restarted_registry.clone(), std::env::temp_dir());
+        restarted_host.hydrate().await.unwrap();
+        let restarted = restarted_host
+            .get_row("rollback-plugin")
+            .unwrap()
+            .expect("previous version remains recoverable after restart");
+        assert_eq!(restarted.version, "0.1.0");
+        assert!(restarted_registry.tool("rollback-plugin.lookup").is_some());
+        assert!(
+            restarted_host
+                .script_plugin("rollback-plugin")
+                .await
+                .is_some()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn upgrade_rejects_when_no_existing_install() {
         // Operators have to use install (or `if_existing=upgrade`
         // which falls through to install). Calling upgrade
         // directly on a clean DB is a programming error.
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db, registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db, registry, std::env::temp_dir());
 
         let (_keep, stage) =
             stage_script_plugin("ghost", "0.1.0", "https://www.googleapis.com/auth/x");
@@ -2752,8 +2972,8 @@ latency = "low"
     async fn fire_on_disable_for_all_invokes_hook_only_for_plugins_that_define_it() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db, registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db, registry, std::env::temp_dir());
 
         // Plugin A defines `on_disable` — fire_on_disable_for_all
         // must invoke it.
@@ -2789,8 +3009,8 @@ latency = "low"
     async fn disable_fires_on_disable_before_engine_shutdown() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db, registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db, registry, std::env::temp_dir());
 
         let (_keep, stage) = stage_script_plugin_with_on_disable("disable-test", "0.1.0");
         host.install(&stage).await.unwrap();
@@ -2810,8 +3030,8 @@ latency = "low"
     async fn upgrade_writes_new_version_string_to_state_plugins() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
 
         let (_v1, v1_stage) =
             stage_script_plugin("v-test", "0.1.0", "https://www.googleapis.com/auth/x");
@@ -2867,8 +3087,8 @@ latency = "low"
     async fn hydrate_quarantines_row_when_stage_dir_is_missing() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
 
         // Stage + install a script plugin with at least one tool —
         // we need `needs_runtime = true` (i.e. tools / transport /
@@ -2895,7 +3115,7 @@ latency = "low"
         // install row survives but the in-memory registry is empty
         // (mirrors what happens at boot: new process, same DB).
         let registry2 = HookRegistry::new();
-        let host2 = PluginHost::new(db.clone(), registry2, stage_root.path().to_path_buf());
+        let host2 = PluginHost::new(db.clone(), registry2, std::env::temp_dir());
         host2.hydrate().await.unwrap();
 
         // Post-hydrate: the row MUST still exist (preserving OAuth
@@ -2940,8 +3160,8 @@ latency = "low"
         use rusqlite::params;
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
 
         // Insert a hand-crafted row whose manifest_toml is garbage.
         // Default health_status is 'healthy' (column NOT NULL DEFAULT
@@ -2989,8 +3209,8 @@ latency = "low"
     async fn upgrade_heals_quarantined_row() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
 
         // Stage + install, then yank the stage dir + hydrate to land
         // the row in the quarantined state — same setup as the
@@ -2999,7 +3219,7 @@ latency = "low"
         host.install(&stage1).await.unwrap();
         std::fs::remove_dir_all(&stage1).unwrap();
         let registry2 = HookRegistry::new();
-        let host2 = PluginHost::new(db.clone(), registry2, stage_root.path().to_path_buf());
+        let host2 = PluginHost::new(db.clone(), registry2, std::env::temp_dir());
         host2.hydrate().await.unwrap();
         assert_eq!(
             host2.get_row("heal-test").unwrap().unwrap().health_status,
@@ -3280,12 +3500,12 @@ executable = "./bin"
     async fn install_rejects_when_ui_panel_entry_is_missing_from_stage() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
 
         // Stage a plugin whose manifest declares a UI panel but
         // DOES NOT ship the entry file.
-        let stage = stage_root.path().join("bad-ui-0.1.0");
+        let stage = _stage_root.path().join("bad-ui-0.1.0");
         std::fs::create_dir_all(&stage).unwrap();
         let manifest = r#"
 [plugin]
@@ -3316,10 +3536,10 @@ entry = "ui/panel.js"
     async fn install_accepts_when_ui_panel_entry_is_present() {
         let db = fresh_db();
         let registry = HookRegistry::new();
-        let stage_root = tempfile::tempdir().unwrap();
-        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let _stage_root = tempfile::tempdir().unwrap();
+        let host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
 
-        let stage = stage_root.path().join("good-ui-0.1.0");
+        let stage = _stage_root.path().join("good-ui-0.1.0");
         std::fs::create_dir_all(stage.join("ui")).unwrap();
         let manifest = r#"
 [plugin]
@@ -3343,5 +3563,23 @@ entry = "ui/panel.js"
             .await
             .expect("install with present panel entry must succeed");
         assert_eq!(row.plugin_id, "good-ui");
+    }
+
+    #[tokio::test]
+    async fn install_rejects_a_stage_directory_outside_the_configured_root() {
+        let db = fresh_db();
+        let registry = HookRegistry::new();
+        let configured_root = tempfile::tempdir().unwrap();
+        let outside_stage = tempfile::tempdir().unwrap();
+        std::fs::write(
+            outside_stage.path().join("plugin.toml"),
+            "[plugin]\nid = \"outside-stage\"\nname = \"Outside\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let host = PluginHost::new(db, registry, configured_root.path().to_path_buf());
+
+        let error = host.install(outside_stage.path()).await.unwrap_err();
+        assert!(matches!(error, PluginHostError::StagePathOutsideRoot(_)));
+        assert!(host.get_row("outside-stage").unwrap().is_none());
     }
 }

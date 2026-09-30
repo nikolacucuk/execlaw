@@ -403,6 +403,7 @@ async fn run_one(
         // request shape, which sets enable_thinking explicitly.
         chat_template_kwargs: Some(serde_json::json!({"enable_thinking": false})),
         tool_choice: None,
+        response_format: None,
         guided_decoding_backend: None,
     };
 

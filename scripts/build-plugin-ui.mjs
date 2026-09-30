@@ -34,32 +34,17 @@
  * # What esbuild does
  *
  *   * Compiles `.tsx`/`.ts` → ESM JS (target: ES2022).
- *   * Erases `import type` declarations (which is how plugins reach
- *     `@execlaw/plugin-ui` for types without a runtime dep).
- *   * Marks `react`, `react-dom`, `@execlaw/plugin-ui` as
- *     externals. The plugin's source should not import these at
- *     runtime — React comes from the bridge passed via props
- *     (`bridge.React`) and the types from `@execlaw/plugin-ui`
- *     are type-only. Marking them external is defensive: if a
- *     plugin author accidentally writes `import React from "react"`,
- *     esbuild leaves the import in the output and the dynamic
- *     loader fails with a clear "cannot resolve module" rather
- *     than silently bundling a second React copy.
- *   * JSX is compiled via the classic transform with
- *     `React.createElement` as the factory. Plugin authors put a
- *     `const React = globalThis.execlawHost.React` (or destructure
- *     from `props.bridge`) at module scope so the factory resolves.
- *   * Source map emitted next to the output. The host's
- *     static-asset route already serves `.js.map` with the right
- *     Content-Type.
+ *   * Erases `import type` declarations from `@execlaw/plugin-ui`.
+ *   * Bundles a private React + ReactDOM runtime into each panel.
+ *     Panels run in an opaque-origin iframe, so no React function
+ *     crosses into the operator SPA.
+ *   * JSX is compiled with the classic transform and uses the
+ *     panel-local `React.createElement` factory.
+ *   * Source map emitted next to the output for local plugin
+ *     authoring; panels must explicitly list other browser assets.
  *
- * # Externals contract
- *
- * The plugin's output JS MUST NOT contain any unresolved imports.
- * If you see esbuild warn about an external being left in the
- * output, your plugin source imports something it shouldn't.
- * Audit and remove. The bridge is the only runtime surface;
- * everything else is type-only.
+ * The generated ESM exports the panel component plus React and
+ * ReactDOM. The frame bootstrap supplies only manifest-scoped RPC.
  */
 
 import * as esbuild from "esbuild";
@@ -120,8 +105,20 @@ function configFor(pluginId) {
     const entry = entryFor(pluginId);
     const outfile = join(PLUGINS_DIR, pluginId, "ui", "panel.js");
     return {
-        entryPoints: [entry],
+        stdin: {
+            contents: [
+                'import * as React from "react";',
+                'import * as ReactDOM from "react-dom/client";',
+                `const panelModule = await import(${JSON.stringify(`./${relative(dirname(entry), entry).replace(/\\/g, "/")}`)});`,
+                "export { React, ReactDOM };",
+                "export default panelModule.default;",
+            ].join("\n"),
+            resolveDir: dirname(entry),
+            sourcefile: "panel-frame-entry.ts",
+            loader: "ts",
+        },
         outfile,
+        nodePaths: [join(REPO_ROOT, "web", "node_modules")],
         bundle: true,
         format: "esm",
         target: "es2022",
@@ -137,7 +134,7 @@ function configFor(pluginId) {
         // accidentally imports any of these at runtime, the
         // resulting output won't resolve and the dynamic loader
         // will surface a clear error.
-        external: ["react", "react-dom", "@execlaw/plugin-ui"],
+        external: ["@execlaw/plugin-ui"],
         // Minify in non-watch mode. Watch mode keeps the output
         // readable so the plugin author can debug.
         minify: !WATCH,

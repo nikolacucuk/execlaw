@@ -7,6 +7,27 @@
 
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use execlaw_server::auth::JwtSigner;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+struct BenchCatalogTool {
+    descriptor: execlaw_core::tool::ToolDescriptor,
+}
+
+#[async_trait::async_trait]
+impl execlaw_core::tool::ToolImpl for BenchCatalogTool {
+    fn descriptor(&self) -> &execlaw_core::tool::ToolDescriptor {
+        &self.descriptor
+    }
+
+    async fn invoke(
+        &self,
+        _ctx: execlaw_core::tool::ToolCtx,
+        _args: serde_json::Value,
+    ) -> execlaw_core::tool::ToolOutcome {
+        execlaw_core::tool::ToolOutcome::ok(serde_json::Value::Null)
+    }
+}
 
 fn bench_jwt_access(c: &mut Criterion) {
     let signer = JwtSigner::generate("execlaw-bench".into());
@@ -253,6 +274,7 @@ fn bench_runner_frame_codec(c: &mut Criterion) {
     };
     let cancel = ServerToRunner::CancelTurn {
         turn_id: "turn-1234".into(),
+        control_id: None,
     };
     c.bench_function("runner_frame_encode_token_delta", |b| {
         b.iter(|| serde_json::to_string(black_box(&token_delta)).unwrap())
@@ -266,7 +288,101 @@ fn bench_runner_frame_codec(c: &mut Criterion) {
     });
 }
 
-// ---------------------------------------------------------------------------
+fn bench_tool_catalog_assembly(c: &mut Criterion) {
+    use execlaw_core::db::{Database, DbConfig};
+    use execlaw_core::migrations::MigrationRunner;
+    use execlaw_core::tool::{Capability, ToolLatency, ToolSource};
+    use execlaw_plugin_host::{HookRegistry, PluginHost};
+    use execlaw_policy::trust::TrustLevel;
+
+    let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+    MigrationRunner::new(&db).apply_all().unwrap();
+    let registry = HookRegistry::new();
+    for index in 0..64 {
+        registry
+            .register_builtin(Arc::new(BenchCatalogTool {
+                descriptor: execlaw_core::tool::ToolDescriptor {
+                    name: format!("bench_tool_{index:02}"),
+                    description: format!(
+                        "Bounded benchmark tool {index} with a short description."
+                    ),
+                    schema: serde_json::json!({
+                        "type":"object",
+                        "properties":{"value":{"type":"string"}},
+                        "additionalProperties":false
+                    }),
+                    source: ToolSource::Builtin,
+                    latency: ToolLatency::Low,
+                    capabilities: Vec::<Capability>::new(),
+                    default_allowed_classes: vec!["Controller".into()],
+                    sensitive: false,
+                },
+            }))
+            .unwrap();
+    }
+    let plugin_host = PluginHost::new(db.clone(), registry, std::env::temp_dir());
+    let caller_caps = vec!["*".to_owned()];
+    c.bench_function("catalog/assemble_64_authorized_builtins", |b| {
+        b.iter(|| {
+            black_box(execlaw_server::chats::benchmark_runner_tool_catalog(
+                &db,
+                &plugin_host,
+                TrustLevel::Controller,
+                black_box(&caller_caps),
+                false,
+            ))
+        })
+    });
+}
+
+fn bench_inference_queue_wait(c: &mut Criterion) {
+    use execlaw_server::inference_resolver::{InferenceAdmission, InferenceWorkload};
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let admission = InferenceAdmission::new();
+    let mut held = runtime.block_on(async {
+        let mut permits = Vec::with_capacity(8);
+        for index in 0..8 {
+            permits.push(
+                admission
+                    .acquire(&format!("held-model-{index}"), InferenceWorkload::Chat)
+                    .await
+                    .unwrap(),
+            );
+        }
+        permits
+    });
+
+    c.bench_function("inference/queue_wait_contended", |b| {
+        b.iter_custom(|iterations| {
+            let mut elapsed = Duration::ZERO;
+            for _ in 0..iterations {
+                let release = held.pop().expect("eight permits stay reserved");
+                let release_task = runtime.spawn(async move {
+                    tokio::task::yield_now().await;
+                    drop(release);
+                });
+                let started = Instant::now();
+                let waiter = runtime
+                    .block_on(admission.acquire("queue-waiter-model", InferenceWorkload::Chat))
+                    .unwrap();
+                elapsed += started.elapsed();
+                drop(waiter);
+                runtime.block_on(release_task).unwrap();
+                held.push(
+                    runtime
+                        .block_on(admission.acquire("held-model-7", InferenceWorkload::Chat))
+                        .unwrap(),
+                );
+            }
+            elapsed
+        })
+    });
+}
+
 // 2026-05-03 — deep-research web-tooling hot paths.
 //
 // Two new benches lock in the perf budget on the gather phase's
@@ -784,6 +900,8 @@ criterion_group!(
     bench_runner_principal_group_hash,
     bench_runner_supervisor_lookup,
     bench_runner_frame_codec,
+    bench_tool_catalog_assembly,
+    bench_inference_queue_wait,
     bench_research_parse_ddg_html,
     bench_research_extract_readable_text,
     // Signal benches `#[cfg(any())]`-gated since the modules they

@@ -61,7 +61,7 @@ fn main() {
                 "jsonrpc": "2.0",
                 "id": id.unwrap(),
                 "result": {
-                    "protocolVersion": "2024-11-05",
+                    "protocolVersion": "2025-06-18",
                     "capabilities": {"tools": {}, "resources": {}},
                     "serverInfo": {"name": "mock-mcp", "version": "0.1.0"},
                 }

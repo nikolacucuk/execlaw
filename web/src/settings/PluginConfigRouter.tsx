@@ -10,10 +10,8 @@
 // Plugin authors ship `ui/panel.tsx` inside their ZIP — see
 // `web/src/plugins/types.ts` for the `PluginPanelComponent`
 // contract + `docs/plugins.md` for the authoring walkthrough.
-// The host's DynamicPluginPanel loads the plugin's `ui/panel.js`
-// at runtime (via authenticated fetch + Blob URL +
-// `import()`), passes the bridge (`globalThis.execlawHost`), and
-// renders the result.
+// DynamicPluginPanel fetches the declared panel entry and boots it in
+// an opaque-origin iframe with only manifest-scoped parent RPC.
 //
 // Plugin authors cannot skip the Danger Zone — it's rendered
 // outside the plugin's panel in the shell below. Same goes for

@@ -36,11 +36,11 @@ def main() -> int:
     for artifact in args.artifacts:
         artifact = artifact.resolve()
         sbom = Path(f"{artifact}.spdx.json")
-        if not sbom.is_file():
+        if not sbom.is_file() and args.artifact_type != "desktop_release":
             raise SystemExit(f"missing SPDX SBOM for {artifact}: {sbom}")
 
         artifact_sha = sha256(artifact)
-        sbom_sha = sha256(sbom)
+        sbom_sha = sha256(sbom) if sbom.is_file() else None
         bundle = Path(f"{artifact}.sigstore.json")
         statement_path = Path(f"{artifact}.provenance.json")
         predicate = {
@@ -90,10 +90,13 @@ def main() -> int:
             "workflow_identity": workflow_identity,
             "signature_reference": str(bundle),
             "attestation_result": "offline Sigstore SLSA provenance bundle",
-            "sbom_format": "spdx",
-            "sbom_location": str(sbom),
-            "sbom_sha256": sbom_sha,
         }
+        if sbom_sha is not None:
+            statement.update({
+                "sbom_format": "spdx",
+                "sbom_location": str(sbom),
+                "sbom_sha256": sbom_sha,
+            })
         statement_path.write_text(json.dumps(statement, indent=2) + "\n", encoding="utf-8")
         print(f"prepared provenance for {artifact.name}")
 

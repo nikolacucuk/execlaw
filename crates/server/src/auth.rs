@@ -99,10 +99,30 @@ impl RefreshStore {
         RefreshTokenStore::new(&self.db).revoke_session(session_id)
     }
 
+    /// Check whether a live refresh-token row still backs an access session.
+    pub fn session_is_active(&self, principal_id: &str, session_id: &str) -> Result<bool, DbError> {
+        RefreshTokenStore::new(&self.db).session_is_active(
+            principal_id,
+            session_id,
+            chrono::Utc::now().timestamp(),
+        )
+    }
+
     /// "Sign out everywhere": drop every refresh token for a user.
     /// Returns the number removed.
     pub fn revoke_all_for_user(&self, principal_id: &str) -> Result<usize, DbError> {
         RefreshTokenStore::new(&self.db).revoke_all_for_user(principal_id)
+    }
+
+    /// Change a user's password and revoke all sessions in one database
+    /// transaction. `None` means the user no longer exists.
+    pub fn set_password_hash_and_revoke_all(
+        &self,
+        principal_id: &str,
+        password_hash: &str,
+    ) -> Result<Option<usize>, DbError> {
+        RefreshTokenStore::new(&self.db)
+            .set_password_hash_and_revoke_all(principal_id, password_hash)
     }
 
     /// Distinct active sessions for a user. Drives the

@@ -168,6 +168,7 @@ mod tests {
                     prompt: "do".into(),
                     target_conversation_id: None,
                     enabled: true,
+                    completion_contract: None,
                 },
                 now,
             )

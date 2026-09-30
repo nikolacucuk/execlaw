@@ -1669,6 +1669,8 @@ struct DelegateTaskArgs {
     context: Option<String>,
     #[serde(default)]
     max_tokens: Option<u32>,
+    #[serde(default)]
+    dependencies: Vec<String>,
 }
 
 fn default_allowed_for_subagent_spawn() -> Vec<String> {
@@ -1716,6 +1718,12 @@ impl DelegateTaskTool {
                             "minimum": 1,
                             "maximum": 4096,
                             "description": "Cap on the subagent's reply length."
+                        },
+                        "dependencies": {
+                            "type": "array",
+                            "items": {"type": "string", "maxLength": 128},
+                            "maxItems": 16,
+                            "description": "Completed sibling child task ids this task depends on."
                         }
                     },
                     "required": ["task"],
@@ -1754,12 +1762,14 @@ impl ToolImpl for DelegateTaskTool {
             task: args.task,
             context: args.context,
             max_tokens: args.max_tokens.map(|n| n.min(4096)),
+            dependencies: args.dependencies,
         };
         match api.delegate(&req).await {
             Ok(resp) => ToolOutcome::Ok(json!({
                 "task_id": resp.task_id,
                 "text": resp.text,
                 "tokens_used": resp.tokens_used,
+                "artifact_id": resp.artifact_id,
             })),
             Err(e) => e.into_outcome(),
         }
@@ -4642,6 +4652,7 @@ mod tests {
             text: "draft body here".into(),
             task_id: "abc-123".into(),
             tokens_used: Some(42),
+            artifact_id: None,
         };
         let ctx = ctx_with_stub_subagent(&db, cid, canned);
         let out = DelegateTaskTool::new()
@@ -4665,6 +4676,7 @@ mod tests {
             text: "".into(),
             task_id: "x".into(),
             tokens_used: None,
+            artifact_id: None,
         };
         let ctx = ctx_with_stub_subagent(&db, cid, canned);
         match DelegateTaskTool::new()
@@ -4711,6 +4723,7 @@ mod tests {
                     text: "ok".into(),
                     task_id: "id".into(),
                     tokens_used: None,
+                    artifact_id: None,
                 })
             }
         }

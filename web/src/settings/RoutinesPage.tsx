@@ -24,6 +24,7 @@ import {
     type RoutineRunView,
     type RoutineView,
     type UpsertRoutineBody,
+    type RunCompletionContractDraft,
 } from "../api/endpoints";
 import { useAuth } from "../auth/AuthContext";
 import { ErrorBanner } from "../components/ErrorBanner";
@@ -36,6 +37,10 @@ interface FormState {
     prompt: string;
     target_conversation_id: string;
     enabled: boolean;
+    criteria_text: string;
+    artifacts_text: string;
+    delivery_required: boolean;
+    original_contract: RunCompletionContractDraft | null;
 }
 
 const EMPTY_FORM: FormState = {
@@ -46,6 +51,10 @@ const EMPTY_FORM: FormState = {
     prompt: "",
     target_conversation_id: "",
     enabled: true,
+    criteria_text: "",
+    artifacts_text: "",
+    delivery_required: false,
+    original_contract: null,
 };
 
 function fromView(v: RoutineView): FormState {
@@ -57,10 +66,31 @@ function fromView(v: RoutineView): FormState {
         prompt: v.prompt,
         target_conversation_id: v.target_conversation_id ?? "",
         enabled: v.enabled,
+        criteria_text: v.completion_contract?.acceptance_criteria.map((item) => item.description).join("\n") ?? "",
+        artifacts_text: v.completion_contract?.required_artifacts.map((item) => item.description).join("\n") ?? "",
+        delivery_required: v.completion_contract?.delivery_required ?? false,
+        original_contract: v.completion_contract ?? null,
     };
 }
 
 function toUpsert(f: FormState): UpsertRoutineBody {
+    const criteria = f.criteria_text.split("\n").map((value) => value.trim()).filter(Boolean)
+        .map((description, index) => {
+            const prior = f.original_contract?.acceptance_criteria[index];
+            return prior?.description === description
+                ? prior
+                : { criterion_id: `criterion-${index + 1}`, description, required: true };
+        });
+    const artifacts = f.artifacts_text.split("\n").map((value) => value.trim()).filter(Boolean)
+        .map((description, index) => {
+            const prior = f.original_contract?.required_artifacts[index];
+            return prior?.description === description
+                ? prior
+                : { artifact_id: `artifact-${index + 1}`, description };
+        });
+    const completion_contract = criteria.length || artifacts.length || f.delivery_required
+        ? { acceptance_criteria: criteria, required_artifacts: artifacts, delivery_required: f.delivery_required }
+        : null;
     return {
         name: f.name,
         schedule_cron: f.schedule_cron,
@@ -71,6 +101,7 @@ function toUpsert(f: FormState): UpsertRoutineBody {
                 ? null
                 : f.target_conversation_id.trim(),
         enabled: f.enabled,
+        completion_contract,
     };
 }
 
@@ -418,6 +449,20 @@ export function RoutinesPage() {
                             data-testid="routine-target"
                         />
                     </Form.Group>
+
+                    <Form.Group className="mb-3" controlId="routine-criteria">
+                        <Form.Label className="small mb-1">Required acceptance checks (one per line)</Form.Label>
+                        <Form.Control as="textarea" rows={3} value={form.criteria_text}
+                            onChange={(e) => onChange("criteria_text", e.target.value)} />
+                    </Form.Group>
+                    <Form.Group className="mb-3" controlId="routine-artifacts">
+                        <Form.Label className="small mb-1">Required artifacts (one per line)</Form.Label>
+                        <Form.Control as="textarea" rows={2} value={form.artifacts_text}
+                            onChange={(e) => onChange("artifacts_text", e.target.value)} />
+                    </Form.Group>
+                    <Form.Check type="switch" id="routine-delivery-required"
+                        label="Require delivery confirmation" checked={form.delivery_required}
+                        onChange={(e) => onChange("delivery_required", e.target.checked)} className="mb-3" />
 
                     <Form.Check
                         type="switch"

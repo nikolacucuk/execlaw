@@ -188,12 +188,8 @@ if ($env:EXECLAW_REUSE_NODE_MODULES -ne '1' -or -not (Test-Path -LiteralPath $we
 if ($LASTEXITCODE -ne 0) { throw "npm run build failed ($LASTEXITCODE)" }
 
 Write-Host "==> Step 2: build server binary for $Target"
-# We intentionally do NOT pass --no-default-features here — the
-# server crate's defaults are what production ships (SQLCipher
-# bundled, OpenSSL vendored). If the operator wants a host dev build
-# without SQLCipher, they should run the workspace `cargo build`
-# directly, not this release script.
-& cargo build --release --target $Target -p execlaw
+# Release builds explicitly select SQLCipher; workspace defaults are plaintext.
+& cargo build --release --target $Target -p execlaw --no-default-features --features sqlcipher
 if ($LASTEXITCODE -ne 0) { throw "cargo build -p execlaw failed ($LASTEXITCODE)" }
 
 Write-Host '==> Step 3: stage server binary for Tauri sidecar bundling'

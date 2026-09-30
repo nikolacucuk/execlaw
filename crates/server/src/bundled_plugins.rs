@@ -421,38 +421,28 @@ pub async fn install_bundled_handler(
 
     let plugin_id_for_log = staged.manifest.plugin.id.clone();
     let plugin_version_for_log = staged.manifest.plugin.version.clone();
-    let target: PathBuf = state.plugin_host.stage_root().join(format!(
-        "{}-{}",
-        staged.manifest.plugin.id, staged.manifest.plugin.version
-    ));
     let upgrade = matches!(q.if_existing.as_deref(), Some("upgrade"));
-
-    // Same conflict-handling logic as the upload path. If we're
-    // upgrading and the stage dir already exists for this same
-    // version, tear it down so the rename below succeeds.
-    if target.exists() && !upgrade {
+    let stage_root = state.plugin_host.stage_root();
+    std::fs::create_dir_all(stage_root).map_err(|error| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "stage_mkdir",
+        message: format!("mkdir: {error}"),
+    })?;
+    let stage_root = stage_root.canonicalize().map_err(|error| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "stage_root",
+        message: format!("canonicalize plugin stage root: {error}"),
+    })?;
+    // Candidate bytes always land in a fresh sibling directory. In
+    // particular, an upgrade with the same plugin id/version must not
+    // overwrite the live version before provenance verification passes.
+    let target = stage_root.join(format!("upload-{}", uuid::Uuid::new_v4()));
+    if target.parent() != Some(stage_root.as_path()) {
         return Err(ApiError {
-            status: StatusCode::CONFLICT,
-            code: "already_staged",
-            message: format!(
-                "a staged dir already exists at {}; pass if_existing=upgrade to replace it",
-                target.display()
-            ),
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "stage_path",
+            message: "bundled plugin candidate escaped the stage root".into(),
         });
-    }
-    if target.exists() && upgrade {
-        std::fs::remove_dir_all(&target).map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "stage_clear",
-            message: format!("could not clear existing stage dir: {e}"),
-        })?;
-    }
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "stage_mkdir",
-            message: format!("mkdir: {e}"),
-        })?;
     }
     let released = staged.tempdir.keep();
     if let Err(e) = std::fs::rename(&released, &target) {
@@ -542,6 +532,9 @@ pub fn bundled_plugins_router() -> Router<AppState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::{self, Body};
+    use axum::http::{Method, Request};
+    use tower::ServiceExt;
 
     #[test]
     fn mirror_skips_when_no_source_dir() {
@@ -576,5 +569,106 @@ mod tests {
             if_existing: None,
         };
         assert!(path_sep.file.contains('/'));
+    }
+
+    #[tokio::test]
+    async fn rejected_bundled_upgrade_preserves_same_version_install() {
+        use execlaw_core::users::{UserRole, UserRow, UserStore};
+        use std::io::{Cursor, Write};
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let state = crate::routes::test_app_state();
+        let now = chrono::Utc::now().timestamp();
+        let user_id = "bundled-plugin-controller";
+        UserStore::new(&state.db)
+            .insert(&UserRow {
+                user_id: user_id.into(),
+                username: "bundled-controller".into(),
+                display_name: "Bundled Controller".into(),
+                email: None,
+                password_hash: "unused-test-hash".into(),
+                role: UserRole::Controller,
+                created_at: now,
+                last_login_at: None,
+            })
+            .unwrap();
+        let session_id = "bundled-plugin-session";
+        state
+            .refresh_store
+            .issue(user_id, session_id, 3600)
+            .unwrap();
+        let access = state
+            .signer
+            .issue_access_token(user_id, session_id, 3600)
+            .unwrap();
+
+        let old_stage = state.plugin_host.stage_root().join("fixture-0.1.0");
+        std::fs::create_dir_all(&old_stage).unwrap();
+        let old_manifest =
+            "[plugin]\nid = \"bundled-fixture\"\nname = \"Bundled fixture\"\nversion = \"0.1.0\"\n";
+        std::fs::write(old_stage.join("plugin.toml"), old_manifest).unwrap();
+        state.plugin_host.install(&old_stage).await.unwrap();
+
+        let bundle_dir = state.data_dir.join(BUNDLED_DIR_NAME);
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        let archive_path = bundle_dir.join("bundled-fixture.zip");
+        let mut archive = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut archive);
+            zip.start_file::<_, ()>("plugin.toml", SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(old_manifest.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+        let archive_bytes = archive.into_inner();
+        std::fs::write(&archive_path, &archive_bytes).unwrap();
+        let provenance = serde_json::json!({
+            "artifact_id": "bundled-fixture-0.1.0",
+            "artifact_type": "plugin_zip",
+            "artifact_locator": archive_path.to_string_lossy(),
+            "sha256": execlaw_core::artifact_provenance::sha256_bytes(&archive_bytes),
+            "publisher_identity": "https://example.invalid/publisher",
+            "source_repository": "https://example.invalid/repository",
+            "source_commit": "0123456789abcdef",
+            "workflow_identity": "https://example.invalid/workflow",
+            "signature_reference": "fixture.zip.sigstore.json",
+            "attestation_result": "signed",
+            "sbom_format": "cyclonedx",
+            "sbom_location": "fixture.zip.cdx.json",
+            "sbom_sha256": "a".repeat(64),
+        });
+        std::fs::write(
+            archive_path.with_file_name("bundled-fixture.zip.provenance.json"),
+            serde_json::to_vec(&provenance).unwrap(),
+        )
+        .unwrap();
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/plugins/install-bundled?file=bundled-fixture.zip&if_existing=upgrade")
+            .header("authorization", format!("Bearer {access}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = crate::routes::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let _ = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        let row = state
+            .plugin_host
+            .get_row("bundled-fixture")
+            .unwrap()
+            .expect("previous plugin row remains installed");
+        assert_eq!(row.version, "0.1.0");
+        assert_eq!(
+            std::fs::read(old_stage.join("plugin.toml")).unwrap(),
+            old_manifest.as_bytes()
+        );
+        assert!(old_stage.exists(), "old staged bytes remain available");
     }
 }

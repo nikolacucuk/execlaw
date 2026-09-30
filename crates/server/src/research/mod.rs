@@ -30,7 +30,7 @@ pub mod synthesize;
 pub mod workspace;
 
 pub use gather::{GatherCtx, GatherDeps, GatherError, run_gather};
-pub use retention::{ResearchRetentionReport, ResearchRetentionSweeper};
+pub use retention::{ResearchRetentionReport, ResearchRetentionSweeper, process_deletion_queue};
 pub use runner::{PhaseDeps, ResearchRunnerError, run_job};
 pub use supervisor::ResearchSupervisor;
 pub use synthesize::{SynthesizeCtx, SynthesizeError, SynthesizeOutcome, run_synthesize};

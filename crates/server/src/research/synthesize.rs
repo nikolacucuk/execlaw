@@ -25,6 +25,7 @@ use execlaw_core::research::{ResearchError, ResearchNote, ResearchPlan, SubQuery
 use execlaw_inference_api::{ChatMessage, ChatRequest, InferenceClient, ModelId};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+use std::sync::OnceLock;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -150,6 +151,7 @@ pub async fn run_synthesize(ctx: SynthesizeCtx) -> Result<SynthesizeOutcome, Syn
         tools: None,
         chat_template_kwargs: None,
         tool_choice: None,
+        response_format: None,
         guided_decoding_backend: None,
     };
     let adapter =
@@ -181,6 +183,7 @@ pub async fn run_synthesize(ctx: SynthesizeCtx) -> Result<SynthesizeOutcome, Syn
             tools: None,
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
         adapter
@@ -200,6 +203,21 @@ pub async fn run_synthesize(ctx: SynthesizeCtx) -> Result<SynthesizeOutcome, Syn
             "synthesize LLM returned empty markdown".into(),
         ));
     }
+
+    let (report_markdown, unverified_citations) =
+        validate_citation_links(&report_markdown, &usable);
+    let report_markdown = if unverified_citations.is_empty() {
+        report_markdown
+    } else {
+        format!(
+            "{report_markdown}\n\n## Citation verification\n\nGenerated links below were not fetched in this research run and are unverified:\n{}",
+            unverified_citations
+                .iter()
+                .map(|url| format!("- {url}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )
+    };
 
     let mut outcome = finalize_report(
         &db,
@@ -226,6 +244,45 @@ pub async fn run_synthesize(ctx: SynthesizeCtx) -> Result<SynthesizeOutcome, Syn
     }
 
     Ok(outcome)
+}
+
+fn validate_citation_links(markdown: &str, notes: &[&ResearchNote]) -> (String, Vec<String>) {
+    static LINK: OnceLock<regex::Regex> = OnceLock::new();
+    let link = LINK.get_or_init(|| {
+        regex::Regex::new(r"\[([^\]]+)\]\((https?://[^)\s]+)(?:\s+[^)]*)?\)")
+            .expect("static markdown citation regex is valid")
+    });
+    let fetched = notes
+        .iter()
+        .flat_map(|note| note.sources.iter())
+        .filter(|source| source.fetched_ok)
+        .map(|source| normalized_source_url(&source.url))
+        .collect::<std::collections::HashSet<_>>();
+    let mut unverified = std::collections::BTreeSet::new();
+    let sanitized = link
+        .replace_all(markdown, |captures: &regex::Captures<'_>| {
+            let title = captures.get(1).map_or("source", |value| value.as_str());
+            let raw_url = captures.get(2).map_or("", |value| value.as_str());
+            if fetched.contains(&normalized_source_url(raw_url)) {
+                captures
+                    .get(0)
+                    .map_or_else(String::new, |value| value.as_str().to_owned())
+            } else {
+                unverified.insert(raw_url.to_owned());
+                format!("[{title}] (unverified citation URL: {raw_url})")
+            }
+        })
+        .into_owned();
+    (sanitized, unverified.into_iter().collect())
+}
+
+fn normalized_source_url(raw_url: &str) -> String {
+    url::Url::parse(raw_url)
+        .map(|mut parsed| {
+            parsed.set_fragment(None);
+            parsed.to_string()
+        })
+        .unwrap_or_else(|_| raw_url.to_owned())
 }
 
 /// Test seam: compose the prompt + finalize without going through
@@ -535,6 +592,7 @@ mod tests {
                 title: Some(query.into()),
                 fetched_ok: true,
                 error: None,
+                ..ResearchSource::default()
             }],
             tokens_used: Some(50),
             error: None,

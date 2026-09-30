@@ -119,6 +119,9 @@ pub struct BusEventRow {
     pub payload: serde_json::Value,
     pub internal: bool,
     pub dispatched_at: Option<i64>,
+    pub completed_at: Option<i64>,
+    pub dispatch_lease_owner: Option<String>,
+    pub dispatch_lease_expires_at: Option<i64>,
 }
 
 #[derive(Debug, Error)]
@@ -198,13 +201,65 @@ impl<'a> BusEventStore<'a> {
     pub fn mark_dispatched(&self, id: &str, dispatched_at: i64) -> Result<bool, BusEventError> {
         let n = self.db.with_conn(|c| {
             let n = c.execute(
-                "UPDATE state_bus_events SET dispatched_at = ?2 \
+                "UPDATE state_bus_events SET dispatched_at = ?2, completed_at = ?2 \
                  WHERE id = ?1 AND dispatched_at IS NULL",
                 params![id, dispatched_at],
             )?;
             Ok(n)
         })?;
         Ok(n > 0)
+    }
+
+    /// Atomically claim an unfinished event or reclaim its expired dispatch lease.
+    pub fn claim_dispatch(
+        &self,
+        id: &str,
+        owner: &str,
+        now: i64,
+        lease_seconds: i64,
+    ) -> Result<bool, BusEventError> {
+        let changed = self.db.with_conn(|connection| {
+            Ok(connection.execute(
+                "UPDATE state_bus_events SET dispatched_at = COALESCE(dispatched_at, ?3), \
+                    dispatch_lease_owner = ?2, dispatch_lease_expires_at = ?4 \
+                 WHERE id = ?1 AND completed_at IS NULL \
+                   AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= ?3)",
+                params![id, owner, now, now.saturating_add(lease_seconds.max(1))],
+            )?)
+        })?;
+        Ok(changed == 1)
+    }
+
+    /// A stale worker cannot acknowledge work after another owner reclaimed it.
+    pub fn complete_dispatch(
+        &self,
+        id: &str,
+        owner: &str,
+        completed_at: i64,
+    ) -> Result<bool, BusEventError> {
+        let changed = self.db.with_conn(|connection| {
+            Ok(connection.execute(
+                "UPDATE state_bus_events SET completed_at = ?3, dispatch_lease_owner = NULL, \
+                    dispatch_lease_expires_at = NULL WHERE id = ?1 AND dispatch_lease_owner = ?2 \
+                    AND completed_at IS NULL",
+                params![id, owner, completed_at],
+            )?)
+        })?;
+        Ok(changed == 1)
+    }
+
+    /// Release a failed handler's lease so the durable recovery scan can
+    /// retry it immediately. Owner fencing prevents a stale worker from
+    /// releasing a lease it no longer owns.
+    pub fn release_dispatch(&self, id: &str, owner: &str) -> Result<bool, BusEventError> {
+        let changed = self.db.with_conn(|connection| {
+            Ok(connection.execute(
+                "UPDATE state_bus_events SET dispatch_lease_owner = NULL, dispatch_lease_expires_at = NULL \
+                 WHERE id = ?1 AND dispatch_lease_owner = ?2 AND completed_at IS NULL",
+                params![id, owner],
+            )?)
+        })?;
+        Ok(changed == 1)
     }
 
     /// Fetch a single row by id. The dispatcher uses this after
@@ -220,7 +275,7 @@ impl<'a> BusEventStore<'a> {
     pub fn get(&self, id: &str) -> Result<Option<BusEventRow>, BusEventError> {
         let row = self.db.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, kind, source, received_at, payload, internal, dispatched_at \
+                "SELECT id, kind, source, received_at, payload, internal, dispatched_at, completed_at, dispatch_lease_owner, dispatch_lease_expires_at \
                  FROM state_bus_events WHERE id = ?1",
             )?;
             let r = stmt
@@ -247,6 +302,9 @@ impl<'a> BusEventStore<'a> {
                         payload,
                         internal: internal_flag != 0,
                         dispatched_at: r.get(6)?,
+                        completed_at: r.get(7)?,
+                        dispatch_lease_owner: r.get(8)?,
+                        dispatch_lease_expires_at: r.get(9)?,
                     })
                 })
                 .ok();
@@ -268,7 +326,7 @@ impl<'a> BusEventStore<'a> {
         let kind_str = kind.as_str();
         let rows = self.db.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT id, kind, source, received_at, payload, internal, dispatched_at \
+                "SELECT id, kind, source, received_at, payload, internal, dispatched_at, completed_at, dispatch_lease_owner, dispatch_lease_expires_at \
                  FROM state_bus_events \
                  WHERE kind = ?1 \
                  ORDER BY received_at DESC \
@@ -290,6 +348,9 @@ impl<'a> BusEventStore<'a> {
                     payload,
                     internal: internal_flag != 0,
                     dispatched_at: r.get(6)?,
+                    completed_at: r.get(7)?,
+                    dispatch_lease_owner: r.get(8)?,
+                    dispatch_lease_expires_at: r.get(9)?,
                 })
             })?;
             let mut out = Vec::new();
@@ -317,11 +378,11 @@ impl<'a> BusEventStore<'a> {
         let ids = self.db.with_conn(|c| {
             let sql = if internal_only {
                 "SELECT id FROM state_bus_events \
-                 WHERE dispatched_at IS NULL AND internal = 1 \
+                 WHERE completed_at IS NULL AND internal = 1 AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= strftime('%s','now')) \
                  ORDER BY received_at ASC LIMIT ?1"
             } else {
                 "SELECT id FROM state_bus_events \
-                 WHERE dispatched_at IS NULL \
+                 WHERE completed_at IS NULL AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= strftime('%s','now')) \
                  ORDER BY received_at ASC LIMIT ?1"
             };
             let mut stmt = c.prepare(sql)?;
@@ -342,7 +403,7 @@ impl<'a> BusEventStore<'a> {
         let n = self.db.with_conn(|c| {
             let n = c.execute(
                 "DELETE FROM state_bus_events \
-                 WHERE dispatched_at IS NOT NULL \
+                 WHERE completed_at IS NOT NULL \
                    AND received_at < ?1",
                 params![cutoff_unix],
             )?;
@@ -674,6 +735,143 @@ mod tests {
             1,
             "exactly one thread must win the claim",
         );
+    }
+
+    #[test]
+    fn expired_dispatch_lease_recovers_after_worker_process_loss() {
+        let db = fresh_db();
+        let store = BusEventStore::new(&db);
+        store
+            .publish(&sample_event("killed-worker", "src", 1), false)
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        // Simulate a process killed after taking its durable lease and
+        // before acknowledging handler completion.
+        assert!(
+            store
+                .claim_dispatch("killed-worker", "old-process", now, 1)
+                .unwrap()
+        );
+        assert!(store.fetch_pending(false, 10).unwrap().is_empty());
+
+        // Restart after the lease expiry: the row is visible to the
+        // recovery scan, the new owner reclaims it, and the old process
+        // cannot acknowledge work under a stale fencing token.
+        std::thread::sleep(std::time::Duration::from_millis(1_100));
+        let recovered_at = chrono::Utc::now().timestamp();
+        assert_eq!(
+            store.fetch_pending(false, 10).unwrap(),
+            vec!["killed-worker".to_owned()]
+        );
+        assert!(
+            store
+                .claim_dispatch("killed-worker", "new-process", recovered_at, 30)
+                .unwrap()
+        );
+        assert!(
+            !store
+                .complete_dispatch("killed-worker", "old-process", recovered_at + 1)
+                .unwrap()
+        );
+        assert!(
+            store
+                .complete_dispatch("killed-worker", "new-process", recovered_at + 1)
+                .unwrap()
+        );
+        assert!(store.fetch_pending(false, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn process_kill_after_automation_claim_recovers_after_database_reopen() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("automation-crash.db");
+        let ready_path = temp.path().join("claimed");
+        let db = Database::open(&DbConfig {
+            path: database_path.clone(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        BusEventStore::new(&db)
+            .publish(&sample_event("killed-automation-worker", "src", 1), false)
+            .unwrap();
+        drop(db);
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "automation_bus::tests::automation_crash_child_holds_lease_until_killed",
+                "--nocapture",
+            ])
+            .env("EXECLAW_AUTOMATION_CRASH_DB", &database_path)
+            .env("EXECLAW_AUTOMATION_CRASH_READY", &ready_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            ready_path.exists(),
+            "child did not acquire automation lease"
+        );
+        child.kill().unwrap();
+        let _ = child.wait();
+
+        std::thread::sleep(Duration::from_millis(1_100));
+        let reopened = Database::open(&DbConfig {
+            path: database_path,
+            key: None,
+        })
+        .unwrap();
+        let store = BusEventStore::new(&reopened);
+        assert_eq!(
+            store.fetch_pending(false, 10).unwrap(),
+            vec!["killed-automation-worker".to_owned()]
+        );
+        assert!(
+            store
+                .claim_dispatch(
+                    "killed-automation-worker",
+                    "recovery-process",
+                    chrono::Utc::now().timestamp(),
+                    30,
+                )
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn automation_crash_child_holds_lease_until_killed() {
+        let (Some(database_path), Some(ready_path)) = (
+            std::env::var_os("EXECLAW_AUTOMATION_CRASH_DB"),
+            std::env::var_os("EXECLAW_AUTOMATION_CRASH_READY"),
+        ) else {
+            return;
+        };
+        let db = Database::open(&DbConfig {
+            path: database_path.into(),
+            key: None,
+        })
+        .unwrap();
+        assert!(
+            BusEventStore::new(&db)
+                .claim_dispatch(
+                    "killed-automation-worker",
+                    "killed-process",
+                    chrono::Utc::now().timestamp(),
+                    1,
+                )
+                .unwrap()
+        );
+        std::fs::write(ready_path, b"claimed").unwrap();
+        std::thread::park();
     }
 
     #[test]

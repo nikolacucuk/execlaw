@@ -745,6 +745,7 @@ impl ScheduleApi for DbScheduleApi {
             prompt: prompt.to_owned(),
             target_conversation_id: target,
             enabled: true,
+            completion_contract: None,
         };
         let now = self.clock_now_unix;
         let db = self.db.clone();
@@ -822,6 +823,7 @@ impl ScheduleApi for DbScheduleApi {
             prompt: new_prompt,
             target_conversation_id: new_target,
             enabled: new_enabled,
+            completion_contract: existing.completion_contract.clone(),
         };
         let now = self.clock_now_unix;
         let db = self.db.clone();

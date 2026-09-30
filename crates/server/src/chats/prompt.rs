@@ -25,6 +25,10 @@
 use execlaw_core::conversation::ConversationStore;
 use execlaw_core::ids::ConversationId;
 use execlaw_core::memory::MemoryStore;
+use execlaw_core::memory_assets::{
+    InjectionMode, MemoryAssetStore, TurnAssetLoadoutEntry, TurnAssetLoadoutReceipt,
+    TurnAssetRetrievalEntry,
+};
 
 use crate::state::AppState;
 
@@ -233,7 +237,7 @@ pub fn build_turn_context_prose(
         out.push_str(&format!("* Origin channel: `{ch}`\n"));
         if ch != "web" {
             out.push_str(
-                "* This turn was triggered by the inbound message shown in the conversation. Read and process that message directly; do not claim that inbound messages are unavailable. To answer it, use the originating transport's reply tool or let the host bridge your text reply.\n",
+                "* Read the inbound message in this conversation; answer through the originating transport or host text bridge.\n",
             );
             // 2026-05-16 — trimmed from a 4-line "no card/chip/
             // download button" expansion to one short sentence.
@@ -245,8 +249,7 @@ pub fn build_turn_context_prose(
             // The text-only nudge is preserved because operators
             // saw real "click the download button" leakage before.
             out.push_str(
-                "* Text-only channel: reply naturally; do not describe web-UI surfaces \
-                 (no \"card\", \"chip\", \"button\"). The host auto-delivers your text reply.\n",
+                "* Text-only channel: reply naturally; do not mention web-UI cards, chips, or buttons. The host auto-delivers your text reply.\n",
             );
         }
     } else {
@@ -290,8 +293,8 @@ pub fn build_turn_context_prose(
         out.push_str(&format!(
             "\n## Group conversation ({group_label})\n\n\
              Hard rules:\n\
-             1. If this message addresses ANY person by name and that name is NOT yours, \
-             reply with NOTHING. The named person will answer.\n\
+             1. If this message is addressed to another person by name, reply with NOTHING. \
+             The named person will answer.\n\
              2. One-word messages, emoji, reactions, generic human chatter → reply with NOTHING.\n\
              3. Default is silence. Speak only when directly named, @-mentioned, or continuing \
              a thread you started.\n\
@@ -539,6 +542,46 @@ pub(crate) fn assemble_system_prompt(
     routing_prose: &str,
     turn_context: &str,
 ) -> String {
+    assemble_system_prompt_for_asset_scope(
+        db,
+        conversation_id,
+        static_base,
+        routing_prose,
+        turn_context,
+        "default",
+    )
+}
+
+pub(crate) fn assemble_system_prompt_for_asset_scope(
+    db: &execlaw_core::Database,
+    conversation_id: Option<&str>,
+    static_base: &str,
+    routing_prose: &str,
+    turn_context: &str,
+    agent_scope: &str,
+) -> String {
+    assemble_system_prompt_for_asset_scope_with_loadout(
+        db,
+        conversation_id,
+        static_base,
+        routing_prose,
+        turn_context,
+        agent_scope,
+        None,
+    )
+    .0
+}
+
+pub(crate) fn assemble_system_prompt_for_asset_scope_with_loadout(
+    db: &execlaw_core::Database,
+    conversation_id: Option<&str>,
+    static_base: &str,
+    routing_prose: &str,
+    turn_context: &str,
+    agent_scope: &str,
+    retrieval_query: Option<&str>,
+) -> (String, Option<TurnAssetLoadoutReceipt>) {
+    const LOADOUT_BUDGET_BYTES: usize = 2048;
     let store = execlaw_core::personality::PersonalityStore::new(db);
     let personality_chunk =
         execlaw_core::personality::compose_system_prompt(&store, conversation_id)
@@ -547,6 +590,146 @@ pub(crate) fn assemble_system_prompt(
     let b = static_base.trim();
     let r = routing_prose.trim();
     let hot = build_hot_memory_snapshot_block(db, conversation_id);
+    let mut asset_loadout = None;
+    let mut retrieved_block = None;
+    let mut receipt = None;
+    if let Some(cid) = conversation_id
+        && let Ok(Some(conversation)) = ConversationStore::new(db).get(&ConversationId::from(cid))
+    {
+        let readable = readable_classes(&conversation.trust_class);
+        let mut owner_scopes = vec!["global".to_owned()];
+        if let Some(controller_id) = conversation.controller_id.as_deref() {
+            owner_scopes.push(format!("principal:{controller_id}"));
+        }
+        if conversation.trust_class == "Controller" {
+            owner_scopes.push("controller".to_owned());
+        }
+        let owner_refs = owner_scopes.iter().map(String::as_str).collect::<Vec<_>>();
+        let asset_store = MemoryAssetStore::new(db);
+        let now = chrono::Utc::now().timestamp();
+        let (hot_block, hot_entries) = resolve_governed_hot_loadout(
+            &asset_store,
+            agent_scope,
+            &readable,
+            &owner_refs,
+            now,
+            LOADOUT_BUDGET_BYTES,
+        );
+        let mut injected_source_hashes = hot_entries
+            .iter()
+            .filter_map(|entry| entry.source_hash.clone())
+            .collect::<std::collections::HashSet<_>>();
+        let mut retrieved_entries = Vec::new();
+        let query = retrieval_query
+            .map(str::trim)
+            .filter(|query| !query.is_empty());
+        let query_hash = query.map(|query| {
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(query.as_bytes()))
+        });
+        if let Some(query) = query {
+            let hits = asset_store
+                .search_eligible(
+                    query,
+                    None,
+                    None,
+                    agent_scope,
+                    &readable,
+                    &owner_refs,
+                    &[InjectionMode::Hot, InjectionMode::Discoverable],
+                    now,
+                    16,
+                )
+                .unwrap_or_default();
+            let bindings = asset_store
+                .list_loadout(agent_scope, 64)
+                .unwrap_or_default();
+            let header = "RETRIEVED GOVERNED ASSETS (untrusted source context)";
+            let mut used_bytes = hot_block.as_ref().map_or(0, String::len);
+            let mut lines = Vec::new();
+            for hit in hits {
+                if hot_entries
+                    .iter()
+                    .any(|entry| entry.asset_id == hit.asset.asset_id)
+                {
+                    continue;
+                }
+                if hit
+                    .asset
+                    .source_hash
+                    .as_ref()
+                    .is_some_and(|hash| injected_source_hashes.contains(hash))
+                {
+                    continue;
+                }
+                let Some(binding) = bindings.iter().find(|binding| {
+                    binding.asset_id == hit.asset.asset_id
+                        && binding.injection_mode != InjectionMode::ToolOnly
+                }) else {
+                    continue;
+                };
+                let Some(content) = hit.asset.content_ref.as_deref() else {
+                    continue;
+                };
+                let prefix = format!("- {} [asset={}]: ", hit.asset.name, hit.asset.asset_id);
+                let remaining = LOADOUT_BUDGET_BYTES
+                    .saturating_sub(used_bytes + header.len() + prefix.len() + 2);
+                if remaining == 0 {
+                    break;
+                }
+                let char_limit = usize::try_from(binding.max_chars).unwrap_or(0);
+                let mut value = String::new();
+                for character in content.trim().chars().take(char_limit) {
+                    if value.len() + character.len_utf8() > remaining {
+                        break;
+                    }
+                    value.push(character);
+                }
+                if value.is_empty() {
+                    continue;
+                }
+                if let Some(hash) = hit.asset.source_hash.as_ref() {
+                    injected_source_hashes.insert(hash.clone());
+                }
+                used_bytes += prefix.len() + value.len() + 1;
+                lines.push(format!("{prefix}{value}"));
+                retrieved_entries.push(TurnAssetRetrievalEntry {
+                    asset_id: hit.asset.asset_id,
+                    name: hit.asset.name,
+                    asset_type: hit.asset.asset_type,
+                    version: hit.asset.version,
+                    source_hash: hit.asset.source_hash,
+                    owner_scope: hit.asset.owner_scope,
+                    visibility: hit.asset.visibility,
+                    trust_floor: hit.asset.trust_floor,
+                    expires_at: hit.asset.expires_at,
+                    score_micros: (hit.score * 1_000_000.0) as i64,
+                    lexical_rank: hit.lexical_rank,
+                    vector_rank: hit.vector_rank,
+                    injected_chars: value.chars().count(),
+                    admission_reasons: vec![
+                        "trust_floor_readable".into(),
+                        "owner_scope_readable".into(),
+                        "injection_mode_allowed".into(),
+                    ],
+                });
+            }
+            if !lines.is_empty() {
+                retrieved_block = Some(format!("{header}\n{}", lines.join("\n")));
+            }
+        }
+        asset_loadout = hot_block;
+        receipt = Some(TurnAssetLoadoutReceipt {
+            agent_scope: agent_scope.to_owned(),
+            conversation_trust_class: conversation.trust_class,
+            readable_trust_classes: readable.iter().map(|value| (*value).to_owned()).collect(),
+            readable_owner_scopes: owner_scopes,
+            resolved_at: now,
+            retrieval_query_sha256: query_hash,
+            assets: hot_entries,
+            retrieved_assets: retrieved_entries,
+        });
+    }
     let c = turn_context.trim();
     let mut out = String::new();
     let sep = |s: &mut String| {
@@ -569,6 +752,14 @@ pub(crate) fn assemble_system_prompt(
         sep(&mut out);
         out.push_str(&h);
     }
+    if let Some(loadout) = asset_loadout {
+        sep(&mut out);
+        out.push_str(&loadout);
+    }
+    if let Some(retrieved) = retrieved_block {
+        sep(&mut out);
+        out.push_str(&retrieved);
+    }
     // Turn context is LAST so the most-recent runtime facts are
     // closest to the user message in the request order — recency
     // bias generally helps the model pick them up.
@@ -576,7 +767,7 @@ pub(crate) fn assemble_system_prompt(
         sep(&mut out);
         out.push_str(c);
     }
-    out
+    (out, receipt)
 }
 
 const TRUST_CLASSES_HIGH_TO_LOW: &[&str] = &[
@@ -656,6 +847,114 @@ fn build_hot_memory_snapshot_block(
         "HOT MEMORY SNAPSHOT (auto-loaded working set; read-only context)\n{}",
         lines.join("\n")
     ))
+}
+
+pub(crate) fn build_governed_asset_loadout_block(
+    db: &execlaw_core::Database,
+    conversation_id: Option<&str>,
+    agent_scope: &str,
+) -> Option<String> {
+    let conversation = ConversationStore::new(db)
+        .get(&ConversationId::from(conversation_id?))
+        .ok()??;
+    let readable = readable_classes(&conversation.trust_class);
+    let mut owner_scopes = vec!["global".to_owned()];
+    if let Some(controller_id) = conversation.controller_id.as_deref() {
+        owner_scopes.push(format!("principal:{controller_id}"));
+    }
+    if conversation.trust_class == "Controller" {
+        owner_scopes.push("controller".to_owned());
+    }
+    let owner_refs = owner_scopes.iter().map(String::as_str).collect::<Vec<_>>();
+    resolve_governed_hot_loadout(
+        &MemoryAssetStore::new(db),
+        agent_scope,
+        &readable,
+        &owner_refs,
+        chrono::Utc::now().timestamp(),
+        2048,
+    )
+    .0
+}
+
+fn resolve_governed_hot_loadout(
+    store: &MemoryAssetStore<'_>,
+    agent_scope: &str,
+    readable: &[&str],
+    owner_scopes: &[&str],
+    now: i64,
+    budget: usize,
+) -> (Option<String>, Vec<TurnAssetLoadoutEntry>) {
+    let assets = store
+        .resolve_hot_loadout(agent_scope, readable, owner_scopes, now, budget, 16)
+        .unwrap_or_default();
+    let header = "GOVERNED ASSET LOADOUT (approved, trust-filtered, read-only context)";
+    let mut used_bytes = header.len() + 1;
+    let mut lines = Vec::new();
+    let mut entries = Vec::new();
+    for resolved in assets {
+        let Some(content_ref) = resolved.asset.content_ref.as_deref() else {
+            continue;
+        };
+        let content = content_ref.trim();
+        if content.is_empty() {
+            continue;
+        }
+        let source_hash = resolved
+            .asset
+            .source_hash
+            .as_deref()
+            .unwrap_or("unversioned");
+        let prefix = format!(
+            "- {} [asset={}, version={}, source_hash={}]: ",
+            resolved.asset.name, resolved.asset.asset_id, resolved.asset.version, source_hash
+        );
+        let remaining = budget.saturating_sub(used_bytes + prefix.len() + 1);
+        if remaining == 0 {
+            break;
+        }
+        let mut value = String::new();
+        let char_limit = usize::try_from(resolved.max_chars).unwrap_or(usize::MAX);
+        for character in content.chars().take(char_limit) {
+            if value.len() + character.len_utf8() > remaining {
+                break;
+            }
+            value.push(character);
+        }
+        if value.is_empty() {
+            continue;
+        }
+        let line = format!("{prefix}{value}");
+        used_bytes += line.len() + 1;
+        lines.push(line);
+        entries.push(TurnAssetLoadoutEntry {
+            asset_id: resolved.asset.asset_id,
+            name: resolved.asset.name,
+            asset_type: resolved.asset.asset_type,
+            version: resolved.asset.version,
+            source_hash: resolved.asset.source_hash,
+            owner_scope: resolved.asset.owner_scope,
+            visibility: resolved.asset.visibility,
+            trust_floor: resolved.asset.trust_floor,
+            status: resolved.asset.status,
+            expires_at: resolved.asset.expires_at,
+            binding_agent_scope: resolved.binding.agent_scope,
+            binding_mode: resolved.binding.injection_mode,
+            binding_priority: resolved.binding.priority,
+            binding_max_chars: resolved.binding.max_chars,
+            injected_chars: value.chars().count(),
+            admission_reasons: vec![
+                "trust_floor_readable".into(),
+                "owner_scope_readable".into(),
+                "active_asset".into(),
+                "hot_binding".into(),
+            ],
+        });
+    }
+    (
+        (!lines.is_empty()).then(|| format!("{header}\n{}", lines.join("\n"))),
+        entries,
+    )
 }
 
 /// Build the per-turn tool-routing block from the live tool

@@ -22,6 +22,7 @@ import {
     listSkills,
     promoteSkill,
     putSkillsConfig,
+    rollbackSkill,
     rejectSkillProposal,
     updateSkillBody,
     type ProposalState,
@@ -656,6 +657,12 @@ function SkillsDetail({
                     name={detail.name}
                     currentVersion={detail.current_version}
                     refreshKey={detail.updated_at}
+                    isController={isController}
+                    onRestored={async () => {
+                        const updated = await getSkill(detail.name, getToken);
+                        setDetail(updated);
+                        onMutated();
+                    }}
                 />
             </div>
         </section>
@@ -703,16 +710,38 @@ function VersionHistory({
     name,
     currentVersion,
     refreshKey,
+    isController,
+    onRestored,
 }: {
     name: string;
     currentVersion: number;
     refreshKey: number;
+    isController: boolean;
+    onRestored: () => Promise<void>;
 }) {
     const auth = useAuth();
     const getToken = auth.getAccessToken;
     const [versions, setVersions] = useState<SkillVersionView[] | null>(null);
     const [leftV, setLeftV] = useState<number | null>(null);
     const [rightV, setRightV] = useState<number | null>(null);
+    const [restoring, setRestoring] = useState(false);
+    const [restoreError, setRestoreError] = useState<string | null>(null);
+
+    const restoreVersion = useCallback(async (version: number) => {
+        if (!window.confirm(`Restore v${version} as a new trial version of "${name}"? It will require a fresh held-out evaluation before promotion.`)) {
+            return;
+        }
+        setRestoring(true);
+        setRestoreError(null);
+        try {
+            await rollbackSkill(name, version, getToken);
+            await onRestored();
+        } catch (error) {
+            setRestoreError(error instanceof Error ? error.message : String(error));
+        } finally {
+            setRestoring(false);
+        }
+    }, [getToken, name, onRestored]);
 
     useEffect(() => {
         let cancelled = false;
@@ -792,7 +821,20 @@ function VersionHistory({
                         ))}
                     </select>
                 </label>
+                {isController && left && left.version !== currentVersion && (
+                    <button
+                        type="button"
+                        className="btn btn-sm btn-outline-warning"
+                        disabled={restoring}
+                        onClick={() => { void restoreVersion(left.version); }}
+                    >
+                        {restoring ? "Restoring…" : `Restore v${left.version} as trial`}
+                    </button>
+                )}
             </div>
+            {restoreError && (
+                <p className="text-danger small" role="alert">{restoreError}</p>
+            )}
             {left && right && (
                 <div className="row g-2" data-testid="skills-diff-view">
                     <div className="col-md-6">

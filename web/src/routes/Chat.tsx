@@ -33,6 +33,7 @@ import {
     respondApproval,
     type ApprovalVerb,
     type InlineAttachment,
+    type RunCompletionContractDraft,
     type SkillListEntry,
     type UiPanelSummary,
     type AvailableTransportView,
@@ -58,6 +59,7 @@ import { useAuth } from "../auth/AuthContext";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { ApprovalCard } from "../chat/ApprovalCard";
 import { Composer } from "../chat/Composer";
+import { DurableTurnControls } from "../chat/DurableTurnControls";
 import { MessageStream } from "../chat/MessageStream";
 import { Sidebar } from "../chat/Sidebar";
 import { useVoiceReadiness } from "../chat/useVoiceReadiness";
@@ -100,6 +102,13 @@ export function Chat() {
     const { conversationId: routeConversationId } = useParams();
     const activeId = useChatState((s) => s.activeId);
     const [topError, setTopError] = useState<string | null>(null);
+    const [unknownOutcomeRetry, setUnknownOutcomeRetry] = useState<{
+        conversationId: string;
+        text: string;
+        attachments: InlineAttachment[];
+        skillNames: string[];
+    } | null>(null);
+    const unknownRetryPending = useRef(false);
     const [availableTransports, setAvailableTransports] = useState<AvailableTransportView[]>([]);
 
     // 2026-04-28 — incognito mode. When true, the next send mints a
@@ -304,7 +313,6 @@ export function Chat() {
     useEffect(() => {
         if (auth.status !== "authenticated") return;
         const client = new WsClient({
-            accessToken: getToken,
             onEvent: (ev) => {
                 handleWsEventRef.current?.(ev);
             },
@@ -343,7 +351,14 @@ export function Chat() {
             text: string,
             attachments: InlineAttachment[] = [],
             skillNames: string[] = [],
+            completionContract?: RunCompletionContractDraft,
+            retryConversationId?: string,
         ) => {
+            if (incognito && completionContract) {
+                const error = new Error("Task completion tracking requires a saved conversation. Turn off Incognito before sending.");
+                setTopError(error.message);
+                throw error;
+            }
             // Lazy-mint a fresh ConversationId on first send when no
             // thread is active. Incognito sends use the same path —
             // they just carry an `incognito: true` flag that tells
@@ -352,7 +367,7 @@ export function Chat() {
             // sidebar / thread list never picks it up + so navigation
             // away can wipe local state).
             const targetId =
-                activeId ??
+                retryConversationId ?? activeId ??
                 (incognito
                     ? `incognito:${mintConversationId()}`
                     : mintConversationId());
@@ -369,6 +384,7 @@ export function Chat() {
                     });
                 }
             }
+            if (!retryConversationId) setUnknownOutcomeRetry(null);
 
             // 2026-04-28 — flag the thread as "sending" in the store
             // BEFORE the optimistic appendMessage runs. The
@@ -443,6 +459,9 @@ export function Chat() {
             // returns a falsy zone (older WebViews etc.).
             const browserTz =
                 Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
+            // Keep this key in the request options so apiFetch can safely
+            // repeat the same send after access-token refresh.
+            const clientRequestId = incognito ? undefined : crypto.randomUUID();
             try {
                 const resp = await postMessage(
                     targetId,
@@ -462,9 +481,12 @@ export function Chat() {
                               attachments,
                               skill_names:
                                   skillNames.length > 0 ? skillNames : undefined,
+                              completion_contract: completionContract,
                           },
                     getToken,
+                    clientRequestId,
                 );
+                if (retryConversationId) setUnknownOutcomeRetry(null);
                 if (incognito) {
                     // Server emitted a `chat_message_outbound` on
                     // the WS bus with the final assistant text.
@@ -515,9 +537,13 @@ export function Chat() {
                 }
                 void resp;
             } catch (e) {
+                if (e instanceof ApiError && e.serverCode === "unknown_outcome" && !incognito) {
+                    setUnknownOutcomeRetry({ conversationId: targetId, text, attachments, skillNames });
+                }
                 setTopError(
                     e instanceof Error ? e.message : "send failed",
                 );
+                if (completionContract) throw e;
             } finally {
                 clearSendingThread(targetId);
             }
@@ -612,6 +638,7 @@ export function Chat() {
                         channel_origin: typeof ev.channel_origin === "string" ? ev.channel_origin : undefined,
                         transport_recipient: typeof ev.transport_recipient === "string" ? ev.transport_recipient : undefined,
                     });
+                    void listMessages(cid, getToken).then((response) => mergeMessages(cid, response.messages)).catch(() => {});
                 }
                 break;
             case "alert_fired":
@@ -900,6 +927,21 @@ export function Chat() {
                     className="mx-3 mt-3"
                     testId="chat-error-banner"
                 />
+                {unknownOutcomeRetry && <div className="alert alert-warning mx-3 mt-2" role="alert" data-testid="unknown-outcome-retry">
+                    <p className="mb-2">The previous request may already have caused an external action. Check its delivery status or receipt before deciding. Retrying creates a new request and may repeat that action.</p>
+                    <button type="button" className="btn btn-sm btn-warning" disabled={unknownRetryPending.current} onClick={() => {
+                        if (unknownRetryPending.current) return;
+                        unknownRetryPending.current = true;
+                        const retry = unknownOutcomeRetry;
+                        setActiveThread(retry.conversationId);
+                        navigate(`/chat/${encodeURIComponent(retry.conversationId)}`);
+                        setUnknownOutcomeRetry(null);
+                        setTopError(null);
+                        void onSend(retry.text, retry.attachments, retry.skillNames, undefined, retry.conversationId)
+                            .finally(() => { unknownRetryPending.current = false; });
+                    }}>Retry as a new request</button>
+                    <button type="button" className="btn btn-sm btn-link" onClick={() => setUnknownOutcomeRetry(null)}>Dismiss</button>
+                </div>}
                 <ChatPane
                     activeId={activeId}
                     availableTransports={availableTransports}
@@ -962,6 +1004,7 @@ function ChatPane({
         text: string,
         attachments: InlineAttachment[],
         skillNames: string[],
+        completionContract?: RunCompletionContractDraft,
     ) => Promise<void> | void;
     getToken: () => string | null;
     onStop: () => void;
@@ -1027,11 +1070,12 @@ function ChatPane({
             text: string,
             attachments: InlineAttachment[],
             skillNames: string[],
+            completionContract?: RunCompletionContractDraft,
         ) => {
             if (!hasContent) {
                 captureBeforeFirstSend();
             }
-            return onSend(text, attachments, skillNames);
+            return onSend(text, attachments, skillNames, completionContract);
         },
         [hasContent, captureBeforeFirstSend, onSend],
     );
@@ -1143,6 +1187,7 @@ function ActiveThreadPane({
         text: string,
         attachments: InlineAttachment[],
         skillNames: string[],
+        completionContract?: RunCompletionContractDraft,
     ) => Promise<void> | void;
     sendVoiceFrame: (bytes: ArrayBuffer) => boolean;
     sendVoiceControl: (payload: object) => boolean;
@@ -1248,10 +1293,13 @@ function ActiveThreadPane({
     // (see WelcomeView's incognito toggle) — once a chat exists in
     // the event log, it stays in the event log.
     const onApprovalRespond = useCallback(
-        async (approvalId: string, verb: ApprovalVerb) => {
+        async (approvalId: string, verb: ApprovalVerb, allowedTopics?: string[]) => {
             setApprovalBusy(true);
             try {
-                await respondApproval(approvalId, { verb }, getToken);
+                await respondApproval(approvalId, {
+                    verb,
+                    ...(verb === "trust_limited" ? { allowed_topics: allowedTopics ?? [] } : {}),
+                }, getToken);
                 clearPendingApproval(conversationId);
                 // Refresh threads so kind/trust_class on the sidebar
                 // updates immediately.
@@ -1418,8 +1466,8 @@ function ActiveThreadPane({
                 conversationId={conversationId}
                 availableTransports={availableTransports}
                 showToolResults={toolResultsVisible}
-                onSendTransportReply={(text, sourceSeq, channel) =>
-                    sendTransportReply(conversationId, text, sourceSeq, channel, getToken).then(
+                onSendTransportReply={(text, sourceSeq, channel, draftRevision) =>
+                    sendTransportReply(conversationId, text, sourceSeq, channel, getToken, draftRevision).then(
                         () => undefined,
                     )
                 }
@@ -1433,17 +1481,19 @@ function ActiveThreadPane({
                 onRerunResponse={(sourceSeq) =>
                     rerunResponse(conversationId, sourceSeq, getToken).then(() => undefined)
                 }
-                onSetTransportReviewDecision={(sourceSeq, decision) =>
+                onSetTransportReviewDecision={(sourceSeq, decision, draftRevision) =>
                     setTransportReviewDecision(
                         conversationId,
                         sourceSeq,
                         decision,
                         getToken,
+                        draftRevision,
                     ).then(() => undefined)
                 }
             />
 
             <div className="execlaw-composer" data-flip-id="composer-shell">
+                {!isIncognito && <DurableTurnControls conversationId={conversationId} getToken={getToken} />}
                 <ApprovalCard
                     approval={approval}
                     busy={approvalBusy}

@@ -32,7 +32,7 @@ pub struct ScriptEngine {
     /// production path constructs via `new()` which sets this to
     /// false. Mirrors the same flag in tool_apis_http's
     /// `HttpWebFetchApi::with_loopback_allowed`.
-    allow_loopback: bool,
+    allow_loopback: Arc<std::sync::atomic::AtomicBool>,
     /// Host-capabilities surface the script tier reaches when
     /// scripts call `sidecar_url` / `ws_subscribe` /
     /// `host_route_inbound`. Wrapped in `Arc<OnceLock<...>>` so
@@ -54,20 +54,46 @@ impl ScriptEngine {
     /// fully sync (no internal tokio runtime), safe to call from
     /// the spawn_blocking thread that runs the script.
     pub fn new() -> Self {
+        let host_caps: Arc<OnceLock<HostCapabilitiesArc>> = Arc::new(OnceLock::new());
+        let resolver_caps = host_caps.clone();
+        let allow_loopback = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resolver_allow_loopback = allow_loopback.clone();
         Self {
             http_agent: ureq::AgentBuilder::new()
                 .timeout(Duration::from_secs(30))
+                // Each request is pinned by the host resolver. Automatic
+                // redirects could forward plugin credentials to a different
+                // approved host without giving the plugin caller a chance to
+                // re-authorize that destination, so plugin HTTP must opt into
+                // a separately validated request for every redirect hop.
+                .redirects(0)
                 .user_agent("execlaw/script-runtime/0.1")
+                .resolver(move |host_port: &str| {
+                    if resolver_allow_loopback.load(std::sync::atomic::Ordering::Relaxed) {
+                        use std::net::ToSocketAddrs;
+                        return host_port.to_socket_addrs().map(Iterator::collect);
+                    }
+                    let caps = resolver_caps.get().ok_or_else(|| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::PermissionDenied,
+                            "host egress policy is not initialized",
+                        )
+                    })?;
+                    caps.resolve_plugin_http_target(host_port).map_err(|error| {
+                        std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.0)
+                    })
+                })
                 .build(),
-            allow_loopback: false,
-            host_caps: Arc::new(OnceLock::new()),
+            allow_loopback,
+            host_caps,
         }
     }
 
+    #[cfg(test)]
     pub fn with_http_agent(http_agent: ureq::Agent) -> Self {
         Self {
             http_agent,
-            allow_loopback: false,
+            allow_loopback: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             host_caps: Arc::new(OnceLock::new()),
         }
     }
@@ -97,10 +123,11 @@ impl ScriptEngine {
     /// loopback can reach Redis, the host's own admin endpoints,
     /// cloud metadata services on link-local, etc.
     pub fn with_loopback_allowed_for_tests() -> Self {
-        Self {
-            allow_loopback: true,
-            ..Self::new()
-        }
+        let engine = Self::new();
+        engine
+            .allow_loopback
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        engine
     }
 
     /// Build a fresh `rhai::Engine` configured with the sandbox
@@ -145,7 +172,8 @@ impl ScriptEngine {
             plugin_id,
             self.http_agent.clone(),
             cache,
-            self.allow_loopback,
+            self.allow_loopback
+                .load(std::sync::atomic::Ordering::Relaxed),
             self.host_caps.clone(),
         );
         (engine, slot, registry)

@@ -120,6 +120,27 @@ impl<'db> RefreshTokenStore<'db> {
         })
     }
 
+    /// Verify that a non-expired refresh-token row still backs an access-token
+    /// session. Revoking refresh tokens therefore revokes issued access JWTs
+    /// at the next authenticated request, including after a server restart.
+    pub fn session_is_active(
+        &self,
+        principal_id: &str,
+        session_id: &str,
+        now: i64,
+    ) -> Result<bool, DbError> {
+        self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_refresh_tokens
+                     WHERE principal_id = ?1 AND session_id = ?2 AND expires_at > ?3)",
+                    params![principal_id, session_id, now],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)
+        })
+    }
+
     /// Revoke every refresh token for a user. Used by the
     /// "sign out everywhere" route: tells the browser the operator
     /// has zero live sessions left, anywhere.
@@ -130,6 +151,32 @@ impl<'db> RefreshTokenStore<'db> {
                 params![principal_id],
             )?;
             Ok(n)
+        })
+    }
+
+    /// Replace a user's password and revoke every session atomically.
+    ///
+    /// Returning `None` means the user row did not exist. Keeping the password
+    /// update and refresh-token deletion in one SQLite transaction prevents a
+    /// password change from succeeding while old access sessions remain live.
+    pub fn set_password_hash_and_revoke_all(
+        &self,
+        principal_id: &str,
+        password_hash: &str,
+    ) -> Result<Option<usize>, DbError> {
+        self.db.transaction(|tx| {
+            let changed = tx.execute(
+                "UPDATE users SET password_hash = ?1 WHERE user_id = ?2",
+                params![password_hash, principal_id],
+            )?;
+            if changed == 0 {
+                return Ok(None);
+            }
+            let removed = tx.execute(
+                "DELETE FROM state_refresh_tokens WHERE principal_id = ?1",
+                params![principal_id],
+            )?;
+            Ok(Some(removed))
         })
     }
 
@@ -318,6 +365,50 @@ mod tests {
         let _ = store.issue("u", "sess-A", 3600).unwrap();
         let _ = store.issue("u", "sess-B", 3600).unwrap();
         assert_eq!(store.active_session_count("u").unwrap(), 2);
+    }
+
+    #[test]
+    fn revoking_refresh_session_invalidates_access_session_check() {
+        let db = fresh_db();
+        let store = RefreshTokenStore::new(&db);
+        store.issue("alice", "session-a", 3600).unwrap();
+        store.issue("alice", "session-a", 3600).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        assert!(store.session_is_active("alice", "session-a", now).unwrap());
+        assert!(!store.session_is_active("bob", "session-a", now).unwrap());
+        assert_eq!(store.revoke_session("session-a").unwrap(), 2);
+        assert!(!store.session_is_active("alice", "session-a", now).unwrap());
+    }
+
+    #[test]
+    fn session_revocation_survives_database_reopen() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = DbConfig {
+            path: directory.path().join("sessions.sqlite"),
+            key: None,
+        };
+        let now = chrono::Utc::now().timestamp();
+        let db = Database::open(&config).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let store = RefreshTokenStore::new(&db);
+        let refresh = store.issue("alice", "device-a", 3600).unwrap();
+        assert!(store.session_is_active("alice", "device-a", now).unwrap());
+        drop(store);
+        drop(db);
+
+        let reopened = Database::open(&config).unwrap();
+        MigrationRunner::new(&reopened).apply_all().unwrap();
+        let store = RefreshTokenStore::new(&reopened);
+        assert!(store.session_is_active("alice", "device-a", now).unwrap());
+        assert_eq!(store.revoke_all_for_user("alice").unwrap(), 1);
+        drop(store);
+        drop(reopened);
+
+        let reopened = Database::open(&config).unwrap();
+        MigrationRunner::new(&reopened).apply_all().unwrap();
+        let store = RefreshTokenStore::new(&reopened);
+        assert!(!store.session_is_active("alice", "device-a", now).unwrap());
+        assert!(store.consume(&refresh).unwrap().is_none());
     }
 
     #[test]

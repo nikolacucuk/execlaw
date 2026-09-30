@@ -3,7 +3,26 @@
 Event-triggered flows. Webhooks, routines, plugin emits, and socket
 messages land on a durable bus; matching automations run a typed graph
 that can filter, transform, branch, or hand off to the agent. Every
-run produces an auditable per-step trace.
+normal run produces a persisted per-step trace; the current Test run path
+returns an in-memory trace and can still perform live effects.
+
+## Implementation delivery plan
+
+All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+Automation delivery covers [H023 recovery](llm-harness-roadmap.md#enhancement-023),
+[H026 authorization](llm-harness-roadmap.md#enhancement-026),
+[H052 live authority](llm-harness-roadmap.md#enhancement-052),
+[H069 clocks](llm-harness-roadmap.md#enhancement-069),
+[H070 routine scheduling](llm-harness-roadmap.md#enhancement-070),
+[H103 trigger bursts](llm-harness-roadmap.md#enhancement-103),
+[H124 workflow revisions](llm-harness-roadmap.md#enhancement-124),
+[H125 durable control nodes](llm-harness-roadmap.md#enhancement-125), and
+[H126 effect-free simulation](llm-harness-roadmap.md#enhancement-126).
+Existing nodes are implementation, not qualification: F08 identifies lost
+claimed work, F18 identifies live Test run effects without a run row, and F19
+identifies unauthenticated automation execution with Controller tool authority.
+Close those boundaries before treating the editor as a safe preview surface.
+The linked tracker owns delivery order, status, and evidence.
 
 Use cases the design serves:
 
@@ -117,19 +136,22 @@ Owned by `crates/core/src/automations.rs` (data + validator) and
 | `Branch` | `{}` | No-op routing junction. Outgoing edges' `when` clauses do the actual routing. |
 | `Terminal` | `{}` | Explicit end; flow status becomes `success`. (Implicit end happens when no edge matches.) |
 | `AskAgent` | `AskAgentConfig` | Hands off to the LLM; see below. |
+| `Notify` | See `execute_notify` in `automation_runtime.rs` | Writes a production alert. |
+| `CallPlugin` | See `execute_call_plugin` in `automation_runtime.rs` | Invokes a registered plugin tool; authority requires F19 remediation. |
+| `HttpFetch` | See `execute_http_fetch` in `automation_runtime.rs` | Performs an HTTP request, including configured mutating methods. |
 
 **Reserved kinds** (validator rejects with `NotYetImplemented` —
-schema slots reserved for future migrations): `CallPlugin`,
-`AppendToChat`, `HttpFetch`, `Notify`, `AwaitApproval`,
+schema slots reserved for future work): `AppendToChat`, `AwaitApproval`,
 `CallAutomation`, `Parallel`, `Join`.
 
 **Edge routing.** Each edge has an optional `when` Rhai bool. The
 executor picks the first edge whose `when` is truthy (or has none).
 No matching edge = implicit end.
 
-**Sandbox.** Rhai engine constructed fresh per call with hard caps:
+**Expression sandbox.** Rhai engine constructed fresh per call with hard caps:
 100k ops, depth 32, 64 KB strings, 10k array/map size. No host
-capabilities, no I/O. Tested via a runaway-loop test.
+capabilities, no I/O within those expressions. Tested via a runaway-loop test.
+This does not make the complete graph effect-free: effectful nodes use host APIs.
 
 **Trace sink.** Same executor body powers live runs (DB checkpoint
 via `AutomationRunStore::append_trace`) and dry runs (in-memory
@@ -227,8 +249,12 @@ The editor's "Test run" button POSTs to
 `/api/admin/automations/{id}/test-run` with either an `event_id`
 (picked from `/recent-events`) or a synthesized `sample_event`. The
 endpoint runs the executor against the chosen event with an in-memory
-trace sink — **no persistence**. The result is the trace + outcome
-JSON, surfaced inline in the canvas drawer.
+trace sink, without creating a durable automation-run row. The result is the
+trace + outcome JSON, surfaced inline in the canvas drawer. This is not an
+effect-free simulation: `AskAgent` uses the configured model, `Notify` can
+write production alerts, and `CallPlugin`/`HttpFetch` can invoke live actions.
+F18/F19 and H026/H052/H126 track isolation, authorization, and audit fixes;
+they have not been implemented by this documentation update.
 
 The sample-payload picker is fed by
 `/api/admin/automations/recent-events?kind=<kind>&limit=N` —
@@ -335,7 +361,9 @@ spelunking logs.
    route conditionally.
 5. **Test run** — open the test-run drawer, pick a recent event from
    the dropdown (or synthesize a payload), click **Run**. The trace
-   table shows each node's input/output/duration inline.
+   table shows each node's input/output/duration inline. Until H126 is
+   implemented, this can execute live effects; use disposable integrations
+   and state for development, not a production workflow preview.
 6. **Save** — server validates the graph + persists. Errors surface
    inline.
 
@@ -401,7 +429,9 @@ docs/automations.md                   — you are here
 
 ## Deferred to follow-ups
 
-Listed by approximate complexity, smallest first:
+Historical estimates below are design notes, not the implementation order or
+current qualification status. Use the accepted H001-H130 tracker above;
+H124-H126 own the workflow versioning, control-node, and simulation work.
 
 | Item | Effort | Notes |
 | --- | --- | --- |

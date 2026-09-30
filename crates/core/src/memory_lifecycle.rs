@@ -119,6 +119,8 @@ pub enum LifecycleError {
     AlreadyDecided(i64),
     #[error("target row missing for proposal {0}")]
     TargetMissing(i64),
+    #[error("target row tier changed after proposal {0} was created")]
+    StaleTarget(i64),
 }
 
 /// Insert / inspect / decide promotion proposals.
@@ -285,11 +287,11 @@ impl<'db> PromotionStore<'db> {
         }
         // Apply the tier change first; the proposal flip records it.
         let store = MemoryStore::new(self.db);
-        if store
-            .get(&proposal.scope, &proposal.trust_class, &proposal.key)?
-            .is_none()
-        {
+        let Some(target) = store.get(&proposal.scope, &proposal.trust_class, &proposal.key)? else {
             return Err(LifecycleError::TargetMissing(id));
+        };
+        if target.tier != proposal.from_tier {
+            return Err(LifecycleError::StaleTarget(id));
         }
         store.set_tier(
             &proposal.scope,
@@ -703,6 +705,42 @@ mod tests {
             LifecycleError::TargetMissing(n) => assert_eq!(n, id),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn approve_rejects_stale_tier_proposal() {
+        let db = fresh();
+        warm_row(&db, "global", "Controller", "k");
+        let store = PromotionStore::new(&db);
+        let id = store
+            .propose(
+                "global",
+                "Controller",
+                "k",
+                MemoryTier::Warm,
+                MemoryTier::Hot,
+                PromotionReason::Frequency,
+                ProposedBy::Sweeper,
+                100,
+            )
+            .unwrap();
+        MemoryStore::new(&db)
+            .set_tier("global", "Controller", "k", MemoryTier::Cold)
+            .unwrap();
+
+        assert!(matches!(
+            store.approve(id, 200, None),
+            Err(LifecycleError::StaleTarget(proposal_id)) if proposal_id == id
+        ));
+        assert_eq!(
+            MemoryStore::new(&db)
+                .get("global", "Controller", "k")
+                .unwrap()
+                .unwrap()
+                .tier,
+            MemoryTier::Cold
+        );
+        assert!(store.get(id).unwrap().unwrap().decided_at.is_none());
     }
 
     #[test]

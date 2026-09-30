@@ -76,6 +76,58 @@ impl AppStateHostCapabilities {
 
 #[async_trait::async_trait]
 impl HostCapabilities for AppStateHostCapabilities {
+    fn resolve_plugin_http_target(
+        &self,
+        host_port: &str,
+    ) -> Result<Vec<std::net::SocketAddr>, HostCapError> {
+        crate::local_endpoint_policy::resolve_plugin_http_target(&self.state.db, host_port)
+            .map_err(HostCapError::new)
+    }
+
+    fn resolve_sidecar_http_target(
+        &self,
+        host_port: &str,
+    ) -> Result<Vec<std::net::SocketAddr>, HostCapError> {
+        let target = url::Url::parse(&format!("http://{host_port}/"))
+            .map_err(|error| HostCapError::new(format!("invalid sidecar target: {error}")))?;
+        let configured_host =
+            std::env::var("EXECLAW_SIDECAR_CONNECT_HOST").unwrap_or_else(|_| "127.0.0.1".into());
+        if target.host_str() != Some(configured_host.as_str()) {
+            return Err(HostCapError::new(
+                "sidecar target host differs from the configured sidecar host",
+            ));
+        }
+        let port = target
+            .port()
+            .ok_or_else(|| HostCapError::new("sidecar target has no explicit port"))?;
+        let supervisor = self
+            .state
+            .sidecar_supervisor
+            .as_ref()
+            .ok_or_else(|| HostCapError::new("sidecar supervisor is unavailable"))?;
+        let runtime = tokio::runtime::Handle::try_current()
+            .map_err(|error| HostCapError::new(format!("tokio runtime unavailable: {error}")))?;
+        let published =
+            tokio::task::block_in_place(|| runtime.block_on(supervisor.has_published_port(port)));
+        if !published {
+            return Err(HostCapError::new(
+                "sidecar target port is not published by a supervised sidecar",
+            ));
+        }
+        let resolution = crate::local_endpoint_policy::load(&self.state.db)
+            .and_then(|policy| {
+                policy
+                    .validate(&format!("http://{configured_host}:{port}/"))
+                    .map_err(|error| error.to_string())
+            })
+            .map_err(HostCapError::new)?;
+        Ok(resolution
+            .addresses
+            .into_iter()
+            .map(|address| std::net::SocketAddr::new(address, port))
+            .collect())
+    }
+
     async fn sidecar_url(&self, sidecar_name: &str) -> Option<String> {
         // Look up the supervised sidecar's published host port.
         // Returns None when the sidecar is still spawning or
@@ -564,7 +616,7 @@ async fn consumer_loop(
                                 target: "host_caps::ws",
                                 %url,
                                 close_code = code,
-                                close_reason = %reason,
+                                close_reason_chars = reason.chars().count(),
                                 "<<< close frame; reconnecting"
                             );
                             // RFC 6455 §5.5.1: when receiving a Close

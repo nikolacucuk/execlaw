@@ -54,7 +54,7 @@ struct WebsurfxResult {
 }
 
 pub struct WebsurfxSearchApi {
-    client: reqwest::Client,
+    client: super::tool_apis_search::SearchHttpClient,
     base_url: String,
 }
 
@@ -67,19 +67,37 @@ impl WebsurfxSearchApi {
     pub fn new(base_url: impl Into<String>) -> Self {
         let raw = base_url.into();
         let base_url = raw.trim_end_matches('/').to_owned();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_S))
-            .user_agent(crate::tool_apis_http::DEFAULT_USER_AGENT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let endpoint = format!("{}/search", base_url);
+        let client = super::tool_apis_search::SearchHttpClient::public(
+            endpoint,
+            Duration::from_secs(DEFAULT_TIMEOUT_S),
+        );
+        Self { client, base_url }
+    }
+
+    pub fn new_private_integration(
+        base_url: impl Into<String>,
+        db: execlaw_core::Database,
+    ) -> Self {
+        let base_url = base_url.into().trim_end_matches('/').to_owned();
+        let client = super::tool_apis_search::SearchHttpClient::private_integration(
+            format!("{base_url}/search"),
+            Duration::from_secs(DEFAULT_TIMEOUT_S),
+            db,
+        );
         Self { client, base_url }
     }
 
     /// Test seam: bring your own client.
+    #[cfg(test)]
     pub fn with_client(base_url: impl Into<String>, client: reqwest::Client) -> Self {
         let raw = base_url.into();
         Self {
-            client,
+            client: super::tool_apis_search::SearchHttpClient::with_client(
+                format!("{}/search", raw.trim_end_matches('/')),
+                Duration::from_secs(DEFAULT_TIMEOUT_S),
+                client,
+            ),
             base_url: raw.trim_end_matches('/').to_owned(),
         }
     }
@@ -97,8 +115,8 @@ impl WebSearchApi for WebsurfxSearchApi {
             ));
         }
         let url = format!("{}/search", self.base_url);
-        let resp = self
-            .client
+        let client = self.client.build()?;
+        let resp = client
             .get(&url)
             .query(&[("q", query), ("page", "1"), ("format", "json")])
             .header("Accept", "application/json")

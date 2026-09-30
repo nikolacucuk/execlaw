@@ -6,7 +6,7 @@
 
 use crate::db::{Database, DbError};
 use crate::ids::{ConversationId, EventSeq, IdempotencyKey};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +16,7 @@ pub enum OutboxStatus {
     Delivered,
     Failed,
     DeadLetter,
+    Unknown,
 }
 
 impl OutboxStatus {
@@ -26,6 +27,7 @@ impl OutboxStatus {
             OutboxStatus::Delivered => "delivered",
             OutboxStatus::Failed => "failed",
             OutboxStatus::DeadLetter => "dead_letter",
+            OutboxStatus::Unknown => "unknown",
         }
     }
 
@@ -36,6 +38,7 @@ impl OutboxStatus {
             "delivered" => Some(Self::Delivered),
             "failed" => Some(Self::Failed),
             "dead_letter" => Some(Self::DeadLetter),
+            "unknown" => Some(Self::Unknown),
             _ => None,
         }
     }
@@ -55,6 +58,40 @@ pub struct OutboxRow {
     pub enqueued_seq: EventSeq,
 }
 
+/// Persisted transition in an outbox effect's delivery history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboxDeliveryEvent {
+    pub id: i64,
+    pub outbox_id: i64,
+    pub transition: String,
+    pub occurred_at: i64,
+    pub attempt: i64,
+    pub detail: Option<String>,
+    pub external_receipt: Option<String>,
+    pub actor: Option<String>,
+}
+
+/// Delivery transition tied to the conversation event that enqueued it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversationDeliveryEvent {
+    pub event_seq: i64,
+    pub transition: String,
+    pub occurred_at: i64,
+    pub attempt: i64,
+    pub external_receipt: Option<String>,
+    pub actor: Option<String>,
+}
+
+/// Metadata needed for a Controller to review a sink outcome without reading effect payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UnknownOutboxEffect {
+    pub id: i64,
+    pub conversation_id: ConversationId,
+    pub effect_kind: String,
+    pub attempts: i64,
+    pub enqueued_seq: EventSeq,
+}
+
 pub struct OutboxStore<'db> {
     db: &'db Database,
 }
@@ -66,8 +103,8 @@ impl<'db> OutboxStore<'db> {
 
     /// Insert a new outbox row, returning the assigned rowid.
     pub fn enqueue(&self, row: &OutboxRow) -> Result<i64, DbError> {
-        self.db.with_conn(|c| {
-            c.execute(
+        self.db.transaction(|tx| {
+            tx.execute(
                 "INSERT INTO state_outbox \
                  (idempotency_key, conversation_id, effect_kind, payload, status, \
                   attempts, next_attempt_at, last_error, enqueued_seq) \
@@ -84,7 +121,107 @@ impl<'db> OutboxStore<'db> {
                     row.enqueued_seq.0,
                 ],
             )?;
-            Ok(c.last_insert_rowid())
+            let id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO state_outbox_delivery_events(outbox_id, transition, occurred_at, attempt) VALUES (?1, 'enqueued', ?2, ?3)",
+                params![id, chrono::Utc::now().timestamp(), row.attempts],
+            )?;
+            Ok(id)
+        })
+    }
+
+    /// Insert an effect under a framework-minted key, returning the original
+    /// row when an identical enqueue is replayed after a lost acknowledgment.
+    /// Reusing a key for a different conversation, payload, or effect is an
+    /// invariant violation and never replaces the original effect.
+    pub fn enqueue_idempotent(&self, row: &OutboxRow) -> Result<(i64, bool), DbError> {
+        self.enqueue_idempotent_guarded(row, None)
+    }
+
+    /// Queue an automatic agent effect only while its ownership generation is current.
+    pub fn enqueue_idempotent_for_agent(
+        &self,
+        row: &OutboxRow,
+        scope_key: &str,
+        agent_id: &str,
+        generation: u64,
+    ) -> Result<(i64, bool), DbError> {
+        self.enqueue_idempotent_guarded(row, Some((scope_key, agent_id, generation)))
+    }
+
+    fn enqueue_idempotent_guarded(
+        &self,
+        row: &OutboxRow,
+        owner: Option<(&str, &str, u64)>,
+    ) -> Result<(i64, bool), DbError> {
+        self.db.transaction(|tx| {
+            if let Some((scope_key, agent_id, generation)) = owner {
+                let current: Option<(String,Option<String>,u64)> = tx.query_row(
+                    "SELECT owner_kind,agent_id,generation FROM state_agent_ownership WHERE scope_key=?1", [scope_key],
+                    |record| Ok((record.get(0)?,record.get(1)?,record.get(2)?)),
+                ).optional()?;
+                if !matches!(current, Some((ref kind,Some(ref id),current_generation)) if kind == "agent" && id == agent_id && current_generation == generation) {
+                    return Err(DbError::Invariant("automatic agent lost transport ownership".into()));
+                }
+            }
+            let existing: Option<(i64, String, String, Vec<u8>, String)> = tx
+                .query_row(
+                    "SELECT id,conversation_id,effect_kind,payload,status \
+                     FROM state_outbox WHERE idempotency_key=?1",
+                    [row.idempotency_key.as_str()],
+                    |record| {
+                        Ok((
+                            record.get(0)?,
+                            record.get(1)?,
+                            record.get(2)?,
+                            record.get(3)?,
+                            record.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            if let Some((id, conversation_id, effect_kind, payload, status)) = existing {
+                if conversation_id == row.conversation_id.as_str()
+                    && effect_kind == row.effect_kind
+                    && payload == row.payload
+                {
+                    if matches!(status.as_str(), "unknown" | "dead_letter" | "failed") {
+                        return Err(DbError::Invariant(format!(
+                            "outbox key '{}' requires explicit outcome resolution before replay",
+                            row.idempotency_key
+                        )));
+                    }
+                    return Ok((id, false));
+                }
+                return Err(DbError::Invariant(format!(
+                    "outbox idempotency key '{}' was reused for a different effect",
+                    row.idempotency_key
+                )));
+            }
+            tx.execute(
+                "INSERT INTO state_outbox \
+                 (idempotency_key, conversation_id, effect_kind, payload, status, \
+                  attempts, next_attempt_at, last_error, enqueued_seq) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    row.idempotency_key.as_str(),
+                    row.conversation_id.as_str(),
+                    row.effect_kind,
+                    row.payload,
+                    row.status.as_str(),
+                    row.attempts,
+                    row.next_attempt_at,
+                    row.last_error,
+                    row.enqueued_seq.0,
+                ],
+            )?;
+            let id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO state_outbox_delivery_events(outbox_id,transition,occurred_at,attempt) \
+                 VALUES (?1,'enqueued',?2,?3)",
+                params![id, chrono::Utc::now().timestamp(), row.attempts],
+            )?;
+            Ok((id, true))
         })
     }
 
@@ -127,8 +264,8 @@ impl<'db> OutboxStore<'db> {
                 "SELECT id, idempotency_key, conversation_id, effect_kind, payload, status, \
                         attempts, next_attempt_at, last_error, enqueued_seq \
                  FROM state_outbox \
-                 WHERE status = 'pending' \
-                   AND (next_attempt_at IS NULL OR next_attempt_at <= ?1) \
+                 WHERE (status = 'pending' AND (next_attempt_at IS NULL OR next_attempt_at <= ?1)) \
+                    OR (status = 'in_flight' AND lease_expires_at IS NOT NULL AND lease_expires_at <= ?1) \
                  ORDER BY id ASC \
                  LIMIT ?2",
             )?;
@@ -145,22 +282,152 @@ impl<'db> OutboxStore<'db> {
     /// This is the leasing primitive that prevents two drain-loop
     /// iterations from dispatching the same row.
     pub fn claim(&self, id: i64) -> Result<bool, DbError> {
-        self.db.with_conn(|c| {
-            let n = c.execute(
-                "UPDATE state_outbox SET status = 'in_flight' WHERE id = ?1 AND status = 'pending'",
-                params![id],
+        self.claim_with_lease(id, "legacy-relay", chrono::Utc::now().timestamp(), 120)
+    }
+
+    /// Atomically claim a pending row or reclaim an abandoned expired lease.
+    pub fn claim_with_lease(
+        &self,
+        id: i64,
+        owner: &str,
+        now_ts: i64,
+        lease_secs: i64,
+    ) -> Result<bool, DbError> {
+        self.db.transaction(|tx| {
+            let previous_status: Option<String> = tx
+                .query_row("SELECT status FROM state_outbox WHERE id=?1", [id], |row| row.get(0))
+                .optional()?;
+            let n = tx.execute(
+                "UPDATE state_outbox SET status = 'in_flight', lease_owner = ?1, lease_expires_at = ?2 \
+                 WHERE id = ?3 AND (status = 'pending' OR (status = 'in_flight' AND lease_expires_at <= ?4))",
+                params![owner, now_ts.saturating_add(lease_secs.max(1)), id, now_ts],
             )?;
+            if n == 1 {
+                let attempt: i64 = tx.query_row("SELECT attempts + 1 FROM state_outbox WHERE id = ?1", params![id], |r| r.get(0))?;
+                let transition = if previous_status.as_deref() == Some("in_flight") {
+                    "lease_reclaimed"
+                } else {
+                    "send_requested"
+                };
+                tx.execute(
+                    "INSERT INTO state_outbox_delivery_events(outbox_id, transition, occurred_at, attempt) VALUES (?1, ?2, ?3, ?4)",
+                    params![id, transition, now_ts, attempt],
+                )?;
+            }
             Ok(n == 1)
         })
     }
 
     /// Mark a claimed row as successfully delivered.
     pub fn mark_delivered(&self, id: i64) -> Result<(), DbError> {
-        self.db.with_conn(|c| {
-            c.execute(
-                "UPDATE state_outbox SET status = 'delivered', last_error = NULL \
-                 WHERE id = ?1",
+        self.mark_delivered_with_receipt(id, None)
+    }
+
+    /// Record delivery and an optional opaque transport receipt.
+    pub fn mark_delivered_with_receipt(
+        &self,
+        id: i64,
+        receipt: Option<&str>,
+    ) -> Result<(), DbError> {
+        self.db.transaction(|tx| {
+            tx.execute(
+                "UPDATE state_outbox SET status = 'delivered', last_error = NULL, lease_owner = NULL, lease_expires_at = NULL WHERE id = ?1",
                 params![id],
+            )?;
+            let attempt: i64 = tx.query_row("SELECT attempts + 1 FROM state_outbox WHERE id = ?1", params![id], |r| r.get(0))?;
+            tx.execute(
+                "INSERT INTO state_outbox_delivery_events(outbox_id, transition, occurred_at, attempt, external_receipt) VALUES (?1, 'delivered', ?2, ?3, ?4)",
+                params![id, chrono::Utc::now().timestamp(), attempt, receipt],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Stop automatic retries after a sink may have accepted a non-idempotent effect.
+    pub fn mark_unknown(&self, id: i64, reason: &str) -> Result<(), DbError> {
+        let detail = bounded_reason(reason);
+        self.db.transaction(|tx| {
+            let attempt: i64 = tx.query_row(
+                "SELECT attempts + 1 FROM state_outbox WHERE id = ?1 AND status = 'in_flight'",
+                params![id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "UPDATE state_outbox SET status = 'unknown', last_error = ?1, attempts = ?2, \
+                 lease_owner = NULL, lease_expires_at = NULL WHERE id = ?3 AND status = 'in_flight'",
+                params![detail, attempt, id],
+            )?;
+            tx.execute(
+                "INSERT INTO state_outbox_delivery_events(outbox_id, transition, occurred_at, attempt, detail) \
+                 VALUES (?1, 'outcome_unknown', ?2, ?3, ?4)",
+                params![id, chrono::Utc::now().timestamp(), attempt, detail],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Authorize another attempt after an operator reviewed an unknown outcome.
+    pub fn authorize_unknown_retry(
+        &self,
+        id: i64,
+        actor: &str,
+        reason: &str,
+    ) -> Result<(), DbError> {
+        let actor = validate_resolution_actor(actor)?;
+        let detail = bounded_reason(reason);
+        if detail.is_empty() {
+            return Err(DbError::Invariant(
+                "unknown outcome retry requires an operator reason".into(),
+            ));
+        }
+        self.db.transaction(|tx| {
+            let attempt: i64 = tx.query_row(
+                "SELECT attempts FROM state_outbox WHERE id = ?1 AND status = 'unknown'",
+                params![id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "UPDATE state_outbox SET status = 'pending', last_error = ?1, next_attempt_at = NULL \
+                 WHERE id = ?2 AND status = 'unknown'",
+                params![detail, id],
+            )?;
+            tx.execute(
+                "INSERT INTO state_outbox_delivery_events(outbox_id, transition, occurred_at, attempt, detail, actor) \
+                 VALUES (?1, 'retry_authorized', ?2, ?3, ?4, ?5)",
+                params![id, chrono::Utc::now().timestamp(), attempt, detail, actor],
+            )?;
+            Ok(())
+        })
+    }
+
+    /// Confirm an unknown effect was accepted, preserving the operator's receipt evidence.
+    pub fn confirm_unknown_delivered(
+        &self,
+        id: i64,
+        actor: &str,
+        receipt: &str,
+    ) -> Result<(), DbError> {
+        let actor = validate_resolution_actor(actor)?;
+        let receipt = bounded_reason(receipt);
+        if receipt.is_empty() {
+            return Err(DbError::Invariant(
+                "unknown outcome confirmation requires a receipt reference".into(),
+            ));
+        }
+        self.db.transaction(|tx| {
+            let attempt: i64 = tx.query_row(
+                "SELECT attempts FROM state_outbox WHERE id = ?1 AND status = 'unknown'",
+                params![id],
+                |row| row.get(0),
+            )?;
+            tx.execute(
+                "UPDATE state_outbox SET status = 'delivered', last_error = NULL WHERE id = ?1 AND status = 'unknown'",
+                params![id],
+            )?;
+            tx.execute(
+                "INSERT INTO state_outbox_delivery_events(outbox_id, transition, occurred_at, attempt, detail, external_receipt, actor) \
+                 VALUES (?1, 'operator_confirmed_delivered', ?2, ?3, ?4, ?5, ?6)",
+                params![id, chrono::Utc::now().timestamp(), attempt, receipt, receipt, actor],
             )?;
             Ok(())
         })
@@ -184,22 +451,111 @@ impl<'db> OutboxStore<'db> {
                 |r| r.get(0),
             )?;
             let new_attempts = attempts + 1;
-            if (new_attempts as u32) >= retry_budget_max {
+            let retrying = (new_attempts as u32) < retry_budget_max;
+            if !retrying {
                 tx.execute(
                     "UPDATE state_outbox SET status = 'dead_letter', last_error = ?1, \
-                         attempts = ?2 WHERE id = ?3",
+                         attempts = ?2, lease_owner = NULL, lease_expires_at = NULL WHERE id = ?3",
                     params![error, new_attempts, id],
                 )?;
-                Ok(false)
             } else {
                 let next_attempt_at = chrono::Utc::now().timestamp() + backoff_secs;
                 tx.execute(
                     "UPDATE state_outbox SET status = 'pending', last_error = ?1, \
-                         attempts = ?2, next_attempt_at = ?3 WHERE id = ?4",
+                         attempts = ?2, next_attempt_at = ?3, lease_owner = NULL, lease_expires_at = NULL WHERE id = ?4",
                     params![error, new_attempts, next_attempt_at, id],
                 )?;
-                Ok(true)
             }
+            tx.execute(
+                "INSERT INTO state_outbox_delivery_events(outbox_id, transition, occurred_at, attempt, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![id, if retrying { "retry_scheduled" } else { "dead_letter" }, chrono::Utc::now().timestamp(), new_attempts, error],
+            )?;
+            Ok(retrying)
+        })
+    }
+
+    /// Read the delivery history in append order.
+    pub fn delivery_timeline(&self, id: i64) -> Result<Vec<OutboxDeliveryEvent>, DbError> {
+        self.db.with_conn(|c| {
+            let mut stmt = c.prepare_cached(
+                "SELECT id, outbox_id, transition, occurred_at, attempt, detail, external_receipt, actor \
+                 FROM state_outbox_delivery_events WHERE outbox_id = ?1 ORDER BY id ASC",
+            )?;
+            let events = stmt
+                .query_map(params![id], |row| {
+                    Ok(OutboxDeliveryEvent {
+                        id: row.get(0)?,
+                        outbox_id: row.get(1)?,
+                        transition: row.get(2)?,
+                        occurred_at: row.get(3)?,
+                        attempt: row.get(4)?,
+                        detail: row.get(5)?,
+                        external_receipt: row.get(6)?,
+                        actor: row.get(7)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(events)
+        })
+    }
+
+    /// Read transport effects associated with a conversation's event sequence.
+    pub fn conversation_delivery_timeline(
+        &self,
+        conversation_id: &ConversationId,
+    ) -> Result<Vec<ConversationDeliveryEvent>, DbError> {
+        self.db.with_conn(|connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT o.enqueued_seq, e.transition, e.occurred_at, e.attempt, e.external_receipt, e.actor \
+                 FROM state_outbox o JOIN state_outbox_delivery_events e ON e.outbox_id = o.id \
+                 WHERE o.conversation_id = ?1 AND o.effect_kind LIKE 'transport.%' \
+                 ORDER BY o.enqueued_seq, e.id",
+            )?;
+            let events = statement
+                .query_map(params![conversation_id.as_str()], |row| {
+                    Ok(ConversationDeliveryEvent {
+                        event_seq: row.get(0)?,
+                        transition: row.get(1)?,
+                        occurred_at: row.get(2)?,
+                        attempt: row.get(3)?,
+                        external_receipt: row.get(4)?,
+                        actor: row.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(events)
+        })
+    }
+
+    /// Read a bounded delivery timeline correlated to one durable run's input
+    /// event and ending before the next run in the same conversation.
+    pub fn run_delivery_timeline(
+        &self,
+        run_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationDeliveryEvent>, DbError> {
+        self.db.with_conn(|connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT o.enqueued_seq, e.transition, e.occurred_at, e.attempt, e.external_receipt, e.actor \
+                 FROM state_runs r \
+                 JOIN state_outbox o ON o.conversation_id=r.conversation_id \
+                   AND o.enqueued_seq>=r.input_event_seq \
+                   AND o.enqueued_seq<COALESCE((SELECT MIN(next.input_event_seq) FROM state_runs next \
+                     WHERE next.conversation_id=r.conversation_id AND next.input_event_seq>r.input_event_seq), 9223372036854775807) \
+                 JOIN state_outbox_delivery_events e ON e.outbox_id=o.id \
+                 WHERE r.run_id=?1 AND o.effect_kind LIKE 'transport.%' \
+                 ORDER BY o.enqueued_seq,e.id LIMIT ?2",
+            )?;
+            statement.query_map(params![run_id, limit.clamp(1, 500)], |row| {
+                Ok(ConversationDeliveryEvent {
+                    event_seq: row.get(0)?,
+                    transition: row.get(1)?,
+                    occurred_at: row.get(2)?,
+                    attempt: row.get(3)?,
+                    external_receipt: row.get(4)?,
+                    actor: row.get(5)?,
+                })
+            })?.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
         })
     }
 
@@ -212,6 +568,51 @@ impl<'db> OutboxStore<'db> {
                 |r| r.get(0),
             )?;
             Ok(n)
+        })
+    }
+
+    /// List bounded metadata for effects that need operator reconciliation.
+    pub fn unknown_effects(&self, limit: usize) -> Result<Vec<UnknownOutboxEffect>, DbError> {
+        self.db.with_conn(|connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT id, conversation_id, effect_kind, attempts, enqueued_seq \
+                 FROM state_outbox WHERE status = 'unknown' ORDER BY id LIMIT ?1",
+            )?;
+            statement
+                .query_map([limit.clamp(1, 200)], |row| {
+                    Ok(UnknownOutboxEffect {
+                        id: row.get(0)?,
+                        conversation_id: ConversationId::from(row.get::<_, String>(1)?),
+                        effect_kind: row.get(2)?,
+                        attempts: row.get(3)?,
+                        enqueued_seq: EventSeq(row.get(4)?),
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)
+        })
+    }
+
+    /// Fetch one unknown effect by ID without exposing its payload or error detail.
+    pub fn unknown_effect(&self, id: i64) -> Result<Option<UnknownOutboxEffect>, DbError> {
+        self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT id, conversation_id, effect_kind, attempts, enqueued_seq \
+                     FROM state_outbox WHERE id = ?1 AND status = 'unknown'",
+                    [id],
+                    |row| {
+                        Ok(UnknownOutboxEffect {
+                            id: row.get(0)?,
+                            conversation_id: ConversationId::from(row.get::<_, String>(1)?),
+                            effect_kind: row.get(2)?,
+                            attempts: row.get(3)?,
+                            enqueued_seq: EventSeq(row.get(4)?),
+                        })
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)
         })
     }
 }
@@ -239,6 +640,25 @@ fn row_to_outbox(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutboxRow> {
         last_error,
         enqueued_seq: EventSeq(enqueued_seq),
     })
+}
+
+fn bounded_reason(reason: &str) -> String {
+    reason
+        .chars()
+        .take(1024)
+        .collect::<String>()
+        .trim()
+        .to_owned()
+}
+
+fn validate_resolution_actor(actor: &str) -> Result<String, DbError> {
+    let actor = actor.trim();
+    if actor.is_empty() || actor.len() > 128 {
+        return Err(DbError::Invariant(
+            "unknown outcome resolution needs a bounded actor id".into(),
+        ));
+    }
+    Ok(actor.to_owned())
 }
 
 #[cfg(test)]
@@ -280,6 +700,185 @@ mod tests {
     }
 
     #[test]
+    fn idempotent_enqueue_replays_identical_rows_and_refuses_unknown_retry() {
+        let db = fresh_db();
+        let store = OutboxStore::new(&db);
+        let cid = ConversationId::from("queued-transport");
+        let row = OutboxRow {
+            id: None,
+            idempotency_key: IdempotencyKey::mint(&cid, crate::ids::TurnSeq(7), 2),
+            conversation_id: cid,
+            effect_kind: "transport.send".into(),
+            payload: b"same-effect".to_vec(),
+            status: OutboxStatus::Pending,
+            attempts: 0,
+            next_attempt_at: Some(i64::MAX),
+            last_error: None,
+            enqueued_seq: EventSeq(11),
+        };
+        let (id, created) = store.enqueue_idempotent(&row).unwrap();
+        assert!(created);
+        assert_eq!(store.enqueue_idempotent(&row).unwrap(), (id, false));
+
+        let mut conflicting = row.clone();
+        conflicting.payload = b"different-effect".to_vec();
+        assert!(store.enqueue_idempotent(&conflicting).is_err());
+
+        store.claim(id).unwrap();
+        store
+            .mark_unknown(id, "peer closed after request body")
+            .unwrap();
+        assert!(store.enqueue_idempotent(&row).is_err());
+    }
+
+    #[test]
+    fn automatic_agent_enqueue_is_fenced_by_controller_takeover() {
+        let db = fresh_db();
+        let ownership = crate::agent_ownership::AgentOwnershipStore::new(&db);
+        let cid = ConversationId::from("owner-fenced-chat");
+        let current = ownership
+            .assign_agent(cid.as_str(), "whatsapp", "group@g.us", "camper", 10)
+            .unwrap();
+        let row = OutboxRow {
+            id: None,
+            idempotency_key: IdempotencyKey::mint(&cid, crate::ids::TurnSeq(1), 0),
+            conversation_id: cid.clone(),
+            effect_kind: "transport.send".into(),
+            payload: b"draft".to_vec(),
+            status: OutboxStatus::Pending,
+            attempts: 0,
+            next_attempt_at: None,
+            last_error: None,
+            enqueued_seq: EventSeq(1),
+        };
+        let key = crate::agent_ownership::scope_key(cid.as_str(), "whatsapp", "group@g.us");
+        OutboxStore::new(&db)
+            .enqueue_idempotent_for_agent(&row, &key, "camper", current.generation)
+            .unwrap();
+        ownership
+            .takeover(cid.as_str(), "whatsapp", "group@g.us", 11)
+            .unwrap();
+        assert!(
+            OutboxStore::new(&db)
+                .enqueue_idempotent_for_agent(&row, &key, "camper", current.generation)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn unknown_outcome_stops_retries_until_operator_resolution() {
+        let db = fresh_db();
+        let store = OutboxStore::new(&db);
+        let cid = ConversationId::from("unknown-delivery");
+        let id = store
+            .enqueue(&OutboxRow {
+                id: None,
+                idempotency_key: IdempotencyKey::mint(&cid, crate::ids::TurnSeq(1), 1),
+                conversation_id: cid,
+                effect_kind: "transport.send".into(),
+                payload: vec![1],
+                status: OutboxStatus::Pending,
+                attempts: 0,
+                next_attempt_at: None,
+                last_error: None,
+                enqueued_seq: EventSeq(1),
+            })
+            .unwrap();
+        assert!(store.claim_with_lease(id, "relay-test", 100, 30).unwrap());
+        store
+            .mark_unknown(id, "peer closed after request body")
+            .unwrap();
+        assert!(store.ready_pending(1_000, 10).unwrap().is_empty());
+        assert_eq!(outbox_status(&db, id), "unknown");
+        assert!(
+            store
+                .authorize_unknown_retry(id, "operator-1", " ")
+                .is_err()
+        );
+
+        store
+            .authorize_unknown_retry(id, "operator-1", "operator checked the transport receipt")
+            .unwrap();
+        assert_eq!(outbox_status(&db, id), "pending");
+        assert_eq!(
+            store
+                .delivery_timeline(id)
+                .unwrap()
+                .last()
+                .unwrap()
+                .transition,
+            "retry_authorized"
+        );
+
+        assert!(store.claim_with_lease(id, "relay-test", 200, 30).unwrap());
+        store.mark_unknown(id, "second response was lost").unwrap();
+        store
+            .confirm_unknown_delivered(id, "operator-1", "receipt:operator-confirmed-1")
+            .unwrap();
+        assert_eq!(outbox_status(&db, id), "delivered");
+        let timeline = store.delivery_timeline(id).unwrap();
+        assert_eq!(
+            timeline.last().unwrap().transition,
+            "operator_confirmed_delivered"
+        );
+        assert_eq!(
+            timeline.last().unwrap().external_receipt.as_deref(),
+            Some("receipt:operator-confirmed-1")
+        );
+        assert_eq!(
+            timeline.last().unwrap().actor.as_deref(),
+            Some("operator-1")
+        );
+    }
+
+    fn outbox_status(db: &Database, id: i64) -> String {
+        db.with_conn(|connection| {
+            Ok(connection.query_row(
+                "SELECT status FROM state_outbox WHERE id = ?1",
+                [id],
+                |row| row.get(0),
+            )?)
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn conversation_projection_joins_only_transport_effect_transitions() {
+        let db = fresh_db();
+        let store = OutboxStore::new(&db);
+        let cid = ConversationId::from("timeline-conversation");
+        let mut transport = mk_row(&cid, 10);
+        transport.effect_kind = "transport.send".into();
+        transport.enqueued_seq = EventSeq(7);
+        let transport_id = store.enqueue(&transport).unwrap();
+        let mut other = mk_row(&cid, 11);
+        other.effect_kind = "schedule.wakeup".into();
+        other.enqueued_seq = EventSeq(8);
+        store.enqueue(&other).unwrap();
+
+        assert!(
+            store
+                .claim_with_lease(transport_id, "relay", 100, 30)
+                .unwrap()
+        );
+        store
+            .mark_delivered_with_receipt(transport_id, Some("remote-ack"))
+            .unwrap();
+        let timeline = store.conversation_delivery_timeline(&cid).unwrap();
+        assert_eq!(
+            timeline
+                .iter()
+                .map(|event| (event.event_seq, event.transition.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(7, "enqueued"), (7, "send_requested"), (7, "delivered")]
+        );
+        assert_eq!(
+            timeline.last().unwrap().external_receipt.as_deref(),
+            Some("remote-ack")
+        );
+    }
+
+    #[test]
     fn inbox_dedup_only_records_once() {
         let db = fresh_db();
         let store = OutboxStore::new(&db);
@@ -314,6 +913,145 @@ mod tests {
             .unwrap();
         assert!(store.claim(id).unwrap(), "first claim should succeed");
         assert!(!store.claim(id).unwrap(), "second claim must fail");
+    }
+
+    #[test]
+    fn expired_outbox_lease_is_reclaimed_and_timeline_survives_store_reopen() {
+        let db = fresh_db();
+        let store = OutboxStore::new(&db);
+        let id = store
+            .enqueue(&mk_row(&ConversationId::from("c"), 0))
+            .unwrap();
+        assert!(store.claim_with_lease(id, "runner-a", 100, 5).unwrap());
+        assert!(!store.claim_with_lease(id, "runner-b", 104, 5).unwrap());
+        assert!(store.claim_with_lease(id, "runner-b", 105, 5).unwrap());
+        store.record_failure(id, "transient", 4, 1).unwrap();
+        let timeline = store.delivery_timeline(id).unwrap();
+        assert_eq!(
+            timeline
+                .iter()
+                .map(|event| event.transition.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "enqueued",
+                "send_requested",
+                "lease_reclaimed",
+                "retry_scheduled"
+            ]
+        );
+        assert_eq!(timeline[2].attempt, 1);
+    }
+
+    #[test]
+    fn dead_letter_is_an_auditable_final_transition() {
+        let db = fresh_db();
+        let store = OutboxStore::new(&db);
+        let id = store
+            .enqueue(&mk_row(&ConversationId::from("c"), 0))
+            .unwrap();
+        assert!(!store.record_failure(id, "permanent", 1, 0).unwrap());
+        let timeline = store.delivery_timeline(id).unwrap();
+        assert_eq!(timeline.last().unwrap().transition, "dead_letter");
+    }
+
+    #[test]
+    fn process_kill_after_outbox_claim_is_recovered_after_database_reopen() {
+        use std::process::{Command, Stdio};
+        use std::time::{Duration, Instant};
+
+        let temp = tempfile::tempdir().unwrap();
+        let database_path = temp.path().join("outbox-crash.db");
+        let ready_path = temp.path().join("claimed");
+        let db = Database::open(&DbConfig {
+            path: database_path.clone(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let id = OutboxStore::new(&db)
+            .enqueue(&mk_row(&ConversationId::from("crash-test"), 0))
+            .unwrap();
+        drop(db);
+
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "outbox::tests::outbox_crash_child_holds_claim_until_killed",
+                "--nocapture",
+            ])
+            .env("EXECLAW_OUTBOX_CRASH_DB", &database_path)
+            .env("EXECLAW_OUTBOX_CRASH_READY", &ready_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready_path.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            ready_path.exists(),
+            "child process did not acquire its lease"
+        );
+        child.kill().unwrap();
+        let _ = child.wait();
+
+        std::thread::sleep(Duration::from_millis(1_100));
+        let reopened = Database::open(&DbConfig {
+            path: database_path,
+            key: None,
+        })
+        .unwrap();
+        let recovered = OutboxStore::new(&reopened)
+            .claim_with_lease(id, "recovery-process", chrono::Utc::now().timestamp(), 30)
+            .unwrap();
+        assert!(recovered);
+        let events = OutboxStore::new(&reopened).delivery_timeline(id).unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.transition == "enqueued")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.transition == "send_requested")
+                .count(),
+            1
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.transition == "lease_reclaimed")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn outbox_crash_child_holds_claim_until_killed() {
+        let (Some(database_path), Some(ready_path)) = (
+            std::env::var_os("EXECLAW_OUTBOX_CRASH_DB"),
+            std::env::var_os("EXECLAW_OUTBOX_CRASH_READY"),
+        ) else {
+            return;
+        };
+        let db = Database::open(&DbConfig {
+            path: database_path.into(),
+            key: None,
+        })
+        .unwrap();
+        let store = OutboxStore::new(&db);
+        let id = store.ready_pending(i64::MAX, 1).unwrap()[0].id.unwrap();
+        assert!(
+            store
+                .claim_with_lease(id, "killed-process", chrono::Utc::now().timestamp(), 1)
+                .unwrap()
+        );
+        std::fs::write(ready_path, b"claimed").unwrap();
+        std::thread::park();
     }
 
     /// `record_failure` bumps attempts and sets next_attempt_at while
@@ -423,6 +1161,7 @@ mod tests {
             OutboxStatus::Delivered,
             OutboxStatus::Failed,
             OutboxStatus::DeadLetter,
+            OutboxStatus::Unknown,
         ] {
             assert_eq!(OutboxStatus::parse(v.as_str()), Some(v));
         }

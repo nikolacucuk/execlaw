@@ -23,7 +23,7 @@ fn python_sandbox_manifest_parses_with_expected_tools() {
         toml::from_str(&source).unwrap_or_else(|e| panic!("plugin.toml must parse: {e}"));
 
     assert_eq!(manifest.plugin.id, "python-sandbox");
-    assert_eq!(manifest.plugin.version, "0.1.0");
+    assert_eq!(manifest.plugin.version, "0.1.1");
 
     let tool_names: Vec<&str> = manifest.tools.iter().map(|t| t.name.as_str()).collect();
     let want = [

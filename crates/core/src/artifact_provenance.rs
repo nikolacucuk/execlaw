@@ -471,7 +471,12 @@ impl ArtifactProvenanceStore {
                 conn.query_row(
                     "SELECT EXISTS(SELECT 1 FROM state_artifact_provenance \
                      WHERE artifact_type=?1 AND artifact_locator=?2 \
-                       AND verification_status='local_development_override')",
+                       AND verification_status='local_development_override') \
+                     OR EXISTS(SELECT 1 FROM state_artifact_verification_events \
+                     WHERE event_type='local_override_used' \
+                       AND status='local_development_override' \
+                       AND json_extract(detail_json,'$.artifact_type')=?1 \
+                       AND json_extract(detail_json,'$.locator')=?2)",
                     params![artifact_type.as_str(), reference],
                     |row| row.get::<_, i64>(0),
                 )
@@ -619,13 +624,13 @@ mod tests {
     #[test]
     fn audited_oci_override_survives_policy_being_disabled() {
         let store = store();
-        let reference = "asternic/wuzapi:latest";
+        let reference = format!("asternic/wuzapi@sha256:{}", "a".repeat(64));
         set_local_override(&store, true);
         store
             .authorize_oci_reference(
                 "sidecar:whatsapp:wuzapi",
                 ArtifactType::Sidecar,
-                reference,
+                &reference,
                 "test",
             )
             .unwrap();
@@ -635,7 +640,7 @@ mod tests {
             .authorize_oci_reference(
                 "sidecar:whatsapp:wuzapi",
                 ArtifactType::Sidecar,
-                reference,
+                &reference,
                 "test",
             )
             .unwrap();

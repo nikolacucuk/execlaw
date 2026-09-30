@@ -32,7 +32,339 @@
 use execlaw_core::Database;
 use execlaw_core::backends::{BackendMode, BackendPurpose, BackendStore};
 use execlaw_inference_api::{InferenceClient, InferenceEngine};
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::future::Future;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
+use std::time::Duration;
+use thiserror::Error;
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+
+const MAX_INFERENCE_CONCURRENCY: usize = 8;
+const MAX_BACKGROUND_CONCURRENCY: usize = 6;
+const MAX_MODEL_CONCURRENCY: usize = 2;
+const MAX_BACKGROUND_PER_MODEL: usize = 1;
+const MAX_CHILD_CONCURRENCY_PER_PARENT: usize = 2;
+const MAX_QUEUED_INFERENCE: usize = 128;
+const INFERENCE_QUEUE_TIMEOUT: Duration = Duration::from_secs(120);
+const BACKGROUND_AGING: Duration = Duration::from_secs(20);
+
+/// Workload class used for fair admission to a local model endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InferenceWorkload {
+    Chat,
+    Voice,
+    Background,
+    Research,
+    Agent,
+    Automation,
+    Child,
+}
+
+impl InferenceWorkload {
+    fn is_background(self) -> bool {
+        matches!(
+            self,
+            Self::Background | Self::Research | Self::Agent | Self::Automation | Self::Child
+        )
+    }
+}
+
+/// Failure to obtain a bounded local-inference admission slot.
+#[derive(Debug, Error)]
+pub enum InferenceAdmissionError {
+    #[error("inference queue is full")]
+    QueueFull,
+    #[error("inference admission queue timed out")]
+    TimedOut,
+    #[error("inference admission was cancelled")]
+    Cancelled,
+    #[error("inference admission semaphore is closed")]
+    Closed,
+    #[error("child inference budget scope is invalid")]
+    InvalidBudgetScope,
+}
+
+#[derive(Debug, Clone)]
+struct ModelPermits {
+    total: Arc<Semaphore>,
+    background: Arc<Semaphore>,
+}
+
+/// Shared bounded scheduler for requests sent to local inference backends.
+///
+/// It reserves global and per-model capacity for foreground chat and voice.
+/// Background work uses a smaller lane initially, then ages into the shared
+/// lane after waiting long enough. Dropping the returned permit releases all
+/// reservations, including when a request is cancelled or times out.
+#[derive(Debug, Clone)]
+pub struct InferenceAdmission {
+    total: Arc<Semaphore>,
+    background: Arc<Semaphore>,
+    models: Arc<Mutex<HashMap<String, ModelPermits>>>,
+    parents: Arc<StdMutex<HashMap<String, Weak<Semaphore>>>>,
+    queued: Arc<AtomicUsize>,
+}
+
+impl Default for InferenceAdmission {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InferenceAdmission {
+    /// Create a scheduler with foreground reserves, per-model limits, and a
+    /// bounded queue. Production shares one instance through `InferenceResolver`.
+    pub fn new() -> Self {
+        Self {
+            total: Arc::new(Semaphore::new(MAX_INFERENCE_CONCURRENCY)),
+            background: Arc::new(Semaphore::new(MAX_BACKGROUND_CONCURRENCY)),
+            models: Arc::new(Mutex::new(HashMap::new())),
+            parents: Arc::new(StdMutex::new(HashMap::new())),
+            queued: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Wait for an admission slot, returning an RAII permit that releases on drop.
+    pub async fn acquire(
+        &self,
+        model: &str,
+        workload: InferenceWorkload,
+    ) -> Result<InferencePermit, InferenceAdmissionError> {
+        self.acquire_scoped(model, workload, None).await
+    }
+
+    /// Wait for an admission slot while enforcing one durable parent's child limit.
+    pub async fn acquire_scoped(
+        &self,
+        model: &str,
+        workload: InferenceWorkload,
+        budget_scope: Option<&str>,
+    ) -> Result<InferencePermit, InferenceAdmissionError> {
+        self.acquire_scoped_cancellable(model, workload, budget_scope, std::future::pending())
+            .await
+    }
+
+    /// Wait for a slot while also observing caller cancellation.
+    pub async fn acquire_cancellable<C>(
+        &self,
+        model: &str,
+        workload: InferenceWorkload,
+        cancelled: C,
+    ) -> Result<InferencePermit, InferenceAdmissionError>
+    where
+        C: Future<Output = ()> + Send,
+    {
+        self.acquire_scoped_cancellable(model, workload, None, cancelled)
+            .await
+    }
+
+    /// Wait for a slot in a durable parent scope while observing cancellation.
+    pub async fn acquire_scoped_cancellable<C>(
+        &self,
+        model: &str,
+        workload: InferenceWorkload,
+        budget_scope: Option<&str>,
+        cancelled: C,
+    ) -> Result<InferencePermit, InferenceAdmissionError>
+    where
+        C: Future<Output = ()> + Send,
+    {
+        let parent_scope = if workload == InferenceWorkload::Child {
+            let scope = budget_scope.unwrap_or("unscoped-child").trim();
+            if scope.is_empty() || scope.len() > 256 {
+                return Err(InferenceAdmissionError::InvalidBudgetScope);
+            }
+            Some(scope.to_owned())
+        } else {
+            None
+        };
+        let wait_started = tokio::time::Instant::now();
+        let position = self.queued.fetch_add(1, Ordering::AcqRel);
+        if position >= MAX_QUEUED_INFERENCE {
+            self.queued.fetch_sub(1, Ordering::AcqRel);
+            tracing::warn!(workload = ?workload, queue_limit = MAX_QUEUED_INFERENCE, "local inference admission queue is full");
+            return Err(InferenceAdmissionError::QueueFull);
+        }
+        let _queue_slot = QueueSlot(self.queued.clone());
+        let model_permits = {
+            let key = model.trim().to_ascii_lowercase();
+            let mut models = self.models.lock().await;
+            models
+                .entry(key)
+                .or_insert_with(|| ModelPermits {
+                    total: Arc::new(Semaphore::new(MAX_MODEL_CONCURRENCY)),
+                    background: Arc::new(Semaphore::new(MAX_BACKGROUND_PER_MODEL)),
+                })
+                .clone()
+        };
+
+        let wait = async {
+            let parent = if let Some(scope) = parent_scope.as_deref() {
+                Some(self.acquire_parent(scope).await?)
+            } else {
+                None
+            };
+            let mut permit = if workload.is_background() {
+                tokio::select! {
+                    biased;
+                    result = self.acquire_background(model_permits.clone()) => result?,
+                    _ = tokio::time::sleep(BACKGROUND_AGING) => {
+                        self.acquire_shared(model_permits).await?
+                    }
+                }
+            } else {
+                self.acquire_shared(model_permits).await?
+            };
+            permit._parent = parent;
+            Ok(permit)
+        };
+
+        let result = tokio::select! {
+            biased;
+            _ = cancelled => Err(InferenceAdmissionError::Cancelled),
+            result = tokio::time::timeout(INFERENCE_QUEUE_TIMEOUT, wait) => {
+                result.unwrap_or(Err(InferenceAdmissionError::TimedOut))
+            }
+        };
+        if result.is_ok() {
+            tracing::debug!(
+                model,
+                workload = ?workload,
+                queue_wait_ms = wait_started.elapsed().as_millis() as u64,
+                queued = self.queued.load(Ordering::Relaxed).saturating_sub(1),
+                "local inference admission granted"
+            );
+        }
+        result
+    }
+
+    fn parent_semaphore(&self, scope: &str) -> Result<Arc<Semaphore>, InferenceAdmissionError> {
+        let mut parents = self
+            .parents
+            .lock()
+            .map_err(|_| InferenceAdmissionError::Closed)?;
+        parents.retain(|_, semaphore| semaphore.strong_count() > 0);
+        if let Some(semaphore) = parents.get(scope).and_then(Weak::upgrade) {
+            return Ok(semaphore);
+        }
+        let semaphore = Arc::new(Semaphore::new(MAX_CHILD_CONCURRENCY_PER_PARENT));
+        parents.insert(scope.to_owned(), Arc::downgrade(&semaphore));
+        Ok(semaphore)
+    }
+
+    async fn acquire_parent(
+        &self,
+        scope: &str,
+    ) -> Result<OwnedSemaphorePermit, InferenceAdmissionError> {
+        self.parent_semaphore(scope)?
+            .acquire_owned()
+            .await
+            .map_err(|_| InferenceAdmissionError::Closed)
+    }
+
+    async fn acquire_shared(
+        &self,
+        model: ModelPermits,
+    ) -> Result<InferencePermit, InferenceAdmissionError> {
+        let global = self
+            .total
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| InferenceAdmissionError::Closed)?;
+        let per_model = model
+            .total
+            .acquire_owned()
+            .await
+            .map_err(|_| InferenceAdmissionError::Closed)?;
+        Ok(InferencePermit {
+            _global: global,
+            _model: per_model,
+            _background_global: None,
+            _background_model: None,
+            _parent: None,
+        })
+    }
+
+    async fn acquire_background(
+        &self,
+        model: ModelPermits,
+    ) -> Result<InferencePermit, InferenceAdmissionError> {
+        let background_global = self
+            .background
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| InferenceAdmissionError::Closed)?;
+        let background_model = model
+            .background
+            .acquire_owned()
+            .await
+            .map_err(|_| InferenceAdmissionError::Closed)?;
+        let global = self
+            .total
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| InferenceAdmissionError::Closed)?;
+        let per_model = model
+            .total
+            .acquire_owned()
+            .await
+            .map_err(|_| InferenceAdmissionError::Closed)?;
+        Ok(InferencePermit {
+            _global: global,
+            _model: per_model,
+            _background_global: Some(background_global),
+            _background_model: Some(background_model),
+            _parent: None,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl execlaw_inference_api::InferenceRequestAdmission for InferenceAdmission {
+    async fn acquire(
+        &self,
+        model: &str,
+        workload: &str,
+        budget_scope: Option<&str>,
+    ) -> Result<Box<dyn execlaw_inference_api::InferenceAdmissionPermit>, String> {
+        let workload = match workload {
+            "chat" => InferenceWorkload::Chat,
+            "voice" => InferenceWorkload::Voice,
+            "background" => InferenceWorkload::Background,
+            "research" => InferenceWorkload::Research,
+            "agent" => InferenceWorkload::Agent,
+            "automation" => InferenceWorkload::Automation,
+            _ => InferenceWorkload::Child,
+        };
+        InferenceAdmission::acquire_scoped(self, model, workload, budget_scope)
+            .await
+            .map(|permit| {
+                Box::new(permit) as Box<dyn execlaw_inference_api::InferenceAdmissionPermit>
+            })
+            .map_err(|error| error.to_string())
+    }
+}
+
+struct QueueSlot(Arc<AtomicUsize>);
+
+impl Drop for QueueSlot {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Active admission reservation. Dropping it releases every semaphore permit.
+pub struct InferencePermit {
+    _global: OwnedSemaphorePermit,
+    _model: OwnedSemaphorePermit,
+    _background_global: Option<OwnedSemaphorePermit>,
+    _background_model: Option<OwnedSemaphorePermit>,
+    _parent: Option<OwnedSemaphorePermit>,
+}
 
 /// Fallback `model` id when the operator's backend row has no
 /// `--model=…` arg AND there's no bootstrap-specified model. The
@@ -70,11 +402,25 @@ pub struct ResolvedInference {
     /// on the resolved struct so it's bound to the same row as the
     /// endpoint + model id.
     pub reasoning_enabled: bool,
+    /// Optional OpenAI-compatible reasoning control from the same backend row.
+    pub reasoning_effort: Option<String>,
+    /// Explicit native Ollama context from the operator's model spec.
+    pub ollama_context_tokens: Option<u32>,
     /// `"db"` when the resolution came from a backend row;
     /// `"bootstrap"` when it came from the boot-time URL.
     /// Surfaced for the turn-timing trace so the operator can
     /// confirm which path won.
     pub source: &'static str,
+    /// Shared scheduler inherited from the owning resolver.
+    pub admission: InferenceAdmission,
+}
+
+impl ResolvedInference {
+    /// Return this resolved endpoint with an explicit scheduler workload.
+    pub fn with_workload(mut self, workload: &'static str) -> Self {
+        self.client = Arc::new(self.client.as_ref().clone().with_workload(workload));
+        self
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +435,8 @@ pub struct InferenceResolver {
     /// `--inference-url --inference-model` gets exactly what they
     /// asked for.
     pub bootstrap_model: Option<String>,
+    /// One scheduler is shared across every purpose resolved by this object.
+    pub admission: InferenceAdmission,
 }
 
 impl InferenceResolver {
@@ -96,6 +444,7 @@ impl InferenceResolver {
         Self {
             bootstrap,
             bootstrap_model: None,
+            admission: InferenceAdmission::new(),
         }
     }
 
@@ -152,6 +501,18 @@ impl InferenceResolver {
                 let endpoint = r.endpoint.clone().filter(|s| !s.trim().is_empty());
                 let row_model = extract_model_arg(&r.model_spec_json);
                 let reasoning_enabled = r.reasoning_enabled;
+                let reasoning_effort = r
+                    .model_spec_json
+                    .get("reasoning_effort")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|value| matches!(*value, "none" | "low" | "medium" | "high" | "max"))
+                    .map(str::to_owned);
+                let ollama_context_tokens = r
+                    .model_spec_json
+                    .get("context_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|tokens| u32::try_from(tokens).ok())
+                    .filter(|tokens| (4_096..=262_144).contains(tokens));
                 // Apple-Silicon Ollama backends speak through
                 // Ollama's native /api/chat endpoint rather than
                 // the OpenAI-compat shim — the shim drops
@@ -174,13 +535,32 @@ impl InferenceResolver {
                             &url,
                         ) {
                             Ok(client) => Some(ResolvedInference {
-                                client: Arc::new(client.with_engine(engine)),
+                                client: Arc::new({
+                                    let client = client.with_engine(engine);
+                                    let client = match reasoning_effort.as_deref() {
+                                        Some(effort) => client.with_reasoning_effort(effort),
+                                        None => client,
+                                    };
+                                    let client = match (engine, ollama_context_tokens) {
+                                        (InferenceEngine::Ollama, Some(tokens)) => {
+                                            client.with_ollama_context_tokens(tokens)
+                                        }
+                                        _ => client,
+                                    };
+                                    client.with_admission(
+                                        Arc::new(self.admission.clone()),
+                                        "background",
+                                    )
+                                }),
                                 model_id: row_model
                                     .or_else(|| self.bootstrap_model.clone())
                                     .unwrap_or_else(|| DEFAULT_FALLBACK_MODEL.to_owned()),
                                 endpoint: url,
                                 reasoning_enabled,
+                                reasoning_effort,
+                                ollama_context_tokens,
                                 source: "db",
+                                admission: self.admission.clone(),
                             }),
                             Err(error) => {
                                 tracing::warn!(
@@ -214,6 +594,12 @@ impl InferenceResolver {
 
     fn bootstrap_resolved(&self) -> Option<ResolvedInference> {
         let client = self.bootstrap.clone()?;
+        let client = Arc::new(
+            client
+                .as_ref()
+                .clone()
+                .with_admission(Arc::new(self.admission.clone()), "background"),
+        );
         Some(ResolvedInference {
             endpoint: client.base_url.clone(),
             client,
@@ -225,7 +611,10 @@ impl InferenceResolver {
             // Operators who want reasoning on must configure the
             // Standard backend row via Settings → Backends.
             reasoning_enabled: false,
+            reasoning_effort: None,
+            ollama_context_tokens: None,
             source: "bootstrap",
+            admission: self.admission.clone(),
         })
     }
 }
@@ -307,6 +696,99 @@ mod tests {
         db
     }
 
+    #[tokio::test]
+    async fn sibling_children_share_a_parent_limit_without_blocking_chat() {
+        let admission = InferenceAdmission::new();
+        let child_one = admission
+            .acquire_scoped("model-one", InferenceWorkload::Child, Some("run-parent"))
+            .await
+            .unwrap();
+        let child_two = admission
+            .acquire_scoped("model-two", InferenceWorkload::Child, Some("run-parent"))
+            .await
+            .unwrap();
+
+        let waiting_admission = admission.clone();
+        let waiting_child = tokio::spawn(async move {
+            waiting_admission
+                .acquire_scoped("model-three", InferenceWorkload::Child, Some("run-parent"))
+                .await
+        });
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while admission.queued.load(Ordering::Acquire) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("third sibling enters the bounded queue");
+
+        let foreground = tokio::time::timeout(
+            Duration::from_millis(100),
+            admission.acquire("model-one", InferenceWorkload::Chat),
+        )
+        .await
+        .expect("foreground admission must not wait behind a saturated parent")
+        .unwrap();
+        drop(foreground);
+        drop(child_one);
+        drop(child_two);
+        tokio::time::timeout(Duration::from_millis(100), waiting_child)
+            .await
+            .expect("released sibling reservation should wake queued work")
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelling_queued_child_releases_queue_and_parent_reservations() {
+        let admission = InferenceAdmission::new();
+        let child_one = admission
+            .acquire_scoped("model-one", InferenceWorkload::Child, Some("run-parent"))
+            .await
+            .unwrap();
+        let child_two = admission
+            .acquire_scoped("model-two", InferenceWorkload::Child, Some("run-parent"))
+            .await
+            .unwrap();
+        let cancel = Arc::new(tokio::sync::Notify::new());
+        let signal = cancel.clone();
+        let waiting_admission = admission.clone();
+        let waiter = tokio::spawn(async move {
+            waiting_admission
+                .acquire_scoped_cancellable(
+                    "model-three",
+                    InferenceWorkload::Child,
+                    Some("run-parent"),
+                    async move { signal.notified().await },
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while admission.queued.load(Ordering::Acquire) < 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child waiter enters the bounded queue");
+        cancel.notify_one();
+        assert!(matches!(
+            waiter.await.unwrap(),
+            Err(InferenceAdmissionError::Cancelled)
+        ));
+        assert_eq!(admission.queued.load(Ordering::Acquire), 0);
+
+        drop(child_one);
+        let replacement = tokio::time::timeout(
+            Duration::from_millis(100),
+            admission.acquire_scoped("model-three", InferenceWorkload::Child, Some("run-parent")),
+        )
+        .await
+        .expect("cancelled sibling must not leak its parent reservation")
+        .unwrap();
+        drop(replacement);
+        drop(child_two);
+    }
+
     fn upsert_row(
         store: &BackendStore<'_>,
         purpose: BackendPurpose,
@@ -362,6 +844,14 @@ mod tests {
     #[test]
     fn external_row_with_endpoint_returns_row_url() {
         let db = fresh_db();
+        execlaw_core::local_endpoint_policy::LocalEndpointPolicyStore::new(&db)
+            .approve_for(
+                execlaw_core::local_endpoint_policy::EndpointApprovalScope::LocalInference,
+                execlaw_core::local_endpoint_policy::EndpointApprovalKind::Cidr,
+                "192.168.1.0/24",
+                chrono::Utc::now().timestamp(),
+            )
+            .unwrap();
         let store = BackendStore::new(&db);
         upsert_row(
             &store,
@@ -374,6 +864,43 @@ mod tests {
         let got = resolver.resolve(&db, BackendPurpose::Standard).unwrap();
         assert_eq!(got.endpoint, "http://192.168.1.50:8000/v1");
         assert_eq!(got.source, "db");
+    }
+
+    #[test]
+    fn external_ollama_row_uses_native_api_and_configured_tag() {
+        let db = fresh_db();
+        let store = BackendStore::new(&db);
+        upsert_row_with_spec(
+            &store,
+            BackendPurpose::Standard,
+            BackendMode::External,
+            Some("http://127.0.0.1:11434"),
+            serde_json::json!({ "binary_hint": "ollama", "model": "qwen3:8b", "context_tokens": 8_192 }),
+        );
+        let resolver = InferenceResolver::new(None);
+        let got = resolver.resolve(&db, BackendPurpose::Standard).unwrap();
+        assert_eq!(got.model_id, "qwen3:8b");
+        assert_eq!(got.endpoint, "http://127.0.0.1:11434");
+        assert_eq!(got.client.engine, InferenceEngine::Ollama);
+        assert_eq!(got.ollama_context_tokens, Some(8_192));
+    }
+
+    #[test]
+    fn external_openai_compatible_row_carries_reasoning_effort() {
+        let db = fresh_db();
+        let store = BackendStore::new(&db);
+        upsert_row_with_spec(
+            &store,
+            BackendPurpose::Standard,
+            BackendMode::External,
+            Some("http://127.0.0.1:11434/v1"),
+            serde_json::json!({"model":"qwen3:8b","reasoning_effort":"none"}),
+        );
+        let resolved = InferenceResolver::new(None)
+            .resolve(&db, BackendPurpose::Standard)
+            .unwrap();
+        assert_eq!(resolved.client.engine, InferenceEngine::OpenAICompat);
+        assert_eq!(resolved.reasoning_effort.as_deref(), Some("none"));
     }
 
     #[test]

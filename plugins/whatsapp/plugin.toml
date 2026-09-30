@@ -1,7 +1,7 @@
 [plugin]
 id = "whatsapp"
 name = "WhatsApp"
-version = "0.2.16"
+version = "0.2.18"
 description = "WhatsApp Multi-Device transport via wuzapi (whatsmeow-backed). Mirrors the Signal plugin shape: 7 agent-callable tools (send_message, reply, read_history, list_groups, create_group, add_group_members, leave_group) + 3 host-internal convention tools (set_typing, send_with_attachments, fetch_attachment), inbound WS consumer, QR-pairing admin flow."
 author = "execlaw"
 license = "Apache-2.0"
@@ -215,6 +215,7 @@ auth = { kind = "query_token", query = "token", vault_key = "webhook_secret" }
 [[ui_panels]]
 mount = "admin/plugins/whatsapp"
 entry = "ui/panel.js"
+rpc_capabilities = ["plugin_admin_routes", "own_plugin_settings"]
 
 [runtime]
 tier = "script"

@@ -2,6 +2,19 @@
 
 Research cutoff: **2026-09-10**
 
+## Status and implementation authority
+
+This is the historical research/rationale source. As of 2026-09-27, the
+accepted delivery scope is **all 130 enhancements (H001-H130)** in
+[`llm-harness-roadmap.md`](llm-harness-roadmap.md); their status, owners, and
+verification evidence live in [`implementation-plan.md`](implementation-plan.md).
+The older ranked portfolio and section 21 checklists below are snapshots,
+not a second active backlog. Where they conflict with later source review,
+use the canonical roadmap's F01-F19 findings and item-specific evidence.
+Do not restart already implemented primitives merely because an old box here
+is unchecked. Lab work remains planned as bounded implementation/qualification
+trials; production rollout requires its acceptance gate.
+
 This document is a research-backed improvement roadmap for execlaw. It compares
 the current implementation with leading open-source agent harnesses, memory
 systems, interoperability standards, and local-inference engines, then converts
@@ -85,18 +98,18 @@ The roadmap should close gaps around these strengths rather than rebuild them.
 
 ## 4. Important verified gaps
 
-These are implementation observations, not speculative product ideas.
+These are historical implementation observations from the research snapshot,
+not a current list of open defects. Later implementations supersede some of
+them. Check the H001-H130 ledger and F01-F19 evidence before scheduling work.
 
-### 4.1 Event rows are authenticated but not chained
+### 4.1 Historical event-integrity gap (superseded by versioned chaining)
 
-`crates/core/src/event_hmac.rs::canonical_bytes` signs each row independently.
-The canonical input does not include a previous event tag or checkpoint root.
-This detects row mutation, but deletion and truncation are not cryptographically
-linked to neighboring rows. Documentation that calls this an HMAC chain is
-stronger than the current implementation.
-
-Recommendation: either describe it accurately as row authentication or add a
-real chain/checkpoint design before making tamper-evident sequence claims.
+The early implementation authenticated rows independently. The current
+`crates/core/src/event_hmac.rs` also supports v2 predecessor-linked events and
+signed conversation heads, preserving legacy verification. Do not repeat the
+old absence of chaining as a current finding. Track qualification of restore,
+schema evolution, and independently retained rollback-detection references
+under H020/H061/H063; these are distinct from merely having chaining code.
 
 ### 4.2 Memory lacks evidence-level lineage
 
@@ -1269,7 +1282,7 @@ schema enforcement, endpoint policy, and evals are in place.
 - Every adoption decision still requires a pinned proof of concept, local
   benchmark, security review, and rollback plan.
 
-## 21. Implementation TODO
+## 21. Historical implementation TODO (superseded by H001-H130)
 
 Status updated: **2026-09-12**. A checked item means the code and focused tests
 exist in this repository; it does not imply that the broader ranked enhancement
@@ -1298,7 +1311,7 @@ is complete unless the text says so.
   the vault; add scope-bound evidence, durable leased ingest/reconcile jobs,
   retry/restart recovery, and fail-closed search-result validation.
 
-### Outstanding P0 work
+### Outstanding P0 work in the 2026-09-12 snapshot
 
 - [ ] Extend fail-closed schema compilation and input/result validation to
   built-in and MCP tools, bundled content-addressed `$ref`, schema hashes, and
@@ -1317,7 +1330,7 @@ is complete unless the text says so.
 - [ ] Persist and verify plugin, subprocess, sidecar, installer, and runner
   signatures, provenance, digests, and SBOMs.
 
-### Outstanding P1/P2 and lab work
+### Outstanding P1/P2 and lab work in the 2026-09-12 snapshot
 
 - [ ] Add backend capability contracts and modern structured-output adapters.
 - [ ] Add hybrid temporal memory retrieval and the Memory Palace UI.

@@ -1,9 +1,21 @@
 # Voice mode — known follow-ups
 
-Phase 13.A–13.D shipped end-to-end voice mode with these explicit deferrals.
-Each item below is intentionally out of scope for the initial commit; the
-hooks are in place so the follow-up is a focused addition rather than a
-rewrite.
+The initial voice transport/STT/TTS path exists, with the integration gaps
+below. Its presence does not qualify end-to-end agent voice behavior.
+
+## Implementation delivery plan
+
+All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+These former deferrals now feed [H047 local voice delivery](llm-harness-roadmap.md#enhancement-047),
+with [H030 inference scheduling](llm-harness-roadmap.md#enhancement-030),
+[H043 stop/steering](llm-harness-roadmap.md#enhancement-043),
+[H074 resource budgets](llm-harness-roadmap.md#enhancement-074),
+[H106 multimodal evidence](llm-harness-roadmap.md#enhancement-106), and
+[H110 local-only verification](llm-harness-roadmap.md#enhancement-110).
+Implement the real chat-path adapter, continuous endpointing, and incremental
+playback with tested interruption and per-session isolation. F15's shared-lock
+STT stall remains open. Existing PCM capture does not close those gates; the
+tracker records implementation and qualification separately.
 
 ## 13.E — Server-side WebRTC AEC3 (deferred)
 
@@ -68,10 +80,10 @@ output sentence-by-sentence.
 `VoicePlayback.flush()`, but the runner doesn't know how much of its
 reply was actually heard before the interrupt.
 
-**Follow-up**: track `played_through_sentence` in the runtime's
-session state (incremented when Kokoro's audio chunk for sentence N has
-finished synthesizing). On `voice_interrupt`, log a structured
+**Follow-up**: track `played_through_sentence` from acknowledged client
+playback, not merely completion of synthesis. On `voice_interrupt`, append a structured
 `VoiceInterrupted { played_through_sentence: u32 }` event so future
 analytics can distinguish "user barged in immediately" from "user heard
-most of it." Conversation history then truncates the agent's "outbound"
-message to the actually-heard prefix, matching what humans would do.
+most of it." Keep the generated-message event intact and derive the
+actually-heard prefix from playback/interruption events for subsequent context.
+Synthesis completion alone does not establish what the operator heard.

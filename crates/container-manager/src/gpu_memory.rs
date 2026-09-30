@@ -53,6 +53,24 @@ pub fn nvidia_memory_mb_via_nvml() -> Vec<u64> {
     out
 }
 
+/// Return currently free NVIDIA VRAM in MiB, ordered by NVML device index.
+/// An empty result means NVML could not provide a live reading.
+pub fn nvidia_free_memory_mb_via_nvml() -> Vec<Option<u64>> {
+    let Ok(nvml) = nvml_wrapper::Nvml::init() else {
+        debug!("NVML init failed; live free-VRAM admission is unavailable");
+        return Vec::new();
+    };
+    let device_count = nvml.device_count().unwrap_or(0);
+    (0..device_count)
+        .map(|index| {
+            nvml.device_by_index(index)
+                .ok()
+                .and_then(|device| device.memory_info().ok())
+                .map(|memory| memory.free / 1024 / 1024)
+        })
+        .collect()
+}
+
 /// Override Intel Arc's `memory_mb` with the Windows registry's
 /// 64-bit `qwMemorySize`. Linux + macOS callers should not invoke
 /// this — sysfs/IOKit return correct values in the upstream paths.

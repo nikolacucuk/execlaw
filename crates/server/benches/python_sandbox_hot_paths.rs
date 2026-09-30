@@ -185,35 +185,42 @@ fn bench_mime_bundle_from_jupyter(c: &mut Criterion) {
 
 fn bench_streaming_publish(c: &mut Criterion) {
     let mut group = c.benchmark_group("streaming_publish");
-    group.throughput(Throughput::Bytes(100_000));
-    group.bench_function("100kb_csv", |b| {
-        b.iter_with_setup(
-            || {
-                let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
-                MigrationRunner::new(&db).apply_all().unwrap();
-                let dir = tempfile::tempdir().unwrap();
-                let blob = dir.path().join("source.csv");
-                std::fs::write(&blob, vec![b'x'; 100_000]).unwrap();
-                let artifacts_root = dir.path().join("artifacts");
-                (db, dir, blob, artifacts_root)
-            },
-            |(db, _dir, blob, artifacts_root): (Database, tempfile::TempDir, PathBuf, PathBuf)| {
-                let store = AttachmentStore::new(&db);
-                let r = store
-                    .insert_plugin_artifact_from_path(
-                        black_box(&artifacts_root),
-                        "bench",
-                        "x.csv",
-                        "text/csv",
-                        black_box(&blob),
-                        None,
-                        1,
-                    )
-                    .unwrap();
-                black_box(r);
-            },
-        );
-    });
+    for (case, bytes) in [("100kb_csv", 100_000usize), ("4mb_blob", 4 * 1024 * 1024)] {
+        group.throughput(Throughput::Bytes(bytes as u64));
+        group.bench_function(case, |b| {
+            b.iter_with_setup(
+                || {
+                    let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+                    MigrationRunner::new(&db).apply_all().unwrap();
+                    let dir = tempfile::tempdir().unwrap();
+                    let blob = dir.path().join("source.csv");
+                    std::fs::write(&blob, vec![b'x'; bytes]).unwrap();
+                    let artifacts_root = dir.path().join("artifacts");
+                    (db, dir, blob, artifacts_root)
+                },
+                |(db, _dir, blob, artifacts_root): (
+                    Database,
+                    tempfile::TempDir,
+                    PathBuf,
+                    PathBuf,
+                )| {
+                    let store = AttachmentStore::new(&db);
+                    let result = store
+                        .insert_plugin_artifact_from_path(
+                            black_box(&artifacts_root),
+                            "bench",
+                            "x.csv",
+                            "text/csv",
+                            black_box(&blob),
+                            None,
+                            1,
+                        )
+                        .unwrap();
+                    black_box(result);
+                },
+            );
+        });
+    }
     group.finish();
 }
 

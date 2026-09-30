@@ -675,6 +675,7 @@ fn decode_event_map(env) {
 
         return #{
             "channel": "whatsapp",
+            "source_event_id": info.ID,
             "reuse_conversation": true,
             "conversation_scope": inbound_conversation_scope(),
             "agent_handling_enabled": inbound_agent_handling_enabled(),

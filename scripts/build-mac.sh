@@ -36,12 +36,8 @@ fi
 npm --prefix web run build
 
 echo "==> Step 2: build server binary for $TARGET"
-# We intentionally do NOT pass --no-default-features here — the
-# server crate's defaults are what production ships (SQLCipher
-# bundled, OpenSSL vendored). If the operator wants a Mac-host dev
-# build without SQLCipher, they should run the workspace `cargo
-# build` directly, not this release script.
-cargo build --release --target "$TARGET" -p execlaw
+# Release builds explicitly select SQLCipher; workspace defaults are plaintext.
+cargo build --release --target "$TARGET" -p execlaw --no-default-features --features sqlcipher
 
 echo "==> Step 3: stage server binary for Tauri sidecar bundling"
 mkdir -p "$BUNDLE_BIN_DIR"

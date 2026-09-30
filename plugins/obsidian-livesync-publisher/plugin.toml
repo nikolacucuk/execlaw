@@ -1,7 +1,7 @@
 [plugin]
 id = "obsidian-livesync-publisher"
 name = "Obsidian LiveSync Publisher"
-version = "0.1.16"
+version = "0.1.17"
 description = "Publishes markdown from the operator-selected execlaw export directory into an Obsidian LiveSync CouchDB database."
 author = "execlaw"
 license = "Apache-2.0"
@@ -53,6 +53,7 @@ description = "Check the read-only vault mount and return its source path."
 [[ui_panels]]
 mount = "admin/plugins/{plugin_id}"
 entry = "ui/panel.js"
+rpc_capabilities = ["plugin_admin_routes"]
 
 [runtime]
 tier = "script"

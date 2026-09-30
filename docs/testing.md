@@ -4,6 +4,77 @@ This document defines the repository test tiers and the external prerequisites
 needed to exercise capability surfaces that cannot run in an offline unit-test
 process.
 
+## Implementation evidence contract
+
+The [implementation plan](implementation-plan.md) tracks all committed
+H001-H130 items. Tests listed here describe available coverage or required
+acceptance work, not evidence that they passed for a particular release.
+The [roadmap findings F01-F19](llm-harness-roadmap.md#review-findings-and-unresolved-verification)
+remain open until their remediation and specified verification are recorded.
+In particular, a store reopen test does not qualify process recovery (F06-F08),
+a process-kill test does not qualify power-loss durability (F17), and the
+current automation Test run can make live effects (F18/F19).
+
+The release evidence work is [H021 real-task evaluation](llm-harness-roadmap.md#enhancement-021),
+[H023 executor recovery](llm-harness-roadmap.md#enhancement-023),
+[H028 packaged-artifact qualification](llm-harness-roadmap.md#enhancement-028),
+[H049 performance gates](llm-harness-roadmap.md#enhancement-049),
+[H058 storage-fault qualification](llm-harness-roadmap.md#enhancement-058),
+[H064 schema evolution](llm-harness-roadmap.md#enhancement-064), and
+[H096 attributable test evidence](llm-harness-roadmap.md#enhancement-096).
+Extend enforcement evidence with [H107 model checking](llm-harness-roadmap.md#enhancement-107),
+[H108 protocol fuzzing](llm-harness-roadmap.md#enhancement-108),
+[H109 mutation tests](llm-harness-roadmap.md#enhancement-109), and
+[H110 denied-network integration](llm-harness-roadmap.md#enhancement-110).
+[H120 evidence-backed support documentation](llm-harness-roadmap.md#enhancement-120)
+will tie claims to the exact artifact, platform, execution path, command,
+prerequisites, and recorded result. Skipped, blocked, and failed checks must
+remain visible; this plan update claims no new test executions.
+
+H022's durable contract store is exposed to the Controller at
+`GET /api/admin/runs/{run_id}/completion`, `PUT .../completion-contract`,
+`POST .../completion-verifications`, `POST .../completion-artifacts`, and
+`POST .../delivery-confirmation`. Run execution status is separate from
+`verified_complete`: required checks, artifacts, and any required delivery
+evidence must all pass. The Controller run inspector lets an operator create
+an immutable contract, record criterion/artifact evidence, confirm required
+delivery, and review derived status and unfinished reasons. These are
+operator-entered records; production task creation does not yet derive
+contracts from requests or run automatic deterministic verifiers.
+
+For H024, `POST /api/chats/{conversation_id}/messages` accepts an optional
+`Idempotency-Key` header. The key is scoped to the authenticated principal and
+conversation and bound to a hash of the normalized request body. Matching
+completed retries return the saved response; a changed body receives 409;
+an active request returns 202; and an interrupted/expired request returns
+409 with `unknown_outcome` and requires an explicit retry decision. Incognito
+turns reject this header because they do not persist a replayable request.
+
+When a request returns `unknown_outcome`, the chat surfaces a warning that an
+external action may already have happened. The operator can inspect delivery
+state, then explicitly retry as a new request; this creates a new idempotency
+key and can repeat effects. Sink status lookup and reconciliation remain open.
+
+The real-task scorer has small release and larger periodic suites under
+[`evals/benchmark/`](../evals/benchmark/README.md). Its offline fixture mode
+validates task scoring without a model and must not be reported as model
+performance. Live runs use the configured local OpenAI-compatible endpoint;
+benchmark records preserve failures, identities, budgets, per-task outcomes,
+and uncertainty intervals.
+
+H036 flagged event ranges can be exported locally with
+`execlaw eval export-flagged <ID> --to <fixture.json> --redaction-map <map.json> --consent`.
+The map is read on the host and is not included in the fixture. Run
+`eval-harness replay-fixture --fixture <fixture.json> --report <validation.json>`
+to check event ordering, expected transitions, tool-call pairing, and mock
+responses without opening an inference client or dispatching effects. Export
+may attach bounded `--incident-ref` and `--release-ref` identifiers; both are
+preserved in the offline validation report. A core unit test validates the
+checked-in synthetic fixture, and CI invokes the `eval-harness` command on it.
+The validator checks fixture structure but does not yet
+replay the production executor or gate a release on a fixed fixture, so H036
+remains partial.
+
 The entry point is:
 
 ```powershell
@@ -32,9 +103,11 @@ must not omit either default tier.
 | Event log, HMAC, replay, migrations | Core unit/integration tests | SQLCipher tier and backup/restore drill |
 | Conversation FSM and memory | Core, session, skills tests | Restart a staged deployment and verify replay |
 | Trust ladder and Rule of Two | Policy and server tests | Unknown-contact transport test with sideband approval |
+| Chat/admin session boundary | Outer middleware authenticates both namespaces, requires Controller role, and chat writes bind sender identity; browser stream uses the revocable HttpOnly session cookie | Generated route matrix and logout-all/revoked-WebSocket qualification (H026) |
 | In-process turn executor | Runner-local adversarial tests | Local inference turn with real tool calls |
 | Container runner protocol | Server WebSocket integration tests | `-IncludeDocker` runner image lifecycle test |
 | Model adapters and inference clients | Adapter/API unit tests with mock servers | Probe each deployed local backend/model |
+
 | Built-in tools | Core/server tests | Read-only smoke calls, then approval-gated effects |
 | Plugin manifest and ZIP lifecycle | Plugin SDK/host/server tests | `-IncludePackaging`, upload, enable, disable, upgrade |
 | Rhai plugin behavior | Script tests against shipped source | Provider sandbox or paired-device test |
@@ -50,14 +123,70 @@ must not omit either default tier.
 | Agents, routines, automations | Core/server/SPA tests | Scheduled and event-only runs across restart |
 | MCP | Client/server tests | Reviewed stdio and HTTP server discovery/call |
 | Graphify and Graphiti | Server/API and SPA tests | Local graph build and Graphiti health/test-call |
-| Durable runs and steps | Core transition/reopen tests | Process-kill matrix through the production turn driver after it is wired |
+| Durable runs and steps | Core transition/reopen coverage; SPA and headless Controller client can explicitly resume a safe non-transport run from saved input/checkpoints | Automatic runner dispatch recovery, routine/child parity, and process-kill matrix (H023; F06-F08) |
+| Streaming protocol | SSE/NDJSON byte framing; multilingual SSE/tool payload every-split fixture; typed incomplete-stream failure carries visible partial output; no model checkpoint/tool call before terminal marker | Process-kill framing, provider-specific/tool-delta split fixtures, and MCP response-before-EOF qualification (H029) |
+| Inference admission | Shared global/per-model permits, foreground reserve, bounded queue, background aging, workload labels, and a two-child-per-parent scope; durable parent/child token/time/retry/effect quotas and resource-capped runner admission are implemented | Run the restart/cancellation budget suite and measure queue delay on each supported hardware tier (H030) |
+| Context budget (H031) | Every in-process, container-runner, and direct-streaming model call sizes the serialized request, tools, and output reserve against the qualified context ceiling; both tool paths have scoped artifact offload | Held-out Unicode/JSON/vision/tool-round suite against exact model/template identities; token-estimate calibration and artifact lifecycle/replay (H031/F12) |
+| Task completion contracts | Core acceptance/artifact/delivery verifier tests; SPA, CLI, and editor adapter submit required/optional criteria, artifacts, and delivery requirements | Other task producers, restart binding, broad real-task coverage, and deterministic production verifier wiring (H022) |
+| Skill evaluation and rollback | Immutable version rollback creates a fresh trial; held-out suite identity is recorded and current promotion gates recheck the current version | Replace substring scoring with isolated workspace/mock execution, behavioral and forbidden-action assertions, resource budgets, and paired candidate/parent acceptance (H039) |
+| Compaction provenance (H032) | Receipt fingerprint/reopen coverage and Controller source-event endpoint | HMAC-verified paged original evidence, stale receipt invalidation, trust-retention attacks, and multi-compaction acceptance-criteria quality suite |
+| Chat request idempotency and effects | Core reopen/replay/stale-outcome/conflicting-body tests; dispatcher safety declarations; unknown outcomes park until a Controller resolves them with evidence | Production transport sink integration, broad sink reconciliation, and process-kill qualification across real adapters (H024) |
+| Durable turn controls | SQLite control transitions and acknowledgements, atomic queue-next-turn event application, startup reconciliation of unapplied queued messages, Controller chat controls, and conversation-scoped request keys | Reconciliation of delivered-but-unacknowledged runner controls, same-key replay/body-conflict behavior, and stop/steer latency through stalled inference and tool waits (H043) |
 | Tool contracts and failures | Core, plugin-host, MCP, runner-local tests | Container-runner typed-failure parity after protocol migration |
 | Local endpoint policy | Policy crate adversarial tests and server adapter tests | Exercise each configured LAN/VPN endpoint and inspect persisted resolution |
-| Memory assertions/jobs | Core evidence/trust/reopen tests and skills capture tests | Production memory-extraction worker after it is wired |
+| Public and plugin egress (H025) | Existing URL guards and local endpoint policy coverage | Prove mixed DNS answers, IPv4-mapped IPv6, redirect-to-private, proxy bypass, approved private integrations, and registered-sidecar pinning issue zero prohibited requests |
+| Memory assertions/jobs | Core evidence/trust/reopen tests and skills capture tests | Exercise the startup-wired extraction worker through durable completion and restart |
+| Memory evidence review | Controller can inspect assertion revisions, validity, status, hash-verified source spans, and review history; CLI export requires consent/redaction; chat traces show metadata-only per-turn HOT-loadout decisions | Agent-run receipt coverage and runtime ancestor/projection invalidation qualification across every retrieval path (H037) |
+| Trust-first memory retrieval | Chat, in-process, and runner prompts apply scope/trust/lifecycle/time/mode eligibility before ranking, exclude TOOL_ONLY assets, deduplicate source hashes, and record query/source/rank receipts | Versioned local embeddings/reranking and rebuild, research/agent context consumers, held-out quality and latency qualification (H038) |
 | Artifact provenance | Core/host/container tests plus packaging checks | Verify detached release bundles through bundled install on every platform |
-| Voice | Pipeline/server/SPA tests | Real STT -> agent -> TTS test when deferred wiring lands |
+| Plugin upgrade transaction and panel authority (H027) | Manifest/path and ZIP bounds, rollback and provenance checks; browser test verifies panel credential isolation and denied unrelated RPC routes | Platform release qualification and lifecycle/process-kill rollback matrix |
+| Voice | Pipeline/server/SPA tests | Runtime locking and cancellation are per-session, but the production path remains push-to-talk with non-streaming STT/TTS and an echo callback; H047 endpointing, queue limits, sentence streaming, real agent integration, and hardware qualification remain |
 | SPA and accessibility contracts | Vitest and TypeScript | Browser smoke at desktop/mobile widths |
-| Deployment | Documentation checks | Live health, OpenAPI, SPA, backup/restore |
+| Deployment and release artifacts | Linux/macOS/Windows build scripts select SQLCipher; installed `doctor` performs encrypted header/wrong-key/migration/reopen plus disposable backup/restore/rekey checks; tagged releases attach Sigstore-signed offline update bundles with schema-safe rollback instructions | Execute each native workflow and review its logs; record install/recovery and actual offline upgrade/rollback results per OS (H028/F04/F16) |
+
+For H034, authenticate the terminal client with `execlaw client login
+--username <controller>` (password is entered at the local prompt), then run
+`execlaw client qualify --context-tokens 4096`. The command prints the
+model/template/backend identity and per-check result matrix without printing
+session credentials. Repeat after selecting each deployed Standard backend;
+record failed checks as failures. A passing qualification persists the profile
+for the exact identity used by routing. If the running server is older than
+the checked-out CLI, `execlaw qualify-model --context-tokens 4096` uses the
+local database and the same qualification checks without restarting it.
+Pass `--no-encrypt` only for a plaintext development database.
+
+For a local memory export, run
+`execlaw memory export-assertion <ID> --to <FILE> --redaction-map <map.json> --consent`.
+The CLI verifies each referenced event and quote hash, applies the reviewed
+replacement map plus built-in pattern redaction, and refuses to overwrite an
+existing file. The JSON remains a private local artifact; the command does not
+send it to a service.
+
+## H049 stable-hardware performance gate
+
+Criterion regression comparisons run in `.github/workflows/performance-bench.yml`
+on a dedicated Linux x64 self-hosted runner labeled `execlaw-bench`. The runner
+must remain the same physical/virtual host across comparisons and have no
+deployment or signing credentials. Fork pull requests are skipped because the
+workflow executes repository code on this runner.
+
+The gate records current Criterion estimates as a workflow artifact and caches
+the last passing default-branch baseline by runner name. It compares replay,
+trust-filtered memory search, catalog assembly, runner framing, contended
+inference queue wait, and 4 MiB artifact publishing. A case fails only when its
+current 95% confidence interval clears the baseline interval plus the
+case-specific noise tolerance. A new case is recorded as unbaselined in its
+first change and joins the gate after the default-branch run stores it.
+
+If no baseline exists, the initial PR measurement is uploaded as an explicit
+bootstrap report but is not called a regression comparison; the default-branch
+run then saves the persistent baseline, and following PRs are gated. After a
+hardware or Rust toolchain change, review and
+dispatch the workflow with `replace_baseline` enabled on the default branch.
+Benchmark results from different runner/compiler fingerprints are rejected.
+Prefix reuse, model residency, batching, and speculative decoding remain
+separate trials; an optimization must preserve task-quality and policy results
+before adoption.
 
 ## Test layers
 
@@ -116,11 +245,34 @@ Run when storage, vault, migrations, release packaging, or backup behavior
 changes:
 
 ```bash
-cargo test --workspace --no-default-features -F execlaw-core/sqlcipher
+cargo test --workspace --no-default-features -F execlaw/sqlcipher
 ```
 
 On Windows this requires the production OpenSSL build prerequisites. The test
 harness does not silently fall back to plaintext SQLite.
+The CLI feature is selected explicitly so `doctor`, backup, restore, and
+rotation compile and run under the same feature set as the packaged binary.
+From Windows PowerShell, run:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/test-sqlcipher-windows.ps1
+```
+
+This imports the installed Visual Studio C++ build environment, runs the
+suite with a repo-local Cargo target, then executes the native SQLCipher CLI's
+`doctor` preflight.
+Install a complete Windows Perl distribution first, or pass `-PerlExe` with a
+portable Strawberry Perl path. Git for Windows' Perl lacks an OpenSSL build
+module and is insufficient. WSL is not required for this suite.
+
+The desktop build scripts select the CLI `sqlcipher` feature explicitly, and
+the installed `execlaw doctor` preflight checks encrypted-header, wrong-key,
+migration/reopen, disposable backup/restore, rekey, and post-rotation recovery.
+Tagged bundle workflows emit detached Sigstore provenance and offline
+update/rollback archives. H028 still requires running every packaged artifact
+and recording the backup/restore, rotation, signing, and rollback results.
+A successful plaintext workspace suite cannot substitute for this tier. F16
+records the remaining CI/evidence gaps.
 
 ### Plugin artifacts
 

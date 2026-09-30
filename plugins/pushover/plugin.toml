@@ -1,7 +1,7 @@
 [plugin]
 id = "pushover"
 name = "Pushover"
-version = "0.2.0"
+version = "0.2.1"
 description = "Pushover push-notification provider. Sends short notifications to the operator's phone via the Pushover API. Exposes the `pushover.notify` tool to the agent and an admin route to configure the user_key + app_token."
 author = "execlaw"
 license = "Apache-2.0"
@@ -54,6 +54,7 @@ description = "Send a 'execlaw test notification' so the operator can confirm th
 [[ui_panels]]
 mount = "admin/plugins/pushover"
 entry = "ui/panel.js"
+rpc_capabilities = ["plugin_admin_routes"]
 
 [runtime]
 tier = "script"

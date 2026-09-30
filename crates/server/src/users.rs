@@ -353,17 +353,40 @@ pub async fn change_my_password_handler(
         Ok(h) => h,
         Err(e) => return internal(&format!("password hash: {e}")),
     };
-    if let Err(e) = users.set_password_hash(&user.user_id, &new_hash) {
-        return internal(&format!("password update: {e}"));
-    }
+    let revoked_sessions = match state
+        .refresh_store
+        .set_password_hash_and_revoke_all(&user.user_id, &new_hash)
+    {
+        Ok(Some(count)) => count,
+        Ok(None) => {
+            return error(
+                StatusCode::UNAUTHORIZED,
+                "user_missing",
+                "authenticated user not found",
+            );
+        }
+        Err(e) => return internal(&format!("password update and session revocation: {e}")),
+    };
     let _ = AuditStore::new(&state.db).insert(
         &user.user_id,
         "users",
         &user.user_id,
         Some(&serde_json::json!({"password_rotated": false})),
-        Some(&serde_json::json!({"password_rotated": true, "by": "self"})),
+        Some(&serde_json::json!({
+            "password_rotated": true,
+            "by": "self",
+            "revoked_sessions": revoked_sessions,
+        })),
     );
-    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "revoked_sessions": revoked_sessions,
+            "session_revoked": true,
+        })),
+    )
+        .into_response()
 }
 
 #[utoipa::path(
@@ -438,17 +461,39 @@ pub async fn reset_user_password_handler(
         Ok(h) => h,
         Err(e) => return internal(&format!("password hash: {e}")),
     };
-    if let Err(e) = users.set_password_hash(&target.user_id, &new_hash) {
-        return internal(&format!("password update: {e}"));
-    }
+    let revoked_sessions = match state
+        .refresh_store
+        .set_password_hash_and_revoke_all(&target.user_id, &new_hash)
+    {
+        Ok(Some(count)) => count,
+        Ok(None) => {
+            return error(
+                StatusCode::NOT_FOUND,
+                "user_not_found",
+                "target user no longer exists",
+            );
+        }
+        Err(e) => return internal(&format!("password update and session revocation: {e}")),
+    };
     let _ = AuditStore::new(&state.db).insert(
         &caller.user_id,
         "users",
         &target.user_id,
         Some(&serde_json::json!({"password_rotated": false})),
-        Some(&serde_json::json!({"password_rotated": true, "by": caller.user_id})),
+        Some(&serde_json::json!({
+            "password_rotated": true,
+            "by": caller.user_id,
+            "revoked_sessions": revoked_sessions,
+        })),
     );
-    (StatusCode::OK, Json(serde_json::json!({"ok": true}))).into_response()
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "revoked_sessions": revoked_sessions,
+        })),
+    )
+        .into_response()
 }
 
 pub fn users_router() -> Router<AppState> {
@@ -502,6 +547,10 @@ mod tests {
 
     /// Set up a controller via /api/setup and return a token.
     async fn setup_controller(app: &axum::Router) -> String {
+        setup_controller_pair(app).await.0
+    }
+
+    async fn setup_controller_pair(app: &axum::Router) -> (String, String) {
         let body = serde_json::to_vec(&serde_json::json!({
             "username": "ctrl",
             "admin_password": "hunter2-longer",
@@ -517,13 +566,20 @@ mod tests {
         let resp = app.clone().oneshot(req).await.unwrap();
         let bytes = body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        v["access_token"].as_str().unwrap().to_owned()
+        (
+            v["access_token"].as_str().unwrap().to_owned(),
+            v["refresh_token"].as_str().unwrap().to_owned(),
+        )
     }
 
     /// Issue a token for an arbitrary pre-inserted user without the
     /// invite path (used to test "non-Controller is forbidden").
     fn issue_token_for(state: &AppState, user_id: &str) -> String {
         let session_id = uuid::Uuid::new_v4().to_string();
+        state
+            .refresh_store
+            .issue(user_id, &session_id, state.config.refresh_token_ttl_secs)
+            .unwrap();
         state
             .signer
             .issue_access_token(user_id, &session_id, state.config.access_token_ttl_secs)
@@ -701,7 +757,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["error"]["code"], "forbidden");
+        assert_eq!(body["error"]["code"], "controller_required");
 
         // Delete forbidden.
         let (status, body) = json_request(
@@ -713,7 +769,7 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
-        assert_eq!(body["error"]["code"], "forbidden");
+        assert_eq!(body["error"]["code"], "controller_required");
     }
 
     #[tokio::test]
@@ -842,7 +898,7 @@ mod tests {
     #[tokio::test]
     async fn change_my_password_round_trip() {
         let app = build_router(test_app_state());
-        let token = setup_controller(&app).await;
+        let (token, refresh_token) = setup_controller_pair(&app).await;
 
         let (status, body) = json_request(
             &app,
@@ -856,6 +912,21 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::OK, "body was {body}");
+        assert_eq!(body["session_revoked"], true);
+
+        let (stale_access_status, _) =
+            json_request(&app, Method::GET, "/api/admin/me", Some(&token), None).await;
+        assert_eq!(stale_access_status, StatusCode::UNAUTHORIZED);
+        let (stale_refresh_status, stale_refresh_body) = json_request(
+            &app,
+            Method::POST,
+            "/api/token/refresh",
+            None,
+            Some(serde_json::json!({"refresh_token": refresh_token})),
+        )
+        .await;
+        assert_eq!(stale_refresh_status, StatusCode::UNAUTHORIZED);
+        assert_eq!(stale_refresh_body["error"]["code"], "invalid_refresh_token");
 
         // Old password no longer logs us in; new one does.
         let (s_old, _) = json_request(

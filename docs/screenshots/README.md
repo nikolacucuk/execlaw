@@ -6,6 +6,13 @@ Drop SPA / admin-panel screenshots here for inline embedding in
 
 ## Conventions
 
+- **Nexus evidence**: `nexus-baseline-*` files are synthetic fixture captures.
+  `nexus-live-*` files are privacy-redacted captures of the operator-authorized
+  local/TrueNAS review. Gray blocks are capture overlays, not application UI.
+  See [the live review](../llm-harness-roadmap.md#nexus-live-review) and
+  [numeric measurements](nexus-live-review-metrics.json) for scope and limits.
+  Do not add raw conversation screenshots, browser profiles, cookies, tokens,
+  or private transcript exports to this directory.
 - **Format**: PNG for UI shots, SVG for diagrams, WebP if you need <100 KB.
 - **Size**: keep each file under ~500 KB. If a shot needs to be larger
   than that, link to a Git LFS-tracked path or a CDN — don't bloat the

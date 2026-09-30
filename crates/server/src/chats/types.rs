@@ -17,14 +17,108 @@
 use execlaw_core::conversation::ThreadSummary;
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct CompletionCriterionInput {
+    pub criterion_id: String,
+    pub description: String,
+    #[serde(default = "required_by_default")]
+    pub required: bool,
+    #[serde(default)]
+    pub verifier: Option<execlaw_core::runs::RunStepVerifier>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct RequiredArtifactInput {
+    pub artifact_id: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct CompletionContractInput {
+    pub acceptance_criteria: Vec<CompletionCriterionInput>,
+    pub required_artifacts: Vec<RequiredArtifactInput>,
+    #[serde(default)]
+    pub delivery_required: bool,
+}
+
+impl From<CompletionContractInput> for execlaw_core::runs::RunCompletionContractDraft {
+    fn from(input: CompletionContractInput) -> Self {
+        Self {
+            acceptance_criteria: input
+                .acceptance_criteria
+                .into_iter()
+                .map(|criterion| execlaw_core::runs::AcceptanceCriterion {
+                    criterion_id: criterion.criterion_id,
+                    description: criterion.description,
+                    required: criterion.required,
+                    verifier: criterion.verifier,
+                })
+                .collect(),
+            required_artifacts: input
+                .required_artifacts
+                .into_iter()
+                .map(|artifact| execlaw_core::runs::RequiredRunArtifact {
+                    artifact_id: artifact.artifact_id,
+                    description: artifact.description,
+                })
+                .collect(),
+            delivery_required: input.delivery_required,
+        }
+    }
+}
+
+#[cfg(test)]
+mod completion_contract_tests {
+    use super::CompletionContractInput;
+
+    #[test]
+    fn chat_contract_keeps_step_verifier_when_converted_to_durable_draft() {
+        let input: CompletionContractInput = serde_json::from_value(serde_json::json!({
+            "acceptance_criteria": [{
+                "criterion_id": "tests",
+                "description": "Required tests pass",
+                "required": true,
+                "verifier": {
+                    "step_id": "test-suite",
+                    "json_pointer": "/exit_code",
+                    "expected": 0
+                }
+            }],
+            "required_artifacts": [],
+            "delivery_required": false
+        }))
+        .unwrap();
+        let draft: execlaw_core::runs::RunCompletionContractDraft = input.into();
+        assert_eq!(
+            draft.acceptance_criteria[0]
+                .verifier
+                .as_ref()
+                .unwrap()
+                .expected,
+            serde_json::json!(0)
+        );
+    }
+}
+
+fn required_by_default() -> bool {
+    true
+}
+
 // =====================================================================
 // Inbound request shapes
 // =====================================================================
 
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct SendMessageRequest {
     pub text: String,
-    /// Optional override — defaults to the controller's principal id.
+    /// Optional deterministic acceptance requirements for this durable turn.
+    #[serde(default)]
+    pub completion_contract: Option<CompletionContractInput>,
+    /// Resume an existing web-originated durable run from its persisted user event.
+    #[serde(default)]
+    pub resume_run_id: Option<String>,
+    /// Optional identity assertion. It must match the authenticated user;
+    /// the server derives the effective sender from the session.
     pub sender_principal_id: Option<String>,
     /// 2026-04-28 — when true, run the turn against inference but
     /// skip every persistent write: no event-log rows, no
@@ -105,7 +199,7 @@ pub(crate) const MAX_PREPEND_SKILL_BYTES: usize = 32 * 1024;
 /// the bytes inline as a `data:` URL (`data:<mime>;base64,<bytes>`).
 /// The SPA encodes locally so the server doesn't need a separate
 /// upload endpoint for the common Phase-1 case.
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct InlineAttachmentRequest {
     /// IANA mime type. Server-side acceptlist:
     ///   * Image: `image/png|jpeg|webp|gif` (routed to vision content).
@@ -129,7 +223,7 @@ pub struct InlineAttachmentRequest {
     pub filename: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct IncognitoTurnMessage {
     pub role: String,
     pub content: String,
@@ -183,12 +277,14 @@ where
 // Outbound response shapes
 // =====================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SendMessageResponse {
     pub conversation_id: String,
     pub user_msg_seq: i64,
     pub assistant_text: String,
     pub assistant_seq: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -229,6 +325,20 @@ pub struct MessageView {
     /// Durable review state for a transport-originated model reply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_state: Option<String>,
+    /// First-class agent proposal tied to this model event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_revision: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft_stale: Option<bool>,
+    /// Outbox-backed transport delivery transitions associated with this turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delivery_timeline: Vec<TransportDeliveryView>,
     /// 2026-05-15 — image attachments included on a user_msg via
     /// the composer's `+` menu. Empty (and serialised as absent)
     /// for every other message kind. The SPA renders each entry
@@ -246,6 +356,15 @@ pub struct MessageView {
     /// any skill selection.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub applied_skill_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TransportDeliveryView {
+    pub transition: String,
+    pub occurred_at: i64,
+    pub attempt: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub external_receipt: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -377,6 +496,9 @@ pub(crate) struct UserMessagePayload {
     /// Required for per-message review sends in a shared conversation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) transport_recipient: Option<String>,
+    /// Persisted browser timezone so a recovered turn rebuilds identical context.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) timezone: Option<String>,
     /// 2026-05-15 — IDs into `state_attachments` for image attachments
     /// the operator added via the composer's `+` menu. Backward-
     /// compatible default `Vec::new()` so prior events without the
@@ -418,6 +540,10 @@ pub(crate) struct RealModelTurnPayload {
     pub(crate) finish_reason: Option<String>,
     pub(crate) prompt_tokens: Option<u32>,
     pub(crate) completion_tokens: Option<u32>,
+    /// True when this reply was produced by the no-tools untrusted-content
+    /// executor. This keeps derived text out of later tool-capable turns.
+    #[serde(default)]
+    pub(crate) untrusted_input: bool,
     /// Transport the agent's reply went out on (when bridged via a
     /// transport). Same encoding as [`UserMessagePayload::channel_origin`].
     #[serde(default, skip_serializing_if = "Option::is_none")]

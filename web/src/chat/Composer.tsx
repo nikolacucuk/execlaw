@@ -11,7 +11,7 @@ import { useEffect, useRef, useState, type DragEvent, type FormEvent, type Keybo
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
 import Spinner from "react-bootstrap/Spinner";
-import type { InlineAttachment, SkillListEntry } from "../api/endpoints";
+import type { InlineAttachment, RunCompletionContractDraft, SkillListEntry } from "../api/endpoints";
 import { useT } from "../i18n";
 import type { VoiceReadiness } from "./useVoiceReadiness";
 import { VoiceCaptureButton } from "./VoiceCaptureButton";
@@ -189,6 +189,7 @@ interface Props {
         text: string,
         attachments: InlineAttachment[],
         skillNames: string[],
+        completionContract?: RunCompletionContractDraft,
     ) => Promise<void> | void;
     /**
      * 2026-05-15 — gates the image-attach affordance ( + button +
@@ -296,6 +297,9 @@ export function Composer({
     const managePersistentDefaults =
         !!skillDefaultsStorageKey || (defaultSkillNames?.length ?? 0) > 0;
     const [text, setText] = useState("");
+    const [completionCriteria, setCompletionCriteria] = useState("");
+    const [requiredArtifacts, setRequiredArtifacts] = useState("");
+    const [deliveryRequired, setDeliveryRequired] = useState(false);
     const lastVoiceSessionRef = useRef<string | null>(null);
     const [submitting, setSubmitting] = useState(false);
     const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -687,6 +691,28 @@ export function Composer({
             filename: a.name,
         }));
         const skillNames = selectedSkills.map((s) => s.name);
+        const criteria = completionCriteria
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean);
+        const artifacts = requiredArtifacts
+            .split("\n")
+            .map((line) => line.trim())
+            .filter(Boolean);
+        const completionContract = criteria.length > 0 || artifacts.length > 0
+            ? {
+                  acceptance_criteria: criteria.map((description, index) => ({
+                      criterion_id: `criterion-${index + 1}`,
+                      description,
+                      required: true,
+                  })),
+                  required_artifacts: artifacts.map((description, index) => ({
+                      artifact_id: `artifact-${index + 1}`,
+                      description,
+                  })),
+                  delivery_required: deliveryRequired,
+              }
+            : undefined;
         setText("");
         setAttachments([]);
         // Reset to the persisted defaults after each send.
@@ -704,7 +730,17 @@ export function Composer({
             setSelectedSkills([]);
         }
         try {
-            await onSend(trimmed, wire, skillNames);
+            if (completionContract) {
+                await onSend(trimmed, wire, skillNames, completionContract);
+            } else {
+                await onSend(trimmed, wire, skillNames);
+            }
+            setCompletionCriteria("");
+            setRequiredArtifacts("");
+            setDeliveryRequired(false);
+        } catch {
+            // The chat shell has already rendered the actionable send error.
+            // Keep the requirements so the operator can retry after recovery.
         } finally {
             setSubmitting(false);
         }
@@ -1234,6 +1270,47 @@ export function Composer({
                     </div>
                 </div>
             </div>
+            <details className="mt-2 px-2">
+                <summary className="small">Track task completion</summary>
+                <label className="form-label small mt-2" htmlFor="composer-completion-criteria">
+                    Required acceptance criteria, one per line
+                </label>
+                <Form.Control
+                    id="composer-completion-criteria"
+                    as="textarea"
+                    rows={2}
+                    value={completionCriteria}
+                    onChange={(event) => setCompletionCriteria(event.target.value)}
+                    placeholder="The requested file exists and passes its checks"
+                    aria-describedby="composer-completion-help"
+                    data-testid="composer-completion-criteria"
+                />
+                <label className="form-label small mt-2" htmlFor="composer-required-artifacts">
+                    Required artifacts, one per line
+                </label>
+                <Form.Control
+                    id="composer-required-artifacts"
+                    as="textarea"
+                    rows={2}
+                    value={requiredArtifacts}
+                    onChange={(event) => setRequiredArtifacts(event.target.value)}
+                    placeholder="Generated report.pdf"
+                    data-testid="composer-required-artifacts"
+                />
+                <Form.Check
+                    className="mt-2 small"
+                    type="checkbox"
+                    id="composer-delivery-required"
+                    label="Require durable delivery confirmation"
+                    checked={deliveryRequired}
+                    disabled={!completionCriteria.trim() && !requiredArtifacts.trim()}
+                    onChange={(event) => setDeliveryRequired(event.target.checked)}
+                    data-testid="composer-delivery-required"
+                />
+                <div id="composer-completion-help" className="form-text">
+                    The durable run stays unverified until you record evidence in Settings &gt; Runs.
+                </div>
+            </details>
         </form>
     );
 }

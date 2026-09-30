@@ -84,7 +84,11 @@ export function UserPage() {
                 canMutate={canMutate}
                 meId={meId}
             />
-            <ChangePasswordCard getToken={getToken} />
+            <ChangePasswordCard
+                getToken={getToken}
+                signOut={auth.signOut}
+                navigate={navigate}
+            />
             <PasskeysCard getToken={getToken} />
             {/* My identities — formerly its own Settings tab; merged
                 here so transport-handle management lives next to the
@@ -104,7 +108,15 @@ export function UserPage() {
 // 1. Change password
 // ---------------------------------------------------------------------------
 
-function ChangePasswordCard({ getToken }: { getToken: () => string | null }) {
+function ChangePasswordCard({
+    getToken,
+    signOut,
+    navigate,
+}: {
+    getToken: () => string | null;
+    signOut: () => Promise<void>;
+    navigate: ReturnType<typeof useNavigate>;
+}) {
     const [current, setCurrent] = useState("");
     const [next, setNext] = useState("");
     const [confirm, setConfirm] = useState("");
@@ -134,14 +146,16 @@ function ChangePasswordCard({ getToken }: { getToken: () => string | null }) {
                 setCurrent("");
                 setNext("");
                 setConfirm("");
-                setNotice("Password updated.");
+                setNotice("Password updated. All sessions were signed out; sign in again.");
+                await signOut();
+                navigate("/login", { replace: true });
             } catch (e) {
                 setError(e instanceof Error ? e.message : String(e));
             } finally {
                 setBusy(false);
             }
         },
-        [current, next, confirm, getToken],
+        [current, next, confirm, getToken, signOut, navigate],
     );
 
     return (
@@ -151,9 +165,8 @@ function ChangePasswordCard({ getToken }: { getToken: () => string | null }) {
                 Your password
             </div>
             <p className="execlaw-muted small mb-3">
-                Rotate your password. Existing sessions on other devices
-                are NOT signed out automatically — use the Sessions
-                section below to sign out everywhere.
+                Rotating your password signs out every session. You will need
+                to sign in again with the new password.
             </p>
             <ErrorBanner message={error} onDismiss={() => setError(null)} className="mb-2" />
             {notice && (

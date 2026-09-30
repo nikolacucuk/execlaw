@@ -14,9 +14,47 @@
 
 mod ollama;
 
-use execlaw_local_endpoint_policy::{EndpointResolution, LocalEndpointPolicy, PolicyError};
+use execlaw_local_endpoint_policy::{
+    EndpointResolution, LocalEndpointPolicy, PolicyError, Resolver, SystemResolver,
+    normalize_mapped_ip,
+};
 use serde::{Deserialize, Serialize};
+use std::fmt;
+use std::sync::Arc;
 use thiserror::Error;
+
+/// RAII reservation held until a request completes or a stream is dropped.
+pub trait InferenceAdmissionPermit: Send + Sync {}
+
+impl<T: Send + Sync> InferenceAdmissionPermit for T {}
+
+/// Workload-aware admission provider injected by the host scheduler.
+#[async_trait::async_trait]
+pub trait InferenceRequestAdmission: Send + Sync {
+    /// Reserve one slot for this model/workload pair.
+    async fn acquire(
+        &self,
+        model: &str,
+        workload: &str,
+        budget_scope: Option<&str>,
+    ) -> Result<Box<dyn InferenceAdmissionPermit>, String>;
+}
+
+#[derive(Clone)]
+struct AdmissionBinding {
+    provider: Arc<dyn InferenceRequestAdmission>,
+    workload: &'static str,
+    budget_scope: Option<Arc<str>>,
+}
+
+impl fmt::Debug for AdmissionBinding {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AdmissionBinding")
+            .field("workload", &self.workload)
+            .finish_non_exhaustive()
+    }
+}
 
 /// Which wire protocol an [`InferenceClient`] speaks. The default —
 /// `OpenAICompat` — works for vLLM / llama-server / OpenArc / the
@@ -53,7 +91,6 @@ impl ModelId {
     }
 }
 
-/// Role of a chat message in OpenAI's function-calling schema.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
@@ -281,6 +318,10 @@ pub struct ChatRequest {
     /// `Value` to keep the wire shape flexible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<serde_json::Value>,
+    /// Optional OpenAI structured-output contract. Backends receive this only
+    /// after the exact model/template/backend profile has been qualified.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
     /// 2026-05-16 — vLLM-extension knob. When set, vLLM uses the
     /// named backend (`"outlines"`, `"lm-format-enforcer"`,
     /// `"xgrammar"`) to grammar-constrain decoding for any
@@ -429,8 +470,98 @@ pub enum InferenceError {
     BadStatus { status: u16, body: String },
     #[error("request timed out")]
     Timeout,
+    #[error("inference request cancelled")]
+    Cancelled,
+    #[error("inference admission failed: {0}")]
+    Admission(String),
+    #[error("streaming response ended before its terminal marker")]
+    IncompleteStream,
+    #[error("SSE event exceeded the {0}-byte frame limit")]
+    FrameTooLarge(usize),
     #[error("local endpoint policy rejected the inference endpoint: {0}")]
     EndpointPolicy(String),
+    #[error("could not persist inference retry metadata: {0}")]
+    AttemptTracking(String),
+}
+
+impl InferenceError {
+    /// Stable error category safe for operational logs (never includes upstream bodies).
+    pub fn safe_class(&self) -> &'static str {
+        match self {
+            Self::Http(error) if error.is_timeout() => "http_timeout",
+            Self::Http(error) if error.is_connect() => "http_connect",
+            Self::Http(_) => "http_transport",
+            Self::Decode(_) => "decode",
+            Self::BadStatus { status: 429, .. } => "http_429",
+            Self::BadStatus { status: 502, .. } => "http_502",
+            Self::BadStatus { status: 503, .. } => "http_503",
+            Self::BadStatus { status: 504, .. } => "http_504",
+            Self::BadStatus { .. } => "http_status",
+            Self::Timeout => "timeout",
+            Self::Cancelled => "cancelled",
+            Self::Admission(_) => "admission",
+            Self::IncompleteStream => "incomplete_stream",
+            Self::FrameTooLarge(_) => "frame_too_large",
+            Self::EndpointPolicy(_) => "endpoint_policy",
+            Self::AttemptTracking(_) => "attempt_tracking",
+        }
+    }
+
+    /// Only transient local failures may be retried; invalid requests and
+    /// endpoint-policy failures must be fixed rather than replayed.
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Self::Http(error) => error.is_timeout() || error.is_connect(),
+            Self::BadStatus { status, .. } => matches!(status, 429 | 502 | 503 | 504),
+            Self::Timeout => true,
+            Self::Cancelled => false,
+            Self::Decode(_)
+            | Self::IncompleteStream
+            | Self::FrameTooLarge(_)
+            | Self::Admission(_)
+            | Self::EndpointPolicy(_)
+            | Self::AttemptTracking(_) => false,
+        }
+    }
+}
+
+/// Bounds retrying a local inference request.
+///
+/// `max_attempts` includes the initial request. Retry is restricted to
+/// [`InferenceError::is_retryable`] failures and stops when `deadline` expires.
+#[derive(Debug, Clone)]
+pub struct InferenceRetryPolicy {
+    pub max_attempts: u32,
+    pub deadline: std::time::Duration,
+    pub initial_backoff: std::time::Duration,
+}
+
+impl Default for InferenceRetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 2,
+            deadline: std::time::Duration::from_secs(30),
+            initial_backoff: std::time::Duration::from_millis(200),
+        }
+    }
+}
+
+impl InferenceRetryPolicy {
+    /// Choose a bounded deadline for the selected local protocol. A cold
+    /// native Ollama model can take longer to load than a warm vLLM request.
+    ///
+    /// ```
+    /// use execlaw_inference_api::{InferenceEngine, InferenceRetryPolicy};
+    /// assert!(InferenceRetryPolicy::for_engine(InferenceEngine::Ollama).deadline
+    ///     > InferenceRetryPolicy::for_engine(InferenceEngine::OpenAICompat).deadline);
+    /// ```
+    pub fn for_engine(engine: InferenceEngine) -> Self {
+        let mut policy = Self::default();
+        if engine == InferenceEngine::Ollama {
+            policy.deadline = std::time::Duration::from_secs(120);
+        }
+        policy
+    }
 }
 
 /// Construct the reqwest client every `InferenceClient::new` uses.
@@ -461,6 +592,116 @@ fn configure_inference_http_client(builder: reqwest::ClientBuilder) -> reqwest::
         .http1_only()
 }
 
+fn trusted_runner_endpoint(
+    raw_url: &str,
+    approved_addresses: &[std::net::IpAddr],
+    gateway_host: Option<&str>,
+    resolver: &dyn Resolver,
+) -> Result<(url::Url, Vec<std::net::IpAddr>), PolicyError> {
+    use std::collections::BTreeSet;
+    use std::net::IpAddr;
+    use url::Host;
+
+    let mut url =
+        url::Url::parse(raw_url).map_err(|error| PolicyError::InvalidUrl(error.to_string()))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(PolicyError::Scheme);
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(PolicyError::Userinfo);
+    }
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| PolicyError::InvalidUrl("missing port".into()))?;
+    let host = url
+        .host()
+        .ok_or_else(|| PolicyError::InvalidUrl("missing host".into()))?;
+
+    let addresses = if let Some(gateway_host) = gateway_host {
+        if url.host_str() != Some(gateway_host) || !matches!(host, Host::Domain(_)) {
+            return Err(PolicyError::InvalidUrl(
+                "runner gateway authorization does not match the inference URL host".into(),
+            ));
+        }
+        let resolved = resolver
+            .resolve(gateway_host, port)
+            .map_err(|error| PolicyError::Resolution {
+                host: gateway_host.to_owned(),
+                message: error.to_string(),
+            })?
+            .into_iter()
+            .map(|socket| normalize_mapped_ip(socket.ip()))
+            .collect::<BTreeSet<_>>();
+        if resolved.is_empty() {
+            return Err(PolicyError::EmptyResolution(gateway_host.to_owned()));
+        }
+        for address in &resolved {
+            if !is_private_runner_gateway(*address) {
+                return Err(PolicyError::UnapprovedAddress(*address));
+            }
+        }
+        resolved.into_iter().collect::<Vec<_>>()
+    } else {
+        let approved = approved_addresses
+            .iter()
+            .copied()
+            .map(normalize_mapped_ip)
+            .collect::<BTreeSet<_>>();
+        if approved.is_empty() {
+            return Err(PolicyError::EmptyResolution(
+                url.host_str().unwrap_or_default().to_owned(),
+            ));
+        }
+        let resolved = match host {
+            Host::Ipv4(address) => vec![IpAddr::V4(address)],
+            Host::Ipv6(address) => vec![normalize_mapped_ip(IpAddr::V6(address))],
+            Host::Domain(name) => resolver
+                .resolve(name, port)
+                .map_err(|error| PolicyError::Resolution {
+                    host: name.to_owned(),
+                    message: error.to_string(),
+                })?
+                .into_iter()
+                .map(|socket| normalize_mapped_ip(socket.ip()))
+                .collect(),
+        }
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+        if resolved.is_empty() {
+            return Err(PolicyError::EmptyResolution(
+                url.host_str().unwrap_or_default().to_owned(),
+            ));
+        }
+        for address in &resolved {
+            if !approved.contains(address) {
+                return Err(PolicyError::UnapprovedAddress(*address));
+            }
+            if address.is_loopback() {
+                return Err(PolicyError::UnapprovedAddress(*address));
+            }
+        }
+        resolved.into_iter().collect::<Vec<_>>()
+    };
+
+    if let Some(Host::Ipv6(address)) = url.host()
+        && let Some(mapped) = address.to_ipv4_mapped()
+    {
+        url.set_host(Some(&mapped.to_string()))
+            .map_err(|error| PolicyError::InvalidUrl(error.to_string()))?;
+    }
+    Ok((url, addresses))
+}
+
+fn is_private_runner_gateway(address: std::net::IpAddr) -> bool {
+    match normalize_mapped_ip(address) {
+        std::net::IpAddr::V4(address) => address.is_private() || address.is_link_local(),
+        std::net::IpAddr::V6(address) => {
+            (address.octets()[0] & 0xfe) == 0xfc
+                || (address.octets()[0] == 0xfe && (address.octets()[1] & 0xc0) == 0x80)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Client
 // ---------------------------------------------------------------------------
@@ -475,6 +716,11 @@ fn configure_inference_http_client(builder: reqwest::ClientBuilder) -> reqwest::
 pub struct InferenceClient {
     pub base_url: String,
     pub api_key: Option<String>,
+    /// Optional OpenAI-compatible reasoning control for the configured model.
+    /// It is sent on both streaming and non-streaming requests.
+    reasoning_effort: Option<String>,
+    /// Native Ollama request context, when the backend declares an override.
+    ollama_context_tokens: Option<u32>,
     /// Wire protocol the client speaks. `OpenAICompat` is the
     /// default; callers (typically `inference_resolver` in the
     /// server crate) flip to `Ollama` for Apple-Silicon backends
@@ -484,6 +730,7 @@ pub struct InferenceClient {
     http: reqwest::Client,
     endpoint_resolution: Option<EndpointResolution>,
     endpoint_policy_error: Option<String>,
+    admission: Option<AdmissionBinding>,
 }
 
 impl InferenceClient {
@@ -494,6 +741,8 @@ impl InferenceClient {
             Err(error) => Self {
                 base_url,
                 api_key: None,
+                reasoning_effort: None,
+                ollama_context_tokens: None,
                 engine: InferenceEngine::default(),
                 http: configure_inference_http_client(reqwest::Client::builder())
                     .redirect(reqwest::redirect::Policy::none())
@@ -501,6 +750,7 @@ impl InferenceClient {
                     .expect("reqwest client build"),
                 endpoint_resolution: None,
                 endpoint_policy_error: Some(error.to_string()),
+                admission: None,
             },
         }
     }
@@ -514,20 +764,44 @@ impl InferenceClient {
     /// `host.docker.internal`. The supervisor boundary is the authorization
     /// boundary for this constructor; callers must never expose it directly
     /// to untrusted input.
-    pub fn new_for_trusted_runner(base_url: impl Into<String>) -> Self {
+    pub fn new_for_trusted_runner(
+        base_url: impl Into<String>,
+        approved_addresses: &[std::net::IpAddr],
+        gateway_host: Option<&str>,
+    ) -> Result<Self, PolicyError> {
         let base_url = base_url.into();
-        Self {
-            base_url,
-            api_key: None,
-            engine: InferenceEngine::default(),
-            http: configure_inference_http_client(
-                reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()),
-            )
+        let (url, addresses) =
+            trusted_runner_endpoint(&base_url, approved_addresses, gateway_host, &SystemResolver)?;
+        let host = url.host_str().expect("validated runner inference host");
+        let port = url
+            .port_or_known_default()
+            .expect("validated runner inference port");
+        let sockets = addresses
+            .iter()
+            .map(|address| std::net::SocketAddr::new(*address, port))
+            .collect::<Vec<_>>();
+        let mut builder = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none());
+        if matches!(url.host(), Some(url::Host::Domain(_))) {
+            builder = builder.resolve_to_addrs(host, &sockets);
+        }
+        let http = configure_inference_http_client(builder)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("reqwest client build"),
+            .map_err(|error| PolicyError::Client(error.to_string()))?;
+        Ok(Self {
+            base_url: url.to_string(),
+            api_key: None,
+            reasoning_effort: None,
+            ollama_context_tokens: None,
+            engine: InferenceEngine::default(),
+            http,
             endpoint_resolution: None,
             endpoint_policy_error: None,
-        }
+            admission: None,
+        })
     }
 
     /// Construct an inference client under an operator-loaded local endpoint
@@ -543,10 +817,13 @@ impl InferenceClient {
         Ok(Self {
             base_url,
             api_key: None,
+            reasoning_effort: None,
+            ollama_context_tokens: None,
             engine: InferenceEngine::default(),
             http,
             endpoint_resolution: Some(resolution),
             endpoint_policy_error: None,
+            admission: None,
         })
     }
 
@@ -566,12 +843,71 @@ impl InferenceClient {
         self
     }
 
+    /// Set the OpenAI-compatible reasoning effort for every request on this
+    /// client. The owning backend must supply a supported value.
+    pub fn with_reasoning_effort(mut self, effort: impl Into<String>) -> Self {
+        self.reasoning_effort = Some(effort.into());
+        self
+    }
+
+    /// Set the context window sent on native Ollama `/api/chat` requests.
+    /// OpenAI-compatible requests cannot set this Ollama option.
+    pub fn with_ollama_context_tokens(mut self, tokens: u32) -> Self {
+        self.ollama_context_tokens = Some(tokens);
+        self
+    }
+
     /// Builder hop that selects the wire protocol. Set to
     /// [`InferenceEngine::Ollama`] for Apple-Silicon native
     /// Ollama backends; defaults to OpenAI-compat otherwise.
     pub fn with_engine(mut self, engine: InferenceEngine) -> Self {
         self.engine = engine;
         self
+    }
+
+    /// Attach the host's shared inference scheduler and workload class.
+    pub fn with_admission(
+        mut self,
+        provider: Arc<dyn InferenceRequestAdmission>,
+        workload: &'static str,
+    ) -> Self {
+        self.admission = Some(AdmissionBinding {
+            provider,
+            workload,
+            budget_scope: None,
+        });
+        self
+    }
+
+    /// Reclassify a resolved client while retaining its shared scheduler.
+    pub fn with_workload(mut self, workload: &'static str) -> Self {
+        if let Some(admission) = &mut self.admission {
+            admission.workload = workload;
+        }
+        self
+    }
+
+    /// Bind child requests to a durable parent so admission limits siblings together.
+    pub fn with_budget_scope(mut self, scope: impl Into<Arc<str>>) -> Self {
+        if let Some(admission) = &mut self.admission {
+            admission.budget_scope = Some(scope.into());
+        }
+        self
+    }
+
+    async fn acquire_admission(
+        &self,
+        model: &str,
+    ) -> Result<Option<Box<dyn InferenceAdmissionPermit>>, InferenceError> {
+        match &self.admission {
+            Some(binding) => binding
+                .provider
+                .acquire(model, binding.workload, binding.budget_scope.as_deref())
+                .await
+                .map(Some)
+                .map_err(InferenceError::Admission),
+            None => Ok(None),
+        }
     }
 
     /// Non-streaming chat completion.
@@ -583,6 +919,7 @@ impl InferenceClient {
         req: &ChatRequest,
     ) -> Result<ChatResponse, InferenceError> {
         self.enforce_endpoint_policy()?;
+        let _admission = self.acquire_admission(req.model.as_str()).await?;
         if self.engine == InferenceEngine::Ollama {
             // Route to the native /api/chat endpoint. Ollama's
             // OpenAI shim has been observed to drop tool_calls on
@@ -593,6 +930,7 @@ impl InferenceClient {
                 &self.base_url,
                 self.api_key.as_deref(),
                 req,
+                self.ollama_context_tokens,
             )
             .await;
         }
@@ -607,7 +945,10 @@ impl InferenceClient {
         // generation latency lives for non-streaming, since vLLM
         // buffers the entire response server-side).
         let started_at = std::time::Instant::now();
-        let mut r = self.http.post(&url).json(&ChatRequestNonStreaming(req));
+        let mut r = self.http.post(&url).json(&ChatRequestNonStreaming(
+            req,
+            self.reasoning_effort.as_deref(),
+        ));
         if let Some(key) = &self.api_key {
             r = r.bearer_auth(key);
         }
@@ -642,9 +983,120 @@ impl InferenceClient {
         );
         serde_json::from_str::<ChatResponse>(&text).map_err(|e| {
             InferenceError::Decode(format!(
-                "bad /v1/chat/completions response: {e} — body: {text}"
+                "bad /v1/chat/completions response: {e}; response_chars={}",
+                text.chars().count()
             ))
         })
+    }
+
+    /// Execute a non-streaming completion with a bounded retry policy.
+    ///
+    /// This intentionally does not retry a stream after bytes have been
+    /// exposed to the caller: replaying a partial stream could duplicate text
+    /// or tool-call deltas. Callers persist the surrounding durable step before
+    /// invoking this helper, so a completed response remains replay-safe.
+    pub async fn chat_completions_with_retry(
+        &self,
+        req: &ChatRequest,
+        policy: &InferenceRetryPolicy,
+    ) -> Result<ChatResponse, InferenceError> {
+        self.chat_completions_with_retry_observed(req, policy, |_| Ok(()), |_, _| Ok(()))
+            .await
+    }
+
+    /// Retry a completion and invoke `before_attempt` before every network
+    /// request. Durable callers use the hook to persist attempt metadata.
+    pub async fn chat_completions_with_retry_observed<F, R>(
+        &self,
+        req: &ChatRequest,
+        policy: &InferenceRetryPolicy,
+        before_attempt: F,
+        on_retry: R,
+    ) -> Result<ChatResponse, InferenceError>
+    where
+        F: FnMut(u32) -> Result<(), InferenceError>,
+        R: FnMut(u32, &InferenceError) -> Result<(), InferenceError>,
+    {
+        self.chat_completions_with_retry_observed_cancelled(
+            req,
+            policy,
+            before_attempt,
+            on_retry,
+            || false,
+        )
+        .await
+    }
+
+    /// Retry a non-streaming completion while observing caller cancellation
+    /// during both the request and retry delay. Durable hooks run only for
+    /// attempts that actually begin.
+    pub async fn chat_completions_with_retry_observed_cancelled<F, R, C>(
+        &self,
+        req: &ChatRequest,
+        policy: &InferenceRetryPolicy,
+        mut before_attempt: F,
+        mut on_retry: R,
+        cancelled: C,
+    ) -> Result<ChatResponse, InferenceError>
+    where
+        F: FnMut(u32) -> Result<(), InferenceError>,
+        R: FnMut(u32, &InferenceError) -> Result<(), InferenceError>,
+        C: Fn() -> bool,
+    {
+        let started_at = tokio::time::Instant::now();
+        let max_attempts = policy.max_attempts.max(1);
+        let mut attempt = 0;
+
+        loop {
+            if cancelled() {
+                return Err(InferenceError::Cancelled);
+            }
+            attempt += 1;
+            before_attempt(attempt)?;
+            let elapsed = started_at.elapsed();
+            let Some(remaining) = policy.deadline.checked_sub(elapsed) else {
+                return Err(InferenceError::Timeout);
+            };
+            let result =
+                cancellable_timeout(self.chat_completions(req), remaining, &cancelled).await;
+            match result {
+                Ok(Ok(response)) => return Ok(response),
+                Ok(Err(error)) if !error.is_retryable() || attempt >= max_attempts => {
+                    return Err(error);
+                }
+                Err(InferenceError::Timeout) if attempt >= max_attempts => {
+                    return Err(InferenceError::Timeout);
+                }
+                Err(error @ InferenceError::Cancelled) => return Err(error),
+                Err(_) if attempt >= max_attempts => return Err(InferenceError::Timeout),
+                Ok(Err(error)) => {
+                    let exponent = attempt.saturating_sub(1).min(10);
+                    let multiplier = 1_u32 << exponent;
+                    let backoff = policy.initial_backoff.saturating_mul(multiplier);
+                    if backoff >= remaining {
+                        return Err(error);
+                    }
+                    on_retry(attempt, &error)?;
+                    tracing::debug!(
+                        attempt,
+                        max_attempts,
+                        backoff_ms = backoff.as_millis(),
+                        error_class = error.safe_class(),
+                        "retrying transient local inference failure"
+                    );
+                    cancellable_sleep(backoff, &cancelled).await?;
+                }
+                Err(InferenceError::Timeout) => {
+                    let backoff = policy.initial_backoff;
+                    if backoff >= remaining {
+                        return Err(InferenceError::Timeout);
+                    }
+                    on_retry(attempt, &InferenceError::Timeout)?;
+                    cancellable_sleep(backoff, &cancelled).await?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
     }
 
     /// Fetch the model list from `GET /v1/models` on the configured
@@ -673,7 +1125,10 @@ impl InferenceClient {
         }
         let text = resp.text().await?;
         serde_json::from_str::<ModelListResponse>(&text).map_err(|e| {
-            InferenceError::Decode(format!("bad /v1/models response: {e} — body: {text}"))
+            InferenceError::Decode(format!(
+                "bad /v1/models response: {e}; response_chars={}",
+                text.chars().count()
+            ))
         })
     }
 
@@ -700,23 +1155,35 @@ impl InferenceClient {
         use futures::StreamExt;
 
         self.enforce_endpoint_policy()?;
+        let admission = self.acquire_admission(req.model.as_str()).await?;
 
         if self.engine == InferenceEngine::Ollama {
             // Native NDJSON stream from /api/chat. The translation
             // layer wraps each frame in a ChatStreamChunk so the
             // upstream aggregator stays on its OpenAI-flavored
             // consumer.
-            return ollama::chat_completions_stream(
+            let stream = ollama::chat_completions_stream(
                 &self.http,
                 &self.base_url,
                 self.api_key.as_deref(),
                 req,
+                self.ollama_context_tokens,
             )
             .await;
+            let mut stream = stream?;
+            return Ok(Box::pin(async_stream::stream! {
+                let _admission = admission;
+                while let Some(chunk) = stream.next().await {
+                    yield chunk;
+                }
+            }));
         }
 
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
-        let mut r = self.http.post(&url).json(&ChatRequestStreaming(req));
+        let mut r = self
+            .http
+            .post(&url)
+            .json(&ChatRequestStreaming(req, self.reasoning_effort.as_deref()));
         if let Some(key) = &self.api_key {
             r = r.bearer_auth(key);
         }
@@ -736,26 +1203,185 @@ impl InferenceClient {
             bytes_stream.map(|r| r.map_err(InferenceError::from)),
         ));
 
-        // For each SSE event, try to decode a ChatStreamChunk. Skip [DONE].
-        let chunk_stream = events.filter_map(|ev| async move {
-            match ev {
-                Ok(SseEvent { data }) => {
-                    let trimmed = data.trim();
-                    if trimmed == "[DONE]" {
-                        return None;
+        // Decode each complete SSE event and require the protocol terminal
+        // marker. A clean TCP EOF alone must not certify a complete model turn.
+        let chunk_stream = async_stream::stream! {
+            let _admission = admission;
+            let mut events = Box::pin(events);
+            let mut saw_done = false;
+            let mut saw_finish_reason = false;
+            let mut stream_error = false;
+            while let Some(event) = events.next().await {
+                match event {
+                    Ok(SseEvent { data }) if data.trim() == "[DONE]" => {
+                        saw_done = true;
+                        if !saw_finish_reason {
+                            stream_error = true;
+                            yield Err(InferenceError::IncompleteStream);
+                        }
+                        break;
                     }
-                    match serde_json::from_str::<ChatStreamChunk>(trimmed) {
-                        Ok(c) => Some(Ok(c)),
-                        Err(e) => Some(Err(InferenceError::Decode(format!(
-                            "bad SSE chunk: {e} — body: {trimmed}"
-                        )))),
+                    Ok(SseEvent { data }) => {
+                        let trimmed = data.trim();
+                        match serde_json::from_str::<ChatStreamChunk>(trimmed) {
+                            Ok(chunk) => {
+                                saw_finish_reason |= chunk
+                                    .choices
+                                    .iter()
+                                    .any(|choice| choice.finish_reason.is_some());
+                                yield Ok(chunk);
+                            }
+                            Err(error) => yield Err(InferenceError::Decode(format!(
+                                "bad SSE chunk: {error}; chunk_chars={}",
+                                trimmed.chars().count()
+                            ))),
+                        }
+                    }
+                    Err(error) => {
+                        stream_error = true;
+                        yield Err(error);
+                        break;
                     }
                 }
-                Err(e) => Some(Err(e)),
             }
-        });
+            if !saw_done && !stream_error {
+                yield Err(InferenceError::IncompleteStream);
+            }
+        };
 
         Ok(Box::pin(chunk_stream))
+    }
+
+    /// Open a streaming completion with bounded retries before any stream
+    /// bytes are exposed to the caller. Once this returns a stream, failures
+    /// while reading it are surfaced directly: replaying then could duplicate
+    /// visible assistant deltas or tool calls.
+    pub async fn chat_completions_stream_with_retry(
+        &self,
+        req: &ChatRequest,
+        policy: &InferenceRetryPolicy,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<ChatStreamChunk, InferenceError>> + Send>,
+        >,
+        InferenceError,
+    > {
+        self.chat_completions_stream_with_retry_cancelled(req, policy, || false)
+            .await
+    }
+
+    /// As [`Self::chat_completions_stream_with_retry`], while observing a
+    /// caller-owned cancellation predicate during request opening and backoff.
+    pub async fn chat_completions_stream_with_retry_cancelled<F>(
+        &self,
+        req: &ChatRequest,
+        policy: &InferenceRetryPolicy,
+        cancelled: F,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<ChatStreamChunk, InferenceError>> + Send>,
+        >,
+        InferenceError,
+    >
+    where
+        F: Fn() -> bool,
+    {
+        self.chat_completions_stream_with_retry_observed_cancelled(
+            req,
+            policy,
+            cancelled,
+            |_, _| Ok(()),
+        )
+        .await
+    }
+
+    /// Open a stream with cancellation and a metadata-only retry observer.
+    /// The observer runs before a retry request is issued.
+    pub async fn chat_completions_stream_with_retry_observed_cancelled<F, R>(
+        &self,
+        req: &ChatRequest,
+        policy: &InferenceRetryPolicy,
+        cancelled: F,
+        mut on_retry: R,
+    ) -> Result<
+        std::pin::Pin<
+            Box<dyn futures::Stream<Item = Result<ChatStreamChunk, InferenceError>> + Send>,
+        >,
+        InferenceError,
+    >
+    where
+        F: Fn() -> bool,
+        R: FnMut(u32, &InferenceError) -> Result<(), InferenceError>,
+    {
+        let started = std::time::Instant::now();
+        let attempts = policy.max_attempts.max(1);
+        let mut backoff = policy.initial_backoff;
+        for attempt in 1..=attempts {
+            if cancelled() {
+                return Err(InferenceError::Cancelled);
+            }
+            let remaining = policy.deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(InferenceError::Timeout);
+            }
+            let result =
+                cancellable_timeout(self.chat_completions_stream(req), remaining, &cancelled).await;
+            let error = match result {
+                Ok(Ok(stream)) => return Ok(stream),
+                Ok(Err(error)) | Err(error) => error,
+            };
+            if attempt == attempts || !error.is_retryable() {
+                return Err(error);
+            }
+            on_retry(attempt, &error)?;
+            let remaining = policy.deadline.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                return Err(InferenceError::Timeout);
+            }
+            cancellable_sleep(backoff.min(remaining), &cancelled).await?;
+            backoff = backoff.saturating_mul(2);
+        }
+        Err(InferenceError::Timeout)
+    }
+}
+
+async fn cancellable_timeout<F, T>(
+    future: F,
+    deadline: std::time::Duration,
+    cancelled: &impl Fn() -> bool,
+) -> Result<T, InferenceError>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::pin!(future);
+    let timeout = tokio::time::sleep(deadline);
+    tokio::pin!(timeout);
+    loop {
+        if cancelled() {
+            return Err(InferenceError::Cancelled);
+        }
+        tokio::select! {
+            result = &mut future => return Ok(result),
+            _ = &mut timeout => return Err(InferenceError::Timeout),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+        }
+    }
+}
+
+async fn cancellable_sleep(
+    duration: std::time::Duration,
+    cancelled: &impl Fn() -> bool,
+) -> Result<(), InferenceError> {
+    let sleep = tokio::time::sleep(duration);
+    tokio::pin!(sleep);
+    loop {
+        if cancelled() {
+            return Err(InferenceError::Cancelled);
+        }
+        tokio::select! {
+            _ = &mut sleep => return Ok(()),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {},
+        }
     }
 }
 
@@ -812,7 +1438,7 @@ pub struct ToolCallFunctionDelta {
 }
 
 /// Serializer adapter that forces `stream = true` for streaming calls.
-struct ChatRequestStreaming<'a>(&'a ChatRequest);
+struct ChatRequestStreaming<'a>(&'a ChatRequest, Option<&'a str>);
 
 impl<'a> Serialize for ChatRequestStreaming<'a> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -826,6 +1452,9 @@ impl<'a> Serialize for ChatRequestStreaming<'a> {
         if let Some(tc) = &self.0.tool_choice {
             st.serialize_field("tool_choice", tc)?;
         }
+        if let Some(format) = &self.0.response_format {
+            st.serialize_field("response_format", format)?;
+        }
         st.serialize_field("stream", &true)?;
         if let Some(t) = &self.0.temperature {
             st.serialize_field("temperature", t)?;
@@ -835,6 +1464,9 @@ impl<'a> Serialize for ChatRequestStreaming<'a> {
         }
         if let Some(kw) = &self.0.chat_template_kwargs {
             st.serialize_field("chat_template_kwargs", kw)?;
+        }
+        if let Some(effort) = self.1 {
+            st.serialize_field("reasoning_effort", effort)?;
         }
         if let Some(g) = &self.0.guided_decoding_backend {
             st.serialize_field("guided_decoding_backend", g)?;
@@ -848,18 +1480,128 @@ impl<'a> Serialize for ChatRequestStreaming<'a> {
 // need event types or IDs, just the `data:` payloads.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone)]
-struct SseEvent {
-    data: String,
+/// Maximum UTF-8 payload size accepted for one server-sent event.
+pub const MAX_SSE_EVENT_BYTES: usize = 1024 * 1024;
+
+/// One decoded SSE event. Multiple `data:` lines are joined with a newline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SseEvent {
+    pub data: String,
+}
+
+/// Incremental bounded SSE decoder shared by inference and HTTP MCP clients.
+#[derive(Debug, Default)]
+pub struct SseDecoder {
+    pending: Vec<u8>,
+    data: Vec<u8>,
+    has_data: bool,
+}
+
+impl SseDecoder {
+    /// Feed a byte fragment and return every complete SSE event it contains.
+    ///
+    /// CR, LF, and CRLF line endings are accepted. UTF-8 decoding happens only
+    /// after a complete event is assembled, so splitting a code point across
+    /// network chunks cannot corrupt streamed text or tool arguments.
+    pub fn push(&mut self, bytes: &[u8], eof: bool) -> Result<Vec<SseEvent>, InferenceError> {
+        self.pending.extend_from_slice(bytes);
+        let mut events = Vec::new();
+        loop {
+            let Some(index) = self
+                .pending
+                .iter()
+                .position(|byte| *byte == b'\r' || *byte == b'\n')
+            else {
+                if self.pending.len() + self.data.len() > MAX_SSE_EVENT_BYTES {
+                    return Err(InferenceError::FrameTooLarge(MAX_SSE_EVENT_BYTES));
+                }
+                break;
+            };
+            if index > MAX_SSE_EVENT_BYTES {
+                return Err(InferenceError::FrameTooLarge(MAX_SSE_EVENT_BYTES));
+            }
+            if self.pending[index] == b'\r' && index + 1 == self.pending.len() && !eof {
+                if index + self.data.len() > MAX_SSE_EVENT_BYTES {
+                    return Err(InferenceError::FrameTooLarge(MAX_SSE_EVENT_BYTES));
+                }
+                break;
+            }
+
+            let line: Vec<u8> = self.pending.drain(..index).collect();
+            let ending =
+                if self.pending.first() == Some(&b'\r') && self.pending.get(1) == Some(&b'\n') {
+                    2
+                } else {
+                    1
+                };
+            self.pending.drain(..ending);
+            self.process_line(&line, &mut events)?;
+        }
+
+        if eof {
+            if !self.pending.is_empty() {
+                let tail = std::mem::take(&mut self.pending);
+                self.process_line(&tail, &mut events)?;
+            }
+            if self.has_data {
+                events.push(self.finish_event()?);
+            }
+        }
+        Ok(events)
+    }
+
+    fn process_line(
+        &mut self,
+        line: &[u8],
+        events: &mut Vec<SseEvent>,
+    ) -> Result<(), InferenceError> {
+        if line.is_empty() {
+            if self.has_data {
+                events.push(self.finish_event()?);
+            }
+            return Ok(());
+        }
+        if line.first() == Some(&b':') {
+            return Ok(());
+        }
+        let Some(colon) = line.iter().position(|byte| *byte == b':') else {
+            return Ok(());
+        };
+        if &line[..colon] != b"data" {
+            return Ok(());
+        }
+        let mut value = &line[colon + 1..];
+        if value.first() == Some(&b' ') {
+            value = &value[1..];
+        }
+        let extra = value.len() + usize::from(self.has_data);
+        if self.data.len().saturating_add(extra) > MAX_SSE_EVENT_BYTES {
+            return Err(InferenceError::FrameTooLarge(MAX_SSE_EVENT_BYTES));
+        }
+        if self.has_data {
+            self.data.push(b'\n');
+        }
+        self.data.extend_from_slice(value);
+        self.has_data = true;
+        Ok(())
+    }
+
+    fn finish_event(&mut self) -> Result<SseEvent, InferenceError> {
+        let data = std::str::from_utf8(&self.data)
+            .map_err(|error| {
+                InferenceError::Decode(format!("SSE data is not valid UTF-8: {error}"))
+            })?
+            .to_owned();
+        self.data.clear();
+        self.has_data = false;
+        Ok(SseEvent { data })
+    }
 }
 
 mod sse_parser {
-    use super::{InferenceError, SseEvent};
+    use super::{InferenceError, SseDecoder, SseEvent};
     use futures::{Stream, StreamExt};
 
-    /// Frame a byte stream into one [`SseEvent`] per `\n\n`-separated
-    /// block. Only the `data:` lines are collected (joined with `\n`),
-    /// matching the OpenAI wire protocol.
     pub fn parse<S>(
         bytes: S,
     ) -> impl Stream<Item = Result<SseEvent, InferenceError>> + Send + 'static
@@ -867,52 +1609,42 @@ mod sse_parser {
         S: Stream<Item = Result<bytes::Bytes, InferenceError>> + Send + 'static,
     {
         async_stream::stream! {
-            let mut buf = String::new();
+            let mut decoder = SseDecoder::default();
             let mut bytes = Box::pin(bytes);
             while let Some(chunk) = bytes.next().await {
                 match chunk {
-                    Ok(b) => {
-                        buf.push_str(&String::from_utf8_lossy(&b));
-                        // Yield any complete events in the buffer.
-                        while let Some(idx) = buf.find("\n\n") {
-                            let event_block: String = buf.drain(..idx + 2).collect();
-                            if let Some(ev) = extract_data(&event_block) {
-                                yield Ok(SseEvent { data: ev });
+                    Ok(chunk) => match decoder.push(&chunk, false) {
+                        Ok(events) => {
+                            for event in events {
+                                yield Ok(event);
                             }
                         }
-                    }
-                    Err(e) => {
-                        yield Err(e);
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    },
+                    Err(error) => {
+                        yield Err(error);
                         return;
                     }
                 }
             }
-            // Flush any tail event that didn't end with \n\n.
-            if !buf.trim().is_empty() {
-                if let Some(ev) = extract_data(&buf) {
-                    yield Ok(SseEvent { data: ev });
+            match decoder.push(&[], true) {
+                Ok(events) => {
+                    for event in events {
+                        yield Ok(event);
+                    }
                 }
+                Err(error) => yield Err(error),
             }
         }
-    }
-
-    fn extract_data(block: &str) -> Option<String> {
-        let mut data = String::new();
-        for line in block.lines() {
-            if let Some(rest) = line.strip_prefix("data:") {
-                if !data.is_empty() {
-                    data.push('\n');
-                }
-                data.push_str(rest.trim_start());
-            }
-        }
-        if data.is_empty() { None } else { Some(data) }
     }
 }
 
 /// Serializer adapter that forces `stream = false` regardless of input.
 /// Ensures non-streaming calls don't get SSE back by accident.
-struct ChatRequestNonStreaming<'a>(&'a ChatRequest);
+struct ChatRequestNonStreaming<'a>(&'a ChatRequest, Option<&'a str>);
 
 impl<'a> Serialize for ChatRequestNonStreaming<'a> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -926,6 +1658,9 @@ impl<'a> Serialize for ChatRequestNonStreaming<'a> {
         if let Some(tc) = &self.0.tool_choice {
             st.serialize_field("tool_choice", tc)?;
         }
+        if let Some(format) = &self.0.response_format {
+            st.serialize_field("response_format", format)?;
+        }
         st.serialize_field("stream", &false)?;
         if let Some(t) = &self.0.temperature {
             st.serialize_field("temperature", t)?;
@@ -935,6 +1670,9 @@ impl<'a> Serialize for ChatRequestNonStreaming<'a> {
         }
         if let Some(kw) = &self.0.chat_template_kwargs {
             st.serialize_field("chat_template_kwargs", kw)?;
+        }
+        if let Some(effort) = self.1 {
+            st.serialize_field("reasoning_effort", effort)?;
         }
         if let Some(g) = &self.0.guided_decoding_backend {
             st.serialize_field("guided_decoding_backend", g)?;
@@ -951,6 +1689,94 @@ impl<'a> Serialize for ChatRequestNonStreaming<'a> {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::net::IpAddr;
+
+    #[test]
+    fn configured_reasoning_effort_is_sent_on_both_chat_wire_shapes() {
+        let request = ChatRequest {
+            model: ModelId("local-model".into()),
+            messages: vec![ChatMessage::user("READY")],
+            tools: None,
+            stream: false,
+            temperature: None,
+            max_tokens: Some(64),
+            chat_template_kwargs: Some(json!({"enable_thinking": false})),
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let non_streaming =
+            serde_json::to_value(ChatRequestNonStreaming(&request, Some("none"))).unwrap();
+        let streaming = serde_json::to_value(ChatRequestStreaming(&request, Some("none"))).unwrap();
+        assert_eq!(non_streaming["reasoning_effort"], "none");
+        assert_eq!(streaming["reasoning_effort"], "none");
+        assert_eq!(non_streaming["stream"], false);
+        assert_eq!(streaming["stream"], true);
+        assert!(
+            serde_json::to_value(ChatRequestNonStreaming(&request, None))
+                .unwrap()
+                .get("reasoning_effort")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn retries_only_transient_inference_errors() {
+        for status in [429, 502, 503, 504] {
+            assert!(
+                InferenceError::BadStatus {
+                    status,
+                    body: String::new()
+                }
+                .is_retryable()
+            );
+        }
+        for status in [400, 401, 403, 404, 422, 500] {
+            assert!(
+                !InferenceError::BadStatus {
+                    status,
+                    body: String::new()
+                }
+                .is_retryable()
+            );
+        }
+        assert!(InferenceError::Timeout.is_retryable());
+        assert!(!InferenceError::Decode("bad response".into()).is_retryable());
+        assert!(!InferenceError::EndpointPolicy("blocked".into()).is_retryable());
+    }
+
+    #[test]
+    fn sse_decoder_is_stable_at_every_utf8_and_line_ending_split() {
+        let wire = "data: {\"text\":\"café 世界🌍\",\"tool\":\"{\\\"name\\\":\\\"🚀\\\"}\"}\r\n\r\ndata: [DONE]\r\n\r\n";
+        let expected = vec![
+            SseEvent {
+                data: "{\"text\":\"café 世界🌍\",\"tool\":\"{\\\"name\\\":\\\"🚀\\\"}\"}".into(),
+            },
+            SseEvent {
+                data: "[DONE]".into(),
+            },
+        ];
+        let bytes = wire.as_bytes();
+
+        for split in 0..=bytes.len() {
+            let mut decoder = SseDecoder::default();
+            let mut events = decoder.push(&bytes[..split], false).unwrap();
+            events.extend(decoder.push(&bytes[split..], false).unwrap());
+            events.extend(decoder.push(&[], true).unwrap());
+            assert_eq!(events, expected, "decoder changed at byte split {split}");
+        }
+
+        let mut decoder = SseDecoder::default();
+        let mut events = Vec::new();
+        for byte in bytes {
+            events.extend(decoder.push(std::slice::from_ref(byte), false).unwrap());
+        }
+        events.extend(decoder.push(&[], true).unwrap());
+        assert_eq!(
+            events, expected,
+            "single-byte network chunks changed output"
+        );
+    }
 
     #[test]
     fn chat_request_serializes_openai_shape() {
@@ -970,6 +1796,7 @@ mod tests {
             max_tokens: Some(512),
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
         let s = serde_json::to_string(&req).unwrap();
@@ -1095,6 +1922,7 @@ mod tests {
             max_tokens: None,
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
         let mut stream = client.chat_completions_stream(&req).await.unwrap();
@@ -1113,6 +1941,68 @@ mod tests {
         }
         assert_eq!(text, "Hello");
         assert!(finished, "expected finish_reason on a chunk");
+    }
+
+    #[tokio::test]
+    async fn truncated_stream_surfaces_partial_output_without_replaying_request() {
+        use futures::StreamExt;
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let served = requests.clone();
+        let body = "data: {\"id\":\"partial\",\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"},\"finish_reason\":\"stop\"}]}\n\n";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            served.fetch_add(1, Ordering::SeqCst);
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = InferenceClient::new(format!("http://{addr}/v1"));
+        let request = ChatRequest {
+            model: ModelId("m".into()),
+            messages: vec![ChatMessage::user("partial")],
+            tools: None,
+            stream: true,
+            temperature: None,
+            max_tokens: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let policy = InferenceRetryPolicy {
+            max_attempts: 3,
+            deadline: std::time::Duration::from_secs(2),
+            initial_backoff: std::time::Duration::ZERO,
+        };
+        let mut stream = client
+            .chat_completions_stream_with_retry(&request, &policy)
+            .await
+            .unwrap();
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            chunk.choices[0].delta.content.as_deref(),
+            Some("partial"),
+            "already emitted content remains available to the caller"
+        );
+        assert!(matches!(
+            stream.next().await.unwrap(),
+            Err(InferenceError::IncompleteStream)
+        ));
+        assert!(stream.next().await.is_none());
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        server.await.unwrap();
     }
 
     /// A malformed `data:` line must NOT poison the whole stream — the
@@ -1155,6 +2045,7 @@ mod tests {
             max_tokens: None,
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
         let mut stream = client.chat_completions_stream(&req).await.unwrap();
@@ -1174,6 +2065,34 @@ mod tests {
         }
         assert!(saw_err, "expected a decode error for malformed chunk");
         assert_eq!(ok_content, "ok", "subsequent chunks must still stream");
+    }
+
+    #[tokio::test]
+    async fn model_decode_errors_do_not_echo_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let body = "private-response-sentinel";
+        let server_body = body.to_owned();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                server_body.len(),
+                server_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        let error = InferenceClient::new(format!("http://{addr}/v1"))
+            .list_models()
+            .await
+            .unwrap_err();
+        assert!(!error.to_string().contains(body));
+        assert!(matches!(error, InferenceError::Decode(_)));
+        server.await.unwrap();
     }
 
     /// Integration-style test: spin up a tokio TCP listener that pretends to
@@ -1227,6 +2146,7 @@ mod tests {
             max_tokens: Some(16),
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
         let resp = client.chat_completions(&req).await.unwrap();
@@ -1240,6 +2160,442 @@ mod tests {
             Some("hello back".to_owned())
         );
         let _ = handle.await;
+    }
+
+    #[tokio::test]
+    async fn retries_transient_status_within_policy_budget() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let served = requests.clone();
+        let handle = tokio::spawn(async move {
+            for status in [503_u16, 200] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                served.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0_u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let body = if status == 200 {
+                    r#"{"id":"retry","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}"#
+                } else {
+                    "temporarily unavailable"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} test\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len(),
+                );
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = InferenceClient::new(format!("http://{addr}/v1"));
+        let request = ChatRequest {
+            model: ModelId("m".into()),
+            messages: vec![ChatMessage::user("retry")],
+            tools: None,
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let response = client
+            .chat_completions_with_retry(
+                &request,
+                &InferenceRetryPolicy {
+                    max_attempts: 2,
+                    deadline: std::time::Duration::from_secs(2),
+                    initial_backoff: std::time::Duration::ZERO,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.id, "retry");
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_open_retries_transient_status_before_exposing_stream() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let served = requests.clone();
+        let server = tokio::spawn(async move {
+            for status in [503_u16, 200] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                served.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0_u8; 4096];
+                let _ = socket.read(&mut request).await;
+                let response = if status == 503 {
+                    "HTTP/1.1 503 unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                };
+                socket.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let client = InferenceClient::new(format!("http://{addr}/v1"));
+        let request = ChatRequest {
+            model: ModelId("m".into()),
+            messages: vec![ChatMessage::user("retry")],
+            tools: None,
+            stream: true,
+            temperature: None,
+            max_tokens: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let stream = client
+            .chat_completions_stream_with_retry(
+                &request,
+                &InferenceRetryPolicy {
+                    max_attempts: 2,
+                    deadline: std::time::Duration::from_secs(2),
+                    initial_backoff: std::time::Duration::ZERO,
+                },
+            )
+            .await
+            .unwrap();
+        drop(stream);
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_retry_backoff_stops_when_cancelled() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let served = requests.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            served.fetch_add(1, Ordering::SeqCst);
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 503 unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let client = InferenceClient::new(format!("http://{addr}/v1"));
+        let request = ChatRequest {
+            model: ModelId("m".into()),
+            messages: vec![ChatMessage::user("cancel")],
+            tools: None,
+            stream: true,
+            temperature: None,
+            max_tokens: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_after = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_after.store(true, Ordering::SeqCst);
+        });
+        let error = client
+            .chat_completions_stream_with_retry_cancelled(
+                &request,
+                &InferenceRetryPolicy {
+                    max_attempts: 3,
+                    deadline: std::time::Duration::from_secs(5),
+                    initial_backoff: std::time::Duration::from_secs(2),
+                },
+                || cancelled.load(Ordering::SeqCst),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, InferenceError::Cancelled));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn streaming_open_stops_when_cancelled_before_headers() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            // Keep the response headers open until the cancelled client
+            // drops its request future.
+            let mut byte = [0_u8; 1];
+            let _ = socket.read(&mut byte).await;
+        });
+        let client = InferenceClient::new(format!("http://{addr}/v1"));
+        let request = ChatRequest {
+            model: ModelId("m".into()),
+            messages: vec![ChatMessage::user("cancel opening")],
+            tools: None,
+            stream: true,
+            temperature: None,
+            max_tokens: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_after = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_after.store(true, Ordering::SeqCst);
+        });
+        let error = client
+            .chat_completions_stream_with_retry_cancelled(
+                &request,
+                &InferenceRetryPolicy {
+                    max_attempts: 3,
+                    deadline: std::time::Duration::from_secs(5),
+                    initial_backoff: std::time::Duration::ZERO,
+                },
+                || cancelled.load(Ordering::SeqCst),
+            )
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, InferenceError::Cancelled));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_streaming_retry_backoff_stops_when_cancelled() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let served = calls.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            served.fetch_add(1, Ordering::SeqCst);
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    b"HTTP/1.1 503 unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let client = InferenceClient::new(format!("http://{addr}/v1"));
+        let request = ChatRequest {
+            model: ModelId("m".into()),
+            messages: vec![ChatMessage::user("cancel retry")],
+            tools: None,
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_after = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_after.store(true, Ordering::SeqCst);
+        });
+        let error = client
+            .chat_completions_with_retry_observed_cancelled(
+                &request,
+                &InferenceRetryPolicy {
+                    max_attempts: 3,
+                    deadline: std::time::Duration::from_secs(5),
+                    initial_backoff: std::time::Duration::from_secs(2),
+                },
+                |_| Ok(()),
+                |_, _| Ok(()),
+                || cancelled.load(Ordering::SeqCst),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, InferenceError::Cancelled));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn non_streaming_open_stops_when_cancelled_before_headers() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            let mut byte = [0_u8; 1];
+            let _ = socket.read(&mut byte).await;
+        });
+        let client = InferenceClient::new(format!("http://{addr}/v1"));
+        let request = ChatRequest {
+            model: ModelId("m".into()),
+            messages: vec![ChatMessage::user("cancel open")],
+            tools: None,
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let cancel_after = cancelled.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            cancel_after.store(true, Ordering::SeqCst);
+        });
+        let error = client
+            .chat_completions_with_retry_observed_cancelled(
+                &request,
+                &InferenceRetryPolicy {
+                    max_attempts: 3,
+                    deadline: std::time::Duration::from_secs(5),
+                    initial_backoff: std::time::Duration::ZERO,
+                },
+                |_| Ok(()),
+                |_, _| Ok(()),
+                || cancelled.load(Ordering::SeqCst),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, InferenceError::Cancelled));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn does_not_retry_permanent_status() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let served = requests.clone();
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            served.fetch_add(1, Ordering::SeqCst);
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(b"HTTP/1.1 400 bad request\r\ncontent-length: 7\r\nconnection: close\r\n\r\ninvalid")
+                .await
+                .unwrap();
+        });
+        let client = InferenceClient::new(format!("http://{addr}/v1"));
+        let request = ChatRequest {
+            model: ModelId("m".into()),
+            messages: vec![ChatMessage::user("invalid")],
+            tools: None,
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let error = client
+            .chat_completions_with_retry(&request, &InferenceRetryPolicy::default())
+            .await
+            .unwrap_err();
+
+        assert!(matches!(
+            error,
+            InferenceError::BadStatus { status: 400, .. }
+        ));
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn bounded_retry_stops_at_deadline_when_local_backend_stalls() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::AsyncReadExt;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let accepted = requests.clone();
+        let server = tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                accepted.fetch_add(1, Ordering::SeqCst);
+                let mut request = [0_u8; 4096];
+                let _ = socket.read(&mut request).await;
+                // Keep the connection open without headers/body; the client
+                // deadline, not a server response, must terminate the call.
+                tokio::spawn(async move {
+                    let _socket = socket;
+                    std::future::pending::<()>().await;
+                });
+            }
+        });
+        let client = InferenceClient::new(format!("http://{address}/v1"));
+        let request = ChatRequest {
+            model: ModelId("m".into()),
+            messages: vec![ChatMessage::user("wait")],
+            tools: None,
+            stream: false,
+            temperature: None,
+            max_tokens: None,
+            chat_template_kwargs: None,
+            tool_choice: None,
+            response_format: None,
+            guided_decoding_backend: None,
+        };
+        let policy = InferenceRetryPolicy {
+            max_attempts: 4,
+            deadline: std::time::Duration::from_millis(100),
+            initial_backoff: std::time::Duration::from_millis(5),
+        };
+        let started = tokio::time::Instant::now();
+        let error = client
+            .chat_completions_with_retry(&request, &policy)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, InferenceError::Timeout));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(requests.load(Ordering::SeqCst) >= 1);
+        server.abort();
     }
 
     /// `MessageContent::Text` serialises as a plain string; the wire
@@ -1326,5 +2682,50 @@ mod tests {
             }
             other => panic!("expected Parts, got {other:?}"),
         }
+    }
+
+    struct RunnerResolver(Vec<std::net::SocketAddr>);
+
+    impl Resolver for RunnerResolver {
+        fn resolve(&self, _host: &str, _port: u16) -> std::io::Result<Vec<std::net::SocketAddr>> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[test]
+    fn trusted_runner_rejects_dns_answers_outside_host_approval() {
+        let resolver = RunnerResolver(vec!["198.51.100.5:8000".parse().unwrap()]);
+        let result = trusted_runner_endpoint(
+            "http://model.home.arpa:8000/v1",
+            &["10.20.0.7".parse().unwrap()],
+            None,
+            &resolver,
+        );
+        assert!(matches!(result, Err(PolicyError::UnapprovedAddress(_))));
+    }
+
+    #[test]
+    fn trusted_runner_resolves_and_pins_only_private_host_gateway_addresses() {
+        let resolver = RunnerResolver(vec!["172.18.0.1:8101".parse().unwrap()]);
+        let (url, addresses) = trusted_runner_endpoint(
+            "http://host.docker.internal:8101/v1",
+            &[],
+            Some("host.docker.internal"),
+            &resolver,
+        )
+        .unwrap();
+        assert_eq!(url.host_str(), Some("host.docker.internal"));
+        assert_eq!(addresses, vec!["172.18.0.1".parse::<IpAddr>().unwrap()]);
+
+        let public_resolver = RunnerResolver(vec!["8.8.8.8:8101".parse().unwrap()]);
+        assert!(matches!(
+            trusted_runner_endpoint(
+                "http://host.docker.internal:8101/v1",
+                &[],
+                Some("host.docker.internal"),
+                &public_resolver,
+            ),
+            Err(PolicyError::UnapprovedAddress(_))
+        ));
     }
 }

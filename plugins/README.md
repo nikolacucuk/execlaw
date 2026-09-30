@@ -168,3 +168,21 @@ when those events arrive; it does not poll the agent endpoint.
 
 Disabling **Inbound message import** acknowledges WuzAPI webhook deliveries but
 does not create conversations, display messages, or trigger agents.
+
+## Implementation plan
+
+All 130 enhancements are committed implementation scope under the
+[implementation plan](../docs/implementation-plan.md). This commitment is not a
+claim that they have shipped: the plan owns implementation status, and the
+[roadmap](../docs/llm-harness-roadmap.md) owns acceptance criteria.
+
+Relevant work for this component:
+
+- [H027: transactional upgrades and panel authority](../docs/llm-harness-roadmap.md#enhancement-027).
+- [H040: workspace coding](../docs/llm-harness-roadmap.md#enhancement-040).
+- [H046: research evidence](../docs/llm-harness-roadmap.md#enhancement-046).
+- [H079: author conformance](../docs/llm-harness-roadmap.md#enhancement-079).
+- [H080: API compatibility](../docs/llm-harness-roadmap.md#enhancement-080).
+- [H082: publisher revocation](../docs/llm-harness-roadmap.md#enhancement-082).
+- [H123: reproducible analysis](../docs/llm-harness-roadmap.md#enhancement-123).
+- [H130: knowledge collections](../docs/llm-harness-roadmap.md#enhancement-130).

@@ -2,13 +2,29 @@
 
 **Naming history:** originally drafted as the "Bridge supervisor" because every supervised companion container we had a use case for at the time bridged a transport (Signal-cli, WhatsApp, Matrix). Renamed 2026-05-04 — "sidecar" is the established container-pattern term and accommodates non-transport companions equally well: an OCR worker, an ffmpeg pool, a Whisper helper, anything a plugin author wants the control plane to keep running. The original "channel" field on `SidecarMeta` was bridge-era leakage; dropped same day. The supervisor's identity-key is now the parent service's `name`, which carries no transport-specific meaning.
 
+## Implementation delivery plan
+
+All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+This memo's original phases are historical design context, not a current
+release checklist. Existing supervision must still pass the scoped gates for
+[H072 runtime profiles](llm-harness-roadmap.md#enhancement-072),
+[H073 OS isolation](llm-harness-roadmap.md#enhancement-073),
+[H074 resource limits](llm-harness-roadmap.md#enhancement-074),
+[H075 shutdown](llm-harness-roadmap.md#enhancement-075),
+[H079 plugin conformance](llm-harness-roadmap.md#enhancement-079),
+[H081 version pinning](llm-harness-roadmap.md#enhancement-081), and
+[H082 revocation](llm-harness-roadmap.md#enhancement-082).
+Keep one container-manager abstraction and manifest-declared services;
+supervisor health does not prove tool authorization or successful delivery.
+The tracker owns implementation order and qualification evidence.
+
 ## Why a separate supervisor
 
 execlaw runs three long-lived supervisors:
 
 - `backend_supervisor` — owns the inference-backend containers (vLLM, TTS, STT). Per-purpose ports, exponential-backoff restart, lifecycle stage tracked separately from container status.
 - `runner_supervisor` — owns per-principal-group runner containers (the agent loop). Spawn-secret auth, idle reaping, WS attachment race recovery.
-- `sidecar_supervisor` *(this)* — owns plugin-managed companion containers. The sidecars in tree today happen to all be transport bridges (signal-cli is the first), but the supervisor itself is generic — it just keeps containers alive and healthy.
+- `sidecar_supervisor` *(this)* — owns plugin-managed companion containers. The initial use cases were transport bridges, but the supervisor is generic: it keeps manifest-declared containers alive and healthy.
 
 Putting sidecars into either of the existing supervisors would muddle responsibilities:
 

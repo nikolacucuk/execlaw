@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "client-contract-v1.schema.json",
+  "title": "execlaw headless client contract v1",
+  "description": "Stable session, chat cursor, artifact, approval, and turn-control wire shapes shared by the SPA, terminal client, and editor adapters.",
+  "$ref": "#/$defs/contract",
+  "$defs": {
+    "contract": {
+      "type": "object",
+      "required": ["version", "minimum_client_version", "api_schema", "event_cursor_unit", "features"],
+      "properties": {
+        "version": { "const": 1 },
+        "minimum_client_version": { "type": "integer", "minimum": 1 },
+        "api_schema": { "type": "string", "const": "/api/openapi.json" },
+        "event_cursor_unit": { "type": "string", "const": "conversation event sequence; exclusive before cursor" },
+        "features": { "type": "array", "items": { "type": "string" }, "uniqueItems": true }
+      },
+      "additionalProperties": false
+    },
+    "tokenPair": {
+      "type": "object",
+      "required": ["access_token", "refresh_token"],
+      "properties": {
+        "access_token": { "type": "string", "minLength": 1 },
+        "refresh_token": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "sendMessageRequest": {
+      "type": "object",
+      "required": ["text"],
+      "properties": {
+        "text": { "type": "string" },
+        "attachments": { "type": "array", "items": { "type": "object" } },
+        "skill_names": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "messageCursor": {
+      "type": "object",
+      "required": ["before", "limit"],
+      "properties": {
+        "before": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 500 }
+      },
+      "additionalProperties": false
+    },
+    "turnControl": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": { "enum": ["queue_next_turn", "steer", "pause", "resume", "cancel"] },
+        "text": { "type": "string", "maxLength": 16384 }
+      },
+      "additionalProperties": false
+    },
+    "approvalDecision": {
+      "type": "object",
+      "required": ["verb", "approval_token"],
+      "properties": {
+        "verb": { "enum": ["approve", "edit", "reject", "trust", "trust_limited", "claim_as_me", "block", "ignore_once"] },
+        "approval_token": { "type": "string", "minLength": 1 },
+        "allowed_topics": { "type": "array", "items": { "type": "string" } },
+        "reason": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "artifactReference": {
+      "type": "object",
+      "required": ["attachment_id", "download_url"],
+      "properties": {
+        "attachment_id": { "type": "string", "minLength": 1 },
+        "download_url": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "byte_length": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "workspaceRegistration": {
+      "type": "object",
+      "required": ["path"],
+      "properties": { "path": { "type": "string", "minLength": 1, "maxLength": 4096 } },
+      "additionalProperties": false
+    },
+    "workspaceCheckpointRequest": {
+      "type": "object",
+      "required": ["workspace_id"],
+      "properties": {
+        "workspace_id": { "type": "string", "minLength": 1 },
+        "parent_checkpoint_id": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "workspaceDiffChange": {
+      "type": "object",
+      "required": ["path", "base_sha256", "current_sha256", "proposed_sha256", "conflict"],
+      "properties": {
+        "path": { "type": "string" },
+        "base_sha256": { "type": ["string", "null"] },
+        "current_sha256": { "type": ["string", "null"] },
+        "proposed_sha256": { "type": ["string", "null"] },
+        "conflict": { "type": "boolean" }
+      },
+      "additionalProperties": false
+    },
+    "workspaceApplyRequest": {
+      "type": "object",
+      "required": ["preview_hash"],
+      "properties": {
+        "preview_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "workspaceRestoreRequest": {
+      "type": "object",
+      "required": ["apply_id"],
+      "properties": {
+        "apply_id": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    }
+  }
+}

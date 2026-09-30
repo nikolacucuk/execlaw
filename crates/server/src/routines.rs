@@ -47,6 +47,7 @@ pub struct RoutineView {
     pub next_run_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub completion_contract: Option<execlaw_core::runs::RunCompletionContractDraft>,
 }
 
 impl From<&RoutineRow> for RoutineView {
@@ -64,6 +65,7 @@ impl From<&RoutineRow> for RoutineView {
             next_run_at: r.next_run_at,
             created_at: r.created_at,
             updated_at: r.updated_at,
+            completion_contract: r.completion_contract.clone(),
         }
     }
 }
@@ -116,6 +118,8 @@ pub struct UpsertRoutineRequest {
     pub target_conversation_id: Option<String>,
     #[serde(default = "yes")]
     pub enabled: bool,
+    #[serde(default)]
+    pub completion_contract: Option<execlaw_core::runs::RunCompletionContractDraft>,
 }
 
 fn default_tz() -> String {
@@ -223,6 +227,7 @@ pub async fn create_handler(
                 prompt: req.prompt.clone(),
                 target_conversation_id: req.target_conversation_id.clone(),
                 enabled: req.enabled,
+                completion_contract: req.completion_contract.clone(),
             },
             now,
         )
@@ -304,6 +309,7 @@ pub async fn update_handler(
                 prompt: req.prompt.clone(),
                 target_conversation_id: req.target_conversation_id.clone(),
                 enabled: req.enabled,
+                completion_contract: req.completion_contract.clone(),
             },
             now,
         )
@@ -394,6 +400,16 @@ pub async fn run_now_handler(
     let run_id = store
         .insert_run_pending(&row.id, now)
         .map_err(ApiError::from)?;
+    if !store
+        .claim_pending_run(&run_id, now)
+        .map_err(ApiError::from)?
+    {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "routine_run_claim_failed",
+            message: "routine run was claimed by another scheduler".into(),
+        });
+    }
     state
         .events
         .publish(crate::events::UiEvent::RoutineRunChanged {
@@ -408,9 +424,10 @@ pub async fn run_now_handler(
     // (Controller), same fall-through to stub turn when no inference
     // backend is wired. Records Success/Failed with the resulting
     // conversation id (or the routine's existing target).
-    let dispatch_outcome = crate::chats::dispatch_routine_turn(
+    let dispatch_outcome = crate::chats::dispatch_routine_run(
         &state,
         &row.id,
+        &run_id,
         row.target_conversation_id.as_deref(),
         &row.prompt,
     )
@@ -607,6 +624,16 @@ mod tests {
     async fn create_then_list_then_update_then_delete() {
         let app = build_router(test_app_state());
         let tok = setup_controller_token(&app).await;
+        let mut body = create_body();
+        body["completion_contract"] = serde_json::json!({
+            "acceptance_criteria": [{
+                "criterion_id": "report",
+                "description": "The report is verified",
+                "required": true
+            }],
+            "required_artifacts": [],
+            "delivery_required": false
+        });
 
         // Create
         let req = Request::builder()
@@ -614,7 +641,7 @@ mod tests {
             .uri("/api/admin/routines")
             .header(header::AUTHORIZATION, format!("Bearer {tok}"))
             .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(create_body().to_string()))
+            .body(Body::from(body.to_string()))
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -624,7 +651,6 @@ mod tests {
         assert!(v["next_run_at"].is_number());
 
         // Update
-        let mut body = create_body();
         body["name"] = "morning-summary v2".into();
         let req = Request::builder()
             .method(Method::PUT)
@@ -649,6 +675,10 @@ mod tests {
         let arr = v["routines"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["name"], "morning-summary v2");
+        assert_eq!(
+            arr[0]["completion_contract"]["acceptance_criteria"][0]["criterion_id"],
+            "report"
+        );
 
         // Delete
         let req = Request::builder()

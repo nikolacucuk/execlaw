@@ -44,6 +44,7 @@ export class ApiError extends Error {
 export interface ApiFetchOptions {
     method?: "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
     body?: unknown;
+    headers?: Record<string, string>;
     /** Override the bearer token (used by `/api/setup`-success → first /me probe). */
     accessToken?: string | null;
     /** Skip JSON parsing — caller wants the raw text body (used by /api/ping). */
@@ -96,7 +97,7 @@ export async function apiFetch<T>(
     opts: ApiFetchOptions = {},
     tokenAccessor: () => string | null = () => null,
 ): Promise<T> {
-    const headers: Record<string, string> = { ...DEFAULT_HEADERS };
+    const headers: Record<string, string> = { ...DEFAULT_HEADERS, ...opts.headers };
     const token = opts.accessToken !== undefined ? opts.accessToken : tokenAccessor();
     if (token) {
         headers.authorization = `Bearer ${token}`;

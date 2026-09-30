@@ -82,3 +82,29 @@ Tight on purpose. No heavyweight state libraries until a real consumer arrives:
 Native iOS / Android targets (Phase 6e+) will land via a parallel
 component layer — Tamagui or similar — at port time. For now the SPA
 is plain React on the DOM.
+
+## Implementation plan
+
+The focused [Nexus visual extension](../docs/llm-harness-roadmap.md#nexus-visual-roadmap)
+adds NX01-NX30, tracked in the [Nexus ledger](../docs/implementation-plan.md#nexus-visual-extension).
+It covers optional appearance, multi-source identity, relationships, rendering,
+and accessibility. The existing Classic/Nexus selector remains the master
+control; NX01 requires complete Classic restoration from collapsed states.
+The proposals are not implemented by this documentation update.
+
+All 130 enhancements are committed implementation scope under the
+[implementation plan](../docs/implementation-plan.md). This commitment is not a
+claim that they have shipped: the plan owns implementation status, and the
+[roadmap](../docs/llm-harness-roadmap.md) owns acceptance criteria.
+
+Relevant work for this component:
+
+- [H035: execution inspection](../docs/llm-harness-roadmap.md#enhancement-035).
+- [H043: steering controls](../docs/llm-harness-roadmap.md#enhancement-043).
+- [H050: accessible setup and recovery](../docs/llm-harness-roadmap.md#enhancement-050).
+- [H053: typed approval rendering](../docs/llm-harness-roadmap.md#enhancement-053).
+- [H121: resumable uploads](../docs/llm-harness-roadmap.md#enhancement-121).
+- [H122: deliverable previews](../docs/llm-harness-roadmap.md#enhancement-122).
+- [H127: draft review](../docs/llm-harness-roadmap.md#enhancement-127).
+- [H128: attention policies](../docs/llm-harness-roadmap.md#enhancement-128).
+- [H129: locale qualification](../docs/llm-harness-roadmap.md#enhancement-129).

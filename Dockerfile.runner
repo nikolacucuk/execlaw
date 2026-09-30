@@ -11,7 +11,7 @@
 #   EXECLAW_INFERENCE_URL=http://127.0.0.1:8101/v1   # default; per-turn overridable
 #   RUST_LOG=info,execlaw_runner=debug                # optional
 #
-# A named volume `execlaw-runner-<group_id>` is bind-mounted at
+# A database-scoped named volume is bind-mounted at
 # /workspace; the runner can scratch there freely.
 #
 # Image strategy (2026-05-03): static musl build → alpine runtime.
@@ -29,6 +29,10 @@ FROM rust:1.90-alpine AS builder
 WORKDIR /build
 
 RUN apk add --no-cache musl-dev
+
+# Docker Desktop may expose less memory than the Windows host. Two Rust jobs
+# keep the runner release build below that daemon limit during qualification.
+ENV CARGO_BUILD_JOBS=2
 
 # Cache the dependency graph: copy manifests first, then sources.
 # Workspace `Cargo.toml` references many crates we don't need at

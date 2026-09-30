@@ -116,11 +116,16 @@ fn build_app(stage_root: PathBuf) -> (axum::Router, AppState) {
     (execlaw_server::routes::build_router(state.clone()), state)
 }
 
-async fn post_zip(app: axum::Router, bytes: Vec<u8>) -> (StatusCode, serde_json::Value) {
+async fn post_zip(
+    app: axum::Router,
+    bytes: Vec<u8>,
+    bearer: &str,
+) -> (StatusCode, serde_json::Value) {
     let req = Request::builder()
         .method(Method::POST)
         .uri("/api/admin/plugins/install?allow_unsigned_local_development=true")
         .header(header::CONTENT_TYPE, "application/zip")
+        .header(header::AUTHORIZATION, format!("Bearer {bearer}"))
         .body(Body::from(bytes))
         .unwrap();
     let resp = app.oneshot(req).await.unwrap();
@@ -205,6 +210,8 @@ fn load_web_scraper_zip_from_workspace() -> Vec<u8> {
         std::fs::read(plugin_root.join("schemas/fetch_page.json")).expect("fetch schema exists");
     let schema_extract =
         std::fs::read(plugin_root.join("schemas/extract.json")).expect("extract schema exists");
+    let schema_clip =
+        std::fs::read(plugin_root.join("schemas/clip_page.json")).expect("clip schema exists");
     let schema_follow = std::fs::read(plugin_root.join("schemas/follow_links.json"))
         .expect("follow links schema exists");
     let schema_session = std::fs::read(plugin_root.join("schemas/session_close.json"))
@@ -216,6 +223,7 @@ fn load_web_scraper_zip_from_workspace() -> Vec<u8> {
         ("main.rhai", &rhai),
         ("schemas/fetch_page.json", &schema_fetch),
         ("schemas/extract.json", &schema_extract),
+        ("schemas/clip_page.json", &schema_clip),
         ("schemas/follow_links.json", &schema_follow),
         ("schemas/session_close.json", &schema_session),
         ("ui/panel.js", &panel_js),
@@ -229,7 +237,7 @@ async fn web_scraper_plugin_install_and_admin_test_route() {
     let token = setup_and_get_access_token(&app).await;
 
     let zip = load_web_scraper_zip_from_workspace();
-    let (status, body) = post_zip(app.clone(), zip).await;
+    let (status, body) = post_zip(app.clone(), zip, &token).await;
     assert_eq!(status, StatusCode::OK, "install body: {body}");
     assert_eq!(body["plugin_id"], PLUGIN_ID);
 

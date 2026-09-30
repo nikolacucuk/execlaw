@@ -94,8 +94,18 @@ pub enum TurnEvent {
     Phase {
         phase: String,
     },
+    InferenceRetry {
+        round: u32,
+        attempt: u32,
+        error_class: String,
+    },
     ModelRoundCheckpoint {
         checkpoint: execlaw_runner_protocol::ModelRoundCheckpoint,
+    },
+    ControlAcknowledged {
+        control_id: String,
+        status: String,
+        detail: Option<String>,
     },
     /// Runner asked to call a tool. Caller dispatches via the
     /// existing `ChainedToolDispatch` and replies on the
@@ -899,8 +909,85 @@ impl RunnerSupervisor {
         };
         let frame = ServerToRunner::CancelTurn {
             turn_id: turn_id.to_owned(),
+            control_id: None,
         };
         send_to_runner(&handle, frame).await.is_ok()
+    }
+
+    /// Deliver a cancellation carrying its durable control id.
+    pub async fn cancel_turn_with_control(
+        &self,
+        group_id: &str,
+        turn_id: &str,
+        control_id: &str,
+    ) -> bool {
+        let Some(handle) = self.get(group_id) else {
+            return false;
+        };
+        send_to_runner(
+            &handle,
+            ServerToRunner::CancelTurn {
+                turn_id: turn_id.to_owned(),
+                control_id: Some(control_id.to_owned()),
+            },
+        )
+        .await
+        .is_ok()
+    }
+
+    /// Deliver steering guidance to the active runner.
+    pub async fn steer_turn(
+        &self,
+        group_id: &str,
+        turn_id: &str,
+        control_id: &str,
+        text: &str,
+    ) -> bool {
+        let Some(handle) = self.get(group_id) else {
+            return false;
+        };
+        send_to_runner(
+            &handle,
+            ServerToRunner::SteerTurn {
+                turn_id: turn_id.to_owned(),
+                control_id: control_id.to_owned(),
+                text: text.to_owned(),
+            },
+        )
+        .await
+        .is_ok()
+    }
+
+    /// Pause at a safe model/tool boundary.
+    pub async fn pause_turn(&self, group_id: &str, turn_id: &str, control_id: &str) -> bool {
+        let Some(handle) = self.get(group_id) else {
+            return false;
+        };
+        send_to_runner(
+            &handle,
+            ServerToRunner::PauseTurn {
+                turn_id: turn_id.to_owned(),
+                control_id: control_id.to_owned(),
+            },
+        )
+        .await
+        .is_ok()
+    }
+
+    /// Resume a turn paused at a safe boundary.
+    pub async fn resume_turn(&self, group_id: &str, turn_id: &str, control_id: &str) -> bool {
+        let Some(handle) = self.get(group_id) else {
+            return false;
+        };
+        send_to_runner(
+            &handle,
+            ServerToRunner::ResumeTurn {
+                turn_id: turn_id.to_owned(),
+                control_id: control_id.to_owned(),
+            },
+        )
+        .await
+        .is_ok()
     }
 
     /// Reply to a tool-call request. Dispatched by the chat
@@ -1044,6 +1131,7 @@ impl RunnerSupervisor {
                 );
                 let frame = ServerToRunner::CancelTurn {
                     turn_id: turn_id.clone(),
+                    control_id: None,
                 };
                 let _ = send_to_runner(&handle, frame).await;
             }
@@ -1078,8 +1166,6 @@ impl RunnerSupervisor {
         &self,
         launcher: &L,
     ) -> Vec<String> {
-        use crate::runner_spawn::volume_name_for;
-
         let store = PrincipalGroupStore::new(&self.inner.db);
         let known_groups = match store.list_all() {
             Ok(g) => g,
@@ -1098,15 +1184,15 @@ impl RunnerSupervisor {
                 return Vec::new();
             }
         };
-        let prefix = "execlaw-runner-";
+        let prefix = launcher.volume_prefix();
         let mut wiped = Vec::new();
         for vol in volumes {
-            let Some(group_id) = vol.strip_prefix(prefix) else {
+            let Some(group_id) = vol.strip_prefix(&prefix) else {
                 continue;
             };
             // Sanity check: only sweep if name actually matches our
             // expected pattern.
-            if vol != volume_name_for(group_id) {
+            if vol != launcher.volume_name_for(group_id) {
                 continue;
             }
             if known_ids.contains(group_id) {
@@ -1173,6 +1259,21 @@ impl RunnerSupervisor {
                     });
                 if let Some(tx) = handle.turn_streams.get(&turn_id) {
                     let _ = tx.send(TurnEvent::Phase { phase });
+                }
+            }
+            RunnerToServer::InferenceRetry {
+                turn_id,
+                conversation_id: _,
+                round,
+                attempt,
+                error_class,
+            } => {
+                if let Some(tx) = handle.turn_streams.get(&turn_id) {
+                    let _ = tx.send(TurnEvent::InferenceRetry {
+                        round,
+                        attempt,
+                        error_class,
+                    });
                 }
             }
             RunnerToServer::ModelRoundCheckpoint {
@@ -1245,12 +1346,39 @@ impl RunnerSupervisor {
                 turn_id,
                 conversation_id: _,
                 message,
+                failure_kind,
+                partial_text,
                 cancelled,
             } => {
                 if let Some(tx) = handle.turn_streams.get(&turn_id) {
+                    let message = if failure_kind.is_some() || partial_text.is_some() {
+                        serde_json::json!({
+                            "kind": "runner_turn_failure_v1",
+                            "message": message,
+                            "failure_kind": failure_kind,
+                            "partial_text": partial_text,
+                        })
+                        .to_string()
+                    } else {
+                        message
+                    };
                     let _ = tx.send(TurnEvent::Error { message, cancelled });
                 }
                 self.finish_turn(&handle, &turn_id).await;
+            }
+            RunnerToServer::ControlAcknowledged {
+                turn_id,
+                control_id,
+                status,
+                detail,
+            } => {
+                if let Some(tx) = handle.turn_streams.get(&turn_id) {
+                    let _ = tx.send(TurnEvent::ControlAcknowledged {
+                        control_id,
+                        status,
+                        detail,
+                    });
+                }
             }
             RunnerToServer::HeartbeatAck { .. } => {
                 // No-op for v1 — we'll wire RTT tracking later.
@@ -1284,7 +1412,13 @@ impl RunnerSupervisor {
         for turn_id in to_close {
             if let Some((_, tx)) = handle.turn_streams.remove(&turn_id) {
                 let _ = tx.send(TurnEvent::Error {
-                    message: "runner disconnected".into(),
+                    message: serde_json::json!({
+                        "kind": "runner_turn_failure_v1",
+                        "message": "runner disconnected",
+                        "failure_kind": "runner_disconnected",
+                        "partial_text": null,
+                    })
+                    .to_string(),
                     cancelled: false,
                 });
             }
@@ -1542,18 +1676,27 @@ mod tests {
             sender_principal_id: "x".into(),
             sender_trust_class: "Controller".into(),
             system_prompt: "".into(),
+            planner_handoff: None,
+            untrusted_context: None,
             history: vec![],
             tool_catalog: vec![],
             inference_url: "http://infer".into(),
+            inference_engine: None,
+            inference_allowed_addresses: Vec::new(),
+            inference_gateway_host: None,
             model: "m".into(),
             temperature: None,
             max_tokens: None,
+            context_tokens: 32_768,
+            bytes_per_token_milli: 3_000,
             reasoning_enabled: false,
+            reasoning_effort: None,
             spotlight: None,
             user_image_urls: Vec::new(),
             max_tool_rounds: 16,
             resume: false,
             round_offset: 0,
+            initial_controls: Vec::new(),
         };
         let res = s.forward_turn("g-missing", req).await;
         assert!(matches!(res, Err(ForwardError::NoRunner)));
@@ -1584,18 +1727,27 @@ mod tests {
             sender_principal_id: "x".into(),
             sender_trust_class: "Controller".into(),
             system_prompt: "".into(),
+            planner_handoff: None,
+            untrusted_context: None,
             history: vec![],
             tool_catalog: vec![],
             inference_url: "http://infer".into(),
+            inference_engine: None,
+            inference_allowed_addresses: Vec::new(),
+            inference_gateway_host: None,
             model: "m".into(),
             temperature: None,
             max_tokens: None,
+            context_tokens: 32_768,
+            bytes_per_token_milli: 3_000,
             reasoning_enabled: false,
+            reasoning_effort: None,
             spotlight: None,
             user_image_urls: Vec::new(),
             max_tool_rounds: 16,
             resume: false,
             round_offset: 0,
+            initial_controls: Vec::new(),
         };
         let res = s.forward_turn("g-dead", req).await;
         assert!(matches!(res, Err(ForwardError::RunnerGone)));
@@ -2208,7 +2360,7 @@ mod tests {
         s.watchdog_pass().await;
         let frame = out_rx.try_recv().unwrap();
         match frame {
-            ServerToRunner::CancelTurn { turn_id } => assert_eq!(turn_id, "t-overdue"),
+            ServerToRunner::CancelTurn { turn_id, .. } => assert_eq!(turn_id, "t-overdue"),
             other => panic!("unexpected: {other:?}"),
         }
         // Only one cancel — the fresh turn was untouched.

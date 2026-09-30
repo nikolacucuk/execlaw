@@ -117,6 +117,9 @@ fn on_frame(raw) {
     // unit-test coverage without needing a live signal-cli sidecar.
     let inbound = decode_frame(raw);
     if inbound == () { return; }
+    if inbound.is_self_message && !inbound_self_message_import_enabled() { return; }
+    inbound.conversation_scope = inbound_conversation_scope();
+    inbound.agent_handling_enabled = inbound_agent_handling_enabled();
     try {
         host_route_inbound(inbound);
     } catch (e) {
@@ -138,7 +141,8 @@ fn decode_frame(raw) {
     // throws in Rhai and we want every shape error to drop the
     // frame, not propagate.
     try {
-        let env = parse_json(raw).envelope;
+        let frame = parse_json(raw);
+        let env = frame.envelope;
         if env == () { return (); }
         let dm = env.dataMessage;
         if dm == () { return (); }
@@ -170,13 +174,14 @@ fn decode_frame(raw) {
             }
         }
 
+        let source_number = if env.sourceNumber != () { env.sourceNumber } else { env.source };
         return #{
             "channel": "signal",
             "reuse_conversation": true,
-            "conversation_scope": inbound_conversation_scope(),
-            "agent_handling_enabled": inbound_agent_handling_enabled(),
-            "is_self_message": inbound_self_message_import_enabled() && env.sourceNumber == self_number(),
-            "native_id": if env.sourceNumber != () { env.sourceNumber } else { env.source },
+            "conversation_scope": "signal",
+            "agent_handling_enabled": true,
+            "is_self_message": frame.account != () && source_number != () && source_number == frame.account,
+            "native_id": source_number,
             "display_name": env.sourceName,
             "group_id": group_id,
             "group_name": group_name,

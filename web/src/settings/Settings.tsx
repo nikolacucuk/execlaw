@@ -34,6 +34,9 @@ import { PersonalityPage } from "./PersonalityPage";
 import { AlertsPage } from "./AlertsPage";
 import { TrustPolicyPage } from "./TrustPolicyPage";
 import { InferencePage } from "./InferencePage";
+import { MemoryAssetsPage } from "./MemoryAssetsPage";
+import { RunInspectorPage } from "./RunInspectorPage";
+import { NetworkAccessPage } from "./NetworkAccessPage";
 
 const TABS: ReadonlyArray<{ to: string; icon: string; label: string }> = [
     // General first (Phase 14 bare-metal pivot) — host-service knobs
@@ -53,6 +56,7 @@ const TABS: ReadonlyArray<{ to: string; icon: string; label: string }> = [
         icon: "bi-chat-square-quote",
         label: "Personality",
     },
+    { to: "/settings/memory-assets", icon: "bi-memory", label: "Memory assets" },
     // My identities used to be its own tab; merged into the User
     // page (Phase 14, 2026-05-02). A redirect below keeps old
     // bookmarks pointed at `/settings/my-identities` working.
@@ -79,6 +83,8 @@ const TABS: ReadonlyArray<{ to: string; icon: string; label: string }> = [
         icon: "bi-graph-up",
         label: "Inference",
     },
+    { to: "/settings/network", icon: "bi-shield-lock", label: "Network access" },
+    { to: "/settings/runs", icon: "bi-diagram-3", label: "Runs" },
     { to: "/settings/runners", icon: "bi-fire", label: "Runners" },
     // Sidecars — companion containers the sidecar supervisor manages
     // (signal-cli, WhatsApp bridges, future OCR / ffmpeg helpers).
@@ -188,6 +194,7 @@ export function Settings() {
                         <Route path="general" element={<GeneralPage />} />
                         <Route path="user" element={<UserPage />} />
                         <Route path="personality" element={<PersonalityPage />} />
+                        <Route path="memory-assets" element={<MemoryAssetsPage />} />
                         {/* Legacy: my-identities is now a panel
                             inside the User page. */}
                         <Route
@@ -222,6 +229,8 @@ export function Settings() {
                         <Route path="mcp" element={<McpServersPage />} />
                         <Route path="backends" element={<BackendsPage />} />
                         <Route path="inference" element={<InferencePage />} />
+                        <Route path="network" element={<NetworkAccessPage />} />
+                        <Route path="runs" element={<RunInspectorPage />} />
                         <Route path="runners" element={<RunnersPage />} />
                         <Route path="sidecars" element={<SidecarsPage />} />
                         <Route path="contacts" element={<ContactsPage />} />

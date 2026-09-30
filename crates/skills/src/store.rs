@@ -565,6 +565,109 @@ impl SkillStore {
         Ok(VersionId(result))
     }
 
+    /// Restore the content of an earlier version as a new trial version.
+    ///
+    /// This preserves monotonic version history and keeps rollback from
+    /// silently reactivating unqualified skill behavior. The restored body
+    /// must pass the current held-out suite before it can be promoted again.
+    pub fn rollback_version(
+        &self,
+        name: &str,
+        target_version: u32,
+        authored_by: &str,
+        now_ms: i64,
+    ) -> Result<VersionId, SkillError> {
+        let created = self.db.transaction(|tx| {
+            let current: Option<(i64, i64, i64, String)> = tx
+                .query_row(
+                    "SELECT id, current_version_id, COALESCE((
+                         SELECT MAX(version) FROM state_skill_versions WHERE skill_id = state_skills.id
+                     ), 0), state
+                     FROM state_skills WHERE name = ?1",
+                    params![name],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            let Some((skill_id, current_version_id, max_version, state)) = current else {
+                return Err(DbError::Invariant(format!("skill not found: {name}")));
+            };
+            if state == "archived" {
+                return Err(DbError::Invariant(format!(
+                    "cannot roll back archived skill: {name}"
+                )));
+            }
+
+            let target: Option<(i64, String, String, String, String)> = tx
+                .query_row(
+                    "SELECT id, description, body_md, frontmatter_json, body_sha256
+                     FROM state_skill_versions WHERE skill_id = ?1 AND version = ?2",
+                    params![skill_id, target_version],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((target_id, description, body_md, frontmatter_json, body_sha256)) = target
+            else {
+                return Err(DbError::Invariant(format!(
+                    "skill {name} has no version {target_version}"
+                )));
+            };
+            if target_id == current_version_id {
+                return Err(DbError::Invariant(format!(
+                    "skill {name} is already at version {target_version}"
+                )));
+            }
+
+            tx.execute(
+                "INSERT INTO state_skill_versions
+                    (skill_id, version, description, body_md, frontmatter_json,
+                     body_sha256, authored_by, authored_at, promotion_notes, parent_version_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    skill_id,
+                    max_version + 1,
+                    description,
+                    body_md,
+                    frontmatter_json,
+                    body_sha256,
+                    authored_by,
+                    now_ms,
+                    format!("Rollback copy of version {target_version}"),
+                    current_version_id,
+                ],
+            )?;
+            let new_version_id = tx.last_insert_rowid();
+            tx.execute(
+                "INSERT INTO state_skill_resources (skill_version_id, path, blob_sha)
+                 SELECT ?1, path, blob_sha FROM state_skill_resources WHERE skill_version_id = ?2",
+                params![new_version_id, target_id],
+            )?;
+            tx.execute(
+                "UPDATE state_skills
+                 SET current_version_id = ?1, state = 'trial', updated_at = ?2
+                 WHERE id = ?3",
+                params![new_version_id, now_ms, skill_id],
+            )?;
+            Ok((new_version_id, max_version + 1))
+        })?;
+
+        tracing::info!(
+            event = "skill.rolled_back",
+            name = %name,
+            version = created.1,
+            target_version,
+            "skill restored as a new trial version"
+        );
+        Ok(VersionId(created.0))
+    }
+
     /// Promote a skill from `trial` → `stable`. Idempotent: promoting
     /// an already-stable skill is a no-op that returns Ok.
     pub fn promote(
@@ -590,6 +693,41 @@ impl SkillStore {
                     "cannot promote archived skill: {name}"
                 ))),
                 "trial" => {
+                    let current_version: (i64, String) = tx.query_row(
+                        "SELECT v.id, v.body_sha256 FROM state_skills s \
+                         JOIN state_skill_versions v ON v.id = s.current_version_id WHERE s.name = ?1",
+                        params![name],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    let suite_cases: Vec<(String, String, String)> = {
+                        let mut stmt = tx.prepare(
+                            "SELECT case_id, prompt, required_terms_json FROM state_skill_eval_cases \
+                             WHERE skill_name = ?1 ORDER BY case_id",
+                        )?;
+                        stmt.query_map(params![name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    if suite_cases.is_empty() {
+                        return Err(DbError::Invariant(format!(
+                            "skill {name} has no held-out evaluation suite"
+                        )));
+                    }
+                    let suite_bytes = serde_json::to_vec(&suite_cases)
+                        .map_err(|error| DbError::Serde(error.to_string()))?;
+                    let suite_hash = hex::encode(Sha256::digest(suite_bytes));
+                    let passing_eval: bool = tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM state_skill_eval_runs r \
+                         WHERE r.id = (SELECT MAX(id) FROM state_skill_eval_runs \
+                           WHERE skill_name = ?1 AND version_id = ?2 AND body_sha256 = ?3 AND suite_sha256 = ?4 AND model_id IS NOT NULL AND backend_fingerprint IS NOT NULL AND evaluator_version = ?5) \
+                           AND r.passed = 1)",
+                        params![name, current_version.0, current_version.1, suite_hash, crate::SKILL_EVAL_VERSION],
+                        |row| row.get(0),
+                    )?;
+                    if !passing_eval {
+                        return Err(DbError::Invariant(format!(
+                            "skill {name} must pass the current held-out suite for its current version before promotion"
+                        )));
+                    }
                     tx.execute(
                         "UPDATE state_skills SET state = 'stable', updated_at = ?1 WHERE name = ?2",
                         params![now_ms, name],
@@ -1747,12 +1885,70 @@ mod tests {
         let s = fresh_store();
         s.create(sample_new("a/p", "x"), Strictness::Strict, 1)
             .unwrap();
+        let skill = s.get("a/p").unwrap().unwrap();
+        let terms = "[\"answer\"]";
+        s.db.with_conn(|conn| {
+            conn.execute("INSERT INTO state_skill_eval_cases (skill_name, case_id, prompt, required_terms_json) VALUES ('a/p', 'heldout-1', 'task', ?1)", params![terms])?;
+            let suite = serde_json::to_vec(&vec![("heldout-1".to_owned(), "task".to_owned(), terms.to_owned())]).unwrap();
+            let suite_hash = hex::encode(Sha256::digest(suite));
+            conn.execute("INSERT INTO state_skill_eval_runs (skill_name, version_id, body_sha256, evaluator_version, passed, score, results_json, created_at, suite_sha256, model_id, backend_fingerprint) VALUES ('a/p', ?1, ?2, 'skill-eval-v1', 1, 1.0, '[]', 1, ?3, 'local-test-model', 'test-backend')", params![skill.current_version.id.0, skill.current_version.body_sha256, suite_hash])?;
+            Ok(())
+        }).unwrap();
         s.promote("a/p", Some("looks good".into()), 2).unwrap();
         let g = s.get("a/p").unwrap().unwrap();
         assert_eq!(g.state, SkillState::Stable);
         // Idempotent.
         s.promote("a/p", None, 3).unwrap();
         assert_eq!(s.get("a/p").unwrap().unwrap().state, SkillState::Stable);
+    }
+
+    #[test]
+    fn promotion_requires_a_current_version_pass_for_current_suite() {
+        let s = fresh_store();
+        s.create(sample_new("a/gated", "x"), Strictness::Strict, 1)
+            .unwrap();
+        let err = s.promote("a/gated", None, 2).unwrap_err();
+        assert!(
+            matches!(err, SkillError::Db(DbError::Invariant(message)) if message.contains("held-out"))
+        );
+    }
+
+    #[test]
+    fn changing_the_held_out_suite_invalidates_a_passing_run() {
+        let s = fresh_store();
+        s.create(sample_new("a/stale-suite", "x"), Strictness::Strict, 1)
+            .unwrap();
+        let skill = s.get("a/stale-suite").unwrap().unwrap();
+        let terms = "[\"answer\"]";
+        s.db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO state_skill_eval_cases (skill_name, case_id, prompt, required_terms_json) VALUES ('a/stale-suite', 'heldout-1', 'original task', ?1)",
+                    params![terms],
+                )?;
+                let suite = serde_json::to_vec(&vec![(
+                    "heldout-1".to_owned(),
+                    "original task".to_owned(),
+                    terms.to_owned(),
+                )])
+                .map_err(|error| DbError::Serde(error.to_string()))?;
+                let suite_hash = hex::encode(Sha256::digest(suite));
+                conn.execute(
+                    "INSERT INTO state_skill_eval_runs (skill_name, version_id, body_sha256, evaluator_version, passed, score, results_json, created_at, suite_sha256, model_id, backend_fingerprint) VALUES ('a/stale-suite', ?1, ?2, 'skill-eval-v1', 1, 1.0, '[]', 1, ?3, 'local-test-model', 'test-backend')",
+                    params![skill.current_version.id.0, skill.current_version.body_sha256, suite_hash],
+                )?;
+                conn.execute(
+                    "UPDATE state_skill_eval_cases SET prompt = 'changed task' WHERE skill_name = 'a/stale-suite' AND case_id = 'heldout-1'",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let err = s.promote("a/stale-suite", None, 2).unwrap_err();
+        assert!(
+            matches!(err, SkillError::Db(DbError::Invariant(message)) if message.contains("held-out"))
+        );
     }
 
     #[test]

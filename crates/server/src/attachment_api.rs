@@ -36,17 +36,16 @@ pub struct ServerAttachmentApi {
     db: Database,
     events: EventBus,
     caller_conversation_id: ConversationId,
-    /// Host-transport registry. When the caller's conversation is
-    /// bound to a transport (state_transport_bindings hit on the
-    /// conversation's principal_group) AND the registry has a
-    /// channel mapping for that channel, `send` ALSO ships the
-    /// attachment through the channel's plugin — not just the
-    /// web-UI download chip.
+    /// Host-transport registry used to resolve the caller's bound channel
+    /// before the attachment is staged for durable delivery.
     transports: Option<crate::transport_registry::HostTransportRegistry>,
-    /// Plugin host for dispatching `<channel>.send_with_attachments`
-    /// tool calls. Required alongside `transports` for the auto-
-    /// bridge fan-out.
+    /// Plugin host used to confirm the attachment-send tool still belongs
+    /// to the registered transport before its effect enters the outbox.
     plugin_host: Option<execlaw_plugin_host::PluginHost>,
+    /// Durable source turn and framework ordinal used to stage transport
+    /// attachments until the matching tool event pair commits.
+    effect_turn_seq: Option<i64>,
+    effect_ordinal: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
     /// Filesystem root where `create_artifact` writes its content-
     /// addressed blob files. `None` means `create_artifact` is
     /// disabled (errors with `ApiError::Storage`); set explicitly
@@ -65,13 +64,14 @@ impl ServerAttachmentApi {
             caller_conversation_id,
             transports: None,
             plugin_host: None,
+            effect_turn_seq: None,
+            effect_ordinal: None,
             artifacts_root: None,
         }
     }
 
-    /// Builder-style attach the host-transport registry + plugin
-    /// host so `send` fans out to the originating channel's
-    /// plugin tool.
+    /// Attach the host-transport registry used to resolve the
+    /// originating channel for durable attachment fan-out.
     pub fn with_transports(
         mut self,
         registry: Option<crate::transport_registry::HostTransportRegistry>,
@@ -82,6 +82,18 @@ impl ServerAttachmentApi {
 
     pub fn with_plugin_host(mut self, plugin_host: execlaw_plugin_host::PluginHost) -> Self {
         self.plugin_host = Some(plugin_host);
+        self
+    }
+
+    /// Bind attachment fan-out to the current model tool call so it is
+    /// released only after the tool-use/result pair is committed.
+    pub fn with_effect_context(
+        mut self,
+        turn_seq: Option<i64>,
+        ordinal: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    ) -> Self {
+        self.effect_turn_seq = turn_seq;
+        self.effect_ordinal = Some(ordinal);
         self
     }
 
@@ -383,12 +395,9 @@ impl AttachmentApi for ServerAttachmentApi {
 }
 
 impl ServerAttachmentApi {
-    /// If the caller's conversation has a binding for any
-    /// registered transport, fan the attachment out through it.
-    /// No-op for web-only conversations and when the registry is
-    /// empty. Errors log but don't propagate — the web-UI chip
-    /// already shipped, so a transport-side failure is a UX
-    /// degradation, not a correctness break.
+    /// If the caller's conversation has a binding for a registered transport,
+    /// enqueue the attachment through the durable relay. The relay remains
+    /// gated on the paired model tool event commit.
     async fn bridge_to_originating_transport(
         &self,
         attachment_id: &str,
@@ -478,32 +487,69 @@ impl ServerAttachmentApi {
 
         let body = caption.unwrap_or(filename);
         let tool_name = format!("{}.send_with_attachments", resolved.channel);
-        let args = serde_json::json!({
-            "to": resolved.foreign_id,
-            "text": body,
-            "attachments": [attachment_id],
-        });
-        if let Err(e) = plugin_host
-            .call_tool(&tool_name, args, &["*"], Some("Controller"))
-            .await
-        {
+        let Some(tool) = plugin_host.registry().tool(&tool_name) else {
             tracing::warn!(
                 target: "attachment_api::bridge",
                 conversation_id = %self.caller_conversation_id.as_str(),
                 channel = %resolved.channel,
-                recipient = %resolved.foreign_id,
-                error = %e,
-                "plugin tool fan-out failed; web-UI chip remains visible to the operator",
+                "transport has no registered send_with_attachments tool; web-UI chip remains available",
             );
-        } else {
-            tracing::info!(
+            return;
+        };
+        if tool.plugin_id != resolved.plugin_id {
+            tracing::warn!(
                 target: "attachment_api::bridge",
                 conversation_id = %self.caller_conversation_id.as_str(),
                 channel = %resolved.channel,
-                recipient = %resolved.foreign_id,
-                attachment_id = %attachment_id,
-                "fanned attachment out via originating transport",
+                "attachment send tool belongs to a different plugin than the registered transport",
             );
+            return;
+        }
+        let Some(turn_seq) = self.effect_turn_seq.filter(|seq| *seq > 0) else {
+            tracing::warn!(
+                target: "attachment_api::bridge",
+                conversation_id = %self.caller_conversation_id.as_str(),
+                attachment_id = %attachment_id,
+                "attachment transport effect has no durable source turn; fan-out was not dispatched",
+            );
+            return;
+        };
+        let Some(ordinal) = self.effect_ordinal.as_ref() else {
+            tracing::warn!(
+                target: "attachment_api::bridge",
+                conversation_id = %self.caller_conversation_id.as_str(),
+                attachment_id = %attachment_id,
+                "attachment transport effect has no tool-call ordinal; fan-out was not dispatched",
+            );
+            return;
+        };
+        let attachments = vec![attachment_id.to_owned()];
+        match crate::transport_outbox::stage_plugin_attachments(
+            &self.db,
+            &self.caller_conversation_id,
+            turn_seq,
+            ordinal.load(std::sync::atomic::Ordering::SeqCst),
+            &resolved.channel,
+            &resolved.foreign_id,
+            body,
+            &attachments,
+        ) {
+            Ok(outbox_id) => tracing::info!(
+                target: "attachment_api::bridge",
+                conversation_id = %self.caller_conversation_id.as_str(),
+                channel = %resolved.channel,
+                attachment_id = %attachment_id,
+                outbox_id,
+                "staged attachment transport effect until its tool event pair commits",
+            ),
+            Err(error) => tracing::warn!(
+                target: "attachment_api::bridge",
+                conversation_id = %self.caller_conversation_id.as_str(),
+                channel = %resolved.channel,
+                attachment_id = %attachment_id,
+                error = %error,
+                "attachment transport effect could not be durably staged",
+            ),
         }
     }
 }

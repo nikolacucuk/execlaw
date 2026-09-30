@@ -354,12 +354,37 @@ impl Default for EventBus {
 /// control messages).
 pub async fn stream_handler(
     State(state): State<AppState>,
+    user: crate::auth_extract::AuthedUser,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
+    if user.role != execlaw_core::users::UserRole::Controller {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"error":{"code":"controller_required","message":"Controller role required for the global event stream"}})),
+        )
+            .into_response();
+    }
+    let Some(session_id) = user.session_id.clone() else {
+        return crate::auth_extract::AuthRejection("authenticated session id is missing")
+            .into_response();
+    };
     let bus = state.events.clone();
     let voice = state.voice_sessions.clone();
     let runtime = state.voice_runtime.clone();
-    ws.on_upgrade(move |socket| handle_socket(socket, bus, voice, runtime))
+    let refresh_store = state.refresh_store.clone();
+    let principal_id = user.user_id;
+    ws.on_upgrade(move |socket| {
+        handle_socket(
+            socket,
+            bus,
+            voice,
+            runtime,
+            refresh_store,
+            principal_id,
+            session_id,
+        )
+    })
+    .into_response()
 }
 
 async fn handle_socket(
@@ -367,6 +392,9 @@ async fn handle_socket(
     bus: EventBus,
     voice: crate::voice_session::VoiceSessionRegistry,
     runtime: crate::voice_runtime::VoiceRuntime,
+    refresh_store: std::sync::Arc<crate::auth::RefreshStore>,
+    principal_id: String,
+    session_id: String,
 ) {
     let mut rx = bus.subscribe();
     debug!(
@@ -395,10 +423,22 @@ async fn handle_socket(
     // size is 0 or 1, but the structure supports a future
     // multi-source UX.
     let mut owned_sessions: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut session_recheck = tokio::time::interval(std::time::Duration::from_secs(10));
 
     loop {
         tokio::select! {
-            ev = rx.recv() => match ev {
+            _ = session_recheck.tick() => {
+                if !socket_session_is_active(&refresh_store, &principal_id, &session_id) {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+            }
+            ev = rx.recv() => {
+                if !socket_session_is_active(&refresh_store, &principal_id, &session_id) {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+                match ev {
                 Ok(ui_ev) => {
                     let payload = match serde_json::to_string(&ui_ev) {
                         Ok(s) => s,
@@ -416,8 +456,14 @@ async fn handle_socket(
                     // keep going; client should re-hydrate from the event log
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
-            },
-            incoming = socket.recv() => match incoming {
+                }
+            }
+            incoming = socket.recv() => {
+                if !socket_session_is_active(&refresh_store, &principal_id, &session_id) {
+                    let _ = socket.send(Message::Close(None)).await;
+                    break;
+                }
+                match incoming {
                 Some(Ok(Message::Close(_))) | None => break,
                 Some(Ok(Message::Binary(bytes))) => {
                     // Phase 13.B — parse the framing header, then
@@ -465,6 +511,7 @@ async fn handle_socket(
                     warn!("ws recv error: {e}");
                     break;
                 }
+                }
             }
         }
     }
@@ -484,6 +531,20 @@ async fn handle_socket(
         }
     }
     debug!("ws stream disconnected");
+}
+
+fn socket_session_is_active(
+    refresh_store: &crate::auth::RefreshStore,
+    principal_id: &str,
+    session_id: &str,
+) -> bool {
+    match refresh_store.session_is_active(principal_id, session_id) {
+        Ok(active) => active,
+        Err(error) => {
+            warn!(error = %error, "could not verify WebSocket session; closing stream");
+            false
+        }
+    }
 }
 
 /// Phase 13.C/D — parse + dispatch a voice-control text message.
@@ -533,7 +594,7 @@ pub async fn handle_voice_control(
             tokio::spawn(async move {
                 let _guard = guard;
                 runtime_for_finalize
-                    .finalize_utterance(&session_id, |transcript| async move {
+                    .finalize_utterance_cancellable(&session_id, |transcript, _cancel| async move {
                         // Placeholder: echo the transcript so the
                         // SPA can verify the round-trip. Phase 13.D
                         // wires this to the runner / chat path.
@@ -586,6 +647,103 @@ impl Drop for VoiceStopGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revoked_session_loses_websocket_authority_at_the_next_recheck() {
+        let state = crate::routes::test_app_state();
+        let user_id = "controller-ws-revoke";
+        let session_id = "controller-ws-session";
+        state
+            .refresh_store
+            .issue(user_id, session_id, 3600)
+            .unwrap();
+        assert!(socket_session_is_active(
+            &state.refresh_store,
+            user_id,
+            session_id
+        ));
+
+        state.refresh_store.revoke_all_for_user(user_id).unwrap();
+        assert!(!socket_session_is_active(
+            &state.refresh_store,
+            user_id,
+            session_id
+        ));
+    }
+
+    #[tokio::test]
+    async fn active_websocket_closes_after_logout_all_revokes_its_session() {
+        use axum::http::header;
+        use execlaw_core::users::{UserRole, UserRow, UserStore};
+        use futures::StreamExt;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+
+        let state = crate::routes::test_app_state();
+        let user_id = "controller-live-ws";
+        let session_id = "controller-live-ws-session";
+        UserStore::new(&state.db)
+            .insert(&UserRow {
+                user_id: user_id.into(),
+                username: "live-ws".into(),
+                display_name: "Live WS".into(),
+                email: None,
+                password_hash: "unused-test-hash".into(),
+                role: UserRole::Controller,
+                created_at: chrono::Utc::now().timestamp(),
+                last_login_at: None,
+            })
+            .unwrap();
+        state
+            .refresh_store
+            .issue(user_id, session_id, 3600)
+            .unwrap();
+        let access = state
+            .signer
+            .issue_access_token(user_id, session_id, 3600)
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = crate::routes::build_router(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let mut request = format!("ws://{address}/api/stream")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            header::AUTHORIZATION,
+            format!("Bearer {access}").parse().unwrap(),
+        );
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        let initial = tokio::time::timeout(std::time::Duration::from_secs(3), socket.next())
+            .await
+            .expect("the authenticated event stream sends an initial event")
+            .expect("websocket remains open")
+            .expect("initial event is valid");
+        assert!(matches!(
+            initial,
+            tokio_tungstenite::tungstenite::Message::Text(_)
+        ));
+
+        state.refresh_store.revoke_all_for_user(user_id).unwrap();
+        let close = tokio::time::timeout(std::time::Duration::from_secs(12), async {
+            loop {
+                match socket.next().await {
+                    Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | None => {
+                        break true;
+                    }
+                    Some(Err(_)) => break true,
+                    Some(Ok(_)) => {}
+                }
+            }
+        })
+        .await
+        .expect("revoked websocket session is checked within its 10 second interval");
+        assert!(close, "revoked WebSocket should close");
+        server.abort();
+    }
 
     #[tokio::test]
     async fn bus_publishes_to_subscribers() {

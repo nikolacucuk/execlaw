@@ -20,6 +20,9 @@ use execlaw_server::{AppState, EventBus, JwtSigner, RefreshStore, ServerConfig};
 use std::io::{Cursor, Write};
 use std::sync::Arc;
 use tower::ServiceExt;
+
+#[path = "support/auth.rs"]
+mod test_auth;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
@@ -150,7 +153,7 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
         inference_metrics: execlaw_server::inference_metrics::InferenceMetrics::new(),
         login_limiter: execlaw_server::auth_rate_limit::LoginRateLimiter::new(),
     };
-    (execlaw_server::routes::build_router(state.clone()), state)
+    (test_auth::authenticated_router(state.clone()), state)
 }
 
 async fn post_zip(app: axum::Router, bytes: Vec<u8>) -> (StatusCode, serde_json::Value) {
@@ -303,9 +306,9 @@ async fn post_zip_with_query(
     query: &str,
 ) -> (StatusCode, serde_json::Value) {
     let uri = if query.is_empty() {
-        "/api/admin/plugins/install".to_string()
+        "/api/admin/plugins/install?allow_unsigned_local_development=true".to_string()
     } else {
-        format!("/api/admin/plugins/install?{query}")
+        format!("/api/admin/plugins/install?allow_unsigned_local_development=true&{query}")
     };
     let req = Request::builder()
         .method(Method::POST)

@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "effects_enabled": false,
+  "provenance": {
+    "flagged_range_id": 1,
+    "source_conversation_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "source_fingerprint_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "label": "synthetic-offline-smoke",
+    "tags": ["synthetic", "offline"],
+    "from_seq": 1,
+    "to_seq": 1,
+    "flagged_at": 1,
+    "exported_at": 1,
+    "incident_ref": "SYNTHETIC-INC-1",
+    "release_ref": "v0.0.0"
+  },
+  "redaction": {
+    "policy_version": "redaction-v1",
+    "redaction_map_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "replacements_applied": 0,
+    "synthetic_ids": []
+  },
+  "events": [
+    {
+      "seq": 1,
+      "kind": "user_msg",
+      "actor": "controller",
+      "committed_at": 1,
+      "payload": {"text": "synthetic task"}
+    }
+  ],
+  "expected_transitions": [
+    {"seq": 1, "transition": "user_msg"}
+  ],
+  "mock_tool_responses": []
+}

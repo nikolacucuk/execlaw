@@ -40,6 +40,7 @@ use execlaw_core::research::{
     ResearchSource, SubQueryState,
 };
 use execlaw_core::tool::{ApiError, SubagentApi, SubagentRequest, WebFetchApi, WebSearchApi};
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use thiserror::Error;
@@ -284,19 +285,21 @@ async fn gather_one(
                     title: Some("inline URL fetch".into()),
                     fetched_ok: false,
                     error: Some("max_pages_total cap reached".into()),
+                    ..ResearchSource::default()
                 });
                 break;
             }
             match deps.fetch.get(&url).await {
                 Ok(resp) => {
-                    let body_for_readability = resp.body.clone();
-                    bodies.push(truncate_body(&body_for_readability, BODY_TRUNCATE_PER_URL));
-                    sources.push(ResearchSource {
-                        url: resp.final_url,
-                        title: Some("inline URL fetch".into()),
-                        fetched_ok: true,
-                        error: None,
-                    });
+                    let body_for_readability = truncate_body(&resp.body, BODY_TRUNCATE_PER_URL);
+                    bodies.push(body_for_readability.clone());
+                    sources.push(source_evidence(
+                        resp.final_url,
+                        Some("inline URL fetch".into()),
+                        &resp.body,
+                        &body_for_readability,
+                        resp.truncated,
+                    ));
                 }
                 Err(e) => {
                     pages_consumed.fetch_sub(1, Ordering::Relaxed);
@@ -305,6 +308,7 @@ async fn gather_one(
                         title: Some("inline URL fetch".into()),
                         fetched_ok: false,
                         error: Some(api_err_msg(&e)),
+                        ..ResearchSource::default()
                     });
                 }
             }
@@ -336,6 +340,7 @@ async fn gather_one(
                         title: Some(hit.title.clone()),
                         fetched_ok: false,
                         error: Some("max_pages_total cap reached".into()),
+                        ..ResearchSource::default()
                     });
                     break;
                 }
@@ -355,13 +360,15 @@ async fn gather_one(
                             text: truncate_body(&resp.body, BODY_TRUNCATE_PER_URL),
                             reason: "extraction task panicked".into(),
                         });
-                        bodies.push(extracted.into_text());
-                        sources.push(ResearchSource {
-                            url: resp.final_url,
-                            title: Some(hit.title.clone()),
-                            fetched_ok: true,
-                            error: None,
-                        });
+                        let extracted_text = extracted.into_text();
+                        bodies.push(extracted_text.clone());
+                        sources.push(source_evidence(
+                            resp.final_url,
+                            Some(hit.title.clone()),
+                            &resp.body,
+                            &extracted_text,
+                            resp.truncated,
+                        ));
                     }
                     Err(e) => {
                         pages_consumed.fetch_sub(1, Ordering::Relaxed);
@@ -370,6 +377,7 @@ async fn gather_one(
                             title: Some(hit.title.clone()),
                             fetched_ok: false,
                             error: Some(api_err_msg(&e)),
+                            ..ResearchSource::default()
                         });
                     }
                 }
@@ -400,19 +408,21 @@ async fn gather_one(
                         title: Some("fallback fetch".into()),
                         fetched_ok: false,
                         error: Some("max_pages_total cap reached".into()),
+                        ..ResearchSource::default()
                     });
                     break;
                 }
                 match deps.fetch.get(&url).await {
                     Ok(resp) => {
-                        let body_for_readability = resp.body.clone();
-                        bodies.push(truncate_body(&body_for_readability, BODY_TRUNCATE_PER_URL));
-                        sources.push(ResearchSource {
-                            url: resp.final_url,
-                            title: Some("fallback fetch".into()),
-                            fetched_ok: true,
-                            error: None,
-                        });
+                        let body_for_readability = truncate_body(&resp.body, BODY_TRUNCATE_PER_URL);
+                        bodies.push(body_for_readability.clone());
+                        sources.push(source_evidence(
+                            resp.final_url,
+                            Some("fallback fetch".into()),
+                            &resp.body,
+                            &body_for_readability,
+                            resp.truncated,
+                        ));
                     }
                     Err(e) => {
                         pages_consumed.fetch_sub(1, Ordering::Relaxed);
@@ -421,6 +431,7 @@ async fn gather_one(
                             title: Some("fallback fetch".into()),
                             fetched_ok: false,
                             error: Some(api_err_msg(&e)),
+                            ..ResearchSource::default()
                         });
                     }
                 }
@@ -521,6 +532,7 @@ async fn gather_one(
         task,
         context: Some(context_blob),
         max_tokens: Some(SUBAGENT_MAX_TOKENS),
+        dependencies: Vec::new(),
     };
     match subagent.delegate(&req).await {
         Ok(resp) => {
@@ -594,9 +606,44 @@ fn wikipedia_search_term(query: &str) -> Option<String> {
 }
 
 const BODY_TRUNCATE_PER_URL: usize = 4_000;
+const SOURCE_SNAPSHOT_MAX_CHARS: usize = 16_384;
 // The deployed Ollama context is 98,304 tokens. Reserve 32,768 for the
 // system/task prompts, fetched pages, and tokenizer variance.
 const SUBAGENT_MAX_TOKENS: u32 = 65_536;
+
+fn source_evidence(
+    url: String,
+    title: Option<String>,
+    response_body: &str,
+    extracted_text: &str,
+    upstream_truncated: bool,
+) -> ResearchSource {
+    let normalized_url = url::Url::parse(&url)
+        .map(|mut parsed| {
+            parsed.set_fragment(None);
+            parsed.to_string()
+        })
+        .unwrap_or_else(|_| url.clone());
+    let source_id = format!(
+        "src-{}",
+        hex::encode(Sha256::digest(normalized_url.as_bytes()))
+    );
+    let content_sha256 = hex::encode(Sha256::digest(response_body.as_bytes()));
+    let snapshot_truncated = upstream_truncated
+        || response_body.chars().count() > SOURCE_SNAPSHOT_MAX_CHARS
+        || extracted_text.chars().count() >= BODY_TRUNCATE_PER_URL;
+    ResearchSource {
+        url,
+        title,
+        fetched_ok: true,
+        error: None,
+        source_id: Some(source_id),
+        retrieved_at: Some(chrono::Utc::now().timestamp()),
+        content_sha256: Some(content_sha256),
+        snapshot_text: Some(truncate_body(extracted_text, SOURCE_SNAPSHOT_MAX_CHARS)),
+        snapshot_truncated,
+    }
+}
 
 fn truncate_body(body: &str, max: usize) -> String {
     if body.chars().count() <= max {
@@ -883,6 +930,7 @@ mod tests {
                 text: format!("extracted: {}", req.task.lines().last().unwrap_or("")),
                 task_id: "stub".into(),
                 tokens_used: Some(self.tokens_per_call),
+                artifact_id: None,
             })
         }
     }
@@ -896,6 +944,7 @@ mod tests {
                 text: String::new(),
                 task_id: "stub-empty".into(),
                 tokens_used: Some(SUBAGENT_MAX_TOKENS),
+                artifact_id: None,
             })
         }
     }

@@ -15,36 +15,12 @@ const DIST = path.resolve("dist");
 const BUDGETS_BYTES = {
     // User-facing payload only — `.map` files are excluded because
     // sourcemaps don't ship as part of the cold-load path; they're
-    // dev-tool artifacts shipped alongside for debugging. Currently
-    // ~2.42 MB: ~1.16 MB JS (see js budget below) + ~360 KB CSS +
-    // ~310 KB bootstrap-icons fonts + ~600 KB IBM Plex Sans variants
-    // (every weight × every subset × woff/woff2). Trim @fontsource
-    // subsets to bring this down — that's the cheapest win once we
-    // cross 2.85 MB.
+    // dev-tool artifacts shipped alongside for debugging. The current
+    // build measures 2.61 MB total (1.33 MB JS, 374.7 KB CSS, and fonts).
     total: 2850 * 1024,
-    // JS only (the cold-load critical path). Currently ~1.16 MB
-    // across the main app chunk + vendor splits + lazy locale
-    // bundles. Tighten via tree-shaking / route-level code-splitting
-    // before raising this further. History of raises:
-    //   * 900 KB → 1100 KB to absorb the Automations milestone
-    //     (M4c ReactFlow canvas + M5 InferencePage observability +
-    //     agent-drafted suggestions surface).
-    //   * 1100 KB → 1250 KB to absorb (a) the i18n locale bundles
-    //     (7 lazy JSON chunks × ~8 KB ≈ 56 KB) and (b) the vendor
-    //     split introduced in vite.config.ts — splitting the
-    //     single 1.14 MB main bundle into react/bootstrap/xyflow/
-    //     gsap/markdown vendor chunks adds ~30 KB of rolldown
-    //     bookkeeping but eliminates the build's chunk-size
-    //     warning AND gives slow-link operators incremental
-    //     updates (code changes don't bust the vendor cache).
-    //     Net-neutral on first-load bytes — same modules, sliced
-    //     into more cacheable units. Route-level
-    //     `React.lazy(() => import("./routes/Automations"))` is
-    //     the next lever once we want to actually shrink this.
-    // Keep a small headroom buffer for deterministic compiler/runtime
-    // metadata changes without allowing a meaningful bundle balloon.
-    // Router 7.18.4 and Vite 8.3 security updates add about 1.5 KB.
-    js: 1254 * 1024,
+    // JS only. Current output is 1.33 MB; the operator selected a 2 MB
+    // regression ceiling, not a hard release-size limit.
+    js: 2 * 1024 * 1024,
     // CSS only. Bootstrap + bootstrap-icons together land near 300 KB
     // out-of-the-box; the budget is cushioned to ~400 KB so we notice
     // when we've added ANOTHER 100 KB of CSS — at that point we should

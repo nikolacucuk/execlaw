@@ -2,8 +2,8 @@
 //!
 //! Long conversations accumulate more tokens than a model's context window
 //! can hold. This crate provides a pure, model-agnostic policy layer that
-//! trims a `Vec<ChatMessage>` to fit within a budget before the first
-//! inference call of each turn.
+//! trims a `Vec<ChatMessage>` or compiles a complete `ChatRequest` before
+//! every model round.
 //!
 //! # Policies
 //!
@@ -31,7 +31,125 @@
 
 #![forbid(unsafe_code)]
 
-use execlaw_inference_api::{ChatMessage, Role};
+use execlaw_inference_api::{ChatMessage, ChatRequest, Role};
+
+/// Fit a complete serialized request to its qualified model context budget.
+///
+/// This includes model/request metadata, messages, tools and schemas, images,
+/// tool arguments, summaries, and tool results. Trimming removes oldest whole
+/// user turns and preserves the newest user turn plus all output reserve.
+pub fn fit_chat_request(
+    request: &mut ChatRequest,
+    context_tokens: u32,
+    output_reserve: u32,
+    bytes_per_token_milli: u32,
+) -> Result<usize, String> {
+    let budget = (context_tokens as usize).saturating_sub(output_reserve as usize);
+    let estimate = |request: &ChatRequest| -> Result<usize, String> {
+        serde_json::to_vec(request)
+            .map(|bytes| estimate_tokens_from_bytes(bytes.len(), bytes_per_token_milli))
+            .map_err(|error| error.to_string())
+    };
+    while estimate(request)? > budget && request.messages.len() > 2 {
+        let is_compaction_receipt = |message: &ChatMessage| {
+            message.role == Role::User
+                && message.content.as_ref().is_some_and(|content| {
+                    content.as_text().starts_with("Untrusted history summary ")
+                })
+        };
+        let Some(first_user) = request
+            .messages
+            .iter()
+            .position(|message| message.role == Role::User && !is_compaction_receipt(message))
+        else {
+            break;
+        };
+        let Some(next_user) = request
+            .messages
+            .iter()
+            .enumerate()
+            .skip(first_user + 1)
+            .find(|(_, message)| message.role == Role::User && !is_compaction_receipt(message))
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        request.messages.drain(first_user..next_user);
+    }
+    let final_estimate = estimate(request)?;
+    if final_estimate > budget {
+        return Err(format!(
+            "mandatory serialized model request exceeds context budget: estimated {final_estimate}, budget {budget}"
+        ));
+    }
+    Ok(final_estimate)
+}
+
+/// Compile one complete model request against a configured context ceiling.
+/// Serialized request size includes message metadata, images, schemas,
+/// arguments, and tool results; three bytes per token is the conservative
+/// mixed-content fallback.
+pub fn fit_model_round(
+    messages: &mut Vec<ChatMessage>,
+    tools: &[execlaw_inference_api::ToolDeclaration],
+    context_tokens: u32,
+    output_reserve: u32,
+    bytes_per_token_milli: u32,
+) -> Result<usize, String> {
+    let budget = (context_tokens as usize).saturating_sub(output_reserve as usize);
+    let estimate = |messages: &[ChatMessage]| -> Result<usize, String> {
+        let bytes = serde_json::to_vec(messages)
+            .map_err(|error| error.to_string())?
+            .len()
+            .saturating_add(
+                serde_json::to_vec(tools)
+                    .map_err(|error| error.to_string())?
+                    .len(),
+            );
+        Ok(estimate_tokens_from_bytes(bytes, bytes_per_token_milli))
+    };
+    while estimate(messages)? > budget && messages.len() > 2 {
+        let is_compaction_receipt = |message: &ChatMessage| {
+            message.role == Role::User
+                && message.content.as_ref().is_some_and(|content| {
+                    content.as_text().starts_with("Untrusted history summary ")
+                })
+        };
+        let Some(first_user) = messages
+            .iter()
+            .position(|message| message.role == Role::User && !is_compaction_receipt(message))
+        else {
+            break;
+        };
+        let Some(next_user) = messages
+            .iter()
+            .enumerate()
+            .skip(first_user + 1)
+            .find(|(_, message)| message.role == Role::User && !is_compaction_receipt(message))
+            .map(|(index, _)| index)
+        else {
+            break;
+        };
+        messages.drain(first_user..next_user);
+    }
+    let final_estimate = estimate(messages)?;
+    if final_estimate > budget {
+        return Err(format!(
+            "mandatory model request block exceeds context budget: estimated {final_estimate}, budget {budget}"
+        ));
+    }
+    Ok(final_estimate)
+}
+
+fn estimate_tokens_from_bytes(bytes: usize, bytes_per_token_milli: u32) -> usize {
+    let ratio = bytes_per_token_milli.clamp(1_000, 3_000) as u128;
+    (bytes as u128)
+        .saturating_mul(1_000)
+        .saturating_add(ratio - 1)
+        .checked_div(ratio)
+        .unwrap_or(u128::MAX)
+        .min(usize::MAX as u128) as usize
+}
 
 // -----------------------------------------------------------------------
 // Policy definition

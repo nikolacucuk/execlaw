@@ -1,7 +1,7 @@
 [plugin]
 id = "python-sandbox"
 name = "Python Sandbox"
-version = "0.1.0"
+version = "0.1.1"
 description = """Persistent per-conversation Python execution sandbox. One \
 container hosting a Jupyter Kernel Gateway with kernel-per-conversation. \
 Pre-installed: pandas, polars, duckdb, pyarrow, numpy, openpyxl, ipython, \
@@ -140,3 +140,4 @@ source = "main.rhai"
 [[ui_panels]]
 mount = "admin/plugins/python-sandbox"
 entry = "ui/panel.js"
+rpc_capabilities = ["own_plugin_settings", "own_sidecar_status"]

@@ -10,6 +10,8 @@ import { ErrorBanner } from "../components/ErrorBanner";
 export function AuditPage() {
     const auth = useAuth();
     const getToken = auth.getAccessToken;
+    const requestedId = Number(new URLSearchParams(window.location.search).get("entry"));
+    const entryId = Number.isSafeInteger(requestedId) && requestedId > 0 ? requestedId : undefined;
 
     const [entries, setEntries] = useState<AuditEntry[] | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -18,7 +20,7 @@ export function AuditPage() {
         let cancelled = false;
         (async () => {
             try {
-                const r = await getAuditEntries(undefined, 200, getToken);
+                const r = await getAuditEntries(undefined, 200, getToken, entryId);
                 if (!cancelled) setEntries(r.entries);
             } catch (e) {
                 if (!cancelled)
@@ -28,7 +30,7 @@ export function AuditPage() {
         return () => {
             cancelled = true;
         };
-    }, [getToken]);
+    }, [getToken, entryId]);
 
     return (
         <div data-testid="settings-audit">
@@ -48,7 +50,7 @@ export function AuditPage() {
                     </div>
                 ) : (
                     entries.map((e) => (
-                        <details className="execlaw-card__row" key={e.id}>
+                        <details className="execlaw-card__row" key={e.id} open={entryId === e.id ? true : undefined}>
                             <summary>
                                 <strong>{e.actor}</strong> ·{" "}
                                 <code>{e.table_name}</code>:{" "}

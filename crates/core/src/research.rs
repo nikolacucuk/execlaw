@@ -189,7 +189,7 @@ impl SubQueryState {
 
 /// One source the gather worker pulled. The Card renderer surfaces
 /// these as a clickable link list under each sub-query.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ResearchSource {
     pub url: String,
     pub title: Option<String>,
@@ -199,6 +199,21 @@ pub struct ResearchSource {
     pub fetched_ok: bool,
     #[serde(default)]
     pub error: Option<String>,
+    /// Stable identifier derived from the normalized source URL.
+    #[serde(default)]
+    pub source_id: Option<String>,
+    /// Unix time when this response was fetched locally.
+    #[serde(default)]
+    pub retrieved_at: Option<i64>,
+    /// Hash of the fetched response body as retained by the local fetcher.
+    #[serde(default)]
+    pub content_sha256: Option<String>,
+    /// Bounded, locally retained text excerpt used as source evidence.
+    #[serde(default)]
+    pub snapshot_text: Option<String>,
+    /// True if either the upstream body or retained text excerpt was truncated.
+    #[serde(default)]
+    pub snapshot_truncated: bool,
 }
 
 /// One gather worker's output, persisted into
@@ -233,6 +248,31 @@ pub struct RecoveredJobRef {
     pub job_id: ResearchJobId,
     pub conversation_id: ConversationId,
     pub card_id: Option<String>,
+}
+
+/// Terminal research row awaiting retention cleanup of its derived files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchPurgeCandidate {
+    pub job_id: ResearchJobId,
+    pub workspace_path: Option<String>,
+    pub attachment_id: Option<String>,
+}
+
+/// Durable research-job privacy deletion request. Completed records remain as
+/// tombstones so snapshot restoration cannot make the resource visible again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResearchDeletionJob {
+    pub deletion_id: String,
+    pub resource_id: ResearchJobId,
+    pub requested_by: String,
+    pub request_source: String,
+    pub payload_json: String,
+    pub status: String,
+    pub attempt_count: u32,
+    pub last_error: Option<String>,
+    pub requested_at: i64,
+    pub updated_at: i64,
+    pub completed_at: Option<i64>,
 }
 
 /// Full row as stored in `state_research_jobs`. The runner +
@@ -374,8 +414,19 @@ impl<'db> ResearchJobStore<'db> {
         let q = trimmed.to_owned();
         let trust = caller_trust.to_owned();
         let overrides = overrides_json;
-        self.db.with_conn(|c| {
-            c.execute(
+        self.db.transaction(|tx| {
+            let tombstoned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_privacy_deletion_jobs \
+                 WHERE resource_kind = 'research_job' AND resource_id = ?1)",
+                params![id_owned],
+                |row| row.get(0),
+            )?;
+            if tombstoned {
+                return Err(DbError::Invariant(
+                    "research job id is protected by a privacy tombstone".into(),
+                ));
+            }
+            tx.execute(
                 "INSERT INTO state_research_jobs \
                    (id, conversation_id, query, status, caller_trust, \
                     overrides_json, created_at, updated_at) \
@@ -397,7 +448,10 @@ impl<'db> ResearchJobStore<'db> {
                             card_id, plan_json, notes_json, workspace_path, \
                             attachment_id, error, overrides_json, \
                             created_at, updated_at, started_at, finished_at \
-                     FROM state_research_jobs WHERE id = ?1",
+                     FROM state_research_jobs WHERE id = ?1 \
+                       AND NOT EXISTS (SELECT 1 FROM state_privacy_deletion_jobs d \
+                         WHERE d.resource_kind = 'research_job' \
+                           AND d.resource_id = state_research_jobs.id)",
                     params![id_owned],
                     row_to_research_row,
                 )
@@ -427,6 +481,9 @@ impl<'db> ResearchJobStore<'db> {
                 .query_row(
                     "SELECT id FROM state_research_jobs \
                      WHERE status = 'pending' \
+                       AND NOT EXISTS (SELECT 1 FROM state_privacy_deletion_jobs d \
+                         WHERE d.resource_kind = 'research_job' \
+                           AND d.resource_id = state_research_jobs.id) \
                      ORDER BY created_at ASC LIMIT 1",
                     [],
                     |r| r.get(0),
@@ -817,6 +874,9 @@ impl<'db> ResearchJobStore<'db> {
                         attachment_id, error, overrides_json, \
                         created_at, updated_at, started_at, finished_at \
                  FROM state_research_jobs WHERE conversation_id = ?1 \
+                   AND NOT EXISTS (SELECT 1 FROM state_privacy_deletion_jobs d \
+                     WHERE d.resource_kind = 'research_job' \
+                       AND d.resource_id = state_research_jobs.id) \
                  ORDER BY created_at DESC",
             )?;
             let rows = stmt
@@ -836,7 +896,11 @@ impl<'db> ResearchJobStore<'db> {
                         card_id, plan_json, notes_json, workspace_path, \
                         attachment_id, error, overrides_json, \
                         created_at, updated_at, started_at, finished_at \
-                 FROM state_research_jobs ORDER BY created_at DESC",
+                 FROM state_research_jobs \
+                 WHERE NOT EXISTS (SELECT 1 FROM state_privacy_deletion_jobs d \
+                   WHERE d.resource_kind = 'research_job' \
+                     AND d.resource_id = state_research_jobs.id) \
+                 ORDER BY created_at DESC",
             )?;
             let rows = stmt
                 .query_map([], row_to_research_row)?
@@ -878,55 +942,216 @@ impl<'db> ResearchJobStore<'db> {
         Ok(n > 0)
     }
 
-    /// Atomically delete every terminal row whose `finished_at` is
-    /// strictly less than `cutoff`, returning each deleted row's
-    /// `(id, workspace_path)` so the caller can purge the on-disk
-    /// dirs. Active rows (Pending / Planning / Planned / Gathering /
-    /// Synthesizing) and terminal rows with `finished_at >= cutoff`
-    /// are preserved.
-    ///
-    /// The DB delete and the filesystem cleanup are decoupled
-    /// intentionally: SQL atomicity guarantees the DB side; the
-    /// caller does best-effort filesystem cleanup outside the
-    /// transaction so a slow `remove_dir_all` can't keep the SQLite
-    /// write-lock held.
-    pub fn purge_terminal_older_than(
+    /// Select terminal rows past retention so the caller can enqueue their
+    /// deletion atomically with payload scrubbing.
+    pub fn terminal_older_than(
         &self,
         cutoff: i64,
-    ) -> Result<Vec<(ResearchJobId, Option<String>)>, ResearchError> {
-        // Two-phase: SELECT then DELETE in one transaction so a
-        // concurrent insert can't change the working set between
-        // queries. The window of "finished_at < cutoff AND status IN
-        // (terminal)" is what defines the work; we re-key it to ids
-        // for the DELETE so a row that flipped to terminal during
-        // the SELECT (impossible today; defensive) doesn't get
-        // accidentally swept.
-        let rows = self.db.with_conn(|c| {
-            let tx = c.unchecked_transaction()?;
-            let mut stmt = tx.prepare(
-                "SELECT id, workspace_path FROM state_research_jobs \
-                 WHERE finished_at IS NOT NULL \
-                   AND finished_at < ?1 \
+    ) -> Result<Vec<ResearchPurgeCandidate>, ResearchError> {
+        let rows = self.db.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id, workspace_path, attachment_id FROM state_research_jobs \
+                 WHERE finished_at IS NOT NULL AND finished_at < ?1 \
                    AND status IN ('complete', 'failed', 'cancelled')",
             )?;
-            let collected: Vec<(String, Option<String>)> = stmt
-                .query_map(params![cutoff], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            statement
+                .query_map(params![cutoff], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
                 })?
-                .collect::<Result<Vec<_>, _>>()?;
-            drop(stmt);
-            for (id, _path) in &collected {
-                tx.execute("DELETE FROM state_research_jobs WHERE id = ?1", params![id])?;
-            }
-            tx.commit()?;
-            Ok(collected)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)
         })?;
         Ok(rows
             .into_iter()
-            .map(|(id, path)| (ResearchJobId::from(id.as_str()), path))
+            .map(
+                |(id, workspace_path, attachment_id)| ResearchPurgeCandidate {
+                    job_id: ResearchJobId::from(id.as_str()),
+                    workspace_path,
+                    attachment_id,
+                },
+            )
             .collect())
     }
+    /// Queue an idempotent research deletion and hide its payload immediately.
+    pub fn request_deletion(
+        &self,
+        job_id: &ResearchJobId,
+        requested_by: &str,
+        request_source: &str,
+        now: i64,
+    ) -> Result<String, ResearchError> {
+        if requested_by.trim().is_empty()
+            || requested_by.len() > 128
+            || !matches!(request_source, "controller" | "retention")
+        {
+            return Err(ResearchError::Invalid(
+                "invalid research deletion actor or source".into(),
+            ));
+        }
+        let job_id_text = job_id.as_str().to_owned();
+        let actor = requested_by.to_owned();
+        let source = request_source.to_owned();
+        let candidate_id = uuid::Uuid::new_v4().to_string();
+        self.db
+            .transaction(|tx| {
+                let existing: Option<String> = tx
+                    .query_row(
+                        "SELECT deletion_id FROM state_privacy_deletion_jobs \
+                         WHERE resource_kind = 'research_job' AND resource_id = ?1",
+                        params![job_id_text],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(deletion_id) = existing {
+                    return Ok(deletion_id);
+                }
+                let resource: Option<(String, Option<String>, Option<String>)> = tx
+                    .query_row(
+                        "SELECT status, workspace_path, attachment_id \
+                         FROM state_research_jobs WHERE id = ?1",
+                        params![job_id_text],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?;
+                let Some((status, workspace_path, attachment_id)) = resource else {
+                    return Err(DbError::Invariant(format!(
+                        "research job not found: {job_id_text}"
+                    )));
+                };
+                if !matches!(status.as_str(), "complete" | "failed" | "cancelled") {
+                    return Err(DbError::Invariant(
+                        "active research jobs cannot be deleted".into(),
+                    ));
+                }
+                let payload = serde_json::to_string(&ResearchPurgeCandidate {
+                    job_id: job_id.clone(),
+                    workspace_path,
+                    attachment_id,
+                })
+                .map_err(|error| DbError::Invariant(format!("encode deletion payload: {error}")))?;
+                tx.execute(
+                    "INSERT INTO state_privacy_deletion_jobs \
+                     (deletion_id, resource_kind, resource_id, requested_by, request_source, \
+                      payload_json, status, requested_at, updated_at) \
+                     VALUES (?1, 'research_job', ?2, ?3, ?4, ?5, 'pending', ?6, ?6)",
+                    params![candidate_id, job_id_text, actor, source, payload, now],
+                )?;
+                tx.execute(
+                    "UPDATE state_research_jobs SET query = '', plan_json = NULL, \
+                     notes_json = NULL, error = NULL WHERE id = ?1 \
+                     AND status IN ('complete', 'failed', 'cancelled')",
+                    params![job_id_text],
+                )?;
+                Ok(candidate_id)
+            })
+            .map_err(|error| match error {
+                DbError::Invariant(message) if message.starts_with("research job not found:") => {
+                    ResearchError::NotFound(message)
+                }
+                DbError::Invariant(message)
+                    if message == "active research jobs cannot be deleted" =>
+                {
+                    ResearchError::Invalid(message)
+                }
+                other => ResearchError::Db(other),
+            })
+    }
 
+    /// List pending research deletions oldest first for the durable worker.
+    pub fn pending_deletions(&self) -> Result<Vec<ResearchDeletionJob>, ResearchError> {
+        self.query_deletion_jobs("WHERE status = 'pending' ORDER BY requested_at, deletion_id")
+    }
+
+    /// Load one deletion job, including completed tombstones.
+    pub fn get_deletion_job(
+        &self,
+        deletion_id: &str,
+    ) -> Result<Option<ResearchDeletionJob>, ResearchError> {
+        let row = self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT deletion_id, resource_id, requested_by, request_source, payload_json, \
+                     status, attempt_count, last_error, requested_at, updated_at, completed_at \
+                     FROM state_privacy_deletion_jobs WHERE deletion_id = ?1",
+                    params![deletion_id],
+                    row_to_research_deletion_job,
+                )
+                .optional()
+                .map_err(DbError::from)
+        })?;
+        Ok(row)
+    }
+
+    /// Record a retryable deletion failure without clearing its tombstone.
+    pub fn record_deletion_failure(
+        &self,
+        deletion_id: &str,
+        error: &str,
+        now: i64,
+    ) -> Result<(), ResearchError> {
+        let bounded_error = error.chars().take(2048).collect::<String>();
+        self.db.with_conn(|connection| {
+            connection.execute(
+                "UPDATE state_privacy_deletion_jobs SET attempt_count = attempt_count + 1, \
+                 last_error = ?1, updated_at = ?2 WHERE deletion_id = ?3 AND status = 'pending'",
+                params![bounded_error, now, deletion_id],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Atomically finish a deletion tombstone and remove its terminal source row.
+    pub fn complete_deletion(&self, deletion_id: &str, now: i64) -> Result<bool, ResearchError> {
+        self.db
+            .transaction(|tx| {
+                let resource_id: Option<String> = tx
+                    .query_row(
+                        "SELECT resource_id FROM state_privacy_deletion_jobs \
+                         WHERE deletion_id = ?1 AND status = 'pending'",
+                        params![deletion_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(resource_id) = resource_id else {
+                    return Ok(false);
+                };
+                tx.execute(
+                    "DELETE FROM state_research_jobs WHERE id = ?1 \
+                     AND status IN ('complete', 'failed', 'cancelled')",
+                    params![resource_id],
+                )?;
+                let changed = tx.execute(
+                    "UPDATE state_privacy_deletion_jobs SET status = 'complete', \
+                     last_error = NULL, completed_at = ?1, updated_at = ?1 \
+                     WHERE deletion_id = ?2 AND status = 'pending'",
+                    params![now, deletion_id],
+                )?;
+                Ok(changed > 0)
+            })
+            .map_err(ResearchError::from)
+    }
+
+    fn query_deletion_jobs(&self, suffix: &str) -> Result<Vec<ResearchDeletionJob>, ResearchError> {
+        let sql = format!(
+            "SELECT deletion_id, resource_id, requested_by, request_source, payload_json, \
+             status, attempt_count, last_error, requested_at, updated_at, completed_at \
+             FROM state_privacy_deletion_jobs {suffix}"
+        );
+        self.db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare(&sql)?;
+                statement
+                    .query_map([], row_to_research_deletion_job)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)
+            })
+            .map_err(ResearchError::from)
+    }
     /// Count rows in any of the active (non-terminal) statuses for
     /// the given conversation. Drives the chat-pane badge so the
     /// UI doesn't need to materialise + filter the full list.
@@ -988,6 +1213,22 @@ fn row_to_research_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResearchJobR
         updated_at: row.get(13)?,
         started_at: row.get(14)?,
         finished_at: row.get(15)?,
+    })
+}
+
+fn row_to_research_deletion_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<ResearchDeletionJob> {
+    Ok(ResearchDeletionJob {
+        deletion_id: row.get(0)?,
+        resource_id: ResearchJobId::from(row.get::<_, String>(1)?.as_str()),
+        requested_by: row.get(2)?,
+        request_source: row.get(3)?,
+        payload_json: row.get(4)?,
+        status: row.get(5)?,
+        attempt_count: row.get(6)?,
+        last_error: row.get(7)?,
+        requested_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        completed_at: row.get(10)?,
     })
 }
 
@@ -2174,6 +2415,7 @@ mod tests {
                 title: Some(query.to_owned()),
                 fetched_ok: true,
                 error: None,
+                ..ResearchSource::default()
             }],
             tokens_used: Some(123),
             error: None,

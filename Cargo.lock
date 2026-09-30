@@ -1351,15 +1351,25 @@ dependencies = [
  "execlaw-server",
  "execlaw-skills",
  "execlaw-vault",
+ "hex",
  "keyring",
+ "rand 0.8.6",
+ "regex",
+ "reqwest",
+ "rmp-serde",
+ "rpassword",
  "serde",
  "serde_json",
  "service-manager",
+ "sha2",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
+ "uuid",
  "windows-service",
 ]
 
@@ -1404,6 +1414,7 @@ name = "execlaw-context-window"
 version = "0.1.0"
 dependencies = [
  "execlaw-inference-api",
+ "serde_json",
  "tracing",
 ]
 
@@ -1443,10 +1454,14 @@ name = "execlaw-eval-harness"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
+ "execlaw-core",
  "execlaw-inference-api",
+ "hex",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "tokio",
  "toml",
@@ -1482,6 +1497,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -1508,6 +1524,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
 ]
 
@@ -1539,6 +1556,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -1608,6 +1626,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "console-subscriber",
+ "execlaw-context-window",
  "execlaw-inference-api",
  "execlaw-runner-protocol",
  "futures",
@@ -1635,13 +1654,16 @@ dependencies = [
  "execlaw-context-window",
  "execlaw-core",
  "execlaw-inference-api",
+ "execlaw-runner-protocol",
  "execlaw-session",
+ "jsonschema",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1696,11 +1718,13 @@ dependencies = [
  "dom_smoothie",
  "ed25519-dalek",
  "execlaw-container-manager",
+ "execlaw-context-window",
  "execlaw-core",
  "execlaw-inference-api",
  "execlaw-local-endpoint-policy",
  "execlaw-mcp-client",
  "execlaw-model-adapter",
+ "execlaw-outbox",
  "execlaw-plugin-host",
  "execlaw-plugin-sdk",
  "execlaw-policy",
@@ -1715,11 +1739,13 @@ dependencies = [
  "hex",
  "hmac",
  "hyper",
+ "ipnet",
  "jsonschema",
  "jsonwebtoken",
  "mime_guess",
  "notify",
  "openssl-sys",
+ "png 0.17.16",
  "printpdf",
  "rand 0.8.6",
  "regex",
@@ -4348,6 +4374,27 @@ checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
 dependencies = [
  "rmp",
  "serde",
+]
+
+[[package]]
+name = "rpassword"
+version = "7.5.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2da316a15f47e3d053de9cb2c439650bd8fa4aaeb9365f2e5f27f492ff73c196"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

@@ -72,6 +72,12 @@ pub struct ChainedToolDispatch<B: BuiltinTools> {
     /// `ctx.subagent` and the tool falls into the standard
     /// "capability not granted" denial.
     pub inference: Option<(Arc<InferenceClient>, String)>,
+    /// Stable durable parent run for child-agent work, when dispatching a
+    /// tool inside the persistent runner path.
+    pub parent_run_id: Option<String>,
+    /// Root for content-addressed child-result handoff artifacts.
+    pub artifact_root: Option<std::path::PathBuf>,
+    pub cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Live event bus used by capabilities that emit broadcast
     /// events into the conversation (currently:
     /// `Capability::AttachmentSend`, which opens an Attachment
@@ -111,6 +117,8 @@ pub struct ChainedToolDispatch<B: BuiltinTools> {
     /// hands the registry to ServerAttachmentApi which walks
     /// bindings without naming Signal directly.
     pub host_transports: Option<crate::transport_registry::HostTransportRegistry>,
+    /// Framework-owned tool-call ordinal for idempotent effects in the turn.
+    pub transport_effect_ordinal: Arc<std::sync::atomic::AtomicU32>,
 }
 
 impl<B: BuiltinTools> ChainedToolDispatch<B> {
@@ -128,11 +136,15 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
             conversation_id: None,
             clock: Arc::new(SystemClock),
             inference: None,
+            parent_run_id: None,
+            artifact_root: None,
+            cancel_flag: None,
             events: None,
             research_supervisor_wake: None,
             signal_transport_resolver: None,
             signal_self_number: None,
             host_transports: None,
+            transport_effect_ordinal: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -156,11 +168,15 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
             conversation_id: None,
             clock: Arc::new(SystemClock),
             inference: None,
+            parent_run_id: None,
+            artifact_root: None,
+            cancel_flag: None,
             events: None,
             research_supervisor_wake: None,
             signal_transport_resolver: None,
             signal_self_number: None,
             host_transports: None,
+            transport_effect_ordinal: Arc::new(std::sync::atomic::AtomicU32::new(0)),
         }
     }
 
@@ -199,6 +215,24 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
         model: impl Into<String>,
     ) -> Self {
         self.inference = Some((client, model.into()));
+        self
+    }
+
+    /// Attach the durable parent run used to persist delegated child runs.
+    pub fn with_parent_run(mut self, run_id: impl Into<String>) -> Self {
+        self.parent_run_id = Some(run_id.into());
+        self
+    }
+
+    /// Attach the managed artifact directory used by durable child results.
+    pub fn with_artifact_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.artifact_root = Some(root.into());
+        self
+    }
+
+    /// Attach the current turn's cancellation flag to delegated child work.
+    pub fn with_cancel_flag(mut self, flag: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.cancel_flag = Some(flag);
         self
     }
 
@@ -343,12 +377,20 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
         }
         if needs_subagent {
             if let Some((client, model)) = self.inference.as_ref() {
-                ctx.subagent = Some(Arc::new(InferenceSubagentApi::new(
+                let mut api = InferenceSubagentApi::new_with_parent(
                     client.clone(),
                     model.clone(),
                     self.host.db().clone(),
                     ctx.conversation_id.clone(),
-                )));
+                    self.parent_run_id.clone(),
+                );
+                if let Some(root) = &self.artifact_root {
+                    api = api.with_artifact_root(root.clone());
+                }
+                if let Some(flag) = &self.cancel_flag {
+                    api = api.with_cancel_flag(flag.clone());
+                }
+                ctx.subagent = Some(Arc::new(api));
             }
             // When `inference` isn't wired (test fixture / no
             // backend resolved this turn), we leave `ctx.subagent
@@ -444,6 +486,15 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
                 // affected `send_attachment`'s transport fan-out.
                 // Wire the plugin host so the bridge can actually
                 // dispatch the channel-side delivery tool.
+                let effect_turn_seq = self
+                    .parent_run_id
+                    .as_deref()
+                    .and_then(|run_id| {
+                        run_id
+                            .strip_prefix(&format!("turn:{}:", ctx.conversation_id.as_str()))
+                            .and_then(|seq| seq.parse::<i64>().ok())
+                    })
+                    .or_else(|| latest_user_event_seq(&self.host.db(), &ctx.conversation_id).ok());
                 ctx.attachments = Some(Arc::new(
                     crate::attachment_api::ServerAttachmentApi::new(
                         self.host.db().clone(),
@@ -452,6 +503,7 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
                     )
                     .with_transports(self.host_transports.clone())
                     .with_plugin_host(self.host.clone())
+                    .with_effect_context(effect_turn_seq, self.transport_effect_ordinal.clone())
                     .with_artifacts_root(artifacts_root),
                 ));
             }
@@ -541,6 +593,35 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
 
 #[async_trait]
 impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
+    fn outbox_idempotency_key(
+        &self,
+        tool_name: &str,
+        turn_seq: i64,
+        ordinal: u32,
+    ) -> Option<String> {
+        let conversation_id = self.conversation_id.as_ref()?;
+        let transports = self.host_transports.as_ref()?;
+        let tool = self.host.registry().tool(tool_name)?;
+        transports.channel_for_send_tool(&tool.plugin_id, tool_name)?;
+        if turn_seq <= 0 {
+            return None;
+        }
+        Some(
+            execlaw_core::ids::IdempotencyKey::mint(
+                conversation_id,
+                execlaw_core::ids::TurnSeq(turn_seq),
+                ordinal,
+            )
+            .as_str()
+            .to_owned(),
+        )
+    }
+
+    fn set_effect_ordinal(&self, ordinal: u32) {
+        self.transport_effect_ordinal
+            .store(ordinal, std::sync::atomic::Ordering::SeqCst);
+    }
+
     async fn call(
         &self,
         tool_name: &str,
@@ -624,6 +705,9 @@ impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
         if let Some(r) = self.builtins.call(tool_name, args_json).await {
             return r;
         }
+        if let Some(result) = self.queue_transport_tool(tool_name, args_json) {
+            return result;
+        }
         let caps: Vec<&str> = self.caller_caps.iter().map(|s| s.as_str()).collect();
         // 2026-05-03 — pass `caller_trust` so the host can enforce
         // `[[tools]].trust_floor` (selfhosted-claw's `controllerOnly`
@@ -639,6 +723,118 @@ impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
             )
             .await
     }
+}
+
+impl<B: BuiltinTools> ChainedToolDispatch<B> {
+    fn queue_transport_tool(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Option<Result<serde_json::Value, String>> {
+        let conversation_id = self.conversation_id.as_ref()?;
+        let transports = self.host_transports.as_ref()?;
+        let registered = self.host.registry().tool(tool_name)?;
+        let channel = transports.channel_for_send_tool(&registered.plugin_id, tool_name)?;
+        let caps = self
+            .caller_caps
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if let Err(error) =
+            self.host
+                .validate_tool_call(tool_name, args, &caps, Some(self.caller_trust.as_str()))
+        {
+            return Some(Err(error));
+        }
+        let Some(text) = args.get("text").and_then(serde_json::Value::as_str) else {
+            return Some(Err("transport send tool requires a text string".into()));
+        };
+        if text.trim().is_empty() {
+            return Some(Err("transport send text must not be empty".into()));
+        }
+        let recipient = match args.get("to").and_then(serde_json::Value::as_str) {
+            Some(recipient) if !recipient.trim().is_empty() => recipient.to_owned(),
+            _ => match latest_transport_recipient(&self.host.db(), conversation_id, channel) {
+                Ok(Some(recipient)) => recipient,
+                Ok(None) => return Some(Err("transport reply has no inbound recipient".into())),
+                Err(error) => return Some(Err(error)),
+            },
+        };
+        let turn_seq = self
+            .parent_run_id
+            .as_deref()
+            .and_then(|run_id| {
+                run_id
+                    .strip_prefix(&format!("turn:{}:", conversation_id.as_str()))
+                    .and_then(|seq| seq.parse::<i64>().ok())
+            })
+            .map(Ok)
+            .unwrap_or_else(|| latest_user_event_seq(&self.host.db(), conversation_id));
+        let turn_seq = match turn_seq {
+            Ok(seq) if seq > 0 => seq,
+            Ok(_) => return Some(Err("transport send has no durable user turn".into())),
+            Err(error) => return Some(Err(error)),
+        };
+        let ordinal = self
+            .transport_effect_ordinal
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Some(
+            crate::transport_outbox::stage_plugin_text(
+                &self.host.db(),
+                conversation_id,
+                turn_seq,
+                ordinal,
+                channel,
+                &recipient,
+                text,
+            )
+            .map(|outbox_id| {
+                serde_json::json!({
+                    "queued": true,
+                    "delivery_status": "queued",
+                    "outbox_id": outbox_id,
+                })
+            }),
+        )
+    }
+}
+
+fn latest_user_event_seq(db: &Database, conversation_id: &ConversationId) -> Result<i64, String> {
+    let events = execlaw_core::EventLog::new(db)
+        .replay_since(conversation_id, execlaw_core::ids::EventSeq(0))
+        .map_err(|error| format!("read transport send turn: {error}"))?;
+    events
+        .iter()
+        .rev()
+        .find(|event| event.kind == execlaw_core::events::EventKind::UserMsg)
+        .map(|event| event.seq.0)
+        .ok_or_else(|| "transport send has no user event".into())
+}
+
+fn latest_transport_recipient(
+    db: &Database,
+    conversation_id: &ConversationId,
+    channel: &str,
+) -> Result<Option<String>, String> {
+    let group_id = execlaw_core::principal_groups::PrincipalGroupStore::new(db)
+        .principal_group_id_for(conversation_id.as_str())
+        .map_err(|error| format!("resolve transport reply group: {error}"))?;
+    let Some(group_id) = group_id else {
+        return Ok(None);
+    };
+    let bindings = execlaw_core::transport_bindings::TransportBindingStore::new(db)
+        .bindings_for_group_any_channel(&group_id)
+        .map_err(|error| format!("resolve transport reply binding: {error}"))?;
+    Ok(bindings
+        .into_iter()
+        .filter(|binding| binding.channel == channel)
+        .max_by_key(|binding| {
+            (
+                binding.last_seen_at.unwrap_or(binding.created_at),
+                binding.created_at,
+            )
+        })
+        .map(|binding| binding.foreign_id))
 }
 
 /// Walk `args` and substitute every `{"$data_ref": "<id>"}` object

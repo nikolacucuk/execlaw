@@ -1,0 +1,242 @@
+{
+  "reviewDate": "2026-09-27",
+  "recordedAtUtc": "2026-09-28T02:00:39.045Z",
+  "method": "Authenticated isolated-browser inspection; no messages sent or organization edited.",
+  "limitations": [
+    "Single DOM samples, not latency/memory benchmarks.",
+    "Dark theme; desktop and narrow viewport emulation, not a physical mobile-device test.",
+    "Loaded message windows, not full-history exports.",
+    "Served deployment builds were not mapped to source revisions."
+  ],
+  "screenshots": [
+    {
+      "id": "L1",
+      "file": "nexus-live-local-desktop.png",
+      "sha256": "33d8d6b08493d572b736c84ab1a21d40ce8faaca1b6a3a411fc255e75cf6c3f6",
+      "redaction": "Privacy overlays applied in browser; clipped to visible container bounds."
+    },
+    {
+      "id": "L2",
+      "file": "nexus-live-local-mobile.png",
+      "sha256": "6cf3bdacd4b93d06443fe94e48d5c608d08432eaa71c87445048c9332ea6d673",
+      "redaction": "Privacy overlays applied in browser; clipped to visible container bounds."
+    },
+    {
+      "id": "L3",
+      "file": "nexus-live-local-relationships.png",
+      "sha256": "8858c967a6ec71db9483ca1996a10a0f62d01aefc2367edc2a8a5c191b77178d",
+      "redaction": "Privacy overlays applied in browser; clipped to visible container bounds."
+    },
+    {
+      "id": "L4",
+      "file": "nexus-live-truenas-desktop.png",
+      "sha256": "5fa9af7527179ee17091d12a741823cb560cdf7a627ce9d727f79b63a65dcf53",
+      "redaction": "Privacy overlays applied in browser; clipped to visible container bounds."
+    },
+    {
+      "id": "L5",
+      "file": "nexus-live-truenas-mobile.png",
+      "sha256": "68ccd539b2725e70250f3a7db0a027dc940361b7daa741ee366e7f592fd5cce1",
+      "redaction": "Privacy overlays applied in browser; clipped to visible container bounds."
+    },
+    {
+      "id": "L6",
+      "file": "nexus-live-truenas-newest.png",
+      "sha256": "ded414175235c4fc5a507dc2f7caefa54ead54ca60f4847150fbaa4872fef532",
+      "redaction": "Privacy overlays applied in browser; clipped to visible container bounds."
+    }
+  ],
+  "deployments": [
+    {
+      "deployment": "local",
+      "organizationResponse": {
+        "status": 200,
+        "contentType": "text/html",
+        "validJson": false
+      },
+      "samples": [
+        {
+          "state": "desktop-oldest-loaded",
+          "viewport": {
+            "width": 1440,
+            "height": 1000
+          },
+          "theme": "dark",
+          "renderedMessageRows": 4,
+          "mountedOrganizationOptions": 32,
+          "toolbarHeightPx": 136.46875,
+          "transcriptViewportHeightPx": 668.375,
+          "transcriptScrollHeightPx": 810,
+          "firstIncomingBubbleWidthPx": 608,
+          "dimmedRows": 0,
+          "documentHorizontalOverflow": false,
+          "atBottom": false
+        },
+        {
+          "state": "desktop-newest-loaded",
+          "viewport": {
+            "width": 1440,
+            "height": 1000
+          },
+          "theme": "dark",
+          "renderedMessageRows": 4,
+          "mountedOrganizationOptions": 32,
+          "toolbarHeightPx": 136.46875,
+          "transcriptViewportHeightPx": 668.375,
+          "transcriptScrollHeightPx": 810,
+          "firstIncomingBubbleWidthPx": 608,
+          "dimmedRows": 0,
+          "documentHorizontalOverflow": false,
+          "atBottom": true
+        },
+        {
+          "state": "mobile-oldest-loaded",
+          "viewport": {
+            "width": 390,
+            "height": 900
+          },
+          "theme": "dark",
+          "renderedMessageRows": 4,
+          "mountedOrganizationOptions": 32,
+          "toolbarHeightPx": 238.390625,
+          "transcriptViewportHeightPx": 466.453125,
+          "transcriptScrollHeightPx": 898,
+          "firstIncomingBubbleWidthPx": 279.8125,
+          "dimmedRows": 0,
+          "documentHorizontalOverflow": false,
+          "atBottom": false
+        },
+        {
+          "state": "mobile-newest-loaded",
+          "viewport": {
+            "width": 390,
+            "height": 900
+          },
+          "theme": "dark",
+          "renderedMessageRows": 4,
+          "mountedOrganizationOptions": 32,
+          "toolbarHeightPx": 238.390625,
+          "transcriptViewportHeightPx": 466.453125,
+          "transcriptScrollHeightPx": 898,
+          "firstIncomingBubbleWidthPx": 279.8125,
+          "dimmedRows": 0,
+          "documentHorizontalOverflow": false,
+          "atBottom": true
+        },
+        {
+          "state": "desktop-relationships",
+          "viewport": {
+            "width": 1440,
+            "height": 1000
+          },
+          "theme": "dark",
+          "renderedMessageRows": 4,
+          "mountedOrganizationOptions": 32,
+          "toolbarHeightPx": 136.46875,
+          "transcriptViewportHeightPx": 668.375,
+          "transcriptScrollHeightPx": 810,
+          "firstIncomingBubbleWidthPx": 608,
+          "dimmedRows": 4,
+          "documentHorizontalOverflow": false,
+          "atBottom": false
+        }
+      ]
+    },
+    {
+      "deployment": "truenas",
+      "organizationResponse": {
+        "status": 200,
+        "contentType": "application/json",
+        "annotationsArray": true,
+        "viewsArray": true
+      },
+      "samples": [
+        {
+          "state": "desktop-oldest-loaded",
+          "viewport": {
+            "width": 1440,
+            "height": 1000
+          },
+          "theme": "dark",
+          "renderedMessageRows": 200,
+          "mountedOrganizationOptions": 40800,
+          "toolbarHeightPx": 99.171875,
+          "transcriptViewportHeightPx": 705.671875,
+          "transcriptScrollHeightPx": 46560,
+          "firstIncomingBubbleWidthPx": 608,
+          "dimmedRows": 0,
+          "documentHorizontalOverflow": false,
+          "atBottom": false
+        },
+        {
+          "state": "desktop-newest-loaded",
+          "viewport": {
+            "width": 1440,
+            "height": 1000
+          },
+          "theme": "dark",
+          "renderedMessageRows": 200,
+          "mountedOrganizationOptions": 40800,
+          "toolbarHeightPx": 99.171875,
+          "transcriptViewportHeightPx": 705.671875,
+          "transcriptScrollHeightPx": 46560,
+          "firstIncomingBubbleWidthPx": 608,
+          "dimmedRows": 0,
+          "documentHorizontalOverflow": false,
+          "atBottom": true
+        },
+        {
+          "state": "mobile-oldest-loaded",
+          "viewport": {
+            "width": 390,
+            "height": 900
+          },
+          "theme": "dark",
+          "renderedMessageRows": 200,
+          "mountedOrganizationOptions": 40800,
+          "toolbarHeightPx": 205.09375,
+          "transcriptViewportHeightPx": 499.75,
+          "transcriptScrollHeightPx": 53516,
+          "firstIncomingBubbleWidthPx": 266.21875,
+          "dimmedRows": 0,
+          "documentHorizontalOverflow": false,
+          "atBottom": false
+        },
+        {
+          "state": "mobile-newest-loaded",
+          "viewport": {
+            "width": 390,
+            "height": 900
+          },
+          "theme": "dark",
+          "renderedMessageRows": 200,
+          "mountedOrganizationOptions": 40800,
+          "toolbarHeightPx": 205.09375,
+          "transcriptViewportHeightPx": 499.75,
+          "transcriptScrollHeightPx": 53516,
+          "firstIncomingBubbleWidthPx": 266.21875,
+          "dimmedRows": 0,
+          "documentHorizontalOverflow": false,
+          "atBottom": true
+        },
+        {
+          "state": "desktop-relationships",
+          "viewport": {
+            "width": 1440,
+            "height": 1000
+          },
+          "theme": "dark",
+          "renderedMessageRows": 200,
+          "mountedOrganizationOptions": 40800,
+          "toolbarHeightPx": 99.171875,
+          "transcriptViewportHeightPx": 705.671875,
+          "transcriptScrollHeightPx": 46560,
+          "firstIncomingBubbleWidthPx": 608,
+          "dimmedRows": 89,
+          "documentHorizontalOverflow": false,
+          "atBottom": false
+        }
+      ]
+    }
+  ]
+}

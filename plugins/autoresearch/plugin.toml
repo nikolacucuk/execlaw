@@ -1,7 +1,7 @@
 [plugin]
 id = "autoresearch"
 name = "AutoResearch"
-version = "0.1.0"
+version = "0.1.1"
 description = "Autonomous experiment-loop helper inspired by karpathy/autoresearch. Adds tools for setup planning, keep/discard scoring, and results.tsv analytics so agents can run faster research cycles with clearer decisions."
 author = "execlaw"
 license = "Apache-2.0"
@@ -54,6 +54,7 @@ description = "Run a local self-test of current defaults and return normalized v
 [[ui_panels]]
 mount = "admin/plugins/autoresearch"
 entry = "ui/panel.js"
+rpc_capabilities = ["plugin_admin_routes"]
 
 [runtime]
 tier = "script"

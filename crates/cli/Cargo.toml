@@ -28,6 +28,9 @@ chrono.workspace = true
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+rmp-serde.workspace = true
+regex.workspace = true
+sha2.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-appender.workspace = true
@@ -36,6 +39,12 @@ thiserror.workspace = true
 directories.workspace = true
 keyring.workspace = true
 axum.workspace = true
+rand.workspace = true
+hex.workspace = true
+reqwest.workspace = true
+url.workspace = true
+uuid.workspace = true
+rpassword = "7.5"
 
 # Phase 14 — bare-metal install. service-manager abstracts systemd
 # (Linux) / launchd (macOS) / Windows SCM behind one trait so the
@@ -49,3 +58,9 @@ service-manager = "0.11"
 # handles registration with the SCM, not the runtime loop.
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+sqlcipher = ["execlaw-core/sqlcipher"]

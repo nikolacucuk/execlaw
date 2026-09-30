@@ -21,19 +21,34 @@ use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum OauthProviderError {
-    #[error("http: {0}")]
+    #[error("OAuth provider HTTP request failed")]
     Http(String),
-    #[error("provider returned {status}: {body}")]
+    #[error("OAuth provider returned HTTP {status} (response body redacted)")]
     Status { status: u16, body: String },
-    #[error("response decode: {0}")]
+    #[error("OAuth provider response could not be decoded")]
     Decode(String),
     #[error("missing field in response: {0}")]
     MissingField(&'static str),
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for OauthProviderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Http(_) => f.write_str("Http(<redacted>)"),
+            Self::Status { status, .. } => f
+                .debug_struct("Status")
+                .field("status", status)
+                .field("body", &"<redacted>")
+                .finish(),
+            Self::Decode(_) => f.write_str("Decode(<redacted>)"),
+            Self::MissingField(field) => f.debug_tuple("MissingField").field(field).finish(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct AuthorizeParams {
     pub client_id: String,
     pub redirect_uri: String,
@@ -43,7 +58,18 @@ pub struct AuthorizeParams {
     pub state_token: String,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for AuthorizeParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthorizeParams")
+            .field("client_id", &self.client_id)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scopes", &self.scopes)
+            .field("state_token", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct ExchangeParams {
     pub client_id: String,
     pub client_secret: String,
@@ -51,16 +77,37 @@ pub struct ExchangeParams {
     pub code: String,
 }
 
-#[derive(Debug, Clone)]
+impl std::fmt::Debug for ExchangeParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExchangeParams")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("redirect_uri", &self.redirect_uri)
+            .field("code", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct RefreshParams {
     pub client_id: String,
     pub client_secret: String,
     pub refresh_token: String,
 }
 
+impl std::fmt::Debug for RefreshParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshParams")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("refresh_token", &"<redacted>")
+            .finish()
+    }
+}
+
 /// Successful token-grant response. Both code-exchange and
 /// refresh-grant land here.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TokenGrant {
     pub access_token: String,
     /// Some providers (Google after the first consent) omit a fresh
@@ -70,6 +117,21 @@ pub struct TokenGrant {
     pub expires_in_secs: i64,
     pub scope: Option<String>,
     pub id_token: Option<String>,
+}
+
+impl std::fmt::Debug for TokenGrant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenGrant")
+            .field("access_token", &"<redacted>")
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "<redacted>"),
+            )
+            .field("expires_in_secs", &self.expires_in_secs)
+            .field("scope", &self.scope)
+            .field("id_token", &self.id_token.as_ref().map(|_| "<redacted>"))
+            .finish()
+    }
 }
 
 /// Userinfo response — for the email field we surface in the
@@ -117,6 +179,8 @@ const GOOGLE_USERINFO_URL: &str = "https://openidconnect.googleapis.com/v1/useri
 #[derive(Debug, Clone)]
 pub struct GoogleOauthProvider {
     client: reqwest::Client,
+    client_error: Option<String>,
+    enforce_public_policy: bool,
     /// Override the authorize URL (tests). None = production URL.
     authorize_url: String,
     token_url: String,
@@ -125,14 +189,30 @@ pub struct GoogleOauthProvider {
 
 impl Default for GoogleOauthProvider {
     fn default() -> Self {
-        Self::new(Self::default_client())
+        match Self::default_client() {
+            Ok(client) => Self {
+                enforce_public_policy: true,
+                ..Self::new(client)
+            },
+            Err(error) => Self {
+                // Keep URL construction available, but network methods fail closed.
+                client: reqwest::Client::new(),
+                client_error: Some(error),
+                enforce_public_policy: true,
+                authorize_url: GOOGLE_AUTHORIZE_URL.into(),
+                token_url: GOOGLE_TOKEN_URL.into(),
+                userinfo_url: GOOGLE_USERINFO_URL.into(),
+            },
+        }
     }
 }
 
 impl GoogleOauthProvider {
-    pub fn new(client: reqwest::Client) -> Self {
+    fn new(client: reqwest::Client) -> Self {
         Self {
             client,
+            client_error: None,
+            enforce_public_policy: false,
             authorize_url: GOOGLE_AUTHORIZE_URL.into(),
             token_url: GOOGLE_TOKEN_URL.into(),
             userinfo_url: GOOGLE_USERINFO_URL.into(),
@@ -141,6 +221,7 @@ impl GoogleOauthProvider {
 
     /// Test-only constructor that points the token + userinfo URLs
     /// at a local `httpmock` / `wiremock` server.
+    #[cfg(test)]
     pub fn with_endpoints(
         client: reqwest::Client,
         authorize_url: impl Into<String>,
@@ -149,22 +230,45 @@ impl GoogleOauthProvider {
     ) -> Self {
         Self {
             client,
+            client_error: None,
+            enforce_public_policy: false,
             authorize_url: authorize_url.into(),
             token_url: token_url.into(),
             userinfo_url: userinfo_url.into(),
         }
     }
 
-    pub fn default_client() -> reqwest::Client {
+    /// Build a direct client for fixed Google endpoints with redirects disabled.
+    pub fn default_client() -> Result<reqwest::Client, String> {
         reqwest::Client::builder()
             .timeout(Duration::from_secs(20))
             .connect_timeout(Duration::from_secs(5))
             .user_agent("execlaw/0.1 oauth-client")
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .build()
-            // The reqwest builder only fails when rustls picks up a
-            // bad system root store; treat that as a hard config
-            // error rather than papering over it with .unwrap().
-            .unwrap_or_else(|_| reqwest::Client::new())
+            .map_err(|error| format!("build direct OAuth client: {error}"))
+    }
+
+    fn ensure_client_ready(&self) -> Result<(), OauthProviderError> {
+        match &self.client_error {
+            Some(error) => Err(OauthProviderError::Http(error.clone())),
+            None => Ok(()),
+        }
+    }
+
+    fn client_for(&self, url: &str) -> Result<reqwest::Client, OauthProviderError> {
+        self.ensure_client_ready()?;
+        if !self.enforce_public_policy {
+            return Ok(self.client.clone());
+        }
+        crate::local_endpoint_policy::checked_public_client(url, |builder| {
+            builder
+                .timeout(Duration::from_secs(20))
+                .connect_timeout(Duration::from_secs(5))
+                .user_agent("execlaw/0.1 oauth-client")
+        })
+        .map_err(OauthProviderError::Http)
     }
 }
 
@@ -198,6 +302,7 @@ impl OauthProvider for GoogleOauthProvider {
         &self,
         params: &ExchangeParams,
     ) -> Result<TokenGrant, OauthProviderError> {
+        let client = self.client_for(&self.token_url)?;
         let form = [
             ("grant_type", "authorization_code"),
             ("code", params.code.as_str()),
@@ -205,25 +310,26 @@ impl OauthProvider for GoogleOauthProvider {
             ("client_secret", params.client_secret.as_str()),
             ("redirect_uri", params.redirect_uri.as_str()),
         ];
-        post_token_grant(&self.client, &self.token_url, &form).await
+        post_token_grant(&client, &self.token_url, &form).await
     }
 
     async fn refresh_access_token(
         &self,
         params: &RefreshParams,
     ) -> Result<TokenGrant, OauthProviderError> {
+        let client = self.client_for(&self.token_url)?;
         let form = [
             ("grant_type", "refresh_token"),
             ("refresh_token", params.refresh_token.as_str()),
             ("client_id", params.client_id.as_str()),
             ("client_secret", params.client_secret.as_str()),
         ];
-        post_token_grant(&self.client, &self.token_url, &form).await
+        post_token_grant(&client, &self.token_url, &form).await
     }
 
     async fn fetch_userinfo(&self, access_token: &str) -> Result<Userinfo, OauthProviderError> {
-        let resp = self
-            .client
+        let client = self.client_for(&self.userinfo_url)?;
+        let resp = client
             .get(&self.userinfo_url)
             .bearer_auth(access_token)
             .send()
@@ -245,8 +351,8 @@ impl OauthProvider for GoogleOauthProvider {
             email: Option<String>,
             name: Option<String>,
         }
-        let r: R = serde_json::from_str(&body)
-            .map_err(|e| OauthProviderError::Decode(format!("{e}: {body}")))?;
+        let r: R =
+            serde_json::from_str(&body).map_err(|e| OauthProviderError::Decode(e.to_string()))?;
         Ok(Userinfo {
             email: r.email,
             name: r.name,
@@ -284,8 +390,8 @@ async fn post_token_grant(
         scope: Option<String>,
         id_token: Option<String>,
     }
-    let r: R = serde_json::from_str(&body)
-        .map_err(|e| OauthProviderError::Decode(format!("{e}: {body}")))?;
+    let r: R =
+        serde_json::from_str(&body).map_err(|e| OauthProviderError::Decode(e.to_string()))?;
     let access_token = r
         .access_token
         .ok_or(OauthProviderError::MissingField("access_token"))?;
@@ -304,6 +410,103 @@ async fn post_token_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn production_oauth_denies_private_destination_before_a_request() {
+        let mut provider = GoogleOauthProvider::default();
+        provider.token_url = "http://169.254.169.254/token".into();
+        assert!(provider.client_for(&provider.token_url).is_err());
+        provider.userinfo_url = "http://127.0.0.1/userinfo".into();
+        assert!(provider.client_for(&provider.userinfo_url).is_err());
+    }
+
+    #[test]
+    fn oauth_provider_debug_output_redacts_credentials_and_grants() {
+        let exchange = ExchangeParams {
+            client_id: "public-client".into(),
+            client_secret: "incident-client-secret-marker".into(),
+            redirect_uri: "http://localhost/callback".into(),
+            code: "incident-authorization-code-marker".into(),
+        };
+        let exchange_debug = format!("{exchange:?}");
+        assert!(exchange_debug.contains("<redacted>"));
+        assert!(!exchange_debug.contains("incident-client-secret-marker"));
+        assert!(!exchange_debug.contains("incident-authorization-code-marker"));
+
+        let grant = TokenGrant {
+            access_token: "incident-access-token-marker".into(),
+            refresh_token: Some("incident-refresh-token-marker".into()),
+            expires_in_secs: 3600,
+            scope: None,
+            id_token: Some("incident-id-token-marker".into()),
+        };
+        let grant_debug = format!("{grant:?}");
+        assert!(grant_debug.contains("<redacted>"));
+        assert!(!grant_debug.contains("incident-access-token-marker"));
+        assert!(!grant_debug.contains("incident-refresh-token-marker"));
+        assert!(!grant_debug.contains("incident-id-token-marker"));
+
+        let provider_error = OauthProviderError::Status {
+            status: 500,
+            body: "incident-provider-secret-marker".into(),
+        };
+        let error_debug = format!("{provider_error:?}");
+        let error_display = provider_error.to_string();
+        assert!(error_debug.contains("<redacted>"));
+        assert!(error_display.contains("redacted"));
+        assert!(!error_debug.contains("incident-provider-secret-marker"));
+        assert!(!error_display.contains("incident-provider-secret-marker"));
+    }
+
+    #[tokio::test]
+    async fn oauth_token_redirect_does_not_forward_credentials() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let token_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let token_address = token_listener.local_addr().unwrap();
+        let target_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_address = target_listener.local_addr().unwrap();
+        let token_server = tokio::spawn(async move {
+            let (mut socket, _) = token_listener.accept().await.unwrap();
+            let mut request = [0_u8; 4096];
+            let _ = socket.read(&mut request).await;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{target_address}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let provider = GoogleOauthProvider::with_endpoints(
+            GoogleOauthProvider::default_client().unwrap(),
+            format!("http://{token_address}/authorize"),
+            format!("http://{token_address}/token"),
+            format!("http://{token_address}/userinfo"),
+        );
+        let result = provider
+            .exchange_code(&ExchangeParams {
+                client_id: "client-id".into(),
+                client_secret: "secret-must-stay-at-token-endpoint".into(),
+                redirect_uri: "http://127.0.0.1/callback".into(),
+                code: "authorization-code".into(),
+            })
+            .await;
+        assert!(matches!(
+            result,
+            Err(OauthProviderError::Status { status: 302, .. })
+        ));
+        token_server.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), target_listener.accept())
+                .await
+                .is_err(),
+            "redirect destination must receive no request"
+        );
+    }
 
     #[test]
     fn build_authorize_url_includes_required_params() {

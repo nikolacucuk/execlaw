@@ -9,7 +9,7 @@
 //! route in Phase 7 (deployment editor) and beyond.
 
 use crate::db::{Database, DbError};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 /// One row out of `config_audit`.
@@ -68,6 +68,36 @@ impl<'db> AuditStore<'db> {
                 params![now, actor, table_name, row_id, old_blob, new_blob],
             )?;
             Ok(c.last_insert_rowid())
+        })
+    }
+
+    /// Read one audit record by its stable id for a completion-evidence link.
+    ///
+    /// ```ignore
+    /// let record = AuditStore::new(&db).get(attestation_id)?;
+    /// ```
+    pub fn get(&self, id: i64) -> Result<Option<AuditEntry>, DbError> {
+        self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT id,ts,actor,table_name,row_id,old_json,new_json FROM config_audit WHERE id=?1",
+                    [id],
+                    |row| {
+                        let old_blob: Option<Vec<u8>> = row.get(5)?;
+                        let new_blob: Option<Vec<u8>> = row.get(6)?;
+                        Ok(AuditEntry {
+                            id: row.get(0)?,
+                            ts: row.get(1)?,
+                            actor: row.get(2)?,
+                            table_name: row.get(3)?,
+                            row_id: row.get(4)?,
+                            old_json: old_blob.as_deref().and_then(|bytes| serde_json::from_slice(bytes).ok()),
+                            new_json: new_blob.as_deref().and_then(|bytes| serde_json::from_slice(bytes).ok()),
+                        })
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)
         })
     }
 
@@ -147,6 +177,8 @@ mod tests {
         assert_eq!(r.table_name, "config_runner_deployments");
         assert!(r.old_json.is_none());
         assert_eq!(r.new_json.as_ref().unwrap()["k"], "v");
+        assert_eq!(store.get(id).unwrap().unwrap().row_id, "row-x");
+        assert!(store.get(id + 1).unwrap().is_none());
     }
 
     #[test]

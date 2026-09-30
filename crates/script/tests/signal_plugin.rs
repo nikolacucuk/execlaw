@@ -105,6 +105,22 @@ async fn decode_canonical_text_frame() {
     assert!(r["group_id"].is_null());
     assert!(r["group_name"].is_null());
     assert!(r["attachments"].is_array());
+    assert_eq!(r["is_self_message"], false);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn decode_marks_own_account_without_sidecar_or_vault() {
+    let plugin = signal_plugin();
+    let own = r#"{"account":"+15551234567","envelope":{"sourceNumber":"+15551234567","dataMessage":{"message":"sent from phone"}}}"#;
+    let other = r#"{"account":"+15551234567","envelope":{"sourceNumber":"+15550000000","dataMessage":{"message":"from a contact"}}}"#;
+    assert_eq!(
+        invoke_one(&plugin, "decode_frame", own).await["is_self_message"],
+        true
+    );
+    assert_eq!(
+        invoke_one(&plugin, "decode_frame", other).await["is_self_message"],
+        false
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

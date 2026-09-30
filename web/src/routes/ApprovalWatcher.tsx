@@ -40,7 +40,6 @@ export function ApprovalWatcher() {
         refresh();
 
         const client = new WsClient({
-            accessToken: getToken,
             onEvent: (ev: WsEvent) => {
                 if (
                     ev.kind === "approval_created" ||

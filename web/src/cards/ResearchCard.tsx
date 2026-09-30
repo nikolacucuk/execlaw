@@ -33,6 +33,11 @@ interface ResearchSourceView {
     title?: string | null;
     fetched_ok?: boolean;
     error?: string | null;
+    source_id?: string | null;
+    retrieved_at?: number | null;
+    content_sha256?: string | null;
+    snapshot_text?: string | null;
+    snapshot_truncated?: boolean;
 }
 
 interface ResearchNoteView {
@@ -389,6 +394,20 @@ function PlanStepRow({
                                         >
                                             {s.title ?? s.url}
                                         </a>
+                                    )}
+                                    {s.fetched_ok && (s.source_id || s.retrieved_at || s.content_sha256) && (
+                                        <div className="execlaw-muted small">
+                                            {s.source_id && <span>Source {s.source_id} </span>}
+                                            {s.retrieved_at && <span>Fetched {new Date(s.retrieved_at * 1000).toLocaleString()} </span>}
+                                            {s.content_sha256 && <code>SHA-256 {s.content_sha256}</code>}
+                                            {s.snapshot_truncated && <span> Snapshot truncated.</span>}
+                                        </div>
+                                    )}
+                                    {s.snapshot_text && (
+                                        <details className="small">
+                                            <summary>Locally retained source excerpt (untrusted)</summary>
+                                            <pre className="small text-wrap">{s.snapshot_text}</pre>
+                                        </details>
                                     )}
                                 </li>
                             ))}

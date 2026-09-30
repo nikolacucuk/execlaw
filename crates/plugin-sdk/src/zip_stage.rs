@@ -13,6 +13,13 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 use thiserror::Error;
 
+/// Maximum number of archive entries accepted by the staging reader.
+pub const MAX_PLUGIN_ARCHIVE_ENTRIES: usize = 4_096;
+/// Maximum expanded size of one file in a plugin archive.
+pub const MAX_PLUGIN_ARCHIVE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+/// Maximum expanded size of all files in a plugin archive.
+pub const MAX_PLUGIN_ARCHIVE_TOTAL_BYTES: u64 = 256 * 1024 * 1024;
+
 #[derive(Debug, Error)]
 pub enum StageError {
     #[error("zip error: {0}")]
@@ -25,6 +32,8 @@ pub enum StageError {
     Manifest(#[from] ManifestError),
     #[error("archive contains unsafe path: '{0}' (zip-slip prevented)")]
     UnsafePath(String),
+    #[error("plugin archive exceeds the staging resource limit: {0}")]
+    ResourceLimit(String),
 }
 
 /// Result of staging a plugin ZIP to a temp directory.
@@ -45,15 +54,41 @@ impl StagedPlugin {
 /// Extract a ZIP archive into a temp directory and parse its manifest.
 pub fn stage_zip<R: Read + Seek>(reader: R) -> Result<StagedPlugin, StageError> {
     let mut zip = zip::ZipArchive::new(reader)?;
+    if zip.len() > MAX_PLUGIN_ARCHIVE_ENTRIES {
+        return Err(StageError::ResourceLimit(format!(
+            "{} entries exceeds the limit of {MAX_PLUGIN_ARCHIVE_ENTRIES}",
+            zip.len()
+        )));
+    }
     let tempdir = tempfile::tempdir()?;
+    let mut declared_total = 0_u64;
+    let mut extracted_total = 0_u64;
 
     // First, extract all files, preventing zip-slip.
     for i in 0..zip.len() {
-        let mut file = zip.by_index(i)?;
+        let file = zip.by_index(i)?;
         let relative = match file.enclosed_name() {
             Some(p) => p.to_owned(),
             None => return Err(StageError::UnsafePath(file.name().to_owned())),
         };
+
+        if !file.is_dir() {
+            let declared_size = file.size();
+            if declared_size > MAX_PLUGIN_ARCHIVE_FILE_BYTES {
+                return Err(StageError::ResourceLimit(format!(
+                    "entry '{}' declares {declared_size} bytes; per-file limit is {MAX_PLUGIN_ARCHIVE_FILE_BYTES}",
+                    file.name()
+                )));
+            }
+            declared_total = declared_total.checked_add(declared_size).ok_or_else(|| {
+                StageError::ResourceLimit("declared expanded size overflow".into())
+            })?;
+            if declared_total > MAX_PLUGIN_ARCHIVE_TOTAL_BYTES {
+                return Err(StageError::ResourceLimit(format!(
+                    "declared expanded size exceeds {MAX_PLUGIN_ARCHIVE_TOTAL_BYTES} bytes"
+                )));
+            }
+        }
 
         let out_path = tempdir.path().join(&relative);
         // Double check containment after join.
@@ -68,7 +103,22 @@ pub fn stage_zip<R: Read + Seek>(reader: R) -> Result<StagedPlugin, StageError> 
                 std::fs::create_dir_all(parent)?;
             }
             let mut out = std::fs::File::create(&out_path)?;
-            std::io::copy(&mut file, &mut out)?;
+            let mut limited = file.take(MAX_PLUGIN_ARCHIVE_FILE_BYTES + 1);
+            let copied = std::io::copy(&mut limited, &mut out)?;
+            if copied > MAX_PLUGIN_ARCHIVE_FILE_BYTES {
+                return Err(StageError::ResourceLimit(format!(
+                    "entry '{}' expanded beyond {MAX_PLUGIN_ARCHIVE_FILE_BYTES} bytes",
+                    out_path.display()
+                )));
+            }
+            extracted_total = extracted_total
+                .checked_add(copied)
+                .ok_or_else(|| StageError::ResourceLimit("actual expanded size overflow".into()))?;
+            if extracted_total > MAX_PLUGIN_ARCHIVE_TOTAL_BYTES {
+                return Err(StageError::ResourceLimit(format!(
+                    "actual expanded size exceeds {MAX_PLUGIN_ARCHIVE_TOTAL_BYTES} bytes"
+                )));
+            }
         }
     }
 
@@ -138,5 +188,67 @@ mod tests {
         ]);
         let err = stage_zip(Cursor::new(bytes)).unwrap_err();
         assert!(matches!(err, StageError::UnsafePath(_)));
+    }
+
+    #[test]
+    fn archive_entry_count_is_bounded_before_extracting() {
+        let mut archive = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut archive);
+            for index in 0..=MAX_PLUGIN_ARCHIVE_ENTRIES {
+                zip.start_file::<_, ()>(format!("entry-{index}"), SimpleFileOptions::default())
+                    .unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        assert!(matches!(
+            stage_zip(Cursor::new(archive.into_inner())),
+            Err(StageError::ResourceLimit(message)) if message.contains("entries")
+        ));
+    }
+
+    #[test]
+    fn declared_expanded_file_size_is_bounded_before_decompression() {
+        let mut archive = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut archive);
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            zip.start_file::<_, ()>("large.bin", options).unwrap();
+            std::io::copy(
+                &mut std::io::repeat(0).take(MAX_PLUGIN_ARCHIVE_FILE_BYTES + 1),
+                &mut zip,
+            )
+            .unwrap();
+            zip.finish().unwrap();
+        }
+        assert!(matches!(
+            stage_zip(Cursor::new(archive.into_inner())),
+            Err(StageError::ResourceLimit(message)) if message.contains("per-file limit")
+        ));
+    }
+
+    #[test]
+    fn declared_total_expansion_is_bounded_before_decompression() {
+        let mut archive = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut archive);
+            let options =
+                SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+            for index in 0..5 {
+                zip.start_file::<_, ()>(format!("large-{index}.bin"), options)
+                    .unwrap();
+                std::io::copy(
+                    &mut std::io::repeat(0).take(MAX_PLUGIN_ARCHIVE_FILE_BYTES),
+                    &mut zip,
+                )
+                .unwrap();
+            }
+            zip.finish().unwrap();
+        }
+        assert!(matches!(
+            stage_zip(Cursor::new(archive.into_inner())),
+            Err(StageError::ResourceLimit(message)) if message.contains("expanded size exceeds")
+        ));
     }
 }

@@ -80,6 +80,14 @@ fn purge_one(db: &Database, cid: &ConversationId) -> Result<usize, DbError> {
             "DELETE FROM state_events WHERE conversation_id = ?1",
             params![cid.as_str()],
         )?;
+        tx.execute(
+            "DELETE FROM state_conversation_event_search WHERE conversation_id = ?1",
+            params![cid.as_str()],
+        )?;
+        tx.execute(
+            "DELETE FROM state_conversation_event_search_state WHERE conversation_id = ?1",
+            params![cid.as_str()],
+        )?;
         // Reset FSM-side state so a stale snapshot can't resurrect
         // anything; clear ephemeral_expires_at so we don't re-sweep
         // this row on the next tick.

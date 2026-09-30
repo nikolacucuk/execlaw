@@ -5,10 +5,13 @@
 
 import { useCallback, useEffect, useState } from "react";
 import Button from "react-bootstrap/Button";
+import Form from "react-bootstrap/Form";
 import {
+    decideMemoryPromotion,
     listPendingApprovals,
     respondApproval,
     type ApprovalVerb,
+    type MemoryPromotionSummary,
     type PendingApprovalSummary,
 } from "../api/endpoints";
 import { useAuth } from "../auth/AuthContext";
@@ -37,7 +40,7 @@ const ACTIONS: ReadonlyArray<ActionButton> = [
         label: "Limited",
         icon: "bi-shield-shaded",
         variant: "outline-warning",
-        title: "Admit as KnownLimited: agent can reply on this transport only. Agent replies to the queued message.",
+        title: "Admit as KnownLimited with the selected topic scope. Agent replays the queued message.",
     },
     {
         verb: "claim_as_me",
@@ -62,17 +65,25 @@ const ACTIONS: ReadonlyArray<ActionButton> = [
     },
 ];
 
+const CHAIN_ACTIONS: ReadonlyArray<ActionButton> = [
+    { verb: "approve", label: "Approve effect", icon: "bi-check-lg", variant: "outline-success", title: "Approve this exact signed effect" },
+    { verb: "reject", label: "Reject", icon: "bi-x-lg", variant: "outline-danger", title: "Reject this pending effect" },
+];
+
 export function ApprovalsPage() {
     const auth = useAuth();
     const getToken = auth.getAccessToken;
     const [approvals, setApprovals] = useState<PendingApprovalSummary[] | null>(null);
+    const [promotions, setPromotions] = useState<MemoryPromotionSummary[]>([]);
     const [error, setError] = useState<string | null>(null);
     const [busyApproval, setBusyApproval] = useState<string | null>(null);
+    const [limitedScopes, setLimitedScopes] = useState<Record<string, string>>({});
 
     const refresh = useCallback(async () => {
         try {
             const r = await listPendingApprovals(getToken);
             setApprovals(r.approvals);
+            setPromotions(r.memory_promotions ?? []);
             setError(null);
         } catch (e) {
             setError(e instanceof Error ? e.message : String(e));
@@ -88,10 +99,19 @@ export function ApprovalsPage() {
     }, [refresh]);
 
     const onRespond = useCallback(
-        async (approvalId: string, verb: ApprovalVerb) => {
+        async (approval: PendingApprovalSummary, verb: ApprovalVerb) => {
+            const approvalId = approval.approval_id;
             setBusyApproval(approvalId);
             try {
-                await respondApproval(approvalId, { verb }, getToken);
+                const allowedTopics = (limitedScopes[approvalId] ?? "")
+                    .split(",")
+                    .map((topic) => topic.trim())
+                    .filter(Boolean);
+                await respondApproval(approvalId, {
+                    verb,
+                    ...(verb === "trust_limited" ? { allowed_topics: allowedTopics } : {}),
+                    approval_token: approval.approval_token,
+                }, getToken);
                 // Optimistic: drop this approval from the list. The
                 // next poll re-confirms.
                 setApprovals((prev) =>
@@ -104,6 +124,24 @@ export function ApprovalsPage() {
                 setBusyApproval(null);
                 // Re-fetch so any server-side changes (e.g. claim_as_me
                 // merging multiple approvals into one) are reflected.
+                void refresh();
+            }
+        },
+        [getToken, limitedScopes, refresh],
+    );
+
+    const onDecidePromotion = useCallback(
+        async (proposalId: number, decision: "approve" | "reject") => {
+            const busyKey = `memory:${proposalId}`;
+            setBusyApproval(busyKey);
+            try {
+                await decideMemoryPromotion(proposalId, decision, getToken);
+                setPromotions((prev) => prev.filter((proposal) => proposal.id !== proposalId));
+                setError(null);
+            } catch (e) {
+                setError(e instanceof Error ? e.message : String(e));
+            } finally {
+                setBusyApproval(null);
                 void refresh();
             }
         },
@@ -137,7 +175,7 @@ export function ApprovalsPage() {
                 className="mb-3"
             />
 
-            {approvals.length === 0 ? (
+            {approvals.length === 0 && promotions.length === 0 ? (
                 <div
                     className="execlaw-card text-center execlaw-muted small"
                     data-testid="approvals-empty"
@@ -148,11 +186,40 @@ export function ApprovalsPage() {
                         style={{ fontSize: "1.5rem" }}
                         aria-hidden
                     />
-                    No pending approvals. New cold contacts will appear here
-                    when they message the agent.
+                    No pending approvals. New trust or memory decisions will
+                    appear here when they need review.
                 </div>
             ) : (
-                <ul className="list-unstyled mb-0">
+                <>
+                    {promotions.length > 0 && (
+                        <section className="mb-4" aria-labelledby="memory-promotion-heading">
+                            <h3 id="memory-promotion-heading" className="h6">Memory tier proposals</h3>
+                            <ul className="list-unstyled mb-0">
+                                {promotions.map((proposal) => (
+                                    <li key={proposal.id} className="execlaw-card mb-3" data-testid="memory-promotion-row">
+                                        <div className="d-flex align-items-start gap-2 mb-3">
+                                            <i className="bi bi-memory execlaw-muted" aria-hidden />
+                                            <div>
+                                                <div><code>{proposal.key}</code> <span className="execlaw-muted">({proposal.scope}, {proposal.trust_class})</span></div>
+                                                <div className="small mt-1">{proposal.from_tier} → {proposal.to_tier} · {proposal.reason} · proposed by {proposal.proposed_by}</div>
+                                                <div className="execlaw-muted small mt-1">Source: <code>{proposal.evidence_ref}</code></div>
+                                            </div>
+                                        </div>
+                                        <div className="d-flex gap-2">
+                                            <Button size="sm" variant="outline-success" disabled={busyApproval !== null} onClick={() => void onDecidePromotion(proposal.id, "approve")} data-testid="memory-promotion-approve">
+                                                <i className="bi bi-check-lg me-2" aria-hidden />Approve
+                                            </Button>
+                                            <Button size="sm" variant="outline-danger" disabled={busyApproval !== null} onClick={() => void onDecidePromotion(proposal.id, "reject")} data-testid="memory-promotion-reject">
+                                                <i className="bi bi-x-lg me-2" aria-hidden />Reject
+                                            </Button>
+                                        </div>
+                                    </li>
+                                ))}
+                            </ul>
+                        </section>
+                    )}
+                    {approvals.length > 0 && (
+                    <ul className="list-unstyled mb-0">
                     {approvals.map((a) => (
                         <li
                             key={a.approval_id}
@@ -167,8 +234,22 @@ export function ApprovalsPage() {
                                 />
                                 <div className="flex-grow-1">
                                     <div className="execlaw-muted small mb-1">
-                                        Sender: <code>{a.sender_principal_id}</code>
+                                        {a.kind === "effectful_chain" ? "Effect approval" : "Sender:"} <code>{a.sender_principal_id}</code>
                                     </div>
+                                    <dl className="row small mb-2" data-testid="approval-context">
+                                        <dt className="col-sm-2">Scope</dt>
+                                        <dd className="col-sm-10">{a.scope}</dd>
+                                        <dt className="col-sm-2">Reason</dt>
+                                        <dd className="col-sm-10">{a.reason}</dd>
+                                        <dt className="col-sm-2">Requested action</dt>
+                                        <dd className="col-sm-10 mb-0">
+                                            {a.kind === "effectful_chain" ? (
+                                                <pre className="small mb-0" data-testid="approval-requested-action">{a.requested_action}</pre>
+                                            ) : (
+                                                <span data-testid="approval-requested-action">{a.requested_action}</span>
+                                            )}
+                                        </dd>
+                                    </dl>
                                     <div
                                         style={{
                                             background: "rgba(0,0,0,0.05)",
@@ -180,18 +261,37 @@ export function ApprovalsPage() {
                                     >
                                         &ldquo;{truncate(a.original_text, 280)}&rdquo;
                                     </div>
+                                    {a.kind !== "effectful_chain" && (
+                                        <Form.Group className="mt-2" controlId={`limited-scope-${a.approval_id}`}>
+                                            <Form.Label className="small mb-1">Limited-trust topic scope</Form.Label>
+                                            <Form.Control
+                                                size="sm"
+                                                value={limitedScopes[a.approval_id] ?? ""}
+                                                onChange={(event) => setLimitedScopes((current) => ({
+                                                    ...current,
+                                                    [a.approval_id]: event.target.value,
+                                                }))}
+                                                placeholder="Comma-separated topics; leave blank for no topic exceptions"
+                                                aria-label={`Limited-trust topic scope for ${a.sender_principal_id}`}
+                                                data-testid="approval-limited-scope"
+                                            />
+                                            <Form.Text>
+                                                Used only if you choose Limited. Topics are saved on this principal&apos;s trust record.
+                                            </Form.Text>
+                                        </Form.Group>
+                                    )}
                                 </div>
                             </div>
                             <div className="d-flex gap-2 flex-wrap">
-                                {ACTIONS.map((act) => (
+                                {(a.kind === "effectful_chain" ? CHAIN_ACTIONS : ACTIONS).map((act) => (
                                     <Button
                                         key={act.verb}
                                         size="sm"
                                         variant={act.variant}
-                                        disabled={busyApproval !== null}
+                                        disabled={busyApproval !== null || (a.kind === "effectful_chain" && !a.approval_token)}
                                         title={act.title}
                                         onClick={() =>
-                                            void onRespond(a.approval_id, act.verb)
+                                            void onRespond(a, act.verb)
                                         }
                                         data-testid={`approval-row-verb-${act.verb}`}
                                     >
@@ -206,6 +306,8 @@ export function ApprovalsPage() {
                         </li>
                     ))}
                 </ul>
+                    )}
+                </>
             )}
         </div>
     );

@@ -25,10 +25,19 @@ interface ApprovalFixture {
     conversation_id: string;
     sender_principal_id: string;
     original_text: string;
+    scope?: string;
+    reason?: string;
+    requested_action?: string;
 }
 
 function approvalsResponse(approvals: ApprovalFixture[]) {
-    return new Response(JSON.stringify({ approvals }), { status: 200 });
+    const withContext = approvals.map((approval) => ({
+        scope: "Trust record for this principal",
+        reason: "A new sender has no approved trust level.",
+        requested_action: "Choose a trust decision and review the queued message.",
+        ...approval,
+    }));
+    return new Response(JSON.stringify({ approvals: withContext, memory_promotions: [] }), { status: 200 });
 }
 
 function mountPage() {
@@ -106,6 +115,40 @@ describe("ApprovalsPage", () => {
         expect(screen.getAllByTestId("approval-row-text")[0].textContent).toContain(
             "Hey there",
         );
+        expect(screen.getAllByTestId("approval-context")[0].textContent).toContain("Trust record for this principal");
+        expect(screen.getAllByTestId("approval-context")[0].textContent).toContain("no approved trust level");
+        expect(screen.getAllByTestId("approval-requested-action")[0].textContent).toContain("queued message");
+    });
+
+    it("submits the operator-selected topic scope for limited trust", async () => {
+        const calls: Array<{ url: string; init?: RequestInit }> = [];
+        fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+            calls.push({ url, init });
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/approvals") return approvalsResponse([{
+                approval_id: "appr-scope",
+                conversation_id: "conv-scope",
+                sender_principal_id: "pri_signal_contact",
+                original_text: "Can you help with gardening?",
+            }]);
+            return new Response("{}", { status: 200 });
+        });
+        mountPage();
+        await waitFor(() => expect(screen.getByTestId("approval-limited-scope")).toBeInTheDocument());
+        fireEvent.change(screen.getByTestId("approval-limited-scope"), {
+            target: { value: "gardening, home repair" },
+        });
+        fireEvent.click(screen.getByTestId("approval-row-verb-trust_limited"));
+        await waitFor(() => expect(calls.some((call) =>
+            call.url === "/api/admin/approvals/appr-scope/respond" && call.init?.method === "POST",
+        )).toBe(true));
+        const response = calls.find((call) =>
+            call.url === "/api/admin/approvals/appr-scope/respond" && call.init?.method === "POST",
+        );
+        expect(JSON.parse(response?.init?.body as string)).toEqual({
+            verb: "trust_limited",
+            allowed_topics: ["gardening", "home repair"],
+        });
     });
 
     it("POSTs the chosen verb (snake_case) to the respond endpoint", async () => {
@@ -161,5 +204,85 @@ describe("ApprovalsPage", () => {
         // Wire value MUST be snake_case — the server's serde rejects
         // PascalCase. This is the contract the pre-fix code violated.
         expect(body.verb).toBe("claim_as_me");
+    });
+
+    it("renders memory proposals with only approve/reject and uses their dedicated endpoint", async () => {
+        const calls: Array<{ url: string; init?: RequestInit }> = [];
+        fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+            calls.push({ url, init });
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/approvals") {
+                return new Response(JSON.stringify({
+                    approvals: [],
+                    memory_promotions: [{
+                        id: 42,
+                        scope: "global",
+                        trust_class: "Controller",
+                        key: "preferred_language",
+                        from_tier: "warm",
+                        to_tier: "hot",
+                        reason: "frequency",
+                        proposed_by: "sweeper",
+                        proposed_at: 100,
+                        evidence_ref: "memory://global/Controller/preferred_language",
+                    }],
+                }), { status: 200 });
+            }
+            return new Response("{}", { status: 200 });
+        });
+        mountPage();
+        await waitFor(() => expect(screen.getByTestId("memory-promotion-row")).toBeInTheDocument());
+        expect(screen.getByTestId("memory-promotion-row").textContent).toContain("preferred_language");
+        expect(screen.queryByTestId("approval-row-verb-trust")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("memory-promotion-approve"));
+        await waitFor(() => {
+            expect(calls.some((call) =>
+                call.url === "/api/admin/memory-promotions/42/respond" &&
+                call.init?.method === "POST",
+            )).toBe(true);
+        });
+        const decision = calls.find((call) =>
+            call.url === "/api/admin/memory-promotions/42/respond" &&
+            call.init?.method === "POST",
+        );
+        expect(JSON.parse(decision?.init?.body as string)).toEqual({ decision: "approve" });
+    });
+
+    it("renders effectful chain approvals with only approve/reject and includes the signed token", async () => {
+        const calls: Array<{ url: string; init?: RequestInit }> = [];
+        fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+            calls.push({ url, init });
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/approvals") return new Response(JSON.stringify({
+                approvals: [{
+                    kind: "effectful_chain",
+                    approval_id: "chain-1",
+                    conversation_id: "conv-1",
+                    sender_principal_id: "tool-chain",
+                    original_text: "Tool-chain execution awaiting approval: send report",
+                    scope: "External effect set in saved plan plan-1",
+                    reason: "External effects require Controller approval.",
+                    requested_action: "[{\"label\":\"send report\",\"effect_kind\":\"email\",\"payload\":{}}]",
+                    approval_token: "signed-effect-token",
+                }],
+                memory_promotions: [],
+            }), { status: 200 });
+            return new Response("{}", { status: 200 });
+        });
+        mountPage();
+        await waitFor(() => expect(screen.getByTestId("approval-row")).toBeInTheDocument());
+        expect(screen.getByTestId("approval-context").textContent).toContain("External effect set in saved plan plan-1");
+        expect(screen.getByTestId("approval-requested-action").textContent).toContain("send report");
+        expect(screen.getByTestId("approval-row-verb-approve")).toBeInTheDocument();
+        expect(screen.queryByTestId("approval-row-verb-trust")).not.toBeInTheDocument();
+        fireEvent.click(screen.getByTestId("approval-row-verb-approve"));
+        await waitFor(() => expect(calls.some((call) =>
+            call.url === "/api/admin/approvals/chain-1/respond" && call.init?.method === "POST",
+        )).toBe(true));
+        const response = calls.find((call) => call.url === "/api/admin/approvals/chain-1/respond" && call.init?.method === "POST");
+        expect(JSON.parse(response?.init?.body as string)).toEqual({
+            verb: "approve",
+            approval_token: "signed-effect-token",
+        });
     });
 });

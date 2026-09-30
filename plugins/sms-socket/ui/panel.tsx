@@ -8,7 +8,7 @@ import type {
     PluginPanelProps,
 } from "@execlaw/plugin-ui";
 
-const React = globalThis.execlawHost!.React;
+import * as React from "react";
 const { useCallback, useEffect, useState } = React;
 
 // --- API types ------------------------------------------------------

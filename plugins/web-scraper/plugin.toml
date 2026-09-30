@@ -1,7 +1,7 @@
 [plugin]
 id = "web-scraper"
 name = "Web Scraper"
-version = "0.2.2"
+version = "0.2.3"
 description = "Advanced webpage scraping via a supervised sidecar. Designed for JavaScript-rendered pages and selector-driven extraction while preserving execlaw trust gating and tool-level policy controls."
 author = "execlaw"
 license = "Apache-2.0"
@@ -83,6 +83,7 @@ description = "Run a sidecar connectivity and policy dry-run test."
 [[ui_panels]]
 mount = "admin/plugins/web-scraper"
 entry = "ui/panel.js"
+rpc_capabilities = ["plugin_admin_routes"]
 
 [runtime]
 tier = "script"

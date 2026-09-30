@@ -1,5 +1,40 @@
 # Desktop installations
 
+## Release qualification plan
+
+The [implementation plan](implementation-plan.md) tracks all committed
+H001-H130 enhancements. This page describes package structure; it does not
+certify an artifact against the [open findings F01-F19](llm-harness-roadmap.md#review-findings-and-unresolved-verification).
+The Linux, macOS, and Windows build scripts explicitly enable SQLCipher.
+Each native bundle workflow runs the packaged binary's `doctor` check; the
+Linux deb, macOS DMG, and Windows NSIS installer steps also install the package
+and run `doctor` from the installed location. A release name, database key
+setting, or default-feature test pass does not prove encryption, and workflow
+definitions are not themselves records of passing platform runs.
+
+[H028 implementation](llm-harness-roadmap.md#enhancement-028) now includes
+installed-binary encrypted backup/restore/rekey recovery checks, detached
+Sigstore-signed release artifacts, and signed offline update archives with a
+previous installer when available. A recovery archive never downgrades the DB
+by replacing the binary: restore its pre-update SQLCipher snapshot first.
+Native runner results and actual per-OS update/rollback runs remain release
+qualification evidence to collect in the later verification pass. Remaining
+security blockers in the
+[closure ledger](implementation-plan.md#finding-closure-ledger) still require
+their own acceptance evidence.
+
+Further committed package work is [H073 per-OS isolation](llm-harness-roadmap.md#enhancement-073),
+[H075 safe shutdown/update](llm-harness-roadmap.md#enhancement-075),
+[H114 reproducible builds](llm-harness-roadmap.md#enhancement-114),
+[H116 offline installation](llm-harness-roadmap.md#enhancement-116),
+[H117 service-account separation](llm-harness-roadmap.md#enhancement-117), and
+[H118 replacement-host recovery](llm-harness-roadmap.md#enhancement-118).
+The Windows LocalSystem service described below is the current installation
+model, not evidence of least-privilege qualification. Record actual account,
+keyring, IPC, and filesystem behavior per platform. Local verification did not
+run the native package-install workflows; their GitHub runner results are still
+needed for H028 qualification.
+
 execlaw ships three first-party desktop bundles, one per supported
 desktop OS. They are deliberately symmetric: same Tauri 2 architecture,
 same tray-app-fronts-a-background-service shape, same `127.0.0.1:3031`

@@ -15,6 +15,7 @@ use axum::body::{self, Body};
 use axum::http::{Method, Request, StatusCode, header};
 use execlaw_core::db::{Database, DbConfig};
 use execlaw_core::migrations::MigrationRunner;
+use execlaw_core::users::{UserRole, UserRow, UserStore};
 use execlaw_plugin_host::{HookRegistry, PluginHost};
 use execlaw_server::{AppState, EventBus, JwtSigner, RefreshStore, ServerConfig};
 use std::io::{Cursor, Write};
@@ -44,12 +45,30 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
     MigrationRunner::new(&db).apply_all().unwrap();
     enable_local_artifacts(&db);
     let events = EventBus::new();
+    let signer = Arc::new(JwtSigner::generate("execlaw-test".into()));
+    let refresh_store = Arc::new(RefreshStore::new(db.clone()));
+    let now = chrono::Utc::now().timestamp();
+    let user_id = "plugin-lifecycle-controller";
+    UserStore::new(&db)
+        .insert(&UserRow {
+            user_id: user_id.into(),
+            username: "plugin-controller".into(),
+            display_name: "Plugin Controller".into(),
+            email: None,
+            password_hash: "unused-test-hash".into(),
+            role: UserRole::Controller,
+            created_at: now,
+            last_login_at: None,
+        })
+        .unwrap();
+    let session_id = "plugin-lifecycle-session";
+    refresh_store.issue(user_id, session_id, 3600).unwrap();
     let state = AppState {
         db: db.clone(),
         db_config: Arc::new(db_config),
         config: Arc::new(ServerConfig::default()),
-        signer: Arc::new(JwtSigner::generate("execlaw-test".into())),
-        refresh_store: Arc::new(RefreshStore::new(db.clone())),
+        signer,
+        refresh_store,
         events: events.clone(),
         event_log_hmac_key: Some(Arc::new(b"execlaw-test-hmac-key-32-bytes!!".to_vec())),
         inference: Arc::new(execlaw_server::inference_resolver::InferenceResolver::new(
@@ -95,7 +114,23 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
         inference_metrics: execlaw_server::inference_metrics::InferenceMetrics::new(),
         login_limiter: execlaw_server::auth_rate_limit::LoginRateLimiter::new(),
     };
-    (execlaw_server::routes::build_router(state.clone()), state)
+    let access = state
+        .signer
+        .issue_access_token(user_id, session_id, 3600)
+        .unwrap();
+    let app = execlaw_server::routes::build_router(state.clone()).layer(axum::middleware::from_fn(
+        move |mut request: Request<Body>, next: axum::middleware::Next| {
+            let access = access.clone();
+            async move {
+                request.headers_mut().insert(
+                    header::AUTHORIZATION,
+                    axum::http::HeaderValue::from_str(&format!("Bearer {access}")).unwrap(),
+                );
+                next.run(request).await
+            }
+        },
+    ));
+    (app, state)
 }
 
 async fn post_zip(app: axum::Router, bytes: Vec<u8>) -> (StatusCode, serde_json::Value) {
@@ -169,7 +204,6 @@ version = "0.1.0"
 
 [[tools]]
 name = "{tool_name}"
-schema = "schema.json"
 latency = "low"
 required_capabilities = ["tools.safe"]
 
@@ -317,7 +351,6 @@ version = "0.1.0"
 
 [[tools]]
 name = "dup-tool"
-schema = "s.json"
 latency = "low"
 required_capabilities = []
 "#;
@@ -337,7 +370,6 @@ version = "0.1.0"
 
 [[tools]]
 name = "dup-tool"
-schema = "s.json"
 latency = "low"
 required_capabilities = []
 "#;
@@ -365,7 +397,6 @@ version = "0.1.0"
 
 [[tools]]
 name = "wasm-tool"
-schema = "s.json"
 latency = "low"
 required_capabilities = []
 
@@ -442,7 +473,6 @@ version = "0.1.0"
 
 [[tools]]
 name = "dangerous"
-schema = "s.json"
 latency = "low"
 required_capabilities = ["admin"]
 "#;
@@ -474,7 +504,6 @@ version = "0.1.0"
 
 [[tools]]
 name = "needs-admin"
-schema = "s.json"
 latency = "low"
 required_capabilities = ["admin", "vault.write"]
 "#;
@@ -511,13 +540,11 @@ version = "0.1.0"
 
 [[tools]]
 name = "alpha"
-schema = "s.json"
 latency = "medium"
 required_capabilities = ["tools.medium"]
 
 [[tools]]
 name = "beta"
-schema = "s.json"
 latency = "low"
 required_capabilities = []
 "#;

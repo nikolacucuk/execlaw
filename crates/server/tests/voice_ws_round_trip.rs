@@ -30,6 +30,9 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
+#[path = "support/auth.rs"]
+mod test_auth;
+
 /// Build an `AppState` with mock STT/TTS that returns a deterministic
 /// transcript on flush, so the test can assert exact event payloads.
 fn build_state(transcript: &'static str) -> AppState {
@@ -83,7 +86,7 @@ fn build_state(transcript: &'static str) -> AppState {
 /// Spin up an axum server on an ephemeral port. Returns the bound
 /// address and a stop handle.
 async fn spawn_test_server(state: AppState) -> (String, tokio::task::JoinHandle<()>) {
-    let app: Router = execlaw_server::routes::build_router(state);
+    let app: Router = test_auth::authenticated_router(state);
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let h = tokio::spawn(async move {

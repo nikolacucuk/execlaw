@@ -4,6 +4,7 @@ Reference document for the execlaw agent model. This is the mental model a new c
 
 Relationship to other docs:
 
+- [`implementation-plan.md`](implementation-plan.md) tracks the accepted implementation of **all 130 enhancements (H001-H130)**; [`llm-harness-roadmap.md`](llm-harness-roadmap.md) owns requirements, acceptance criteria, and F01-F19 findings. This architecture describes foundations and intended contracts; it does not certify that every production path already meets them.
 - This document incorporates the durable design rationale from the retired migration plan alongside the current architecture.
 - This document is the *what*: the structure, the invariants, the flows. Read it when you need to understand *how things fit together*.
 - [`agent-model.md`](agent-model.md) is the *how* of one turn — TurnExecutor, memory layers, reflection loop, planner/executor split.
@@ -166,7 +167,7 @@ The coordinator. Owns:
 - **Vault** — SQLCipher-encrypted secrets; master key from OS keyring.
 - **MCP HTTP client** — `crates/server/src/mcp_http_client.rs`; Streamable HTTP transport for MCP (JSON-RPC-2.0 over HTTP, bearer token auth, `2025-06-18` protocol version). Complements the existing stdio-based `crates/mcp-client/`.
 
-Deployed as a per-OS native binary, one of `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, or `aarch64-apple-darwin`. Intel Macs (`x86_64-apple-darwin`) are intentionally out of scope — the only macOS-specific code path that justifies a dedicated build is Metal-accelerated inference, which doesn't exist on Intel hardware. The `service-manager` crate registers the binary as a host service — systemd unit on Linux, launchd plist on macOS, Service Control Manager entry on Windows. State lives at `~/.execlaw/` (SQLite DB, master key, per-plugin sidecar volumes). No Docker image for the control plane itself; `execlaw install` migrates the DB, registers the service, and starts it.
+Deployed as a per-OS native binary, one of `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`, or `aarch64-apple-darwin`. Intel Macs (`x86_64-apple-darwin`) are intentionally out of scope — the only macOS-specific code path that justifies a dedicated build is Metal-accelerated inference, which doesn't exist on Intel hardware. The `service-manager` crate registers the binary as a host service — systemd unit on Linux, launchd plist on macOS, Service Control Manager entry on Windows. State lives at `~/.execlaw/` (SQLite DB, master key, event HMAC key, per-plugin sidecar volumes). No Docker image for the control plane itself; `execlaw install` migrates the DB, registers the service, and starts it.
 
 ### 4.2 Runner (one container *per active conversation*)
 
@@ -260,6 +261,14 @@ Transport-class plugins implement the conversation-routing contract: receive inb
 ### 4.5 Outbox relay
 
 A separate async task in the control plane, explicitly *not* invoked by the runner. Reads `state_outbox`, delivers via transport plugins with the framework-minted idempotency key, handles retries (5 attempts + exponential backoff + dead-letter), and commits `effect_committed` events on success. The LLM never calls an external API directly; this is the only path out.
+
+If a sink accepted an effect but the relay lost its acknowledgement, expiry
+of the relay lease does not prove that a second send is safe. Recovery records
+`lease_reclaimed` and parks an effect with no sink deduplication or status
+lookup as Unknown for explicit Controller reconciliation. A caller retry with
+the same request key resolves to the original durable run. The process-kill
+acceptance matrix and its current evidence are in
+[`h022-h025-qualification.md`](h022-h025-qualification.md).
 
 ---
 
@@ -512,13 +521,39 @@ rewrite the event log; deleting a conversation cascades its organization data.
 and links after verifying every referenced sequence through signed event
 replay. `POST /api/chats/{id}/nexus/views` upserts a named filter and
 `DELETE /api/chats/{id}/nexus/views/{name}` removes one. Full-history
-`GET /api/chats/{id}/messages/search?q=...&source=...&before=...` scans verified
-event text, returns up to 100 newest matches and a `has_more` cursor flag;
+`GET /api/chats/{id}/messages/search?q=...&source=...&before=...` queries the
+rebuildable `state_conversation_event_search` FTS5 projection, returns up to 100
+newest matches and a `has_more` cursor flag;
 `GET /api/chats/{id}/messages?around={seq}&limit=100` loads a bounded window
-for a search jump. Search is not an FTS projection and its replay cost grows
-with conversation length; pagination bounds response size, not scan time.
+for a search jump. The first search backfills from HMAC-verified event replay;
+`state_conversation_event_search_state.indexed_seq` then advances the index
+from new verified events only. A watermark beyond the event-log tail triggers
+a rebuild. Search remains Controller-only and every FTS query filters by the
+requested conversation id, so indexing does not widen conversation visibility.
 The legacy transport `reply_to_seq` is contextual proximity metadata, while
 the Nexus links above represent explicit operator-confirmed relationships.
+
+### Transport delivery timeline
+
+Transport replies are represented as a sequence of append-only
+`TransportReviewDecision` events keyed to the originating `model_turn` seq.
+`send_requested` is committed before the transport plugin is called; completion
+records `accepted`, `delivered`, or `failed`. Plugin acceptance is not treated
+as delivery unless the adapter returns an explicit delivery receipt. The
+social archive separately projects `generated`, `accepted`, `delivered`, or
+`failed` on its outbound row; it is regenerable and does not replace the event
+timeline. This keeps a generated draft, a send request, and confirmed delivery
+visibly distinct.
+
+### Managed backend readiness
+
+Migration `0030_backend_readiness.sql` stores the supervisor's derived
+`(purpose, model_id, stage, last_observed_at, last_success_at,
+stage_changed_at)` projection. Backend edits clear the projection; backend
+deletion cascades it. The supervisor records managed-model observations after
+each reconcile, including downloads and failures. The status API returns
+historical observation timestamps independently of its live supervisor
+snapshot; a past healthy observation never implies the model is ready now.
 
 ### 5.1 `state_events` — the source of truth
 
@@ -959,27 +994,24 @@ For `ExternalWithOutsider` turns and any turn ingesting untrusted content:
   │   PLANNER    │                       │   EXECUTOR   │
   │              │                       │              │
   │ sees:        │                       │ sees:        │
-  │  trusted     │                       │  UNTRUSTED   │
-  │  metadata +  │                       │  content     │
-  │  structured  │                       │  (spotlit)   │
-  │  summaries   │                       │              │
+  │  fixed safe  │                       │  UNTRUSTED   │
+  │  goal + trust│                       │  content     │
+  │  metadata    │                       │  (spotlit)   │
   │              │                       │              │
   │ has:         │                       │ has:         │
-  │  all tools   │                       │  NO tools    │
+  │  NO tools    │                       │  NO tools    │
   │              │                       │              │
   │ produces:    │                       │ produces:    │
-  │  tool calls  │───── placeholders ───▶│  values to   │
-  │  with holes  │                       │  fill holes  │
-  │              │◀─── tainted values ───│              │
+  │ bounded plan │──── handoff text ────▶│ final text   │
+  │              │                       │              │
   └──────────────┘                       └──────────────┘
                 │
                 ▼
-    policy engine rejects tainted values entering
-    sensitive sinks (cross-conversation send, vault read,
-    shared-state write) unless explicitly trusted
+    untrusted-derived values never return to a tool-capable
+    role during this two-pass turn
 ```
 
-This is CaMeL (DeepMind 2503.18813) restated for execlaw's trust classes. It doesn't prevent injection; it contains blast radius.
+This is a conservative two-pass specialization of CaMeL for outsider turns and turns with attachments. The inbound message is itself untrusted and the current request shape has no separately authenticated goal, so neither pass gets tools. The metadata-only planner cannot authorize effects, and no executor output is returned to a tool-capable role. An `untrusted_input` marker on the committed assistant event keeps later turns in that conversation on the same no-tools path. It doesn't prevent injection; it contains blast radius.
 
 ### 9.3 Cold-contact escalation (Phase 3)
 
@@ -1212,12 +1244,17 @@ Admin UI has a log viewer with filters by level / plugin / conversation / time w
 
 ### 14.1 Inference observability
 
-A dedicated `InferenceMetrics` service tracks every inference call with per-consumer attribution and latency percentiles. Accessible without a UI rebuild via:
+A dedicated `InferenceMetrics` service tracks inference calls with per-consumer attribution and latency percentiles. Its bounded samples cover prompt assembly, local prefill/decode, tool wait, retry-eligible failed attempts, and time to first visible streamed token. It also records serialized request bytes and a four-bytes-per-token context estimate at prompt assembly; prompt text is never retained in metrics. The `/admin/inference` page renders phase and context distributions. Accessible without a UI rebuild via:
 
-- `GET /api/admin/inference/metrics` — returns `MetricsSnapshot` JSON with `in_flight`, `total_calls`, `total_failures`, `p50_ms`, `p95_ms` per consumer (Chat, Routines, Research, Automations).
+- `GET /api/admin/inference/metrics` — returns `MetricsSnapshot` JSON with per-consumer totals and p50/p95 latency, per-phase latency distributions, and numeric request byte/token estimates. Samples are bounded to 256 per consumer and phase.
 - `POST /api/admin/inference/probe` — runs a diagnostic inference call that bypasses the event log, history hydration, and tool routing. Returns timing splits: `open_stream_ms`, `first_chunk_ms`, `decode_ms`, `chunks_per_sec`. Use this to localize latency to: network, prompt size, guided decoding (outlines), tool-catalog schema inflation, or model prefill.
+- `POST /api/admin/inference/conformance` — Controller-only, bounded text,
+  streaming-text, and declared `probe_noop` tool-call checks against the
+  currently resolved Standard backend. Returns per-capability pass/fail codes
+  without dispatching tools or committing chat events. Both native Ollama and
+  OpenAI-compatible protocols use the same local endpoint policy.
 
-The 256-deep ring buffer for latency samples is single-Mutex-protected (`Mutex<HashMap<InferenceConsumer, …>>`). Lock contention is negligible compared to inference call duration (hundreds of milliseconds vs sub-microsecond lock hold time).
+Latency and context distributions use bounded 256-sample rings. Metrics retain numeric measurements only. Regression thresholds are not currently enforced; local inference latency varies by model and operator hardware.
 
 ### 14.2 Signed media download URLs
 
@@ -1341,6 +1378,17 @@ This section documents the seven enhancements implemented in June 2026.
 ### 17.1 Master key file permissions hardening (#13)
 
 `crates/vault/src/keyring_key.rs` — the fallback key file (`~/.execlaw/master.key`) is now created with mode `0o600` (owner-read/write only) on Unix. Prior to this change the file was created with the OS default umask, potentially allowing group- or world-read. The `open_with_permissions` helper uses `OpenOptions` + `std::os::unix::fs::OpenOptionsExt::mode(0o600)` on Unix; Windows is a no-op (uses NTFS ACLs, which default to user-only for files in the user profile). A warning is logged if an existing key file has broader permissions than 0600.
+
+SQLCipher encryption and event signing use separate key files. On first use,
+`event-hmac.key` is initialized from the current master key to preserve event
+tags on existing installations; future master-key rotation leaves this signing
+key stable. `execlaw rotate-keys` requires a stopped service, retains an
+old-key snapshot until it has rekeyed the database and verified a new-key
+snapshot, then durably replaces `master.key` and refreshes the OS keyring
+cache. Backup and restore checks include SQLite integrity, schema, and the
+HMAC chain when SQLCipher is enabled. Operators must protect the database
+backup and both key files as one recovery set. The procedure, crash recovery,
+and secret-compromise response are in [`key-rotation-drill.md`](key-rotation-drill.md).
 
 ### 17.2 HttpOnly session cookies + sensitive_tool flag (#10)
 
@@ -1475,7 +1523,8 @@ Valid transitions:
 | [`crates/core/src/eval.rs`](../crates/core/src/eval.rs) | `EvalFlaggedStore` for regression-target event ranges (Phase 5) |
 | [`crates/server/src/observability.rs`](../crates/server/src/observability.rs) | `GET /api/admin/logs` + `GET /api/admin/eval/flags` (Phase 5) |
 | [`crates/server/src/tracing_layer.rs`](../crates/server/src/tracing_layer.rs) | `SqliteLogLayer` — mirrors tracing events into `log_entries` (Phase 5) |
-| [`crates/eval-harness/src/main.rs`](../crates/eval-harness/src/main.rs) | LLM-judge harness against local Qwen (Phase 5) |
+| [`crates/eval-harness/src/main.rs`](../crates/eval-harness/src/main.rs) | Local rubric judge and reproducible real-task benchmark entry point |
+| [`evals/benchmark/`](../evals/benchmark/) | Release and periodic coding, research, memory, and mock-effect task suites |
 | [`evals/rubrics/`](../evals/rubrics/) | Rubric TOML files |
 | [`crates/cli/src/main.rs`](../crates/cli/src/main.rs) | `execlaw` CLI (+ replay + eval flag/list subcommands) |
 
@@ -1549,21 +1598,29 @@ The palette entry appears in the **Actions** group alongside `CallPlugin` and `N
 
 ## 17. Non-goals (what execlaw deliberately does not do)
 
-These are *not* oversights — they are chosen constraints:
+These boundaries are reconciled with the accepted H001-H130 plan. Planned
+extensions do not replace the local-inference, SQLite, outbox, trust, or
+manifest-driven plugin invariants. See the [delivery ledger](implementation-plan.md).
 
 - **Cloud LLMs.** Not as default, not as opt-in, not ever. No Anthropic, OpenAI, Gemini, or equivalent on any code path. Models must be hosted locally.
-- **Native-audio full-duplex** (GPT-4o Realtime-style). The OSS ecosystem hasn't shipped something portable across nvidia + Intel with acceptable quality. Cascaded STT→LLM→TTS with aggressive barge-in is the self-hosted ceiling; we accept the latency delta.
+- **Current voice topology.** Cascaded local STT→LLM→TTS remains the implementation basis. H047/H106 extend streaming, interruption, and grounding; the plan does not implicitly substitute a cloud or native-audio model.
 - **Vendor agent SDKs.** The Claude Agent SDK, OpenAI Assistants API, and equivalents are not used. We implement sessions, memory, streaming, tool use, compaction, and reasoning-on-demand ourselves in Rust against a local OpenAI-compatible inference endpoint. Research findings from those SDKs inform design; they do not define dependencies.
 - **Multi-agent by default — with exception for research.** Default is single-threaded. Sub-agents are endorsed for guardrails, research fan-out, and deep escalation; never for untrusted conversations.
 - **Hosted plugin registries.** Plugins install via ZIP upload. No central index, no `cargo install`-style package manager for plugins.
-- **Complex observability stack.** No OpenTelemetry, Langfuse, Phoenix. JSONL + SQLite, same as selfhosted-claw.
-- **Distributed operation.** Single host. SQLite is enough; the control plane runs as one host service, the runner + inference + plugin sidecars are local containers it spawns over the host's Docker socket.
+- **No required external observability stack.** SQLite remains authoritative. H115 adds an optional bounded local telemetry adapter; it does not make a collector a dependency of execution or alter the canonical event schema.
+- **One authoritative control plane.** The default remains one host service with local runners, inference, and sidecars. H085 plans a qualified trial of delegation to explicitly paired operator-owned local/VPN hosts, not unrestricted distributed authority or cloud inference.
 
 ---
 
 ## 18. What's built vs. what's next
 
-Last refreshed: 2026-06-06. The phase tags below reflect implementation milestones; for the live-progress feed, look at `git log` on `foundation` and the per-plugin manifests under `plugins/`.
+Historical milestone snapshot: 2026-06-06. The phase tags below record earlier
+implementation milestones, not current release qualification. Current status
+for all H001-H130 lives in [`implementation-plan.md`](implementation-plan.md).
+F01-F19 qualify broad safety/durability claims in this snapshot: especially
+admin authorization, production encryption, restart/power-loss recovery,
+default logging, and automation test-run effects. Completing a historical
+phase does not close those findings.
 
 **Phase 0 — Foundation + local inference + GPU-aware deployment.** Complete.
 
@@ -1600,7 +1657,7 @@ Last refreshed: 2026-06-06. The phase tags below reflect implementation mileston
 - `POST /api/admin/principals/:id/revoke` for direct trust revocation
 - `TrustChanged` event committed on every transition (audit trail)
 - Spotlighting applied to prompt assembly when `policy.spotlighting` fires
-- **Planner/executor containment** — when `policy.planner_executor` is true (effective_trust < KnownTrusted), the tool-capable chat path is disabled. A prompt-injected executor can't exfiltrate via tool_use args because there are no tool_use slots. Full placeholder-passing choreography lands as a later refinement.
+- **Two-pass untrusted-content boundary** — when `policy.planner_executor` is true (effective_trust < KnownTrusted), the metadata-only planner and untrusted-content executor each run with no tools. The planner receives only the fixed safe-analysis goal and trusted metadata; the executor receives the bounded handoff and current untrusted text/attachments, with no history. Both runner-mediated and in-process paths enforce this.
 - Trust-class-scoped memory reads (from Phase 1)
 
 **Phase 3 deferrals**:
@@ -1634,7 +1691,7 @@ Last refreshed: 2026-06-06. The phase tags below reflect implementation mileston
 - `GET /api/admin/logs` and `GET /api/admin/eval/flags` HTTP routes — pure data feeds for the Phase-6 React UI
 - `execlaw replay <conversation_id> --at <seq>` CLI — reconstructs the prompt history + sender trust + policy decision (capabilities / planner_executor / spotlighting / latency_band) + the events that turn committed
 - `execlaw eval flag <conv> --range a..b --label X --tags ... --notes ...` and `execlaw eval list [--label]` CLI commands
-- `execlaw-eval-harness` Rust binary — runs rubric TOML against a local OpenAI-compatible endpoint (the same Qwen the agent uses; no cloud judge). `--mock` mode skips the network call so CI exercises the orchestration without a live model.
+- `execlaw-eval-harness` Rust binary — runs rubric TOML against a local OpenAI-compatible endpoint; `benchmark` runs held-out task suites with deterministic workspace, source, memory, and mock-sink verifiers, repeated-run uncertainty, and identity-bound records. `--offline-fixture` validates scoring only and is not model evidence.
 - Reference rubric at `evals/rubrics/trust-class.toml` covering: outsider can't pull Controller memory, Rule-of-Two breach blocked, tool_use/tool_result pairing.
 
 **Phase 5 deferrals → Phase 6 (UI):**

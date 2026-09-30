@@ -6,7 +6,7 @@
 //! surface without introducing a second service or trust model.
 
 use crate::db::{Database, DbError};
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -127,6 +127,68 @@ pub struct AssetBinding {
     pub created_at: i64,
 }
 
+/// An asset admitted to a turn's HOT loadout after trust, lifecycle, and
+/// byte-budget policy have been applied.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResolvedLoadoutAsset {
+    pub asset: MemoryAsset,
+    pub binding: AssetBinding,
+    pub max_chars: i64,
+}
+
+/// Metadata-only proof of why a governed asset was injected into one turn.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnAssetLoadoutReceipt {
+    pub agent_scope: String,
+    pub conversation_trust_class: String,
+    pub readable_trust_classes: Vec<String>,
+    pub readable_owner_scopes: Vec<String>,
+    pub resolved_at: i64,
+    pub retrieval_query_sha256: Option<String>,
+    pub assets: Vec<TurnAssetLoadoutEntry>,
+    pub retrieved_assets: Vec<TurnAssetRetrievalEntry>,
+}
+
+/// One asset that passed every loadout policy check and was actually injected.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnAssetLoadoutEntry {
+    pub asset_id: String,
+    pub name: String,
+    pub asset_type: AssetType,
+    pub version: i64,
+    pub source_hash: Option<String>,
+    pub owner_scope: String,
+    pub visibility: AssetVisibility,
+    pub trust_floor: String,
+    pub status: String,
+    pub expires_at: Option<i64>,
+    pub binding_agent_scope: String,
+    pub binding_mode: InjectionMode,
+    pub binding_priority: i64,
+    pub binding_max_chars: i64,
+    pub injected_chars: usize,
+    pub admission_reasons: Vec<String>,
+}
+
+/// One trust-eligible retrieval result injected into the model context.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TurnAssetRetrievalEntry {
+    pub asset_id: String,
+    pub name: String,
+    pub asset_type: AssetType,
+    pub version: i64,
+    pub source_hash: Option<String>,
+    pub owner_scope: String,
+    pub visibility: AssetVisibility,
+    pub trust_floor: String,
+    pub expires_at: Option<i64>,
+    pub score_micros: i64,
+    pub lexical_rank: i64,
+    pub vector_rank: Option<i64>,
+    pub injected_chars: usize,
+    pub admission_reasons: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetHit {
     pub asset: MemoryAsset,
@@ -167,6 +229,8 @@ pub enum MemoryAssetError {
     InvalidEnum,
     #[error("embedding dimensions do not match")]
     InvalidEmbedding,
+    #[error("eligible memory candidate set exceeds the {limit}-asset search bound")]
+    CandidateSetTooLarge { limit: usize },
 }
 
 pub struct MemoryAssetStore<'db> {
@@ -179,8 +243,19 @@ impl<'db> MemoryAssetStore<'db> {
     }
 
     pub fn create(&self, asset: NewMemoryAsset<'_>) -> Result<(), MemoryAssetError> {
-        self.db.with_conn(|c| {
-            c.execute(
+        self.db.transaction(|tx| {
+            let tombstoned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_memory_asset_deletion_tombstones \
+                 WHERE asset_id = ?1)",
+                params![asset.asset_id],
+                |row| row.get(0),
+            )?;
+            if tombstoned {
+                return Err(DbError::Invariant(
+                    "memory asset ID is protected by a privacy tombstone".into(),
+                ));
+            }
+            tx.execute(
                 "INSERT INTO memory_assets(
                     asset_id, asset_type, name, description, owner_scope,
                     visibility, trust_floor, source_ref, content_ref, source_hash,
@@ -205,6 +280,67 @@ impl<'db> MemoryAssetStore<'db> {
         Ok(())
     }
 
+    /// Delete a governed asset, its bindings, embeddings, and FTS projection.
+    /// The tombstone remains after deletion to fence delayed writers and replay.
+    pub fn delete(
+        &self,
+        asset_id: &str,
+        requested_by: &str,
+        now_unix: i64,
+    ) -> Result<bool, MemoryAssetError> {
+        if requested_by.trim().is_empty() || requested_by.len() > 128 {
+            return Err(MemoryAssetError::Db(DbError::Invariant(
+                "memory asset deletion actor is invalid".into(),
+            )));
+        }
+        let asset_id = asset_id.to_owned();
+        let requested_by = requested_by.to_owned();
+        self.db
+            .transaction(|tx| {
+                let tombstoned: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_memory_asset_deletion_tombstones \
+                     WHERE asset_id = ?1)",
+                    params![asset_id],
+                    |row| row.get(0),
+                )?;
+                if tombstoned {
+                    return Ok(false);
+                }
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM memory_assets WHERE asset_id = ?1)",
+                    params![asset_id],
+                    |row| row.get(0),
+                )?;
+                tx.execute(
+                    "INSERT INTO state_memory_asset_deletion_tombstones \
+                     (asset_id, requested_by, requested_at, completed_at) \
+                     VALUES (?1, ?2, ?3, ?3)",
+                    params![asset_id, requested_by, now_unix],
+                )?;
+                tx.execute(
+                    "DELETE FROM memory_asset_search WHERE asset_id = ?1",
+                    params![asset_id],
+                )?;
+                // FTS5 has no foreign-key cascade, so remove this derived
+                // wiki projection before the relational wiki rows cascade.
+                tx.execute(
+                    "DELETE FROM knowledge_wiki_search WHERE wiki_id IN (\
+                       SELECT wiki_id FROM knowledge_wikis WHERE asset_id = ?1\
+                     )",
+                    params![asset_id],
+                )?;
+                if !exists {
+                    return Ok(false);
+                }
+                tx.execute(
+                    "DELETE FROM memory_assets WHERE asset_id = ?1",
+                    params![asset_id],
+                )?;
+                Ok(true)
+            })
+            .map_err(MemoryAssetError::from)
+    }
+
     pub fn get(&self, asset_id: &str) -> Result<Option<MemoryAsset>, MemoryAssetError> {
         Ok(self.db.with_conn(|c| {
             Ok(c.query_row(
@@ -217,6 +353,21 @@ impl<'db> MemoryAssetStore<'db> {
                 row_to_asset,
             )
             .optional()?)
+        })?)
+    }
+
+    pub fn list(&self, limit: u32) -> Result<Vec<MemoryAsset>, MemoryAssetError> {
+        Ok(self.db.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT asset_id, asset_type, name, description, owner_scope,
+                        visibility, trust_floor, status, version, source_ref,
+                        content_ref, source_hash, expires_at, last_used_at,
+                        usage_count, created_at, updated_at
+                 FROM memory_assets ORDER BY updated_at DESC, asset_id LIMIT ?1",
+            )?;
+            Ok(statement
+                .query_map(params![limit.min(200) as i64], row_to_asset)?
+                .collect::<Result<Vec<_>, _>>()?)
         })?)
     }
 
@@ -271,6 +422,142 @@ impl<'db> MemoryAssetStore<'db> {
                 .query_map(params![agent_scope, limit as i64], row_to_binding)?
                 .collect::<Result<Vec<_>, _>>()?)
         })?)
+    }
+
+    pub fn unbind(&self, asset_id: &str, agent_scope: &str) -> Result<bool, MemoryAssetError> {
+        Ok(self.db.with_conn(|connection| {
+            Ok(connection.execute(
+                "DELETE FROM memory_asset_bindings WHERE asset_id = ?1 AND agent_scope = ?2",
+                params![asset_id, agent_scope],
+            )? > 0)
+        })?)
+    }
+
+    /// Resolve HOT assets for a turn without exposing unauthorized metadata to
+    /// ranking or prompt assembly. `readable_trust_classes` is derived by the
+    /// caller from the conversation's read-down trust policy.
+    pub fn resolve_hot_loadout(
+        &self,
+        agent_scope: &str,
+        readable_trust_classes: &[&str],
+        readable_owner_scopes: &[&str],
+        now_unix: i64,
+        char_budget: usize,
+        limit: u32,
+    ) -> Result<Vec<ResolvedLoadoutAsset>, MemoryAssetError> {
+        let bindings = self.list_loadout(agent_scope, limit)?;
+        let mut used = 0_usize;
+        let mut resolved = Vec::new();
+        for binding in bindings {
+            if binding.injection_mode != InjectionMode::Hot {
+                continue;
+            }
+            let Some(asset) = self.get(&binding.asset_id)? else {
+                continue;
+            };
+            let visibility_allowed = match asset.visibility {
+                AssetVisibility::Private | AssetVisibility::Team => true,
+                AssetVisibility::Restricted => readable_trust_classes.contains(&"Controller"),
+                AssetVisibility::Agent => binding.agent_scope == agent_scope,
+            };
+            if asset.status != "active"
+                || asset.expires_at.is_some_and(|expiry| expiry <= now_unix)
+                || !readable_trust_classes
+                    .iter()
+                    .any(|trust| *trust == asset.trust_floor)
+                || !readable_owner_scopes
+                    .iter()
+                    .any(|scope| *scope == asset.owner_scope)
+                || !visibility_allowed
+            {
+                continue;
+            }
+            let requested = usize::try_from(binding.max_chars).unwrap_or(usize::MAX);
+            let available = char_budget.saturating_sub(used);
+            if requested == 0 || requested > available {
+                continue;
+            }
+            used = used.saturating_add(requested);
+            let max_chars = binding.max_chars;
+            resolved.push(ResolvedLoadoutAsset {
+                asset,
+                binding,
+                max_chars,
+            });
+        }
+        Ok(resolved)
+    }
+
+    /// Persist the metadata-only selection receipt for one user turn.
+    pub fn record_turn_loadout(
+        &self,
+        conversation_id: &str,
+        input_event_seq: i64,
+        receipt: &TurnAssetLoadoutReceipt,
+    ) -> Result<(), MemoryAssetError> {
+        if input_event_seq <= 0 || receipt.assets.len() > 16 {
+            return Err(DbError::Invariant("turn asset loadout receipt is invalid".into()).into());
+        }
+        let json = serde_json::to_string(receipt)
+            .map_err(|error| DbError::Serde(format!("asset loadout receipt: {error}")))?;
+        if json.len() > 32 * 1024 {
+            return Err(
+                DbError::Invariant("turn asset loadout receipt exceeds its bound".into()).into(),
+            );
+        }
+        self.db.transaction(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO state_turn_asset_loadouts \
+                 (conversation_id, input_event_seq, receipt_json, resolved_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![conversation_id, input_event_seq, json, receipt.resolved_at],
+            )?;
+            let saved: String = tx.query_row(
+                "SELECT receipt_json FROM state_turn_asset_loadouts \
+                 WHERE conversation_id = ?1 AND input_event_seq = ?2",
+                params![conversation_id, input_event_seq],
+                |row| row.get(0),
+            )?;
+            let saved: TurnAssetLoadoutReceipt = serde_json::from_str(&saved)
+                .map_err(|error| DbError::Serde(format!("stored asset loadout receipt: {error}")))?;
+            let mut current = receipt.clone();
+            // Resolution time is diagnostic metadata. Reopening an unchanged
+            // run must keep its original timestamp and receipt bytes.
+            current.resolved_at = saved.resolved_at;
+            if saved != current {
+                return Err(DbError::Invariant(format!(
+                    "turn {conversation_id}:{input_event_seq} was reopened with a different memory loadout"
+                )));
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Read the selection receipt for a durable user event without reading asset content.
+    pub fn turn_loadout(
+        &self,
+        conversation_id: &str,
+        input_event_seq: i64,
+    ) -> Result<Option<TurnAssetLoadoutReceipt>, MemoryAssetError> {
+        self.db
+            .with_conn(|connection| {
+                connection
+                    .query_row(
+                        "SELECT receipt_json FROM state_turn_asset_loadouts \
+                         WHERE conversation_id = ?1 AND input_event_seq = ?2",
+                        params![conversation_id, input_event_seq],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .optional()
+                    .map_err(DbError::from)
+            })?
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|error| DbError::Serde(format!("asset loadout receipt: {error}")))
+            })
+            .transpose()
+            .map_err(Into::into)
     }
 
     pub fn touch(&self, asset_id: &str, now_unix: i64) -> Result<(), MemoryAssetError> {
@@ -345,6 +632,157 @@ impl<'db> MemoryAssetStore<'db> {
         }
         hits.sort_by(|a, b| b.score.total_cmp(&a.score));
         hits.truncate(limit as usize);
+        Ok(hits)
+    }
+
+    /// Search an agent's eligible assets, applying scope, trust, lifecycle,
+    /// visibility, and time filters before lexical/vector rank fusion.
+    ///
+    /// The search fails rather than silently truncating if more than 900 assets
+    /// are eligible. The cap keeps the parameterized FTS/vector joins under
+    /// SQLite's conservative variable limit while preserving candidate recall.
+    pub fn search_eligible(
+        &self,
+        query: &str,
+        vector: Option<&[f32]>,
+        embedding_model_id: Option<&str>,
+        agent_scope: &str,
+        readable_trust_classes: &[&str],
+        readable_owner_scopes: &[&str],
+        eligible_injection_modes: &[InjectionMode],
+        as_of_unix: i64,
+        limit: u32,
+    ) -> Result<Vec<AssetHit>, MemoryAssetError> {
+        const MAX_ELIGIBLE_ASSETS: usize = 900;
+        if agent_scope.trim().is_empty()
+            || readable_trust_classes.is_empty()
+            || readable_owner_scopes.is_empty()
+            || eligible_injection_modes.is_empty()
+        {
+            return Ok(Vec::new());
+        }
+        let limit = limit.clamp(1, 200);
+        let trust_placeholders = (0..readable_trust_classes.len())
+            .map(|index| format!("?{}", index + 3))
+            .collect::<Vec<_>>()
+            .join(",");
+        let owner_start = 3 + readable_trust_classes.len();
+        let owner_placeholders = (0..readable_owner_scopes.len())
+            .map(|index| format!("?{}", owner_start + index))
+            .collect::<Vec<_>>()
+            .join(",");
+        let mode_start = owner_start + readable_owner_scopes.len();
+        let mode_placeholders = (0..eligible_injection_modes.len())
+            .map(|index| format!("?{}", mode_start + index))
+            .collect::<Vec<_>>()
+            .join(",");
+        let eligibility_sql = format!(
+            "SELECT DISTINCT a.asset_id FROM memory_assets a \
+             JOIN memory_asset_bindings b ON b.asset_id = a.asset_id \
+             WHERE b.agent_scope = ?1 AND a.created_at <= ?2 \
+               AND b.injection_mode IN ({mode_placeholders}) \
+               AND a.status = 'active' AND (a.expires_at IS NULL OR a.expires_at > ?2) \
+               AND a.trust_floor IN ({trust_placeholders}) \
+               AND a.owner_scope IN ({owner_placeholders}) \
+               AND (a.visibility <> 'restricted' OR 'Controller' IN ({trust_placeholders})) \
+             ORDER BY a.asset_id LIMIT ?{}",
+            mode_start + eligible_injection_modes.len()
+        );
+        let eligible_ids = self.db.with_conn(|connection| {
+            let mut values: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(agent_scope.to_owned()), Box::new(as_of_unix)];
+            for trust_class in readable_trust_classes {
+                values.push(Box::new((*trust_class).to_owned()));
+            }
+            for owner_scope in readable_owner_scopes {
+                values.push(Box::new((*owner_scope).to_owned()));
+            }
+            for injection_mode in eligible_injection_modes {
+                values.push(Box::new(injection_mode.as_sql().to_owned()));
+            }
+            values.push(Box::new((MAX_ELIGIBLE_ASSETS + 1) as i64));
+            let mut statement = connection.prepare(&eligibility_sql)?;
+            statement
+                .query_map(params_from_iter(values.iter()), |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<Result<std::collections::HashSet<_>, _>>()
+                .map_err(DbError::from)
+        })?;
+        if eligible_ids.len() > MAX_ELIGIBLE_ASSETS {
+            return Err(MemoryAssetError::CandidateSetTooLarge {
+                limit: MAX_ELIGIBLE_ASSETS,
+            });
+        }
+        if eligible_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let eligible_placeholders = (0..eligible_ids.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let lexical_sql = format!(
+            "SELECT a.asset_id, bm25(memory_asset_search) \
+             FROM memory_asset_search \
+             JOIN memory_assets a ON a.asset_id = memory_asset_search.asset_id \
+             WHERE memory_asset_search MATCH ?1 AND a.asset_id IN ({eligible_placeholders}) \
+             ORDER BY bm25(memory_asset_search) LIMIT ?{}",
+            eligible_ids.len() + 2
+        );
+        let mut lexical = self.db.with_conn(|connection| {
+            let mut values: Vec<Box<dyn rusqlite::ToSql>> =
+                vec![Box::new(sanitize_fts_query(query))];
+            let mut ids = eligible_ids.iter().cloned().collect::<Vec<_>>();
+            ids.sort();
+            for id in ids {
+                values.push(Box::new(id));
+            }
+            values.push(Box::new(limit as i64));
+            let mut statement = connection.prepare(&lexical_sql)?;
+            statement
+                .query_map(params_from_iter(values.iter()), |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)
+        })?;
+        let vector_ids = match (vector, embedding_model_id) {
+            (Some(vector), Some(model_id)) => {
+                self.vector_candidates_for_allowed(vector, model_id, &eligible_ids, limit)?
+            }
+            _ => Vec::new(),
+        };
+        let mut candidate_ids = std::collections::BTreeSet::new();
+        candidate_ids.extend(lexical.iter().map(|(asset_id, _)| asset_id.clone()));
+        candidate_ids.extend(vector_ids.iter().map(|(asset_id, _)| asset_id.clone()));
+        let mut hits = Vec::with_capacity(candidate_ids.len());
+        for asset_id in candidate_ids {
+            let Some(asset) = self.get(&asset_id)? else {
+                continue;
+            };
+            let lexical_rank = lexical
+                .iter()
+                .position(|(candidate, _)| candidate == &asset_id)
+                .map(|index| index as i64 + 1);
+            let vector_rank = vector_ids
+                .iter()
+                .position(|(candidate, _)| candidate == &asset_id)
+                .map(|index| index as i64 + 1);
+            let score = 1.0 / (60.0 + lexical_rank.unwrap_or(10_000) as f64)
+                + vector_rank
+                    .map(|rank| 1.0 / (60.0 + rank as f64))
+                    .unwrap_or(0.0);
+            hits.push(AssetHit {
+                asset,
+                score,
+                lexical_rank: lexical_rank.unwrap_or(0),
+                vector_rank,
+            });
+        }
+        hits.sort_by(|left, right| right.score.total_cmp(&left.score));
+        hits.truncate(limit as usize);
+        lexical.clear();
         Ok(hits)
     }
 
@@ -427,8 +865,8 @@ impl<'db> MemoryAssetStore<'db> {
                 "SELECT p.wiki_id, p.page_ref, p.title, p.body, p.source_path, p.source_hash, p.updated_at
                  FROM knowledge_wiki_search s
                  JOIN knowledge_wiki_pages p ON p.wiki_id = s.wiki_id AND p.page_ref = s.page_ref
-                 WHERE s.wiki_id = ?1 AND s MATCH ?2
-                 ORDER BY bm25(s) LIMIT ?3",
+                 WHERE s.wiki_id = ?1 AND knowledge_wiki_search MATCH ?2
+                 ORDER BY bm25(knowledge_wiki_search) LIMIT ?3",
             )?;
             Ok(stmt.query_map(params![wiki_id, sanitize_fts_query(query), limit as i64], |r| {
                 Ok(WikiPage { wiki_id: r.get(0)?, page_ref: r.get(1)?, title: r.get(2)?, body: r.get(3)?, source_path: r.get(4)?, source_hash: r.get(5)?, updated_at: r.get(6)? })
@@ -570,13 +1008,13 @@ impl<'db> MemoryAssetStore<'db> {
         side: &str,
         limit: u32,
     ) -> Result<Vec<String>, MemoryAssetError> {
-        let column = match side {
-            "callee" => "callee",
-            "caller" => "caller",
+        let (returned_column, filtered_column) = match side {
+            "callee" => ("caller", "callee"),
+            "caller" => ("callee", "caller"),
             _ => return Ok(Vec::new()),
         };
         Ok(self.db.with_conn(|c| {
-            let sql = format!("SELECT {} FROM knowledge_code_edges WHERE graph_id = ?1 AND {} = ?2 ORDER BY {} LIMIT ?3", column, side, column);
+            let sql = format!("SELECT {returned_column} FROM knowledge_code_edges WHERE graph_id = ?1 AND {filtered_column} = ?2 ORDER BY {returned_column} LIMIT ?3");
             let mut stmt = c.prepare(&sql)?;
             Ok(stmt.query_map(params![graph_id, symbol, limit as i64], |r| r.get(0))?.collect::<Result<Vec<_>, _>>()?)
         })?)
@@ -614,6 +1052,60 @@ impl<'db> MemoryAssetStore<'db> {
             scored.push((id, score));
         }
         scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scored.truncate(limit as usize);
+        Ok(scored)
+    }
+
+    fn vector_candidates_for_allowed(
+        &self,
+        query: &[f32],
+        model_id: &str,
+        eligible_ids: &std::collections::HashSet<String>,
+        limit: u32,
+    ) -> Result<Vec<(String, f32)>, MemoryAssetError> {
+        if eligible_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = (0..eligible_ids.len())
+            .map(|index| format!("?{}", index + 2))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT e.asset_id, e.dimensions, e.vector_json FROM memory_asset_embeddings e \
+             JOIN memory_assets a ON a.asset_id = e.asset_id \
+             WHERE e.model_id = ?1 AND e.asset_id IN ({placeholders}) \
+               AND e.source_hash = a.source_hash AND a.status = 'active'"
+        );
+        let rows = self.db.with_conn(|connection| {
+            let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(model_id.to_owned())];
+            let mut ids = eligible_ids.iter().cloned().collect::<Vec<_>>();
+            ids.sort();
+            for id in ids {
+                values.push(Box::new(id));
+            }
+            let mut statement = connection.prepare(&sql)?;
+            statement
+                .query_map(params_from_iter(values.iter()), |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)? as usize,
+                        row.get::<_, String>(2)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)
+        })?;
+        let mut scored = Vec::new();
+        for (asset_id, dimensions, vector_json) in rows {
+            if dimensions != query.len() {
+                continue;
+            }
+            let Ok(candidate) = serde_json::from_str::<Vec<f32>>(&vector_json) else {
+                continue;
+            };
+            scored.push((asset_id, cosine_similarity(query, &candidate)));
+        }
+        scored.sort_by(|left, right| right.1.total_cmp(&left.1));
         scored.truncate(limit as usize);
         Ok(scored)
     }
@@ -744,9 +1236,220 @@ mod tests {
     }
 
     #[test]
+    fn hot_loadout_filters_trust_and_expiry_before_budgeting() {
+        let db = db();
+        let store = MemoryAssetStore::new(&db);
+        for (id, floor, expiry, priority, owner_scope, visibility) in [
+            (
+                "controller-only",
+                "Controller",
+                None,
+                100,
+                "principal:test",
+                AssetVisibility::Private,
+            ),
+            (
+                "readable",
+                "KnownLimited",
+                None,
+                90,
+                "principal:test",
+                AssetVisibility::Private,
+            ),
+            (
+                "expired",
+                "KnownLimited",
+                Some(50),
+                80,
+                "principal:test",
+                AssetVisibility::Private,
+            ),
+            (
+                "other-owner",
+                "KnownLimited",
+                None,
+                70,
+                "principal:other",
+                AssetVisibility::Private,
+            ),
+            (
+                "restricted",
+                "KnownLimited",
+                None,
+                60,
+                "principal:test",
+                AssetVisibility::Restricted,
+            ),
+        ] {
+            store
+                .create(NewMemoryAsset {
+                    asset_id: id,
+                    asset_type: AssetType::Memory,
+                    name: id,
+                    description: "fixture",
+                    owner_scope,
+                    visibility,
+                    trust_floor: floor,
+                    source_ref: None,
+                    content_ref: Some("safe contents"),
+                    source_hash: Some("fixture-hash"),
+                    now_unix: 1,
+                })
+                .unwrap();
+            store
+                .bind(id, "default", InjectionMode::Hot, priority, 12, 1)
+                .unwrap();
+            if let Some(expiry) = expiry {
+                db.with_conn(|connection| {
+                    connection.execute(
+                        "UPDATE memory_assets SET expires_at = ?1 WHERE asset_id = ?2",
+                        params![expiry, id],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            }
+        }
+
+        let assets = store
+            .resolve_hot_loadout(
+                "default",
+                &["KnownLimited", "UnknownPending"],
+                &["global", "principal:test"],
+                100,
+                12,
+                10,
+            )
+            .unwrap();
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].asset.asset_id, "readable");
+        assert_eq!(assets[0].max_chars, 12);
+        assert_eq!(assets[0].binding.agent_scope, "default");
+        assert_eq!(assets[0].binding.priority, 90);
+        assert_eq!(assets[0].binding.injection_mode, InjectionMode::Hot);
+    }
+
+    #[test]
+    fn turn_loadout_receipt_is_immutable_and_metadata_only() {
+        let db = db();
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_conversations \
+                 (conversation_id, kind, phase, trust_class, modality) \
+                 VALUES ('loadout-conversation', 'ControllerDM', 'idle', 'Controller', 'Text')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let receipt = TurnAssetLoadoutReceipt {
+            agent_scope: "default".into(),
+            conversation_trust_class: "Controller".into(),
+            readable_trust_classes: vec!["Controller".into()],
+            readable_owner_scopes: vec!["global".into(), "controller".into()],
+            resolved_at: 100,
+            retrieval_query_sha256: None,
+            assets: vec![TurnAssetLoadoutEntry {
+                asset_id: "asset-1".into(),
+                name: "release notes".into(),
+                asset_type: AssetType::Memory,
+                version: 3,
+                source_hash: Some("sha256:source".into()),
+                owner_scope: "controller".into(),
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller".into(),
+                status: "active".into(),
+                expires_at: None,
+                binding_agent_scope: "default".into(),
+                binding_mode: InjectionMode::Hot,
+                binding_priority: 80,
+                binding_max_chars: 240,
+                injected_chars: 129,
+                admission_reasons: vec![
+                    "active".into(),
+                    "trust_readable".into(),
+                    "owner_scope_readable".into(),
+                    "visibility_allowed".into(),
+                    "within_loadout_budget".into(),
+                ],
+            }],
+            retrieved_assets: Vec::new(),
+        };
+        let store = MemoryAssetStore::new(&db);
+        store
+            .record_turn_loadout("loadout-conversation", 7, &receipt)
+            .unwrap();
+        assert_eq!(
+            store.turn_loadout("loadout-conversation", 7).unwrap(),
+            Some(receipt.clone())
+        );
+        let mut repeated_resolution = receipt.clone();
+        repeated_resolution.resolved_at += 60;
+        store
+            .record_turn_loadout("loadout-conversation", 7, &repeated_resolution)
+            .unwrap();
+        assert_eq!(
+            store.turn_loadout("loadout-conversation", 7).unwrap(),
+            Some(receipt.clone()),
+            "retry preserves the original resolution timestamp"
+        );
+        let mut changed = receipt;
+        changed.assets[0].source_hash = Some("sha256:changed".into());
+        assert!(
+            store
+                .record_turn_loadout("loadout-conversation", 7, &changed)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn wiki_and_code_graph_queries_are_revision_scoped() {
         let db = db();
         let store = MemoryAssetStore::new(&db);
+        store
+            .create(NewMemoryAsset {
+                asset_id: "wiki-asset",
+                asset_type: AssetType::Wiki,
+                name: "Wiki fixture",
+                description: "",
+                owner_scope: "global",
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: None,
+                content_ref: None,
+                source_hash: Some("wiki-hash"),
+                now_unix: 1,
+            })
+            .unwrap();
+        store
+            .create(NewMemoryAsset {
+                asset_id: "graph-asset",
+                asset_type: AssetType::CodeGraph,
+                name: "Graph fixture",
+                description: "",
+                owner_scope: "global",
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: None,
+                content_ref: None,
+                source_hash: Some("graph-hash"),
+                now_unix: 1,
+            })
+            .unwrap();
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO knowledge_wikis(wiki_id,asset_id,root_path,revision,created_at,updated_at) \
+                 VALUES ('wiki-1','wiki-asset','docs','rev-1',1,1)",
+                [],
+            )?;
+            connection.execute(
+                "INSERT INTO knowledge_code_graphs(graph_id,asset_id,root_path,revision,created_at,updated_at) \
+                 VALUES ('graph-1','graph-asset','src','rev-1',1,1)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
         store
             .upsert_wiki_page(&WikiPage {
                 wiki_id: "wiki-1".into(),

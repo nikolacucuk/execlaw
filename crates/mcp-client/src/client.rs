@@ -61,9 +61,15 @@ pub enum McpNotification {
 /// Internal request the actor processes. The oneshot returns the
 /// raw `result` field (or an error mapped from `RpcError`).
 struct PendingCall {
+    id: RpcId,
     method: String,
     params: Option<Value>,
     reply: oneshot::Sender<McpResult<Value>>,
+}
+
+enum ActorMessage {
+    Request(PendingCall),
+    Cancel(RpcId),
 }
 
 /// Public handle. Cloneable — every clone shares the same actor.
@@ -74,7 +80,7 @@ pub struct McpClient {
 
 struct Inner {
     next_id: AtomicU64,
-    requests: mpsc::Sender<PendingCall>,
+    requests: mpsc::Sender<ActorMessage>,
     notifs: broadcast::Sender<McpNotification>,
     server_capabilities: ServerCapabilities,
 }
@@ -89,7 +95,7 @@ impl McpClient {
         // Pending request id → oneshot sender map. Built first so the
         // initialize call can use it.
         let pending: Arc<PendingMap> = Arc::new(Mutex::new(HashMap::new()));
-        let (tx, mut rx) = mpsc::channel::<PendingCall>(32);
+        let (tx, mut rx) = mpsc::channel::<ActorMessage>(32);
         let (notif_tx, _) = broadcast::channel::<McpNotification>(16);
         let notif_tx_actor = notif_tx.clone();
         let next_id = Arc::new(AtomicU64::new(0));
@@ -116,6 +122,12 @@ impl McpClient {
             &notif_tx_actor,
         )
         .await?;
+        if init_result.protocol_version != PROTOCOL_VERSION {
+            return Err(McpError::Protocol(format!(
+                "server negotiated unsupported MCP protocol version '{}'",
+                init_result.protocol_version
+            )));
+        }
         info!(
             server = %init_result.server_info.as_ref().map(|i| i.name.as_str()).unwrap_or("?"),
             protocol = %init_result.protocol_version,
@@ -130,7 +142,6 @@ impl McpClient {
 
         // ---- Spawn the actor ----
         let pending_actor = pending.clone();
-        let next_id_actor = next_id.clone();
         tokio::spawn(async move {
             let mut transport = transport;
             loop {
@@ -142,8 +153,8 @@ impl McpClient {
                     }
                     out = rx.recv() => {
                         match out {
-                            Some(call) => {
-                                let id = RpcId::Int(next_id_actor.fetch_add(1, Ordering::SeqCst));
+                            Some(ActorMessage::Request(call)) => {
+                                let id = call.id.clone();
                                 let req = RpcRequest::new(
                                     id.clone(),
                                     call.method,
@@ -152,6 +163,17 @@ impl McpClient {
                                 pending_actor.lock().await.insert(id, call.reply);
                                 if let Err(e) = transport.write_request(&req).await {
                                     warn!(error = %e, "MCP write failed; client gone");
+                                    break;
+                                }
+                            }
+                            Some(ActorMessage::Cancel(id)) => {
+                                pending_actor.lock().await.remove(&id);
+                                let notification = RpcNotification::new(
+                                    notifications::CANCELLED,
+                                    Some(serde_json::json!({"requestId": id, "reason": "caller cancelled or timed out"})),
+                                );
+                                if let Err(error) = transport.write_notification(&notification).await {
+                                    warn!(error = %error, "MCP cancellation notification write failed");
                                     break;
                                 }
                             }
@@ -186,7 +208,7 @@ impl McpClient {
 
         Ok(Self {
             inner: Arc::new(Inner {
-                next_id: AtomicU64::new(2), // 0 was init, leave gap
+                next_id: AtomicU64::new(1), // 0 was initialize
                 requests: tx,
                 notifs: notif_tx,
                 server_capabilities,
@@ -205,22 +227,94 @@ impl McpClient {
     }
 
     pub async fn list_tools(&self) -> McpResult<Vec<McpTool>> {
-        let result: ListToolsResult = self.call(methods::TOOLS_LIST, None).await?;
-        Ok(result.tools)
+        if self.inner.server_capabilities.tools.is_none() {
+            return Err(McpError::Protocol(
+                "server did not advertise tools capability".into(),
+            ));
+        }
+        let mut cursor: Option<String> = None;
+        let mut tools = Vec::new();
+        for _ in 0..64 {
+            let params = cursor
+                .as_ref()
+                .map(|value| serde_json::json!({"cursor": value}));
+            let result: ListToolsResult = self.call(methods::TOOLS_LIST, params).await?;
+            if tools.len().saturating_add(result.tools.len()) > 4096 {
+                return Err(McpError::Protocol("tools/list item limit exceeded".into()));
+            }
+            tools.extend(result.tools);
+            cursor = result.next_cursor;
+            if cursor.is_none() {
+                return Ok(tools);
+            }
+        }
+        Err(McpError::Protocol("tools/list page limit exceeded".into()))
     }
 
     pub async fn call_tool(&self, name: &str, arguments: Value) -> McpResult<CallToolResult> {
+        if self.inner.server_capabilities.tools.is_none() {
+            return Err(McpError::Protocol(
+                "server did not advertise tools capability".into(),
+            ));
+        }
         let params = serde_json::to_value(CallToolParams { name, arguments })?;
         self.call::<CallToolResult>(methods::TOOLS_CALL, Some(params))
             .await
     }
 
+    /// Call one tool with cancellation wired to MCP's request-id cancellation
+    /// notification. Dropping the caller future alone does not stop server work.
+    pub async fn call_tool_cancellable(
+        &self,
+        name: &str,
+        arguments: Value,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> McpResult<CallToolResult> {
+        if self.inner.server_capabilities.tools.is_none() {
+            return Err(McpError::Protocol(
+                "server did not advertise tools capability".into(),
+            ));
+        }
+        let params = serde_json::to_value(CallToolParams { name, arguments })?;
+        self.call_cancellable::<CallToolResult>(methods::TOOLS_CALL, Some(params), Some(cancel))
+            .await
+    }
+
     pub async fn list_resources(&self) -> McpResult<Vec<McpResource>> {
-        let result: ListResourcesResult = self.call(methods::RESOURCES_LIST, None).await?;
-        Ok(result.resources)
+        if self.inner.server_capabilities.resources.is_none() {
+            return Err(McpError::Protocol(
+                "server did not advertise resources capability".into(),
+            ));
+        }
+        let mut cursor: Option<String> = None;
+        let mut resources = Vec::new();
+        for _ in 0..64 {
+            let params = cursor
+                .as_ref()
+                .map(|value| serde_json::json!({"cursor": value}));
+            let result: ListResourcesResult = self.call(methods::RESOURCES_LIST, params).await?;
+            if resources.len().saturating_add(result.resources.len()) > 4096 {
+                return Err(McpError::Protocol(
+                    "resources/list item limit exceeded".into(),
+                ));
+            }
+            resources.extend(result.resources);
+            cursor = result.next_cursor;
+            if cursor.is_none() {
+                return Ok(resources);
+            }
+        }
+        Err(McpError::Protocol(
+            "resources/list page limit exceeded".into(),
+        ))
     }
 
     pub async fn read_resource(&self, uri: &str) -> McpResult<ReadResourceResult> {
+        if self.inner.server_capabilities.resources.is_none() {
+            return Err(McpError::Protocol(
+                "server did not advertise resources capability".into(),
+            ));
+        }
         let params = serde_json::to_value(ReadResourceParams { uri })?;
         self.call(methods::RESOURCES_READ, Some(params)).await
     }
@@ -228,21 +322,57 @@ impl McpClient {
     /// Generic request/response. Internal use; public methods above
     /// are typed wrappers.
     async fn call<T: DeserializeOwned>(&self, method: &str, params: Option<Value>) -> McpResult<T> {
-        let _ = self.inner.next_id.fetch_add(0, Ordering::SeqCst); // touch to keep `next_id` field used
+        self.call_cancellable(method, params, None).await
+    }
+
+    async fn call_cancellable<T: DeserializeOwned>(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        cancel: Option<&tokio_util::sync::CancellationToken>,
+    ) -> McpResult<T> {
+        if cancel.is_some_and(tokio_util::sync::CancellationToken::is_cancelled) {
+            return Err(McpError::Cancelled);
+        }
+        let id = RpcId::Int(self.inner.next_id.fetch_add(1, Ordering::SeqCst));
         let (reply_tx, reply_rx) = oneshot::channel();
         self.inner
             .requests
-            .send(PendingCall {
+            .send(ActorMessage::Request(PendingCall {
+                id: id.clone(),
                 method: method.to_owned(),
                 params,
                 reply: reply_tx,
-            })
+            }))
             .await
             .map_err(|_| McpError::ClientGone)?;
-        let value = tokio::time::timeout(REQUEST_TIMEOUT, reply_rx)
-            .await
-            .map_err(|_| McpError::Timeout(REQUEST_TIMEOUT))?
-            .map_err(|_| McpError::ClientGone)??;
+        let response = tokio::time::timeout(REQUEST_TIMEOUT, reply_rx);
+        let value = if let Some(cancel) = cancel {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    let _ = self.inner.requests.send(ActorMessage::Cancel(id)).await;
+                    return Err(McpError::Cancelled);
+                }
+                result = response => match result {
+                    Ok(Ok(value)) => value?,
+                    Ok(Err(_)) => return Err(McpError::ClientGone),
+                    Err(_) => {
+                        let _ = self.inner.requests.send(ActorMessage::Cancel(id)).await;
+                        return Err(McpError::Timeout(REQUEST_TIMEOUT));
+                    }
+                }
+            }
+        } else {
+            match response.await {
+                Ok(Ok(value)) => value?,
+                Ok(Err(_)) => return Err(McpError::ClientGone),
+                Err(_) => {
+                    let _ = self.inner.requests.send(ActorMessage::Cancel(id)).await;
+                    return Err(McpError::Timeout(REQUEST_TIMEOUT));
+                }
+            }
+        };
         let typed: T = serde_json::from_value(value)
             .map_err(|e| McpError::Protocol(format!("decoding {method} result: {e}")))?;
         Ok(typed)
@@ -273,8 +403,18 @@ async fn read_until_response<T: DeserializeOwned>(
             .await
             .map_err(|_| McpError::Timeout(timeout))??
             .ok_or(McpError::Closed)?;
+        if frame.jsonrpc.as_deref() != Some("2.0") {
+            return Err(McpError::Protocol(
+                "MCP frame must declare JSON-RPC 2.0".into(),
+            ));
+        }
         match (frame.id.as_ref(), frame.method.as_deref()) {
             (Some(id), None) if id == expect_id => {
+                if frame.error.is_some() == frame.result.is_some() {
+                    return Err(McpError::Protocol(
+                        "JSON-RPC response must contain exactly one of result or error".into(),
+                    ));
+                }
                 if let Some(err) = frame.error {
                     return Err(McpError::Server {
                         code: err.code,
@@ -305,18 +445,27 @@ async fn handle_inbound(
     notifs: &broadcast::Sender<McpNotification>,
     transport: &mut StdioTransport,
 ) {
+    if frame.jsonrpc.as_deref() != Some("2.0") {
+        warn!("ignoring MCP frame with invalid JSON-RPC version");
+        return;
+    }
     match (frame.id.as_ref(), frame.method.as_deref()) {
         (Some(id), None) => {
             // Response to one of our requests.
             let waiter = pending.lock().await.remove(id);
             if let Some(tx) = waiter {
                 let outcome = match (frame.error, frame.result) {
+                    (Some(_), Some(_)) => Err(McpError::Protocol(
+                        "JSON-RPC response contains both result and error".into(),
+                    )),
+                    (None, None) => Err(McpError::Protocol(
+                        "JSON-RPC response contains neither result nor error".into(),
+                    )),
                     (Some(err), _) => Err(McpError::Server {
                         code: err.code,
                         message: err.message,
                     }),
                     (None, Some(v)) => Ok(v),
-                    (None, None) => Ok(Value::Null),
                 };
                 let _ = tx.send(outcome);
             } else {

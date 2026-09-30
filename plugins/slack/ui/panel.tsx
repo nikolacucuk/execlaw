@@ -8,7 +8,7 @@ import type {
     PluginPanelProps,
 } from "@execlaw/plugin-ui";
 
-const React = globalThis.execlawHost!.React;
+import * as React from "react";
 const { useCallback, useEffect, useState } = React;
 
 // --- API types ------------------------------------------------------
@@ -122,7 +122,7 @@ const Panel: PluginPanelComponent = (props: PluginPanelProps) => {
                 try {
                     await bridge.fetchJson<unknown>(
                         "POST",
-                        "/api/admin/me/identifiers",
+                    "/api/admin/plugins/slack/identifiers",
                         { transport: "slack", handle: trimmedController },
                     );
                 } catch (idErr) {

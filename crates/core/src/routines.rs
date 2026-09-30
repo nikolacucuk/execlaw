@@ -14,10 +14,11 @@
 //! UTC so the scheduler tick is timezone-agnostic.
 
 use crate::db::{Database, DbError};
+use crate::runs::RunCompletionContractDraft;
 use chrono::{DateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use cron::Schedule;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use thiserror::Error;
@@ -64,6 +65,7 @@ pub struct RoutineRow {
     pub next_run_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    pub completion_contract: Option<RunCompletionContractDraft>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +78,7 @@ pub struct RoutineUpsert {
     pub prompt: String,
     pub target_conversation_id: Option<String>,
     pub enabled: bool,
+    pub completion_contract: Option<RunCompletionContractDraft>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -173,6 +176,11 @@ impl<'db> RoutineStore<'db> {
         if payload.name.trim().is_empty() {
             return Err(RoutineError::Invalid("routine name is required".into()));
         }
+        if let Some(contract) = &payload.completion_contract {
+            contract
+                .validate()
+                .map_err(|error| RoutineError::Invalid(error.to_string()))?;
+        }
         let schedule = parse_cron(&payload.schedule_cron)?;
         let tz = parse_timezone(&payload.timezone)?;
         let after_dt = Utc
@@ -205,14 +213,20 @@ impl<'db> RoutineStore<'db> {
         let tz_str = payload.timezone.clone();
         let prompt = payload.prompt.clone();
         let target = payload.target_conversation_id.clone();
+        let completion_contract_json = payload
+            .completion_contract
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|error| RoutineError::Invalid(error.to_string()))?;
 
         self.db.with_conn(|c| {
             c.execute(
                 "INSERT INTO config_routines \
                    (id, name, schedule_cron, timezone, prompt, \
                     target_conversation_id, enabled, last_run_at, \
-                    last_run_status, next_run_at, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9) \
+                    last_run_status, next_run_at, created_at, updated_at, completion_contract_json) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9, ?10) \
                  ON CONFLICT(id) DO UPDATE SET \
                     name                  = excluded.name, \
                     schedule_cron         = excluded.schedule_cron, \
@@ -221,6 +235,7 @@ impl<'db> RoutineStore<'db> {
                     target_conversation_id= excluded.target_conversation_id, \
                     enabled               = excluded.enabled, \
                     next_run_at           = excluded.next_run_at, \
+                    completion_contract_json = excluded.completion_contract_json, \
                     updated_at            = excluded.updated_at",
                 params![
                     id_for_query,
@@ -232,6 +247,7 @@ impl<'db> RoutineStore<'db> {
                     enabled_int,
                     next_run_at,
                     now,
+                    completion_contract_json,
                 ],
             )?;
             Ok(())
@@ -244,17 +260,16 @@ impl<'db> RoutineStore<'db> {
         let id_owned = id.to_owned();
         self.db
             .with_conn(|c| {
-                let got = c
-                    .query_row(
+                c.query_row(
                         "SELECT id, name, schedule_cron, timezone, prompt, \
                             target_conversation_id, enabled, last_run_at, \
-                            last_run_status, next_run_at, created_at, updated_at \
+                            last_run_status, next_run_at, created_at, updated_at, completion_contract_json \
                      FROM config_routines WHERE id = ?1",
                         params![id_owned],
                         row_to_routine,
                     )
-                    .ok();
-                Ok(got)
+                    .optional()
+                    .map_err(DbError::from)
             })
             .map_err(RoutineError::from)
     }
@@ -266,7 +281,7 @@ impl<'db> RoutineStore<'db> {
             let mut stmt = c.prepare(
                 "SELECT id, name, schedule_cron, timezone, prompt, \
                         target_conversation_id, enabled, last_run_at, \
-                        last_run_status, next_run_at, created_at, updated_at \
+                        last_run_status, next_run_at, created_at, updated_at, completion_contract_json \
                  FROM config_routines \
                  ORDER BY enabled DESC, \
                           CASE WHEN next_run_at IS NULL THEN 1 ELSE 0 END, \
@@ -300,7 +315,7 @@ impl<'db> RoutineStore<'db> {
             let mut stmt = c.prepare(
                 "SELECT id, name, schedule_cron, timezone, prompt, \
                         target_conversation_id, enabled, last_run_at, \
-                        last_run_status, next_run_at, created_at, updated_at \
+                        last_run_status, next_run_at, created_at, updated_at, completion_contract_json \
                  FROM config_routines \
                  WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?1 \
                  ORDER BY next_run_at ASC",
@@ -349,16 +364,136 @@ impl<'db> RoutineStore<'db> {
         let routine_id_owned = routine_id.to_owned();
         let run_id_for_query = run_id.clone();
         self.db.with_conn(|c| {
-            c.execute(
+            let inserted = c.execute(
                 "INSERT INTO state_routine_runs \
                    (id, routine_id, fired_at, started_at, finished_at, \
-                    status, error, conversation_id) \
-                 VALUES (?1, ?2, ?3, NULL, NULL, 'Pending', NULL, NULL)",
+                    status, error, conversation_id, completion_contract_json) \
+                 SELECT ?1, ?2, ?3, NULL, NULL, 'Pending', NULL, NULL, completion_contract_json \
+                 FROM config_routines WHERE id = ?2",
                 params![run_id_for_query, routine_id_owned, fired_at],
             )?;
+            if inserted != 1 {
+                return Err(DbError::Invariant(format!(
+                    "routine not found: {routine_id}"
+                )));
+            }
             Ok(())
         })?;
         Ok(run_id)
+    }
+
+    /// List unfinished routine fires so the scheduler can resume their stable
+    /// run identities after a server restart instead of creating another fire.
+    pub fn list_pending_run_ids(&self, limit: u32) -> Result<Vec<(String, String)>, RoutineError> {
+        self.db.with_conn(|connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT id,routine_id FROM state_routine_runs WHERE status='Pending' AND started_at IS NULL \
+                 ORDER BY fired_at,id LIMIT ?1",
+            )?;
+            let rows = statement.query_map([limit.clamp(1, 500)], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+        }).map_err(RoutineError::from)
+    }
+
+    /// Return the immutable completion requirements captured when a routine fired.
+    pub fn run_completion_contract(
+        &self,
+        run_id: &str,
+    ) -> Result<Option<RunCompletionContractDraft>, RoutineError> {
+        let encoded: Option<String> = self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT completion_contract_json FROM state_routine_runs WHERE id = ?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map(|stored| stored.flatten())
+                .map_err(DbError::from)
+        })?;
+        encoded
+            .map(|json| {
+                serde_json::from_str(&json)
+                    .map_err(|error| RoutineError::Invalid(error.to_string()))
+            })
+            .transpose()
+    }
+
+    /// Drop in-process claims left by a stopped server. Called once during
+    /// scheduler startup before pending run ids are enumerated.
+    pub fn reset_pending_run_claims(&self) -> Result<usize, RoutineError> {
+        self.db
+            .with_conn(|connection| {
+                Ok(connection.execute(
+                    "UPDATE state_routine_runs SET started_at=NULL \
+                     WHERE status='Pending' AND started_at IS NOT NULL",
+                    [],
+                )?)
+            })
+            .map_err(Into::into)
+    }
+
+    /// Claim an unstarted Pending run so concurrent ticks cannot dispatch it
+    /// twice within this server process.
+    pub fn claim_pending_run(&self, run_id: &str, started_at: i64) -> Result<bool, RoutineError> {
+        self.db
+            .with_conn(|connection| {
+                Ok(connection.execute(
+                    "UPDATE state_routine_runs SET started_at=?1 \
+                 WHERE id=?2 AND status='Pending' AND started_at IS NULL",
+                    params![started_at, run_id],
+                )? == 1)
+            })
+            .map_err(Into::into)
+    }
+
+    /// Persist the conversation selected by a routine fire before dispatch so
+    /// startup recovery can exclude it from the generic chat-run replayer.
+    pub fn bind_run_conversation(
+        &self,
+        run_id: &str,
+        conversation_id: &str,
+    ) -> Result<(), RoutineError> {
+        self.db.transaction(|tx| {
+            let stored: Option<Option<String>> = tx
+                .query_row(
+                    "SELECT conversation_id FROM state_routine_runs WHERE id=?1 AND status='Pending'",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(stored) = stored else {
+                return Err(DbError::Invariant(format!("pending routine run was not found: {run_id}")));
+            };
+            if stored.as_deref().is_some_and(|existing| existing != conversation_id) {
+                return Err(DbError::Invariant("routine run was retried with a different conversation".into()));
+            }
+            tx.execute(
+                "UPDATE state_routine_runs SET conversation_id=?2 WHERE id=?1 AND status='Pending'",
+                params![run_id, conversation_id],
+            )?;
+            Ok(())
+        }).map_err(Into::into)
+    }
+
+    /// Conversations owned by pending routine fires that must be resumed by
+    /// the routine scheduler, not the generic controller chat replayer.
+    pub fn pending_run_conversations(
+        &self,
+    ) -> Result<std::collections::HashSet<String>, RoutineError> {
+        self.db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare_cached(
+                    "SELECT conversation_id FROM state_routine_runs \
+                 WHERE status='Pending' AND conversation_id IS NOT NULL",
+                )?;
+                let rows = statement.query_map([], |row| row.get(0))?;
+                rows.collect::<Result<std::collections::HashSet<_>, _>>()
+                    .map_err(DbError::from)
+            })
+            .map_err(Into::into)
     }
 
     /// Move a run from Pending → terminal status. The runner calls
@@ -449,6 +584,10 @@ fn row_to_routine(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
         next_run_at: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        completion_contract: row
+            .get::<_, Option<String>>(12)?
+            .map(|json| serde_json::from_str(&json).map_err(|_| rusqlite::Error::InvalidQuery))
+            .transpose()?,
     })
 }
 
@@ -497,6 +636,7 @@ mod tests {
             prompt: "do the thing".into(),
             target_conversation_id: None,
             enabled: true,
+            completion_contract: None,
         }
     }
 
@@ -549,6 +689,56 @@ mod tests {
         assert_eq!(r2.name, "morning v2");
         // The schedule changed, so next_run_at should differ.
         assert_ne!(r1.next_run_at, r2.next_run_at);
+    }
+
+    #[test]
+    fn routine_fire_freezes_completion_contract_before_definition_changes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("routine-contract.db");
+        let db = Database::open(&DbConfig {
+            path: path.clone(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let store = RoutineStore::new(&db);
+        let now = Utc
+            .with_ymd_and_hms(2026, 4, 25, 3, 0, 0)
+            .unwrap()
+            .timestamp();
+        let mut definition = upsert("verified morning", "0 8 * * *");
+        let contract = RunCompletionContractDraft {
+            acceptance_criteria: vec![crate::runs::AcceptanceCriterion {
+                criterion_id: "tests".into(),
+                description: "Required tests pass".into(),
+                required: true,
+                verifier: None,
+            }],
+            required_artifacts: Vec::new(),
+            delivery_required: false,
+        };
+        definition.completion_contract = Some(contract.clone());
+        let routine = store.upsert(&definition, now).unwrap();
+        let fire_id = store.insert_run_pending(&routine.id, now).unwrap();
+        definition.id = Some(routine.id.clone());
+        definition.completion_contract = None;
+        store.upsert(&definition, now + 1).unwrap();
+        drop(store);
+        drop(db);
+        let reopened = Database::open(&DbConfig { path, key: None }).unwrap();
+        let store = RoutineStore::new(&reopened);
+        assert_eq!(
+            store.run_completion_contract(&fire_id).unwrap(),
+            Some(contract)
+        );
+        assert!(
+            store
+                .get(&routine.id)
+                .unwrap()
+                .unwrap()
+                .completion_contract
+                .is_none()
+        );
     }
 
     #[test]
@@ -659,6 +849,28 @@ mod tests {
         assert_eq!(runs[0].status, RoutineRunStatus::Success);
         assert_eq!(runs[0].finished_at, Some(now + 5));
         assert_eq!(runs[0].conversation_id.as_deref(), Some("conv-123"));
+    }
+
+    #[test]
+    fn pending_routine_run_claim_is_restored_after_restart() {
+        let db = fresh_db();
+        let store = RoutineStore::new(&db);
+        let now = Utc
+            .with_ymd_and_hms(2026, 4, 25, 3, 0, 0)
+            .unwrap()
+            .timestamp();
+        let routine = store.upsert(&upsert("recover", "0 8 * * *"), now).unwrap();
+        let run_id = store.insert_run_pending(&routine.id, now).unwrap();
+        assert!(store.claim_pending_run(&run_id, now + 1).unwrap());
+        assert!(store.list_pending_run_ids(10).unwrap().is_empty());
+
+        assert_eq!(store.reset_pending_run_claims().unwrap(), 1);
+        assert_eq!(
+            store.list_pending_run_ids(10).unwrap(),
+            vec![(run_id.clone(), routine.id.clone())]
+        );
+        assert!(store.claim_pending_run(&run_id, now + 2).unwrap());
+        assert!(!store.claim_pending_run(&run_id, now + 3).unwrap());
     }
 
     #[test]

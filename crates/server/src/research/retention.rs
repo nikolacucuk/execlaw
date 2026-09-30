@@ -2,25 +2,25 @@
 //!
 //! Mirrors `LogRetentionSweeper` / `RoutineRunRetentionSweeper`:
 //! a long-running tokio task that wakes every `interval`, computes
-//! the cutoff from the live `RetentionPolicy`, deletes terminal
-//! rows past the cutoff, and best-effort removes the on-disk
-//! workspace directories the runner provisioned.
+//! the cutoff from the live `RetentionPolicy`, removes workspace,
+//! Graphify, and report-attachment projections, then deletes terminal
+//! rows past the cutoff.
 //!
 //! Active rows are never swept regardless of age — a job that's
 //! been in `Planning` for hours might be stuck on a slow LLM, not
 //! abandoned. The supervisor's `auto_cancel_after_idle_secs` cap
 //! is the right knob for that, not retention.
 //!
-//! The two-phase delete (SQL transaction → workspace `remove_dir_all`)
-//! is intentional: SQL atomicity guarantees the DB side; the
-//! filesystem cleanup runs OUTSIDE the transaction so a slow
-//! recursive remove can't hold the SQLite write-lock open.
+//! A terminal source row stays in SQLite until projection cleanup succeeds.
+//! That row is the durable retry record after restart or filesystem failure;
+//! slow recursive deletion never holds a SQLite write transaction open.
 //!
 //! 2026-04-29.
 
 use crate::research::workspace::{ResearchWorkspace, WorkspaceError};
 use execlaw_core::Database;
-use execlaw_core::ids::ResearchJobId;
+use execlaw_core::attachments::AttachmentStore;
+use execlaw_core::ids::{AttachmentId, ResearchJobId};
 use execlaw_core::research::{ResearchError, ResearchJobStore};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,6 +37,9 @@ pub struct ResearchRetentionReport {
     pub rows_deleted: usize,
     pub workspace_dirs_removed: usize,
     pub workspace_failures: usize,
+    pub graph_snapshots_removed: usize,
+    pub attachments_removed: usize,
+    pub projection_failures: usize,
 }
 
 /// Run a single retention pass. Pure-ish — caller supplies
@@ -52,67 +55,156 @@ pub fn sweep_once(
 ) -> Result<ResearchRetentionReport, ResearchError> {
     let cutoff = now_unix.saturating_sub(retention_secs);
     let store = ResearchJobStore::new(db);
-    let purged = store.purge_terminal_older_than(cutoff)?;
-    if purged.is_empty() {
-        return Ok(ResearchRetentionReport::default());
+    for candidate in store.terminal_older_than(cutoff)? {
+        store.request_deletion(
+            &candidate.job_id,
+            "retention-sweeper",
+            "retention",
+            now_unix,
+        )?;
     }
+    process_deletion_queue(db, workspace, now_unix)
+}
+
+/// Process durable deletion jobs. Safe to call after enqueue and at every
+/// retention tick; individual failures stay pending and are retried later.
+pub fn process_deletion_queue(
+    db: &Database,
+    workspace: &ResearchWorkspace,
+    now_unix: i64,
+) -> Result<ResearchRetentionReport, ResearchError> {
+    let store = ResearchJobStore::new(db);
+    let mut rows_deleted = 0usize;
     let mut workspace_dirs_removed = 0usize;
     let mut workspace_failures = 0usize;
-    for (job_id, workspace_path) in &purged {
-        match purge_dir_for_row(workspace, job_id, workspace_path.as_deref()) {
+    let mut graph_snapshots_removed = 0usize;
+    let mut attachments_removed = 0usize;
+    let mut projection_failures = 0usize;
+    for deletion in store.pending_deletions()? {
+        let candidate: execlaw_core::research::ResearchPurgeCandidate =
+            match serde_json::from_str(&deletion.payload_json) {
+                Ok(candidate) => candidate,
+                Err(error) => {
+                    projection_failures += 1;
+                    store.record_deletion_failure(
+                        &deletion.deletion_id,
+                        &format!("invalid research deletion payload: {error}"),
+                        now_unix,
+                    )?;
+                    continue;
+                }
+            };
+        if candidate.job_id != deletion.resource_id {
+            projection_failures += 1;
+            store.record_deletion_failure(
+                &deletion.deletion_id,
+                "research deletion payload ID does not match its tombstone",
+                now_unix,
+            )?;
+            continue;
+        }
+        let job_id = &deletion.resource_id;
+        if let Some(attachment_id) = candidate.attachment_id.as_deref() {
+            match AttachmentStore::new(db).purge_attachment(&AttachmentId::from(attachment_id)) {
+                Ok(true) => attachments_removed += 1,
+                Ok(false) => {}
+                Err(error) => {
+                    projection_failures += 1;
+                    store.record_deletion_failure(
+                        &deletion.deletion_id,
+                        &error.to_string(),
+                        now_unix,
+                    )?;
+                    warn!(
+                        job_id = job_id.as_str(),
+                        error = %error,
+                        "research-deletion: report attachment purge failed; retain job for retry",
+                    );
+                    continue;
+                }
+            }
+        }
+        match purge_dir_for_row(workspace, job_id, candidate.workspace_path.as_deref()) {
             Ok(true) => workspace_dirs_removed += 1,
             Ok(false) => {} // dir didn't exist; not a failure
             Err(e) => {
                 workspace_failures += 1;
+                store.record_deletion_failure(&deletion.deletion_id, &e.to_string(), now_unix)?;
                 warn!(
                     job_id = job_id.as_str(),
                     error = %e,
-                    "research-retention: workspace dir purge failed; row already deleted",
+                    "research-deletion: workspace purge failed; retain job for retry",
                 );
+                continue;
             }
+        }
+        match workspace.purge_graph_snapshot(job_id) {
+            Ok(true) => graph_snapshots_removed += 1,
+            Ok(false) => {}
+            Err(error) => {
+                projection_failures += 1;
+                store.record_deletion_failure(
+                    &deletion.deletion_id,
+                    &error.to_string(),
+                    now_unix,
+                )?;
+                warn!(
+                    job_id = job_id.as_str(),
+                    error = %error,
+                    "research-deletion: graph snapshot purge failed; retain job for retry",
+                );
+                continue;
+            }
+        }
+        if store.complete_deletion(&deletion.deletion_id, now_unix)? {
+            rows_deleted += 1;
         }
     }
     let report = ResearchRetentionReport {
-        rows_deleted: purged.len(),
+        rows_deleted,
         workspace_dirs_removed,
         workspace_failures,
+        graph_snapshots_removed,
+        attachments_removed,
+        projection_failures,
     };
     debug!(
         rows = report.rows_deleted,
         dirs = report.workspace_dirs_removed,
-        failures = report.workspace_failures,
-        cutoff_unix = cutoff,
+        failures = report.workspace_failures + report.projection_failures,
         "research-retention sweep",
     );
     Ok(report)
 }
 
-/// Decide which directory to rm-rf for a given row. Prefers the row's
-/// stored `workspace_path` (covers the case where the operator moved
-/// the workspace root mid-life); falls back to `workspace.purge(id)`
-/// against the supplied root for rows that were created before
-/// `workspace_path` was added to the row.
+/// Resolve the stored workspace path, falling back for older rows, then
+/// restrict recursive removal to a directory whose final component is the
+/// source job ID. This prevents malformed payloads from widening deletion.
 fn purge_dir_for_row(
     workspace: &ResearchWorkspace,
     job_id: &ResearchJobId,
     stored_path: Option<&str>,
 ) -> Result<bool, WorkspaceError> {
-    if let Some(path_str) = stored_path {
-        let path = PathBuf::from(path_str);
-        if path.exists() {
-            std::fs::remove_dir_all(&path)?;
-            return Ok(true);
-        }
+    let target = stored_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace.root().join(job_id.as_str()));
+    if !target.exists() {
         return Ok(false);
     }
-    // No stored path — fall back to the workspace's default layout.
-    let default_path = workspace.root().join(job_id.as_str());
-    if default_path.exists() {
-        workspace.purge(job_id)?;
-        Ok(true)
-    } else {
-        Ok(false)
+    let canonical = std::fs::canonicalize(&target)?;
+    if canonical.file_name().and_then(|name| name.to_str()) != Some(job_id.as_str()) {
+        return Err(WorkspaceError::Encoding(
+            "stored research workspace path is not scoped to its job ID".into(),
+        ));
     }
+    let metadata = std::fs::symlink_metadata(&canonical)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(WorkspaceError::Encoding(
+            "stored research workspace is not a regular directory".into(),
+        ));
+    }
+    std::fs::remove_dir_all(canonical)?;
+    Ok(true)
 }
 
 /// Long-running sweeper actor. Constructed in `cmd_serve`; runs

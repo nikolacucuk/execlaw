@@ -303,6 +303,11 @@ pub(crate) fn rewrite_url_with_alias(url: &str, alias: &str) -> String {
     // scheme separator. Avoids accidentally munging path segments
     // that happen to contain "localhost".
     let lower = url.to_ascii_lowercase();
+    if let Some(idx) = lower.find("://[::1]") {
+        let prefix = &url[..idx + 3];
+        let suffix = &url[idx + 3 + "[::1]".len()..];
+        return format!("{prefix}{alias}{suffix}");
+    }
     if let Some(idx) = lower.find("://127.0.0.1") {
         let prefix = &url[..idx + 3];
         let suffix = &url[idx + 3 + "127.0.0.1".len()..];

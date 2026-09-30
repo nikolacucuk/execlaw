@@ -26,6 +26,7 @@ use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+mod api_client;
 mod service;
 
 // 2026-05-18 — process-wide python-sandbox service handle moved
@@ -85,6 +86,20 @@ enum Command {
         #[command(subcommand)]
         op: HwOp,
     },
+    /// Use execlaw's versioned headless Controller API from a terminal.
+    Client {
+        #[command(subcommand)]
+        op: ClientOp,
+    },
+    /// Qualify the configured local Standard backend using this machine's database.
+    QualifyModel {
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        no_encrypt: bool,
+        #[arg(long, default_value_t = 4096)]
+        context_tokens: u32,
+    },
     /// Run the HTTP server directly — for local dev / tests.
     ///
     /// Production uses `execlaw up` which spawns the container.
@@ -132,6 +147,11 @@ enum Command {
         #[command(subcommand)]
         op: EvalOp,
     },
+    /// Governed memory assertion tools.
+    Memory {
+        #[command(subcommand)]
+        op: MemoryOp,
+    },
     /// Phase-7 hardening: scan `state_events` for rows with NULL
     /// `tag` and sign them under the current HMAC key. Idempotent.
     /// Run once per fleet before flipping the column to NOT NULL.
@@ -167,6 +187,18 @@ enum Command {
         db: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         no_encrypt: bool,
+    },
+    /// Rotate the SQLCipher master key after creating and verifying an
+    /// encrypted recovery snapshot. Stop execlaw before running this command.
+    RotateKeys {
+        /// Required encrypted recovery snapshot path; must not already exist.
+        #[arg(long)]
+        backup: PathBuf,
+        #[arg(long)]
+        db: Option<PathBuf>,
+        /// Required acknowledgement that the live database encryption key changes.
+        #[arg(long, default_value_t = false)]
+        i_understand_database_key_will_change: bool,
     },
     /// Phase-7 hardening: validate a snapshot file (must be openable
     /// with the same key + carry the migrations table) and atomically
@@ -204,6 +236,189 @@ enum Command {
         db: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
         no_encrypt: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ClientOp {
+    /// Authenticate and save the rotated refresh token in the OS keyring.
+    Login {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        username: String,
+    },
+    /// Run the Controller model qualification matrix and print its results.
+    Qualify {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long, default_value_t = 4096)]
+        context_tokens: u32,
+    },
+    /// Securely import an already-issued refresh token from a TTY prompt.
+    ImportRefreshToken,
+    /// Send a task and print the assistant response as JSON.
+    Send {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long, required_unless_present = "resume_run_id", default_value = "")]
+        text: String,
+        /// Reuse this idempotency key when retrying an uncertain request.
+        #[arg(long)]
+        request_id: Option<String>,
+        /// Resume this conversation's persisted run using its saved input.
+        #[arg(long)]
+        resume_run_id: Option<String>,
+        /// Required acceptance check in ID=DESCRIPTION form. Repeat for each check.
+        #[arg(long = "acceptance-criterion", action = clap::ArgAction::Append)]
+        acceptance_criteria: Vec<String>,
+        /// Optional acceptance check in ID=DESCRIPTION form; failure labels the task partial.
+        #[arg(long = "optional-acceptance-criterion", action = clap::ArgAction::Append)]
+        optional_acceptance_criteria: Vec<String>,
+        /// Required artifact in ID=DESCRIPTION form. Repeat for each artifact.
+        #[arg(long = "required-artifact", action = clap::ArgAction::Append)]
+        required_artifacts: Vec<String>,
+        /// Do not report the task complete until delivery evidence is confirmed.
+        #[arg(long, default_value_t = false)]
+        delivery_required: bool,
+    },
+    /// Read messages after a durable event cursor.
+    Messages {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long, default_value_t = 0)]
+        after: i64,
+    },
+    /// Stop the active turn.
+    Stop {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        conversation_id: String,
+    },
+    /// Persist and deliver steering, pause, resume, or queue-next-turn intent.
+    Control {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long, value_parser = ["steer", "queue_next_turn", "pause", "resume", "cancel"])]
+        kind: String,
+        #[arg(long)]
+        text: Option<String>,
+        /// Reuse the same key when retrying an uncertain control delivery.
+        #[arg(long)]
+        request_id: Option<String>,
+    },
+    /// Reconnect to durable control acknowledgements.
+    Controls {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        conversation_id: String,
+        #[arg(long, default_value_t = 0)]
+        after_created_at: i64,
+    },
+    /// List pending Controller approvals.
+    Approvals {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+    },
+    /// Respond to an approval using its signed approval token.
+    RespondApproval {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        approval_id: String,
+        #[arg(long)]
+        approval_token: String,
+        #[arg(long, value_parser = ["approve", "edit", "reject", "trust", "trust_limited", "claim_as_me", "block", "ignore_once"])]
+        verb: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Download an authenticated attachment/artifact to a local path.
+    DownloadArtifact {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        attachment_id: String,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Register a Controller-selected local project directory.
+    RegisterWorkspace {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        path: String,
+    },
+    /// Read a bounded UTF-8 file from a registered workspace root.
+    WorkspaceRead {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        workspace_id: String,
+        #[arg(long)]
+        path: String,
+    },
+    /// Search bounded text files inside a registered workspace root.
+    WorkspaceSearch {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        workspace_id: String,
+        #[arg(long)]
+        query: String,
+    },
+    /// Capture a content-addressed checkpoint into a durable run.
+    WorkspaceCheckpoint {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        run_id: String,
+        #[arg(long)]
+        workspace_id: String,
+    },
+    /// Preview workspace edits and concurrent-file conflicts for a run.
+    WorkspaceDiff {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        run_id: String,
+    },
+    /// Apply a conflict-free diff preview using an idempotency key.
+    WorkspaceApply {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        run_id: String,
+        #[arg(long)]
+        preview_hash: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    /// Restore only the latest applied run-owned file changes.
+    WorkspaceRestore {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
+        #[arg(long)]
+        run_id: String,
+        #[arg(long)]
+        apply_id: String,
+        #[arg(long)]
+        request_id: String,
+    },
+    /// Remove the stored API refresh token from the OS keyring.
+    Logout,
+    /// Run an allowlisted Language Server Protocol command adapter on stdio.
+    EditorAdapter {
+        #[arg(long, default_value = "http://127.0.0.1:3031")]
+        server: String,
     },
 }
 
@@ -327,6 +542,53 @@ enum EvalOp {
     List {
         #[arg(long)]
         label: Option<String>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        no_encrypt: bool,
+    },
+    /// Export a flagged trajectory to a redacted, effects-disabled fixture.
+    ExportFlagged {
+        /// Eval flag id returned by `execlaw eval list`.
+        id: i64,
+        /// New fixture path. Existing files are never overwritten.
+        #[arg(long)]
+        to: PathBuf,
+        /// Local JSON map: {"replacements":[{"source":"private","replacement":"<SYNTHETIC_1>"}]}.
+        /// The map is read locally and is never copied into the fixture.
+        #[arg(long)]
+        redaction_map: PathBuf,
+        /// Explicitly consent to exporting this flagged source range after redaction.
+        #[arg(long, default_value_t = false)]
+        consent: bool,
+        /// Link the fixture to a bounded incident identifier, such as INC-42.
+        #[arg(long)]
+        incident_ref: Option<String>,
+        /// Link the fixture to a bounded release tag, such as v2026.09.29.
+        #[arg(long)]
+        release_ref: Option<String>,
+        #[arg(long)]
+        db: Option<PathBuf>,
+        #[arg(long, default_value_t = false)]
+        no_encrypt: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryOp {
+    /// Export one assertion and verified evidence locally with explicit redaction consent.
+    ExportAssertion {
+        /// Stable assertion id from the Controller Memory Assets page.
+        assertion_id: String,
+        /// New destination path; existing files are never overwritten.
+        #[arg(long)]
+        to: PathBuf,
+        /// Reviewed local JSON replacement map. It is not included in the export.
+        #[arg(long)]
+        redaction_map: PathBuf,
+        /// Acknowledge local redaction review before writing a private-memory export.
+        #[arg(long, default_value_t = false)]
+        consent: bool,
         #[arg(long)]
         db: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
@@ -752,34 +1014,188 @@ fn cmd_doctor() -> anyhow::Result<()> {
 
     // 3. SQLCipher sanity — open a throwaway encrypted DB in a temp
     //    location. If SQLCipher isn't bundled correctly this fails.
-    let tmp = std::env::temp_dir().join("execlaw-doctor-sqlcipher-check.db");
-    let _ = std::fs::remove_file(&tmp);
-    let cfg = execlaw_core::DbConfig {
-        path: tmp.clone(),
-        key: Some(execlaw_core::db::SqlCipherKey::Passphrase(
-            "doctor-preflight".into(),
-        )),
-    };
-    match execlaw_core::Database::open(&cfg) {
-        Ok(db) => {
-            let res = db.with_conn(|c| {
-                c.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES (1);")?;
+    #[cfg(feature = "sqlcipher")]
+    {
+        let tmp = std::env::temp_dir().join(format!(
+            "execlaw-doctor-sqlcipher-{}.db",
+            uuid::Uuid::new_v4()
+        ));
+        let pre_rotation_backup = tmp.with_extension("pre-rotation.db");
+        let restored_pre_rotation = tmp.with_extension("restored-pre-rotation.db");
+        let post_rotation_backup = tmp.with_extension("post-rotation.db");
+        let restored_post_rotation = tmp.with_extension("restored-post-rotation.db");
+        let old_key = [0x31_u8; 32];
+        let new_key = [0x73_u8; 32];
+        let cfg = execlaw_core::DbConfig {
+            path: tmp.clone(),
+            key: Some(execlaw_core::db::SqlCipherKey::RawBytes(old_key.to_vec())),
+        };
+        let cipher_check = (|| -> Result<(), String> {
+            let db = execlaw_core::Database::open(&cfg).map_err(|error| error.to_string())?;
+            execlaw_core::MigrationRunner::new(&db)
+                .apply_all()
+                .map_err(|error| error.to_string())?;
+            db.with_conn(|connection| {
+                connection.execute_batch("CREATE TABLE doctor_probe(value TEXT);")?;
+                connection.execute("INSERT INTO doctor_probe(value) VALUES ('cipher-ok')", [])?;
                 Ok(())
-            });
-            match res {
-                Ok(_) => report.push_str("OK  sqlcipher: bundled SQLCipher works\n"),
-                Err(e) => {
-                    ok = false;
-                    report.push_str(&format!("MISS sqlcipher: {e}\n"));
+            })
+            .map_err(|error| error.to_string())?;
+            drop(db);
+
+            let bytes = std::fs::read(&tmp).map_err(|error| error.to_string())?;
+            if bytes.starts_with(b"SQLite format 3\0") {
+                return Err("database header is plaintext SQLite".into());
+            }
+
+            let wrong_key = execlaw_core::DbConfig {
+                path: tmp.clone(),
+                key: Some(execlaw_core::db::SqlCipherKey::RawBytes(vec![0x42; 32])),
+            };
+            if let Ok(wrong_db) = execlaw_core::Database::open(&wrong_key) {
+                let readable = wrong_db.with_conn(|connection| {
+                    connection.query_row("SELECT COUNT(*) FROM schema_version", [], |row| {
+                        row.get::<_, i64>(0)
+                    })?;
+                    Ok(())
+                });
+                if readable.is_ok() {
+                    return Err("database accepted an incorrect key".into());
                 }
             }
+
+            let reopened = execlaw_core::Database::open(&cfg)
+                .map_err(|error| format!("reopen with correct key: {error}"))?;
+            reopened
+                .with_conn(|connection| {
+                    let migrations: i64 =
+                        connection.query_row("SELECT COUNT(*) FROM schema_version", [], |row| {
+                            row.get(0)
+                        })?;
+                    if migrations == 0 {
+                        return Err(execlaw_core::DbError::Config(
+                            "encrypted migration probe contains no migration rows".into(),
+                        ));
+                    }
+                    let value: String =
+                        connection
+                            .query_row("SELECT value FROM doctor_probe", [], |row| row.get(0))?;
+                    if value != "cipher-ok" {
+                        return Err(execlaw_core::DbError::Config(
+                            "encrypted data did not survive reopen".into(),
+                        ));
+                    }
+                    Ok(())
+                })
+                .map_err(|error| error.to_string())?;
+
+            // Exercise the same encrypted snapshot and rekey primitives used
+            // by backup, restore, and rotation before a release package ships.
+            write_backup_file(&reopened, &pre_rotation_backup)
+                .map_err(|error| format!("create pre-rotation snapshot: {error}"))?;
+            verify_database_snapshot_with_keys(&pre_rotation_backup, &old_key, &[0x55; 32])
+                .map_err(|error| format!("verify pre-rotation snapshot: {error}"))?;
+            std::fs::copy(&pre_rotation_backup, &restored_pre_rotation)
+                .map_err(|error| format!("restore pre-rotation snapshot: {error}"))?;
+            let restored_old = execlaw_core::Database::open(&execlaw_core::DbConfig {
+                path: restored_pre_rotation.clone(),
+                key: Some(execlaw_core::db::SqlCipherKey::RawBytes(old_key.to_vec())),
+            })
+            .map_err(|error| format!("open restored old-key snapshot: {error}"))?;
+            let restored_value: String = restored_old
+                .with_conn(|connection| {
+                    Ok(connection
+                        .query_row("SELECT value FROM doctor_probe", [], |row| row.get(0))?)
+                })
+                .map_err(|error| format!("read restored old-key snapshot: {error}"))?;
+            if restored_value != "cipher-ok" {
+                return Err("restored backup did not retain its encrypted probe row".into());
+            }
+            drop(restored_old);
+
+            reopened
+                .rekey_sqlcipher(&new_key)
+                .map_err(|error| format!("rotate disposable SQLCipher key: {error}"))?;
+            drop(reopened);
+            let stale_key = execlaw_core::DbConfig {
+                path: tmp.clone(),
+                key: Some(execlaw_core::db::SqlCipherKey::RawBytes(old_key.to_vec())),
+            };
+            if let Ok(stale_db) = execlaw_core::Database::open(&stale_key) {
+                let stale_key_readable = stale_db.with_conn(|connection| {
+                    Ok(
+                        connection.query_row("SELECT value FROM doctor_probe", [], |row| {
+                            row.get::<_, String>(0)
+                        })?,
+                    )
+                });
+                if stale_key_readable.is_ok() {
+                    return Err("rekeyed database still accepts the pre-rotation key".into());
+                }
+            }
+            let rotated = execlaw_core::Database::open(&execlaw_core::DbConfig {
+                path: tmp.clone(),
+                key: Some(execlaw_core::db::SqlCipherKey::RawBytes(new_key.to_vec())),
+            })
+            .map_err(|error| format!("reopen after disposable key rotation: {error}"))?;
+            let rotated_value: String = rotated
+                .with_conn(|connection| {
+                    Ok(connection
+                        .query_row("SELECT value FROM doctor_probe", [], |row| row.get(0))?)
+                })
+                .map_err(|error| format!("read after disposable key rotation: {error}"))?;
+            if rotated_value != "cipher-ok" {
+                return Err("key rotation did not preserve the encrypted probe row".into());
+            }
+            write_backup_file(&rotated, &post_rotation_backup)
+                .map_err(|error| format!("create post-rotation snapshot: {error}"))?;
+            verify_database_snapshot_with_keys(&post_rotation_backup, &new_key, &[0x55; 32])
+                .map_err(|error| format!("verify post-rotation snapshot: {error}"))?;
+            drop(rotated);
+            std::fs::copy(&post_rotation_backup, &restored_post_rotation)
+                .map_err(|error| format!("restore post-rotation snapshot: {error}"))?;
+            let restored_new = execlaw_core::Database::open(&execlaw_core::DbConfig {
+                path: restored_post_rotation.clone(),
+                key: Some(execlaw_core::db::SqlCipherKey::RawBytes(new_key.to_vec())),
+            })
+            .map_err(|error| format!("open restored new-key snapshot: {error}"))?;
+            let restored_value: String = restored_new
+                .with_conn(|connection| {
+                    Ok(connection
+                        .query_row("SELECT value FROM doctor_probe", [], |row| row.get(0))?)
+                })
+                .map_err(|error| format!("read restored new-key snapshot: {error}"))?;
+            if restored_value != "cipher-ok" {
+                return Err("restored rotated snapshot did not retain its probe row".into());
+            }
+            Ok(())
+        })();
+        match cipher_check {
+            Ok(()) => report.push_str(
+                "OK  sqlcipher: encrypted header, wrong-key rejection, migration, backup restore, rekey, and post-rotation restore verified\n",
+            ),
+            Err(error) => {
+                ok = false;
+                report.push_str(&format!("MISS sqlcipher: {error}\n"));
+            }
         }
-        Err(e) => {
-            ok = false;
-            report.push_str(&format!("MISS sqlcipher: {e}\n"));
+        for path in [
+            &tmp,
+            &pre_rotation_backup,
+            &restored_pre_rotation,
+            &post_rotation_backup,
+            &restored_post_rotation,
+        ] {
+            let _ = std::fs::remove_file(path);
+            let _ = std::fs::remove_file(path.with_extension("db-wal"));
+            let _ = std::fs::remove_file(path.with_extension("db-shm"));
         }
     }
-    let _ = std::fs::remove_file(&tmp);
+    #[cfg(not(feature = "sqlcipher"))]
+    {
+        ok &= false;
+        report.push_str("MISS sqlcipher: this binary was built without the sqlcipher feature\n");
+    }
 
     // 4. Keyring — try to create/read a test entry.
     match keyring::Entry::new("execlaw", "doctor_probe") {
@@ -831,6 +1247,31 @@ fn cmd_db_status(db_path: PathBuf, no_encrypt: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn cmd_qualify_model(
+    db_path: PathBuf,
+    no_encrypt: bool,
+    context_tokens: u32,
+) -> anyhow::Result<()> {
+    let db = open_db(&db_path, no_encrypt)?;
+    let resolver = execlaw_server::inference_resolver::InferenceResolver::new(None);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime
+        .block_on(execlaw_server::inference_probe::qualify_local_model(
+            &db,
+            &resolver,
+            context_tokens,
+        ))
+        .map_err(|error| anyhow::anyhow!("{}: {}", error.code, error.message))?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    anyhow::ensure!(
+        result.qualified,
+        "model qualification failed; see result matrix above"
+    );
+    Ok(())
+}
+
 fn cmd_db_repair_checksum(id: u32, db_path: PathBuf, no_encrypt: bool) -> anyhow::Result<()> {
     let db = open_db(&db_path, no_encrypt)?;
     let runner = execlaw_core::MigrationRunner::new(&db);
@@ -873,7 +1314,11 @@ fn cmd_delete_thread(
     println!(
         "conversation {} {}",
         cid.as_str(),
-        if existed { "deleted" } else { "was already absent" }
+        if existed {
+            "deleted"
+        } else {
+            "was already absent"
+        }
     );
     Ok(())
 }
@@ -912,6 +1357,7 @@ fn cmd_replay(
     use execlaw_core::ids::{ConversationId, EventSeq};
     use execlaw_core::principal::PrincipalStore;
     use execlaw_core::principal::TrustLevel as CoreTrust;
+    use execlaw_core::runs::RunStore;
     use execlaw_policy::trust::{TrustLevel, TurnPolicyInput, evaluate_turn};
 
     let db = open_db(&db_path, no_encrypt)?;
@@ -980,6 +1426,21 @@ fn cmd_replay(
     println!("  spotlighting:      {}", policy.spotlighting);
     println!("  latency_band:      {:?}", policy.latency_band);
     println!("  capability_set:    {:?}", policy.capability_set);
+    let run_store = RunStore::new(&db);
+    if let Some(run) =
+        run_store.find_run_for_input(&cid, EventSeq(all_events[user_msg_idx].seq.0))?
+    {
+        if let Some(inputs) = run_store.input_manifest(&run.run_id)? {
+            println!("Turn input manifest (v{}):", inputs.input_version);
+            println!("  prompt_hash:       {}", inputs.prompt_hash);
+            println!("  model_hash:        {}", inputs.model_settings_hash);
+            println!("  tool_catalog_hash: {}", inputs.tool_catalog_hash);
+        } else {
+            println!("Turn input manifest: unavailable (legacy run)");
+        }
+    } else {
+        println!("Turn input manifest: unavailable (no durable run record)");
+    }
     println!();
     println!("Reconstructed prompt history:");
     for ev in &all_events[..=user_msg_idx] {
@@ -1091,6 +1552,509 @@ fn cmd_eval_list(label: Option<String>, db_path: PathBuf, no_encrypt: bool) -> a
     Ok(())
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct EvalRedactionMap {
+    replacements: Vec<EvalRedactionReplacement>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct EvalRedactionReplacement {
+    source: String,
+    replacement: String,
+}
+
+#[derive(Default)]
+struct EvalFixtureRedactor {
+    replacements: Vec<(String, String)>,
+    synthetic: std::collections::BTreeMap<(String, String), String>,
+    applied: usize,
+}
+
+impl EvalFixtureRedactor {
+    fn new(map: EvalRedactionMap) -> anyhow::Result<Self> {
+        if map.replacements.is_empty() {
+            anyhow::bail!("redaction map must provide at least one reviewed replacement");
+        }
+        let mut seen_sources = std::collections::HashSet::new();
+        let mut seen_replacements = std::collections::HashSet::new();
+        let mut replacements = Vec::with_capacity(map.replacements.len());
+        for entry in map.replacements {
+            if entry.source.trim().len() < 3
+                || !entry.replacement.starts_with("<SYNTHETIC_")
+                || !entry.replacement.ends_with('>')
+                || entry.source == entry.replacement
+                || !seen_sources.insert(entry.source.clone())
+                || !seen_replacements.insert(entry.replacement.clone())
+            {
+                anyhow::bail!(
+                    "redaction entries require unique source values and unique <SYNTHETIC_...> replacements"
+                );
+            }
+            replacements.push((entry.source, entry.replacement));
+        }
+        replacements.sort_by_key(|(source, _)| std::cmp::Reverse(source.len()));
+        Ok(Self {
+            replacements,
+            ..Self::default()
+        })
+    }
+
+    fn synthetic_id(&mut self, kind: &str, raw: &str) -> String {
+        let key = (kind.to_owned(), raw.to_owned());
+        if let Some(existing) = self.synthetic.get(&key) {
+            return existing.clone();
+        }
+        let replacement = format!(
+            "<SYNTHETIC_{}_{}>",
+            kind.to_ascii_uppercase(),
+            self.synthetic.len() + 1
+        );
+        self.synthetic.insert(key, replacement.clone());
+        self.applied += 1;
+        replacement
+    }
+
+    fn redact_text(&mut self, input: &str) -> String {
+        let mut text = input.to_owned();
+        for (source, replacement) in &self.replacements {
+            let count = text.matches(source).count();
+            if count > 0 {
+                text = text.replace(source, replacement);
+                self.applied += count;
+            }
+        }
+        for (kind, pattern) in sensitive_text_patterns() {
+            text = pattern
+                .replace_all(&text, |captures: &regex::Captures<'_>| {
+                    let matched = captures
+                        .get(0)
+                        .map(|value| value.as_str())
+                        .unwrap_or_default();
+                    if *kind == "PHONE" && matched.chars().filter(char::is_ascii_digit).count() < 10
+                    {
+                        return matched.to_owned();
+                    }
+                    self.synthetic_id(kind, matched)
+                })
+                .into_owned();
+        }
+        text
+    }
+
+    fn redact_value(&mut self, value: &mut serde_json::Value, field: Option<&str>) {
+        use serde_json::Value;
+        match value {
+            Value::Object(fields) => {
+                for (name, nested) in fields.iter_mut() {
+                    let lower = name.to_ascii_lowercase();
+                    if [
+                        "password",
+                        "secret",
+                        "api_key",
+                        "access_token",
+                        "refresh_token",
+                        "authorization",
+                        "cookie",
+                        "credential",
+                    ]
+                    .iter()
+                    .any(|needle| lower.contains(needle))
+                    {
+                        *nested = Value::String("<REDACTED_SECRET>".into());
+                        self.applied += 1;
+                    } else if [
+                        "principal_id",
+                        "user_id",
+                        "username",
+                        "display_name",
+                        "email",
+                        "phone",
+                        "native_id",
+                        "recipient",
+                        "conversation_id",
+                        "assertion_id",
+                        "evidence_id",
+                        "extraction_run_id",
+                        "reviewer_id",
+                        "scope",
+                    ]
+                    .contains(&lower.as_str())
+                    {
+                        let raw = nested.as_str().unwrap_or("unknown").to_owned();
+                        *nested = Value::String(self.synthetic_id("PERSON", &raw));
+                    } else {
+                        self.redact_value(nested, Some(name));
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.redact_value(item, field);
+                }
+            }
+            Value::String(text) => *text = self.redact_text(text),
+            _ => {}
+        }
+    }
+
+    fn synthetic_ids(&self) -> Vec<String> {
+        let mut ids = self.synthetic.values().cloned().collect::<Vec<_>>();
+        ids.extend(
+            self.replacements
+                .iter()
+                .map(|(_, replacement)| replacement.clone()),
+        );
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+}
+
+fn sensitive_text_patterns() -> &'static [(&'static str, regex::Regex)] {
+    static PATTERNS: std::sync::OnceLock<Vec<(&'static str, regex::Regex)>> =
+        std::sync::OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            ("EMAIL", r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"),
+            (
+                "JWT",
+                r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+            ),
+            ("SECRET", r"(?i)\bBearer\s+[A-Za-z0-9._~+/-]+=*"),
+            ("SECRET", r"\bsk-[A-Za-z0-9_-]{12,}\b"),
+            ("PHONE", r"\+?[0-9][0-9(). -]{7,}[0-9]"),
+            ("IP", r"\b(?:[0-9]{1,3}\.){3}[0-9]{1,3}\b"),
+        ]
+        .into_iter()
+        .map(|(kind, pattern)| {
+            (
+                kind,
+                regex::Regex::new(pattern).expect("static redaction regex is valid"),
+            )
+        })
+        .collect()
+    })
+}
+
+fn cmd_memory_export_assertion(
+    assertion_id: String,
+    output_path: PathBuf,
+    redaction_map_path: PathBuf,
+    consent: bool,
+    db_path: PathBuf,
+    no_encrypt: bool,
+) -> anyhow::Result<()> {
+    use execlaw_core::events::{EventLog, KeyRing};
+    use execlaw_core::{ConversationId, EventSeq};
+    use sha2::{Digest, Sha256};
+    use std::io::Write;
+
+    if !consent {
+        anyhow::bail!(
+            "memory export requires --consent after reviewing the source and local redaction map"
+        );
+    }
+    if output_path.exists() {
+        anyhow::bail!(
+            "memory export destination already exists: {}",
+            output_path.display()
+        );
+    }
+    let map_bytes = std::fs::read(&redaction_map_path)
+        .map_err(|error| anyhow::anyhow!("read local redaction map: {error}"))?;
+    let map: EvalRedactionMap = serde_json::from_slice(&map_bytes)
+        .map_err(|error| anyhow::anyhow!("parse local redaction map: {error}"))?;
+    let db = open_db(&db_path, no_encrypt)?;
+    let store = execlaw_core::memory_assertions::MemoryAssertionStore::new(&db);
+    let assertion = store
+        .get(&assertion_id)?
+        .ok_or_else(|| anyhow::anyhow!("memory assertion '{assertion_id}' was not found"))?;
+    let evidence = store.evidence_for(&assertion_id, 501)?;
+    if evidence.is_empty() {
+        anyhow::bail!("memory assertion has no source evidence to export");
+    }
+    if evidence.len() > 500 {
+        anyhow::bail!(
+            "memory assertion has more than 500 evidence references; narrow the export first"
+        );
+    }
+    let event_hmac_key = execlaw_vault::keyring_key::load_or_create_event_hmac_key()
+        .map_err(|error| anyhow::anyhow!("event HMAC key: {error}"))?;
+    let event_log = EventLog::new(&db).with_key_ring(KeyRing::single(0, event_hmac_key.to_vec()));
+    let mut events_by_conversation = std::collections::HashMap::new();
+    let mut exported_evidence = Vec::with_capacity(evidence.len());
+    for source in evidence {
+        if !events_by_conversation.contains_key(&source.conversation_id) {
+            let events = event_log.replay_since(
+                &ConversationId::from(source.conversation_id.clone()),
+                EventSeq(0),
+            )?;
+            events_by_conversation.insert(source.conversation_id.clone(), events);
+        }
+        let source_event = events_by_conversation
+            .get(&source.conversation_id)
+            .and_then(|events| events.iter().find(|event| event.seq.0 == source.event_seq))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "source event {} is unavailable for evidence {}",
+                    source.event_seq,
+                    source.evidence_id
+                )
+            })?;
+        let payload: serde_json::Value = source_event.decode_payload()?;
+        let quote = execlaw_core::memory_assertions::evidence_quote(&payload, &source.payload_path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "evidence payload path no longer resolves: {}",
+                    source.payload_path
+                )
+            })?;
+        let quote_hash = hex::encode(Sha256::digest(quote.as_bytes()));
+        if quote_hash != source.quote_hash.to_ascii_lowercase() {
+            anyhow::bail!(
+                "source quote hash mismatch for evidence {}",
+                source.evidence_id
+            );
+        }
+        exported_evidence.push(serde_json::json!({
+            "evidence_id": source.evidence_id,
+            "conversation_id": source.conversation_id,
+            "event_seq": source.event_seq,
+            "payload_path": source.payload_path,
+            "quote_hash": source.quote_hash,
+            "evidence_kind": source.evidence_kind,
+            "event_kind": source_event.kind.as_str(),
+            "source_event_sha256": execlaw_core::harness::HarnessStore::fingerprint(source_event)?,
+            "source_quote": quote,
+        }));
+    }
+
+    let replacement_id_hash = execlaw_core::harness::HarnessStore::fingerprint(
+        &map.replacements
+            .iter()
+            .map(|entry| &entry.replacement)
+            .collect::<Vec<_>>(),
+    )?;
+    let mut redactor = EvalFixtureRedactor::new(map)?;
+    let assertion_sha256 = execlaw_core::harness::HarnessStore::fingerprint(&assertion)?;
+    let mut assertion_value = serde_json::to_value(&assertion)?;
+    if store.is_retracted(&assertion_id)? {
+        assertion_value["status"] = serde_json::Value::String("retracted".into());
+    }
+    let mut export = serde_json::json!({
+        "schema_version": 1,
+        "exported_at": chrono::Utc::now().timestamp(),
+        "source_assertion_sha256": assertion_sha256,
+        "assertion": assertion_value,
+        "evidence": exported_evidence,
+        "redaction": {
+            "policy_version": "memory-redaction-v1",
+            "replacement_ids_sha256": replacement_id_hash,
+        },
+        "privacy": "local_only",
+    });
+    redactor.redact_value(&mut export, None);
+    let replacements_applied = redactor.applied;
+    let synthetic_ids = redactor.synthetic_ids();
+    export["redaction"]["replacements_applied"] = serde_json::json!(replacements_applied);
+    export["redaction"]["synthetic_ids"] = serde_json::json!(synthetic_ids);
+    let encoded = serde_json::to_vec_pretty(&export)?;
+    if encoded.len() > 8 * 1024 * 1024 {
+        anyhow::bail!("redacted memory export exceeds the 8 MiB limit");
+    }
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output_path)
+        .map_err(|error| anyhow::anyhow!("create memory export: {error}"))?;
+    output.write_all(&encoded)?;
+    println!(
+        "memory assertion exported locally: evidence={} redactions={} path={}",
+        export["evidence"].as_array().map_or(0, Vec::len),
+        replacements_applied,
+        output_path.display()
+    );
+    Ok(())
+}
+
+fn cmd_eval_export_flagged(
+    id: i64,
+    output_path: PathBuf,
+    redaction_map_path: PathBuf,
+    consent: bool,
+    incident_ref: Option<String>,
+    release_ref: Option<String>,
+    db_path: PathBuf,
+    no_encrypt: bool,
+) -> anyhow::Result<()> {
+    use execlaw_core::eval::{
+        EvalFlaggedStore, ExpectedStateTransition, MockToolResponse, RegressionFixture,
+        RegressionFixtureEvent, RegressionFixtureProvenance, RegressionFixtureRedaction,
+        validate_regression_fixture,
+    };
+    use execlaw_core::events::{EventLog, KeyRing};
+    use execlaw_core::ids::EventSeq;
+
+    if !consent {
+        anyhow::bail!(
+            "fixture export contains selected conversation evidence; re-run with --consent after reviewing the redaction map"
+        );
+    }
+    if output_path.exists() {
+        anyhow::bail!(
+            "fixture destination already exists: {}",
+            output_path.display()
+        );
+    }
+    let map_bytes = std::fs::read(&redaction_map_path)
+        .map_err(|error| anyhow::anyhow!("read local redaction map: {error}"))?;
+    let map: EvalRedactionMap = serde_json::from_slice(&map_bytes)
+        .map_err(|error| anyhow::anyhow!("parse local redaction map: {error}"))?;
+    let map_identity = map
+        .replacements
+        .iter()
+        .map(|entry| &entry.replacement)
+        .collect::<Vec<_>>();
+    let redaction_map_sha256 = execlaw_core::harness::HarnessStore::fingerprint(&map_identity)?;
+    let mut redactor = EvalFixtureRedactor::new(map)?;
+
+    let db = open_db(&db_path, no_encrypt)?;
+    let flag = EvalFlaggedStore::new(&db)
+        .get(id)?
+        .ok_or_else(|| anyhow::anyhow!("eval flag {id} was not found"))?;
+    let hmac_key = execlaw_vault::keyring_key::load_or_create_event_hmac_key()
+        .map_err(|error| anyhow::anyhow!("event HMAC key: {error}"))?;
+    let conversation_id = flag.conversation_id.clone();
+    let source_events = EventLog::new(&db)
+        .with_key_ring(KeyRing::single(0, hmac_key.to_vec()))
+        .replay_since(&conversation_id, EventSeq(flag.from_seq.saturating_sub(1)))?
+        .into_iter()
+        .filter(|event| event.seq.0 <= flag.to_seq)
+        .collect::<Vec<_>>();
+    if source_events.is_empty() {
+        anyhow::bail!("flagged range contains no events");
+    }
+    if source_events.len() > 4096 {
+        anyhow::bail!(
+            "flagged range contains {} events; split it into ranges of at most 4096",
+            source_events.len()
+        );
+    }
+
+    let source_fingerprint_sha256 =
+        execlaw_core::harness::HarnessStore::fingerprint(&source_events)?;
+    let source_conversation_sha256 =
+        execlaw_core::harness::HarnessStore::fingerprint(&conversation_id)?;
+    let mut fixture_events = Vec::with_capacity(source_events.len());
+    let mut expected_transitions = Vec::with_capacity(source_events.len());
+    let mut mock_tool_responses = Vec::new();
+    let mut current_turn_seq = flag.from_seq;
+    for event in source_events {
+        let mut payload: serde_json::Value =
+            rmp_serde::from_slice(&event.payload).map_err(|error| {
+                anyhow::anyhow!("decode event {} for redaction: {error}", event.seq.0)
+            })?;
+        redactor.redact_value(&mut payload, None);
+        if event.kind.as_str() == "user_msg" {
+            current_turn_seq = event.seq.0;
+        }
+        let actor = event.actor.map(|actor| match actor.as_str() {
+            "system" => "system".to_owned(),
+            "agent" => "agent".to_owned(),
+            other => redactor.synthetic_id("ACTOR", other),
+        });
+        if event.kind.as_str() == "tool_result" {
+            let ordinal = payload
+                .get("ordinal")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|ordinal| u32::try_from(ordinal).ok())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("tool_result event {} has no ordinal", event.seq.0)
+                })?;
+            mock_tool_responses.push(MockToolResponse {
+                turn_seq: current_turn_seq,
+                ordinal,
+                payload: payload.clone(),
+            });
+        }
+        let kind = event.kind.as_str().to_owned();
+        expected_transitions.push(ExpectedStateTransition {
+            seq: event.seq.0,
+            transition: kind.clone(),
+        });
+        fixture_events.push(RegressionFixtureEvent {
+            seq: event.seq.0,
+            kind,
+            actor,
+            committed_at: event.committed_at,
+            payload,
+        });
+    }
+
+    let fixture = RegressionFixture {
+        schema_version: 1,
+        effects_enabled: false,
+        provenance: RegressionFixtureProvenance {
+            flagged_range_id: id,
+            source_conversation_sha256,
+            source_fingerprint_sha256,
+            label: redactor.redact_text(&flag.label),
+            tags: flag
+                .tags
+                .iter()
+                .map(|tag| redactor.redact_text(tag))
+                .collect(),
+            from_seq: flag.from_seq,
+            to_seq: flag.to_seq,
+            flagged_at: flag.flagged_at,
+            exported_at: chrono::Utc::now().timestamp(),
+            incident_ref,
+            release_ref,
+        },
+        redaction: RegressionFixtureRedaction {
+            policy_version: "redaction-v1".into(),
+            redaction_map_sha256,
+            replacements_applied: redactor.applied,
+            synthetic_ids: redactor.synthetic_ids(),
+        },
+        events: fixture_events,
+        expected_transitions,
+        mock_tool_responses,
+    };
+    validate_regression_fixture(&fixture)
+        .map_err(|error| anyhow::anyhow!("fixture rejected by offline validator: {error}"))?;
+    let encoded = serde_json::to_vec_pretty(&fixture)?;
+    if encoded.len() > 8 * 1024 * 1024 {
+        anyhow::bail!(
+            "redacted fixture exceeds the 8 MiB export limit; select a narrower flag range"
+        );
+    }
+    use std::io::Write;
+    let mut output = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&output_path)
+        .map_err(|error| anyhow::anyhow!("create fixture output: {error}"))?;
+    output.write_all(&encoded)?;
+    println!(
+        "fixture exported: flag_id={id} events={} redactions={} effects_enabled=false incident={} release={} path={}",
+        fixture.events.len(),
+        fixture.redaction.replacements_applied,
+        fixture
+            .provenance
+            .incident_ref
+            .as_deref()
+            .unwrap_or("unlinked"),
+        fixture
+            .provenance
+            .release_ref
+            .as_deref()
+            .unwrap_or("unlinked"),
+        output_path.display()
+    );
+    Ok(())
+}
+
 // ----- Phase 7 hardening commands -------------------------------------
 
 fn cmd_backfill_events(db_path: PathBuf, no_encrypt: bool) -> anyhow::Result<()> {
@@ -1100,8 +2064,8 @@ fn cmd_backfill_events(db_path: PathBuf, no_encrypt: bool) -> anyhow::Result<()>
     // Use the operator's keyring-backed master key so back-fill
     // produces tags that match what `serve` would have produced
     // had a key been attached at append time.
-    let key = execlaw_vault::load_or_create_master_key()
-        .map_err(|e| anyhow::anyhow!("master key: {e}"))?;
+    let key = execlaw_vault::keyring_key::load_or_create_event_hmac_key()
+        .map_err(|e| anyhow::anyhow!("event HMAC key: {e}"))?;
     let log = EventLog::new(&db).with_key_ring(KeyRing::single(0, key.to_vec()));
     let report = log
         .backfill_null_tags()
@@ -1130,8 +2094,8 @@ fn cmd_resign_events(db_path: PathBuf, no_encrypt: bool, confirmed: bool) -> any
     }
 
     let db = open_db(&db_path, no_encrypt)?;
-    let key = execlaw_vault::load_or_create_master_key()
-        .map_err(|e| anyhow::anyhow!("master key: {e}"))?;
+    let key = execlaw_vault::keyring_key::load_or_create_event_hmac_key()
+        .map_err(|e| anyhow::anyhow!("event HMAC key: {e}"))?;
     let log = EventLog::new(&db).with_key_ring(KeyRing::single(0, key.to_vec()));
     let report = log
         .resign_all_with_current_key()
@@ -1144,43 +2108,10 @@ fn cmd_backup(to: PathBuf, db_path: PathBuf, no_encrypt: bool) -> anyhow::Result
     if !db_path.exists() {
         anyhow::bail!("source db not found: {}", db_path.display());
     }
-    if let Some(parent) = to.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            anyhow::bail!(
-                "parent directory of --to does not exist: {}",
-                parent.display()
-            );
-        }
-    }
-    if to.exists() {
-        anyhow::bail!(
-            "--to path already exists; remove it first: {}",
-            to.display()
-        );
-    }
-
     let db = open_db(&db_path, no_encrypt)?;
-    let to_str = to
-        .to_str()
-        .ok_or_else(|| anyhow::anyhow!("non-utf8 path: {}", to.display()))?
-        .to_owned();
+    write_backup_file(&db, &to)?;
 
-    // VACUUM INTO writes a fresh, fully-defragmented copy at the
-    // target path. With SQLCipher in play it inherits the same
-    // encryption posture by default, so a snapshot can be restored
-    // by any process holding the master key.
-    db.with_conn(|c| {
-        // VACUUM INTO requires the destination as an inline string
-        // literal (rusqlite's `?` placeholders don't substitute for
-        // path positions in SQLite DDL). Path comes from the
-        // admin-only `--to` CLI flag and is SQL-quote-escaped via
-        // `replace('\'', "''")` to neutralise embedded single quotes.
-        // Not reachable by untrusted input.
-        // nosemgrep: rust-rusqlite-format-arg
-        c.execute_batch(&format!("VACUUM INTO '{}'", to_str.replace('\'', "''")))?;
-        Ok(())
-    })
-    .map_err(|e| anyhow::anyhow!("VACUUM INTO: {e}"))?;
+    verify_database_snapshot(&to, no_encrypt)?;
 
     println!(
         "backup: {} -> {} ({} bytes)",
@@ -1188,6 +2119,105 @@ fn cmd_backup(to: PathBuf, db_path: PathBuf, no_encrypt: bool) -> anyhow::Result
         to.display(),
         std::fs::metadata(&to).map(|m| m.len()).unwrap_or_default()
     );
+    Ok(())
+}
+
+fn write_backup_file(db: &execlaw_core::Database, to: &Path) -> anyhow::Result<()> {
+    if let Some(parent) = to.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            anyhow::bail!(
+                "backup parent directory does not exist: {}",
+                parent.display()
+            );
+        }
+    }
+    if to.exists() {
+        anyhow::bail!("backup target already exists: {}", to.display());
+    }
+    let to_str = to
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("non-utf8 path: {}", to.display()))?;
+    db.with_conn(|connection| {
+        // VACUUM INTO requires a quoted path rather than a bind parameter.
+        // The path is operator-supplied and SQL-quote-escaped here.
+        // nosemgrep: rust-rusqlite-format-arg
+        connection.execute_batch(&format!("VACUUM INTO '{}'", to_str.replace('\'', "''")))?;
+        Ok(())
+    })
+    .map_err(|error| anyhow::anyhow!("VACUUM INTO: {error}"))
+}
+
+fn cmd_rotate_keys(backup_path: PathBuf, db_path: PathBuf, confirmed: bool) -> anyhow::Result<()> {
+    if !confirmed {
+        anyhow::bail!(
+            "key rotation changes the SQLCipher key; event history remains signed with its stable HMAC key. \
+             pass --i-understand-database-key-will-change to proceed"
+        );
+    }
+    #[cfg(not(feature = "sqlcipher"))]
+    {
+        let _ = (backup_path, db_path);
+        anyhow::bail!("key rotation requires an execlaw binary built with --features sqlcipher");
+    }
+    #[cfg(feature = "sqlcipher")]
+    {
+        use rand::RngCore;
+
+        if db_path == backup_path {
+            anyhow::bail!("backup path must differ from the live database path");
+        }
+        if backup_path.exists() || backup_path.with_extension("rotation-pre.db").exists() {
+            anyhow::bail!("rotation backup path or temporary old-key snapshot already exists");
+        }
+        let old_key = execlaw_vault::load_or_create_master_key()
+            .map_err(|error| anyhow::anyhow!("load current master key: {error}"))?;
+        let event_hmac_key = execlaw_vault::keyring_key::load_or_create_event_hmac_key()
+            .map_err(|error| anyhow::anyhow!("load event HMAC key: {error}"))?;
+        // Keep an old-key snapshot until the new-key snapshot has been
+        // verified and the durable key file has switched successfully.
+        let old_backup = backup_path.with_extension("rotation-pre.db");
+        cmd_backup(old_backup.clone(), db_path.clone(), false)?;
+        let (db, _) = open_db_with_config(&db_path, false)?;
+        let mut new_key = [0_u8; 32];
+        rand::thread_rng().fill_bytes(&mut new_key);
+
+        db.rekey_sqlcipher(&new_key)
+            .map_err(|error| anyhow::anyhow!("re-encrypt database: {error}"))?;
+
+        let snapshot_result = write_backup_file(&db, &backup_path).and_then(|()| {
+            verify_database_snapshot_with_keys(&backup_path, &new_key, &event_hmac_key)
+        });
+        if let Err(error) = snapshot_result {
+            rollback_master_key_rotation(&db, &old_key)?;
+            let _ = std::fs::remove_file(&backup_path);
+            return Err(anyhow::anyhow!("verify new-key recovery snapshot: {error}"));
+        }
+
+        let key_path = execlaw_vault::keyring_key::default_passphrase_file_path();
+        if let Err(error) =
+            execlaw_vault::keyring_key::persist_rotated_master_key(&key_path, &new_key)
+        {
+            rollback_master_key_rotation(&db, &old_key)?;
+            let _ = std::fs::remove_file(&backup_path);
+            return Err(anyhow::anyhow!("persist rotated key: {error}"));
+        }
+        let _ = std::fs::remove_file(&old_backup);
+        println!(
+            "database key rotation complete; verified recovery snapshot: {}; event HMAC chain preserved",
+            backup_path.display(),
+        );
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sqlcipher")]
+fn rollback_master_key_rotation(
+    db: &execlaw_core::Database,
+    old_key: &[u8; 32],
+) -> anyhow::Result<()> {
+    db.rekey_sqlcipher(old_key).map_err(|error| {
+        anyhow::anyhow!("rotation rollback could not restore old database key: {error}")
+    })?;
     Ok(())
 }
 
@@ -1204,28 +2234,7 @@ fn cmd_restore(
     // Validate the snapshot first: it must open with the operator's
     // master key AND carry the schema_version table. Otherwise
     // restoring would silently swap in a useless DB.
-    {
-        let snap = open_db(&from, no_encrypt)?;
-        let has_version: bool = snap
-            .with_conn(|c| {
-                let n: i64 = c
-                    .query_row(
-                        "SELECT COUNT(*) FROM sqlite_master \
-                         WHERE type='table' AND name='schema_version'",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(0);
-                Ok(n > 0)
-            })
-            .unwrap_or(false);
-        if !has_version {
-            anyhow::bail!(
-                "snapshot at {} doesn't look like an execlaw DB (missing schema_version table)",
-                from.display()
-            );
-        }
-    }
+    verify_database_snapshot(&from, no_encrypt)?;
 
     if db_path.exists() && !force {
         let size = std::fs::metadata(&db_path)
@@ -1265,6 +2274,87 @@ fn cmd_restore(
             .map(|m| m.len())
             .unwrap_or_default()
     );
+    Ok(())
+}
+
+fn verify_database_snapshot(path: &Path, no_encrypt: bool) -> anyhow::Result<()> {
+    let key = if no_encrypt {
+        None
+    } else {
+        Some(
+            execlaw_vault::load_or_create_master_key()
+                .map_err(|error| anyhow::anyhow!("master key: {error}"))?,
+        )
+    };
+    let hmac_key = if no_encrypt {
+        None
+    } else {
+        Some(
+            execlaw_vault::keyring_key::load_or_create_event_hmac_key()
+                .map_err(|error| anyhow::anyhow!("event HMAC key: {error}"))?,
+        )
+    };
+    verify_database_snapshot_inner(path, key.as_ref(), hmac_key.as_ref())
+}
+
+#[cfg(feature = "sqlcipher")]
+fn verify_database_snapshot_with_keys(
+    path: &Path,
+    encryption_key: &[u8; 32],
+    hmac_key: &[u8; 32],
+) -> anyhow::Result<()> {
+    verify_database_snapshot_inner(path, Some(encryption_key), Some(hmac_key))
+}
+
+fn verify_database_snapshot_inner(
+    path: &Path,
+    encryption_key: Option<&[u8; 32]>,
+    hmac_key: Option<&[u8; 32]>,
+) -> anyhow::Result<()> {
+    let snapshot = execlaw_core::Database::open(&execlaw_core::DbConfig {
+        path: path.to_path_buf(),
+        key: encryption_key.map(|raw| execlaw_core::db::SqlCipherKey::RawBytes(raw.to_vec())),
+    })?;
+    let (integrity, has_version): (String, bool) = snapshot.with_conn(|connection| {
+        let integrity = connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+        let count: i64 = connection.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_version'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok((integrity, count > 0))
+    })?;
+    if integrity != "ok" {
+        anyhow::bail!(
+            "snapshot at {} failed SQLite integrity check",
+            path.display()
+        );
+    }
+    if !has_version {
+        anyhow::bail!(
+            "snapshot at {} doesn't look like an execlaw DB (missing schema_version table)",
+            path.display()
+        );
+    }
+    if let Some(key) = hmac_key {
+        use execlaw_core::events::{EventLog, KeyRing};
+        use execlaw_core::ids::{ConversationId, EventSeq};
+
+        let conversations = snapshot.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT conversation_id FROM state_conversations ORDER BY conversation_id",
+            )?;
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(Into::into)
+        })?;
+        let log = EventLog::new(&snapshot).with_key_ring(KeyRing::single(0, key.to_vec()));
+        for conversation_id in conversations {
+            log.replay_since(&ConversationId::from(conversation_id.as_str()), EventSeq(0))
+                .map_err(|error| anyhow::anyhow!("snapshot event-chain verification: {error}"))?;
+        }
+    }
     Ok(())
 }
 
@@ -1343,6 +2433,83 @@ async fn cmd_serve(
 ) -> anyhow::Result<()> {
     let (db, db_config) = open_db_with_config(&db_path, no_encrypt)?;
     execlaw_core::MigrationRunner::new(&db).apply_all()?;
+    // Advance completed checkpoints and empty cursors automatically. This
+    // touches no model, approval, tool, or external-effect operation; those
+    // require their owning executor to revalidate before resuming.
+    let run_store = execlaw_core::runs::RunStore::new(&db);
+    let recovered_transitions =
+        run_store.recover_completed_transitions(chrono::Utc::now().timestamp(), 500, 2_000)?;
+    for transition in &recovered_transitions {
+        tracing::info!(
+            run_id = %transition.run_id,
+            action = transition.action,
+            from_cursor = transition.from_cursor,
+            to_cursor = transition.to_cursor,
+            status = ?transition.resulting_status,
+            "durable run recovered without redispatch"
+        );
+    }
+    // Inventory the remaining transitions. Tool and outbox work still belongs
+    // to its executor and must reconcile its sink before it can be resumed.
+    let recovery_candidates = run_store.recovery_candidates(chrono::Utc::now().timestamp(), 500)?;
+    if !recovery_candidates.is_empty() {
+        tracing::warn!(
+            recoverable_run_count = recovery_candidates.len(),
+            "durable runs require executor recovery"
+        );
+        for candidate in &recovery_candidates {
+            let (next_action, step_id, step_kind) = match &candidate.next_action {
+                execlaw_core::runs::NextSafeAction::Claim(step) => (
+                    "claim",
+                    Some(step.step_id.as_str()),
+                    Some(step.kind.as_str()),
+                ),
+                execlaw_core::runs::NextSafeAction::ReclaimExpired(step) => (
+                    "reclaim_expired_lease",
+                    Some(step.step_id.as_str()),
+                    Some(step.kind.as_str()),
+                ),
+                execlaw_core::runs::NextSafeAction::WaitForLease(step) => (
+                    "wait_for_lease",
+                    Some(step.step_id.as_str()),
+                    Some(step.kind.as_str()),
+                ),
+                execlaw_core::runs::NextSafeAction::WaitForApproval(step) => (
+                    "wait_for_approval",
+                    Some(step.step_id.as_str()),
+                    Some(step.kind.as_str()),
+                ),
+                execlaw_core::runs::NextSafeAction::Wait(step) => (
+                    "wait_for_step",
+                    Some(step.step_id.as_str()),
+                    Some(step.kind.as_str()),
+                ),
+                execlaw_core::runs::NextSafeAction::AdvanceCursor(step) => (
+                    "advance_completed_checkpoint",
+                    Some(step.step_id.as_str()),
+                    Some(step.kind.as_str()),
+                ),
+                execlaw_core::runs::NextSafeAction::CompleteRun { .. } => {
+                    ("complete_empty_cursor", None, None)
+                }
+                execlaw_core::runs::NextSafeAction::RunCompleted => {
+                    ("already_completed", None, None)
+                }
+                execlaw_core::runs::NextSafeAction::RunFailed => ("failed", None, None),
+                execlaw_core::runs::NextSafeAction::RunCancelled => ("cancelled", None, None),
+            };
+            tracing::warn!(
+                run_id = %candidate.run.run_id,
+                conversation_id = %candidate.run.conversation_id,
+                status = ?candidate.run.status,
+                cursor = candidate.run.cursor,
+                next_action,
+                step_id = step_id.unwrap_or(""),
+                step_kind = step_kind.unwrap_or(""),
+                "recoverable run discovered during startup"
+            );
+        }
+    }
     let provenance_store =
         execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(db.clone());
     if allow_unsigned_local_development {
@@ -1456,13 +2623,12 @@ async fn cmd_serve(
         execlaw_server::inference_resolver::InferenceResolver::new(bootstrap_inference),
     );
 
-    // Load-or-create the event-log HMAC key. Phase 1 derives it from
-    // the same OS keyring entry as the SQLCipher master; a future
-    // migration adds a dedicated `event_log_hmac_key` vault row with
-    // key_id rotation. For now, reuse the keyring-backed bytes.
-    let hmac_key = execlaw_vault::load_or_create_master_key()
-        .map(|bytes| std::sync::Arc::new(bytes.to_vec()))
-        .ok();
+    // Keep event signing stable when SQLCipher's encryption key rotates.
+    let hmac_key = Some(std::sync::Arc::new(
+        execlaw_vault::keyring_key::load_or_create_event_hmac_key()
+            .map_err(|error| anyhow::anyhow!("event HMAC key: {error}"))?
+            .to_vec(),
+    ));
 
     // Stage root for installed plugins — defaults to
     // `<db_parent>/plugins/`. Each install lands under
@@ -2167,11 +3333,50 @@ async fn cmd_serve(
         // state is not durable (an operator restart resets counters).
         login_limiter: execlaw_server::auth_rate_limit::LoginRateLimiter::new(),
     };
+    match execlaw_core::agents::AgentStore::new(&state.db)
+        .reconcile_interrupted_runs(chrono::Utc::now().timestamp())
+    {
+        Ok(recovered) if recovered > 0 => tracing::warn!(
+            recovered_agent_runs = recovered,
+            "requeued mailbox input from agent runs interrupted by restart"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::error!(
+            %error,
+            "could not reconcile interrupted agent runs; inspect agent run history"
+        ),
+    }
+    let outbox_stop = execlaw_server::transport_outbox::spawn(state.clone());
+    match execlaw_server::chats::reconcile_idempotent_chat_requests(
+        &state,
+        chrono::Utc::now().timestamp(),
+        1_000,
+    ) {
+        Ok((responses_rebuilt, requests_marked_unknown))
+            if responses_rebuilt > 0 || requests_marked_unknown > 0 =>
+        {
+            tracing::info!(
+                responses_rebuilt,
+                requests_marked_unknown,
+                "reconciled interrupted chat requests at startup"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "chat request startup reconciliation needs review"),
+    }
     // We don't await `automation_bus_tasks` — letting the spawned
     // dispatcher + poller run for the process lifetime. The `stop`
     // notify is held by the same shutdown path that drives the rest
     // of the sweepers (`sweep_stop`); we link them below so a SIGTERM
     // drains everything together.
+    match execlaw_server::turn_controls_admin::recover_pending_queued_controls(&state) {
+        Ok(recovered) if recovered > 0 => tracing::info!(
+            recovered_queued_controls = recovered,
+            "recovered pending next-turn chat controls"
+        ),
+        Ok(_) => {}
+        Err(error) => tracing::warn!(%error, "queued chat-control recovery needs operator review"),
+    }
     drop(automation_bus_tasks);
 
     // Phase B (channel-plugin surface): wire the host-capabilities
@@ -2218,6 +3423,12 @@ async fn cmd_serve(
     {
         let stop = sweep_stop.clone();
         tokio::spawn(async move { ephemeral_sweeper.run(stop).await });
+    }
+    let memory_lifecycle_sweeper =
+        execlaw_server::memory_lifecycle_sweeper::MemoryLifecycleSweeper::new(db.clone());
+    {
+        let stop = sweep_stop.clone();
+        tokio::spawn(async move { memory_lifecycle_sweeper.run(stop).await });
     }
     // Phase 7 hardening — keeps `state_refresh_tokens` from growing
     // without bound. Expired rows are already rejected at consume
@@ -2584,6 +3795,7 @@ async fn cmd_serve(
         });
     }
 
+    let _safe_chat_recovery = execlaw_server::chats::spawn_safe_chat_run_recovery(state.clone());
     let app = execlaw_server::routes::build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!(addr = %config.bind_addr, "execlaw server listening");
@@ -2595,14 +3807,26 @@ async fn cmd_serve(
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await?;
+    let _ = outbox_stop.send(true);
     sweep_stop.notify_waiters();
     Ok(())
 }
 
 fn main() -> ExitCode {
+    let cli = Cli::parse();
     // Hold the tracing-appender guard for the whole process lifetime
     // so the background flush thread sees every event before exit.
-    let _tracing_guard = init_tracing();
+    // The editor adapter reserves stdout for Content-Length JSON-RPC frames.
+    let _tracing_guard = if matches!(
+        &cli.command,
+        Command::Client {
+            op: ClientOp::EditorAdapter { .. }
+        }
+    ) {
+        None
+    } else {
+        init_tracing()
+    };
     // 2026-05-16 — install a panic hook that emits a structured
     // tracing event (full backtrace + payload + location) and
     // aborts. The abort produces a core dump if the host's
@@ -2612,7 +3836,6 @@ fn main() -> ExitCode {
     // and the server keeps running with a corrupt runtime —
     // exactly the failure mode that's hardest to debug.
     install_panic_hook();
-    let cli = Cli::parse();
     let result: anyhow::Result<()> = (|| match cli.command {
         Command::Install {
             no_encrypt,
@@ -2674,6 +3897,19 @@ fn main() -> ExitCode {
         Command::Hw { op } => match op {
             HwOp::Rescan => cmd_hw_rescan(),
         },
+        Command::Client { op } => match op {
+            ClientOp::EditorAdapter { server } => api_client::run_editor_adapter(server),
+            other => api_client::run(other),
+        },
+        Command::QualifyModel {
+            db,
+            no_encrypt,
+            context_tokens,
+        } => cmd_qualify_model(
+            db.unwrap_or_else(default_db_path),
+            no_encrypt,
+            context_tokens,
+        ),
         Command::Serve {
             bind,
             db,
@@ -2724,6 +3960,42 @@ fn main() -> ExitCode {
                 db,
                 no_encrypt,
             } => cmd_eval_list(label, db.unwrap_or_else(default_db_path), no_encrypt),
+            EvalOp::ExportFlagged {
+                id,
+                to,
+                redaction_map,
+                consent,
+                incident_ref,
+                release_ref,
+                db,
+                no_encrypt,
+            } => cmd_eval_export_flagged(
+                id,
+                to,
+                redaction_map,
+                consent,
+                incident_ref,
+                release_ref,
+                db.unwrap_or_else(default_db_path),
+                no_encrypt,
+            ),
+        },
+        Command::Memory { op } => match op {
+            MemoryOp::ExportAssertion {
+                assertion_id,
+                to,
+                redaction_map,
+                consent,
+                db,
+                no_encrypt,
+            } => cmd_memory_export_assertion(
+                assertion_id,
+                to,
+                redaction_map,
+                consent,
+                db.unwrap_or_else(default_db_path),
+                no_encrypt,
+            ),
         },
         Command::BackfillEvents { db, no_encrypt } => {
             cmd_backfill_events(db.unwrap_or_else(default_db_path), no_encrypt)
@@ -2740,6 +4012,15 @@ fn main() -> ExitCode {
         Command::Backup { to, db, no_encrypt } => {
             cmd_backup(to, db.unwrap_or_else(default_db_path), no_encrypt)
         }
+        Command::RotateKeys {
+            backup,
+            db,
+            i_understand_database_key_will_change,
+        } => cmd_rotate_keys(
+            backup,
+            db.unwrap_or_else(default_db_path),
+            i_understand_database_key_will_change,
+        ),
         Command::Restore {
             from,
             db,
@@ -2778,6 +4059,160 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_send_accepts_repeatable_task_contract_flags() {
+        let cli = Cli::try_parse_from([
+            "execlaw",
+            "client",
+            "send",
+            "--conversation-id",
+            "conv-1",
+            "--text",
+            "run the task",
+            "--acceptance-criterion",
+            "tests=Focused tests pass",
+            "--acceptance-criterion",
+            "review=Review findings are fixed",
+            "--optional-acceptance-criterion",
+            "latency=Under the preferred latency target",
+            "--required-artifact",
+            "report=Test report",
+            "--delivery-required",
+        ])
+        .unwrap();
+        let Command::Client {
+            op:
+                ClientOp::Send {
+                    acceptance_criteria,
+                    optional_acceptance_criteria,
+                    required_artifacts,
+                    delivery_required,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected client send command");
+        };
+        assert_eq!(acceptance_criteria.len(), 2);
+        assert_eq!(
+            optional_acceptance_criteria,
+            ["latency=Under the preferred latency target"]
+        );
+        assert_eq!(required_artifacts, ["report=Test report"]);
+        assert!(delivery_required);
+    }
+
+    #[test]
+    fn client_send_accepts_saved_run_resume_without_replacement_text() {
+        let cli = Cli::try_parse_from([
+            "execlaw",
+            "client",
+            "send",
+            "--conversation-id",
+            "conv-1",
+            "--resume-run-id",
+            "turn:conv-1:9",
+            "--request-id",
+            "resume-attempt-1",
+        ])
+        .unwrap();
+        let Command::Client {
+            op:
+                ClientOp::Send {
+                    text,
+                    resume_run_id,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected client send command");
+        };
+        assert!(text.is_empty());
+        assert_eq!(resume_run_id.as_deref(), Some("turn:conv-1:9"));
+    }
+
+    #[test]
+    fn flagged_fixture_export_accepts_incident_and_release_links() {
+        let cli = Cli::try_parse_from([
+            "execlaw",
+            "eval",
+            "export-flagged",
+            "7",
+            "--to",
+            "fixture.json",
+            "--redaction-map",
+            "redaction.json",
+            "--consent",
+            "--incident-ref",
+            "INC-42",
+            "--release-ref",
+            "v2026.09.29",
+        ])
+        .unwrap();
+        let Command::Eval {
+            op:
+                EvalOp::ExportFlagged {
+                    incident_ref,
+                    release_ref,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected eval export-flagged command");
+        };
+        assert_eq!(incident_ref.as_deref(), Some("INC-42"));
+        assert_eq!(release_ref.as_deref(), Some("v2026.09.29"));
+    }
+
+    #[test]
+    fn rotate_keys_requires_explicit_acknowledgement_before_touching_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let database = dir.path().join("live.db");
+        let backup = dir.path().join("backup.db");
+        let error = cmd_rotate_keys(backup.clone(), database.clone(), false).unwrap_err();
+        assert!(error.to_string().contains("event history remains signed"));
+        assert!(!database.exists());
+        assert!(!backup.exists());
+    }
+
+    #[test]
+    fn backup_restore_roundtrip_validates_disposable_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source.db");
+        let backup = dir.path().join("backup.db");
+        let restored = dir.path().join("restored.db");
+        let database = open_db(&source, true).unwrap();
+        execlaw_core::migrations::MigrationRunner::new(&database)
+            .apply_all()
+            .unwrap();
+        database
+            .with_conn(|connection| {
+                connection.execute(
+                    "UPDATE config_general SET bind_address = '127.0.0.1:3031', updated_at = 1 \
+                     WHERE id = 1",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        drop(database);
+
+        cmd_backup(backup.clone(), source, true).unwrap();
+        verify_database_snapshot(&backup, true).unwrap();
+        cmd_restore(backup, restored.clone(), false, true).unwrap();
+        let restored_db = open_db(&restored, true).unwrap();
+        let bind: String = restored_db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT bind_address FROM config_general WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(bind, "127.0.0.1:3031");
+    }
 
     #[test]
     fn resolve_bind_prefers_cli_over_db() {

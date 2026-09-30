@@ -68,9 +68,8 @@ fi
 npm --prefix web run build
 
 echo "==> Step 2: build server binary for $TARGET"
-# Default features ship — SQLCipher bundled, OpenSSL vendored —
-# same posture as the macOS + Windows release scripts.
-cargo build --release --target "$TARGET" -p execlaw
+# Release builds explicitly select SQLCipher; workspace defaults are plaintext.
+cargo build --release --target "$TARGET" -p execlaw --no-default-features --features sqlcipher
 
 echo "==> Step 3: stage server binary for Tauri sidecar bundling"
 mkdir -p "$BUNDLE_BIN_DIR"

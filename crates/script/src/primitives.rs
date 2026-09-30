@@ -1482,6 +1482,8 @@ fn register_host_cap_bindings(
     }
 
     // host_route_inbound(message_map) -> "Dispatched" |
+    //                                    "SpecialistQueued" |
+    //                                    "ControllerOwned" |
     //                                    "GroupNotAddressed" |
     //                                    "ColdContact" |
     //                                    "Blocked"
@@ -2178,16 +2180,41 @@ fn clamp_dim(requested: i64, min: u32, max: u32, default: u32) -> u32 {
     r as u32
 }
 
+fn sidecar_http_agent(
+    host_caps: HostCapsHandle,
+    timeout: Duration,
+    user_agent: &'static str,
+) -> ureq::Agent {
+    ureq::AgentBuilder::new()
+        .timeout(timeout)
+        .user_agent(user_agent)
+        // A registered sidecar may redirect to an unrelated listener. Require
+        // the caller to authorize each new URL instead of following it here.
+        .redirects(0)
+        .resolver(move |host_port: &str| {
+            let caps = host_caps.get().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "host egress policy is not initialized",
+                )
+            })?;
+            caps.resolve_sidecar_http_target(host_port)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::PermissionDenied, error.0))
+        })
+        .build()
+}
+
 fn register_sidecar_http_get_bytes(
     engine: &mut Engine,
     plugin_id: &str,
     host_caps: HostCapsHandle,
 ) {
     let pid = plugin_id.to_owned();
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(60))
-        .user_agent("execlaw/script-runtime/sidecar-bytes/0.1")
-        .build();
+    let agent = sidecar_http_agent(
+        host_caps.clone(),
+        Duration::from_secs(60),
+        "execlaw/script-runtime/sidecar-bytes/0.1",
+    );
     {
         let agent = agent.clone();
         let pid = pid.clone();
@@ -2265,10 +2292,11 @@ fn http_get_bytes_impl(
 
 fn register_sidecar_http_get(engine: &mut Engine, plugin_id: &str, host_caps: HostCapsHandle) {
     let pid = plugin_id.to_owned();
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(30))
-        .user_agent("execlaw/script-runtime/sidecar/0.1")
-        .build();
+    let agent = sidecar_http_agent(
+        host_caps.clone(),
+        Duration::from_secs(30),
+        "execlaw/script-runtime/sidecar/0.1",
+    );
     {
         let agent = agent.clone();
         let pid = pid.clone();
@@ -2319,10 +2347,11 @@ fn register_sidecar_http_get(engine: &mut Engine, plugin_id: &str, host_caps: Ho
 
 fn register_sidecar_http_post(engine: &mut Engine, plugin_id: &str, host_caps: HostCapsHandle) {
     let pid = plugin_id.to_owned();
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(30))
-        .user_agent("execlaw/script-runtime/sidecar/0.1")
-        .build();
+    let agent = sidecar_http_agent(
+        host_caps.clone(),
+        Duration::from_secs(30),
+        "execlaw/script-runtime/sidecar/0.1",
+    );
     {
         let agent = agent.clone();
         let pid = pid.clone();
@@ -2407,10 +2436,11 @@ fn apply_headers(mut req: ureq::Request, headers: &Map) -> ureq::Request {
 
 fn register_sidecar_http_put(engine: &mut Engine, plugin_id: &str, host_caps: HostCapsHandle) {
     let pid = plugin_id.to_owned();
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(30))
-        .user_agent("execlaw/script-runtime/sidecar/0.1")
-        .build();
+    let agent = sidecar_http_agent(
+        host_caps.clone(),
+        Duration::from_secs(30),
+        "execlaw/script-runtime/sidecar/0.1",
+    );
     {
         let agent = agent.clone();
         let pid = pid.clone();
@@ -2466,10 +2496,11 @@ fn register_sidecar_http_put(engine: &mut Engine, plugin_id: &str, host_caps: Ho
 
 fn register_sidecar_http_delete(engine: &mut Engine, plugin_id: &str, host_caps: HostCapsHandle) {
     let pid = plugin_id.to_owned();
-    let agent = ureq::AgentBuilder::new()
-        .timeout(Duration::from_secs(30))
-        .user_agent("execlaw/script-runtime/sidecar/0.1")
-        .build();
+    let agent = sidecar_http_agent(
+        host_caps.clone(),
+        Duration::from_secs(30),
+        "execlaw/script-runtime/sidecar/0.1",
+    );
     {
         let agent = agent.clone();
         let pid = pid.clone();
@@ -2627,6 +2658,7 @@ fn inbound_from_rhai_map(plugin_id: &str, msg: &Map) -> Result<InboundMessage, B
         .collect();
     Ok(InboundMessage {
         channel,
+        source_event_id: opt_str("source_event_id"),
         native_id,
         display_name: opt_str("display_name"),
         group_id: opt_str("group_id"),
@@ -2792,15 +2824,13 @@ fn http_get_impl_with_headers(
     if let Some(h) = headers {
         req = apply_headers(req, h);
     }
-    let resp = req
-        .call()
-        .map_err(|e| {
-            if !bearer.is_empty() || headers.is_some_and(has_authorization_header) {
-                authenticated_http_error(plugin_id, "http_get", e)
-            } else {
-                ureq_to_eval_err(plugin_id, "http_get", url, e)
-            }
-        })?;
+    let resp = req.call().map_err(|e| {
+        if !bearer.is_empty() || headers.is_some_and(has_authorization_header) {
+            authenticated_http_error(plugin_id, "http_get", e)
+        } else {
+            ureq_to_eval_err(plugin_id, "http_get", url, e)
+        }
+    })?;
     decode_response(plugin_id, url, resp)
 }
 
@@ -2837,15 +2867,13 @@ fn http_post_impl_with_headers(
     if let Some(h) = headers {
         req = apply_headers(req, h);
     }
-    let resp = req
-        .send_json(body_json)
-        .map_err(|e| {
-            if !bearer.is_empty() || headers.is_some_and(has_authorization_header) {
-                authenticated_http_error(plugin_id, "http_post", e)
-            } else {
-                ureq_to_eval_err(plugin_id, "http_post", url, e)
-            }
-        })?;
+    let resp = req.send_json(body_json).map_err(|e| {
+        if !bearer.is_empty() || headers.is_some_and(has_authorization_header) {
+            authenticated_http_error(plugin_id, "http_post", e)
+        } else {
+            ureq_to_eval_err(plugin_id, "http_post", url, e)
+        }
+    })?;
     decode_response(plugin_id, url, resp)
 }
 
@@ -3146,7 +3174,9 @@ fn decode_envelope(
 }
 
 fn has_authorization_header(headers: &Map) -> bool {
-    headers.keys().any(|key| key.as_str().eq_ignore_ascii_case("authorization"))
+    headers
+        .keys()
+        .any(|key| key.as_str().eq_ignore_ascii_case("authorization"))
 }
 
 fn authenticated_http_error(plugin_id: &str, op: &str, error: ureq::Error) -> Box<EvalAltResult> {
@@ -3273,6 +3303,126 @@ pub fn json_to_rhai(v: &serde_json::Value) -> Dynamic {
 mod tests {
     use super::*;
     use crate::engine::ScriptEngine;
+
+    #[test]
+    fn sidecar_http_agent_does_not_follow_a_cross_sidecar_redirect() {
+        use crate::host_caps::{
+            AttachmentBytes, CreatedArtifact, HostCapError, HostCapabilities, RouteOutcome,
+            WsFrameHandler, WsSubscriptionHandle,
+        };
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, ToSocketAddrs};
+
+        struct SidecarCaps;
+
+        #[async_trait::async_trait]
+        impl HostCapabilities for SidecarCaps {
+            fn resolve_sidecar_http_target(
+                &self,
+                host_port: &str,
+            ) -> Result<Vec<std::net::SocketAddr>, HostCapError> {
+                host_port
+                    .to_socket_addrs()
+                    .map(|addresses| addresses.collect())
+                    .map_err(|error| HostCapError::new(error.to_string()))
+            }
+
+            async fn sidecar_url(&self, _name: &str) -> Option<String> {
+                None
+            }
+
+            async fn route_inbound(
+                &self,
+                _message: InboundMessage,
+            ) -> Result<RouteOutcome, HostCapError> {
+                Err(HostCapError::new("unused"))
+            }
+
+            async fn ws_subscribe_with_init(
+                &self,
+                _url: String,
+                _headers: Vec<(String, String)>,
+                _init_frames: Vec<String>,
+                _on_frame: WsFrameHandler,
+            ) -> Result<WsSubscriptionHandle, HostCapError> {
+                Err(HostCapError::new("unused"))
+            }
+
+            async fn get_attachment_bytes_b64(
+                &self,
+                _attachment_id: &str,
+            ) -> Result<AttachmentBytes, HostCapError> {
+                Err(HostCapError::new("unused"))
+            }
+
+            async fn vault_put(
+                &self,
+                _plugin_id: &str,
+                _name: &str,
+                _value: &str,
+            ) -> Result<(), HostCapError> {
+                Err(HostCapError::new("unused"))
+            }
+
+            async fn vault_get(
+                &self,
+                _plugin_id: &str,
+                _name: &str,
+            ) -> Result<Option<String>, HostCapError> {
+                Err(HostCapError::new("unused"))
+            }
+
+            async fn vault_delete(
+                &self,
+                _plugin_id: &str,
+                _name: &str,
+            ) -> Result<bool, HostCapError> {
+                Err(HostCapError::new("unused"))
+            }
+
+            async fn create_artifact_attachment(
+                &self,
+                _plugin_id: &str,
+                _filename: &str,
+                _mime_type: &str,
+                _bytes: Vec<u8>,
+                _ttl_seconds: Option<i64>,
+            ) -> Result<CreatedArtifact, HostCapError> {
+                Err(HostCapError::new("unused"))
+            }
+        }
+
+        let origin = TcpListener::bind("127.0.0.1:0").unwrap();
+        let destination = TcpListener::bind("127.0.0.1:0").unwrap();
+        destination.set_nonblocking(true).unwrap();
+        let redirect_url = format!("http://{}/private", destination.local_addr().unwrap());
+        let origin_url = format!("http://{}/start", origin.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = origin.accept().unwrap();
+            let mut request = [0_u8; 512];
+            let _ = stream.read(&mut request).unwrap();
+            write!(
+                stream,
+                "HTTP/1.1 302 Found\r\nLocation: {redirect_url}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+        });
+        let caps: HostCapsHandle = Arc::new(OnceLock::new());
+        caps.set(Arc::new(SidecarCaps))
+            .unwrap_or_else(|_| panic!("caps set"));
+        let agent = sidecar_http_agent(caps, Duration::from_secs(2), "test-sidecar");
+        let status = match agent.get(&origin_url).call() {
+            Ok(response) => response.status(),
+            Err(ureq::Error::Status(status, _)) => status,
+            Err(error) => panic!("origin request failed: {error}"),
+        };
+        assert_eq!(status, 302);
+        server.join().unwrap();
+        assert!(
+            destination.accept().is_err(),
+            "redirect reached another sidecar"
+        );
+    }
 
     #[test]
     fn digits_only_strips_non_digits() {

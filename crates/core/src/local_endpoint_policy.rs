@@ -6,17 +6,51 @@
 use crate::{Database, DbError};
 use rusqlite::params;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EndpointApprovalKind {
     Cidr,
     DnsName,
 }
 
+/// Capability boundary to which an operator-approved address range applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EndpointApprovalScope {
+    LocalInference,
+    PrivateIntegration,
+}
+
+impl EndpointApprovalScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LocalInference => "local_inference",
+            Self::PrivateIntegration => "private_integration",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "local_inference" => Some(Self::LocalInference),
+            "private_integration" => Some(Self::PrivateIntegration),
+            _ => None,
+        }
+    }
+}
+
 impl EndpointApprovalKind {
-    fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Cidr => "cidr",
             Self::DnsName => "dns_name",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "cidr" => Some(Self::Cidr),
+            "dns_name" => Some(Self::DnsName),
+            _ => None,
         }
     }
 }
@@ -47,11 +81,19 @@ impl<'db> LocalEndpointPolicyStore<'db> {
     }
 
     pub fn approvals(&self) -> Result<LocalEndpointApprovals, DbError> {
+        self.approvals_for(EndpointApprovalScope::PrivateIntegration)
+    }
+
+    pub fn approvals_for(
+        &self,
+        scope: EndpointApprovalScope,
+    ) -> Result<LocalEndpointApprovals, DbError> {
         self.db.with_conn(|conn| {
             let mut stmt = conn.prepare(
-                "SELECT kind, value FROM config_local_endpoint_approvals ORDER BY kind, value",
+                "SELECT kind, value FROM config_local_endpoint_approvals \
+                 WHERE scope = ?1 ORDER BY kind, value",
             )?;
-            let rows = stmt.query_map([], |row| {
+            let rows = stmt.query_map([scope.as_str()], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             let mut approvals = LocalEndpointApprovals::default();
@@ -73,24 +115,45 @@ impl<'db> LocalEndpointPolicyStore<'db> {
         value: &str,
         now: i64,
     ) -> Result<(), DbError> {
+        self.approve_for(EndpointApprovalScope::PrivateIntegration, kind, value, now)
+    }
+
+    pub fn approve_for(
+        &self,
+        scope: EndpointApprovalScope,
+        kind: EndpointApprovalKind,
+        value: &str,
+        now: i64,
+    ) -> Result<(), DbError> {
         let value = value.trim();
         if value.is_empty() {
             return Err(DbError::Config("endpoint approval may not be empty".into()));
         }
         self.db.with_conn(|conn| {
             conn.execute(
-                "INSERT OR REPLACE INTO config_local_endpoint_approvals(kind, value, created_at) VALUES (?1, ?2, ?3)",
-                params![kind.as_str(), value, now],
+                "INSERT OR REPLACE INTO config_local_endpoint_approvals(scope, kind, value, created_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![scope.as_str(), kind.as_str(), value, now],
             )?;
             Ok(())
         })
     }
 
     pub fn revoke(&self, kind: EndpointApprovalKind, value: &str) -> Result<bool, DbError> {
+        self.revoke_for(EndpointApprovalScope::PrivateIntegration, kind, value)
+    }
+
+    pub fn revoke_for(
+        &self,
+        scope: EndpointApprovalScope,
+        kind: EndpointApprovalKind,
+        value: &str,
+    ) -> Result<bool, DbError> {
         self.db.with_conn(|conn| {
             Ok(conn.execute(
-                "DELETE FROM config_local_endpoint_approvals WHERE kind = ?1 AND value = ?2",
-                params![kind.as_str(), value],
+                "DELETE FROM config_local_endpoint_approvals \
+                 WHERE scope = ?1 AND kind = ?2 AND value = ?3",
+                params![scope.as_str(), kind.as_str(), value],
             )? > 0)
         })
     }
@@ -168,6 +231,55 @@ mod tests {
         assert_eq!(
             store.resolution("inference:standard").unwrap(),
             Some(record)
+        );
+    }
+
+    #[test]
+    fn approvals_are_isolated_by_network_capability() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let store = LocalEndpointPolicyStore::new(&db);
+        store
+            .approve_for(
+                EndpointApprovalScope::LocalInference,
+                EndpointApprovalKind::Cidr,
+                "10.20.0.0/16",
+                1,
+            )
+            .unwrap();
+        store
+            .approve_for(
+                EndpointApprovalScope::PrivateIntegration,
+                EndpointApprovalKind::DnsName,
+                "calendar.home.arpa",
+                2,
+            )
+            .unwrap();
+
+        let inference = store
+            .approvals_for(EndpointApprovalScope::LocalInference)
+            .unwrap();
+        let integrations = store
+            .approvals_for(EndpointApprovalScope::PrivateIntegration)
+            .unwrap();
+        assert_eq!(inference.cidrs, ["10.20.0.0/16"]);
+        assert!(inference.dns_names.is_empty());
+        assert!(integrations.cidrs.is_empty());
+        assert_eq!(integrations.dns_names, ["calendar.home.arpa"]);
+        assert!(
+            store
+                .revoke_for(
+                    EndpointApprovalScope::LocalInference,
+                    EndpointApprovalKind::Cidr,
+                    "10.20.0.0/16"
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            store
+                .approvals_for(EndpointApprovalScope::PrivateIntegration)
+                .unwrap(),
+            integrations
         );
     }
 }

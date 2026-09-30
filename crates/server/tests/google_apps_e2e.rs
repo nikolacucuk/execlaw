@@ -28,6 +28,9 @@ use std::net::TcpListener;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
+
+#[path = "support/auth.rs"]
+mod test_auth;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
@@ -209,7 +212,7 @@ fn build_app(stage_root: PathBuf) -> (axum::Router, AppState) {
     let caps =
         execlaw_server::host_caps_impl::AppStateHostCapabilities::new(state.clone()).into_arc();
     let _ = state.plugin_host.attach_host_capabilities(caps);
-    (execlaw_server::routes::build_router(state.clone()), state)
+    (test_auth::authenticated_router(state.clone()), state)
 }
 
 async fn post_zip(app: axum::Router, bytes: Vec<u8>) -> (StatusCode, serde_json::Value) {

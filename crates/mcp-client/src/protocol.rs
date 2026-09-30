@@ -78,7 +78,6 @@ impl RpcNotification {
 ///   * `method` only → notification
 #[derive(Debug, Clone, Deserialize)]
 pub struct InboundFrame {
-    #[allow(dead_code)]
     #[serde(default)]
     pub jsonrpc: Option<String>,
     #[serde(default)]
@@ -115,10 +114,9 @@ pub mod error_codes {
 // MCP method payloads — only the ones execlaw uses are typed.
 // ---------------------------------------------------------------------------
 
-/// `initialize` request params. Our protocol-version string matches
-/// what most current MCP servers expect (`2024-11-05`); newer servers
-/// negotiate downward gracefully.
-pub const PROTOCOL_VERSION: &str = "2024-11-05";
+/// Pinned initialize protocol version. Both transports enforce the negotiated
+/// version; changing this requires updating the interoperability fixtures.
+pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct InitializeParams<'a> {
@@ -301,6 +299,7 @@ pub mod methods {
 /// Notification method names.
 pub mod notifications {
     pub const INITIALIZED: &str = "notifications/initialized";
+    pub const CANCELLED: &str = "notifications/cancelled";
     pub const TOOLS_LIST_CHANGED: &str = "notifications/tools/list_changed";
     pub const RESOURCES_LIST_CHANGED: &str = "notifications/resources/list_changed";
 }

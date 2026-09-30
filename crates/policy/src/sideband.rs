@@ -35,6 +35,8 @@ pub enum ApprovalReason {
     AskController,
     /// Anomaly tripwire fired (burst tool calls / policy denials).
     AnomalyTripwire,
+    /// A persisted chain run is paused before enqueueing external effects.
+    EffectfulChain,
 }
 
 /// The controller's response verb.
@@ -75,6 +77,14 @@ pub struct ApprovalClaims {
     pub reason: ApprovalReason,
     /// Specific tool call this approval gates, if any.
     pub tool_call_id: Option<String>,
+    /// Controller identity the approval token is issued to, when the decision
+    /// is fetched from an authenticated operator surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_id: Option<String>,
+    /// Canonical fingerprint of the exact pending effect, when this is an
+    /// effect-bound approval. `None` for trust-admission approvals.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_hash: Option<String>,
     /// When the request was minted.
     pub iat: i64,
     /// Hard expiry — after this, the token must be re-minted.
@@ -155,6 +165,8 @@ mod tests {
             conversation_id: "conv-1".into(),
             reason: ApprovalReason::ColdContact,
             tool_call_id: None,
+            principal_id: None,
+            effect_hash: None,
             iat: 0,
             exp: 3600,
         };

@@ -15,6 +15,7 @@ import { EvalFlagsPage } from "../settings/EvalFlagsPage";
 import { PrincipalsPage } from "../settings/PrincipalsPage";
 import { ContactsPage } from "../settings/ContactsPage";
 import { AuditPage } from "../settings/AuditPage";
+import { CompletionEvidenceRef } from "../components/CompletionEvidenceRef";
 
 let fetchMock: ReturnType<typeof vi.fn>;
 
@@ -448,6 +449,37 @@ describe("ContactsPage", () => {
 // ---- AuditPage -----------------------------------------------------
 
 describe("AuditPage", () => {
+    it("opens an exact Controller attestation from its evidence link", async () => {
+        window.history.replaceState({}, "", "/settings/audit?entry=42");
+        const requests: string[] = [];
+        fetchMock.mockImplementation(async (url: string) => {
+            requests.push(url);
+            if (url === "/api/admin/me") return meResponse();
+            return new Response(JSON.stringify({ entries: [{
+                id: 42,
+                ts: 1_700_000_000,
+                actor: "controller-1",
+                table_name: "run_completion_verification",
+                row_id: "run-1/review",
+                old_json: null,
+                new_json: { status: "passed" },
+            }] }), { status: 200 });
+        });
+        try {
+            mountWithAuth(<AuditPage />);
+            await waitFor(() => expect(requests).toContain("/api/admin/audit?limit=200&id=42"));
+            expect(screen.getByText("controller-1")).toBeInTheDocument();
+            expect(document.querySelector("details")?.open).toBe(true);
+        } finally {
+            window.history.replaceState({}, "", "/");
+        }
+    });
+
+    it("links completion attestations to their exact audit record", () => {
+        render(<CompletionEvidenceRef reference="attestation:42" />);
+        expect(screen.getByRole("link", { name: "Controller attestation 42" }))
+            .toHaveAttribute("href", "/settings/audit?entry=42");
+    });
     it("shows the empty hint when no audit rows exist", async () => {
         fetchMock.mockImplementation(async (url: string) => {
             if (url === "/api/admin/me") return meResponse();

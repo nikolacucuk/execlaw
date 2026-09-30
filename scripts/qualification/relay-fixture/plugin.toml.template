@@ -1,0 +1,26 @@
+[plugin]
+id = "discord"
+name = "Disposable relay qualification sink"
+version = "0.0.1"
+description = "A local test sink that records a transport acceptance before acknowledging it."
+author = "execlaw qualification"
+license = "Apache-2.0"
+
+[transport]
+transport_id = "discord"
+supports_attachments = false
+supports_groups = false
+icon = "discord"
+
+[[tools]]
+name = "discord.send_message"
+description = "Record a disposable transport delivery."
+trust_floor = "Controller"
+latency = "low"
+host_internal = true
+schema = "schemas/discord.send_message.json"
+
+[runtime]
+tier = "subprocess"
+executable = "./relay-fixture.exe"
+args = ['@@SINK_FILE@@', '120000']

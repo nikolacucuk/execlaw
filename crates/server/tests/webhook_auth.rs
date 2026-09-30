@@ -28,6 +28,9 @@ use sha2::Sha256;
 use std::io::{Cursor, Write};
 use std::sync::Arc;
 use tower::ServiceExt;
+
+#[path = "support/auth.rs"]
+mod test_auth;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
@@ -188,7 +191,7 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
         inference_metrics: execlaw_server::inference_metrics::InferenceMetrics::new(),
         login_limiter: execlaw_server::auth_rate_limit::LoginRateLimiter::new(),
     };
-    (execlaw_server::routes::build_router(state.clone()), state)
+    (test_auth::authenticated_router(state.clone()), state)
 }
 
 async fn install_plugin(app: axum::Router, manifest: &str) {

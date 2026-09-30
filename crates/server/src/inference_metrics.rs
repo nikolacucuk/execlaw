@@ -47,6 +47,29 @@ pub enum InferenceConsumer {
     Other,
 }
 
+/// Stable phase labels for per-turn latency diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum InferencePhase {
+    PromptAssembly,
+    PrefillDecode,
+    ToolWait,
+    Retry,
+    StreamDelay,
+}
+
+impl InferencePhase {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PromptAssembly => "prompt_assembly",
+            Self::PrefillDecode => "prefill_decode",
+            Self::ToolWait => "tool_wait",
+            Self::Retry => "retry",
+            Self::StreamDelay => "stream_delay",
+        }
+    }
+}
+
 impl InferenceConsumer {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -62,6 +85,8 @@ impl InferenceConsumer {
 /// Ring-buffer cap for per-consumer duration samples. 256 is enough
 /// for stable p50/p95 estimates without unbounded memory growth.
 const DURATIONS_RING_CAP: usize = 256;
+const MIN_REGRESSION_SAMPLES: usize = 16;
+const REGRESSION_BUDGET_PERCENT: u8 = 25;
 
 #[derive(Default)]
 struct ConsumerCounters {
@@ -76,6 +101,14 @@ struct ConsumerCounters {
 #[derive(Clone)]
 pub struct InferenceMetrics {
     inner: Arc<Mutex<HashMap<InferenceConsumer, ConsumerCounters>>>,
+    phases: Arc<Mutex<HashMap<(InferenceConsumer, InferencePhase), VecDeque<u32>>>>,
+    contexts: Arc<Mutex<HashMap<(InferenceConsumer, InferencePhase), VecDeque<ContextSample>>>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContextSample {
+    serialized_bytes: u64,
+    estimated_tokens: u64,
 }
 
 impl Default for InferenceMetrics {
@@ -88,6 +121,8 @@ impl InferenceMetrics {
     pub fn new() -> Self {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
+            phases: Arc::new(Mutex::new(HashMap::new())),
+            contexts: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -139,6 +174,43 @@ impl InferenceMetrics {
         result
     }
 
+    /// Record one phase duration without retaining request or prompt content.
+    pub fn record_phase(
+        &self,
+        consumer: InferenceConsumer,
+        phase: InferencePhase,
+        duration: std::time::Duration,
+    ) {
+        let mut phases = self.phases.lock().unwrap();
+        let samples = phases.entry((consumer, phase)).or_default();
+        if samples.len() >= DURATIONS_RING_CAP {
+            samples.pop_front();
+        }
+        samples.push_back(duration.as_millis().min(u32::MAX as u128) as u32);
+    }
+
+    /// Record numeric context-size estimates for a serialized inference request.
+    /// Prompt bytes and text are never retained. Token estimates use the same
+    /// conservative four-bytes-per-token heuristic as history budgeting.
+    pub fn record_context(
+        &self,
+        consumer: InferenceConsumer,
+        phase: InferencePhase,
+        serialized_bytes: usize,
+    ) {
+        let bytes = serialized_bytes as u64;
+        let sample = ContextSample {
+            serialized_bytes: bytes,
+            estimated_tokens: bytes.div_ceil(4),
+        };
+        let mut contexts = self.contexts.lock().unwrap();
+        let samples = contexts.entry((consumer, phase)).or_default();
+        if samples.len() >= DURATIONS_RING_CAP {
+            samples.pop_front();
+        }
+        samples.push_back(sample);
+    }
+
     /// Capture a JSON-friendly view of the current state. Sorts
     /// consumers by their wire-name for deterministic rendering.
     pub fn snapshot(&self) -> MetricsSnapshot {
@@ -160,7 +232,63 @@ impl InferenceMetrics {
             })
             .collect();
         consumers.sort_by_key(|c| c.consumer.as_str());
-        MetricsSnapshot { consumers }
+        let phases = self.phases.lock().unwrap();
+        let mut phase_snapshots = phases
+            .iter()
+            .map(|((consumer, phase), samples)| {
+                let mut sorted: Vec<u32> = samples.iter().copied().collect();
+                sorted.sort_unstable();
+                PhaseSnapshot {
+                    consumer: *consumer,
+                    phase: *phase,
+                    sample_count: sorted.len(),
+                    p50_ms: percentile(&sorted, 50),
+                    p95_ms: percentile(&sorted, 95),
+                    baseline_p95_ms: rolling_baseline(&samples.iter().copied().collect::<Vec<_>>()),
+                    regression_budget_percent: REGRESSION_BUDGET_PERCENT,
+                    regression_detected: regression_detected(
+                        &samples.iter().copied().collect::<Vec<_>>(),
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        phase_snapshots.sort_by_key(|entry| (entry.consumer.as_str(), entry.phase.as_str()));
+        let contexts = self.contexts.lock().unwrap();
+        let mut context_snapshots = contexts
+            .iter()
+            .map(|((consumer, phase), samples)| {
+                let bytes = sorted_context_values(samples, |sample| sample.serialized_bytes);
+                let tokens = sorted_context_values(samples, |sample| sample.estimated_tokens);
+                ContextSnapshot {
+                    consumer: *consumer,
+                    phase: *phase,
+                    sample_count: samples.len(),
+                    p50_serialized_bytes: percentile_u64(&bytes, 50),
+                    p95_serialized_bytes: percentile_u64(&bytes, 95),
+                    p50_estimated_tokens: percentile_u64(&tokens, 50),
+                    p95_estimated_tokens: percentile_u64(&tokens, 95),
+                    baseline_p95_estimated_tokens: rolling_baseline_u64(
+                        &samples
+                            .iter()
+                            .map(|sample| sample.estimated_tokens)
+                            .collect::<Vec<_>>(),
+                    ),
+                    regression_budget_percent: REGRESSION_BUDGET_PERCENT,
+                    regression_detected: regression_detected_u64(
+                        &samples
+                            .iter()
+                            .map(|sample| sample.estimated_tokens)
+                            .collect::<Vec<_>>(),
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+        context_snapshots.sort_by_key(|entry| (entry.consumer.as_str(), entry.phase.as_str()));
+        MetricsSnapshot {
+            consumers,
+            phases: phase_snapshots,
+            contexts: context_snapshots,
+        }
     }
 }
 
@@ -188,6 +316,36 @@ impl Drop for InflightGuard<'_> {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct MetricsSnapshot {
     pub consumers: Vec<ConsumerSnapshot>,
+    pub phases: Vec<PhaseSnapshot>,
+    pub contexts: Vec<ContextSnapshot>,
+}
+
+/// Bounded prompt/context size distribution, estimated from serialized request
+/// bytes; only numeric aggregates are retained.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ContextSnapshot {
+    pub consumer: InferenceConsumer,
+    pub phase: InferencePhase,
+    pub sample_count: usize,
+    pub p50_serialized_bytes: Option<u64>,
+    pub p95_serialized_bytes: Option<u64>,
+    pub p50_estimated_tokens: Option<u64>,
+    pub p95_estimated_tokens: Option<u64>,
+    pub baseline_p95_estimated_tokens: Option<u64>,
+    pub regression_budget_percent: u8,
+    pub regression_detected: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct PhaseSnapshot {
+    pub consumer: InferenceConsumer,
+    pub phase: InferencePhase,
+    pub sample_count: usize,
+    pub p50_ms: Option<u32>,
+    pub p95_ms: Option<u32>,
+    pub baseline_p95_ms: Option<u32>,
+    pub regression_budget_percent: u8,
+    pub regression_detected: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -208,6 +366,64 @@ fn percentile(sorted: &[u32], pct: u8) -> Option<u32> {
     }
     let rank = (pct as f64 / 100.0 * (sorted.len() as f64 - 1.0)).round() as usize;
     sorted.get(rank.min(sorted.len() - 1)).copied()
+}
+
+fn sorted_context_values(
+    samples: &VecDeque<ContextSample>,
+    field: impl Fn(&ContextSample) -> u64,
+) -> Vec<u64> {
+    let mut values = samples.iter().map(field).collect::<Vec<_>>();
+    values.sort_unstable();
+    values
+}
+
+fn percentile_u64(sorted: &[u64], pct: u8) -> Option<u64> {
+    if sorted.is_empty() {
+        return None;
+    }
+    let rank = (pct as f64 / 100.0 * (sorted.len() as f64 - 1.0)).round() as usize;
+    sorted.get(rank.min(sorted.len() - 1)).copied()
+}
+
+fn rolling_baseline(samples: &[u32]) -> Option<u32> {
+    if samples.len() < MIN_REGRESSION_SAMPLES {
+        return None;
+    }
+    let midpoint = samples.len() / 2;
+    let mut older = samples[..midpoint].to_vec();
+    older.sort_unstable();
+    percentile(&older, 95)
+}
+
+fn regression_detected(samples: &[u32]) -> Option<bool> {
+    let baseline = rolling_baseline(samples)?;
+    let midpoint = samples.len() / 2;
+    let mut recent = samples[midpoint..].to_vec();
+    recent.sort_unstable();
+    let current = percentile(&recent, 95)?;
+    Some(current as u64 * 100 > baseline as u64 * (100 + REGRESSION_BUDGET_PERCENT as u64))
+}
+
+fn rolling_baseline_u64(samples: &[u64]) -> Option<u64> {
+    if samples.len() < MIN_REGRESSION_SAMPLES {
+        return None;
+    }
+    let midpoint = samples.len() / 2;
+    let mut older = samples[..midpoint].to_vec();
+    older.sort_unstable();
+    percentile_u64(&older, 95)
+}
+
+fn regression_detected_u64(samples: &[u64]) -> Option<bool> {
+    let baseline = rolling_baseline_u64(samples)?;
+    let midpoint = samples.len() / 2;
+    let mut recent = samples[midpoint..].to_vec();
+    recent.sort_unstable();
+    let current = percentile_u64(&recent, 95)?;
+    Some(
+        current.saturating_mul(100)
+            > baseline.saturating_mul(100 + REGRESSION_BUDGET_PERCENT as u64),
+    )
 }
 
 #[cfg(test)]
@@ -240,6 +456,96 @@ mod tests {
         assert_eq!(auto.total_failures, 0);
         assert_eq!(auto.sample_count, 1);
         assert!(auto.p50_ms.is_some());
+    }
+
+    #[test]
+    fn phase_metrics_keep_bounded_aggregate_samples_without_input_content() {
+        let metrics = InferenceMetrics::new();
+        metrics.record_phase(
+            InferenceConsumer::Chat,
+            InferencePhase::PromptAssembly,
+            std::time::Duration::from_millis(5),
+        );
+        metrics.record_phase(
+            InferenceConsumer::Chat,
+            InferencePhase::PromptAssembly,
+            std::time::Duration::from_millis(9),
+        );
+        let snapshot = metrics.snapshot();
+        let prompt = snapshot
+            .phases
+            .iter()
+            .find(|entry| entry.phase == InferencePhase::PromptAssembly)
+            .unwrap();
+        assert_eq!(prompt.sample_count, 2);
+        assert_eq!(prompt.p50_ms, Some(9));
+        assert_eq!(prompt.p95_ms, Some(9));
+    }
+
+    #[test]
+    fn context_metrics_keep_only_bounded_numeric_estimates() {
+        let metrics = InferenceMetrics::new();
+        metrics.record_context(InferenceConsumer::Chat, InferencePhase::PromptAssembly, 40);
+        metrics.record_context(InferenceConsumer::Chat, InferencePhase::PromptAssembly, 100);
+        let snapshot = metrics.snapshot();
+        let context = snapshot
+            .contexts
+            .iter()
+            .find(|entry| {
+                entry.consumer == InferenceConsumer::Chat
+                    && entry.phase == InferencePhase::PromptAssembly
+            })
+            .unwrap();
+        assert_eq!(context.sample_count, 2);
+        assert_eq!(context.p50_serialized_bytes, Some(100));
+        assert_eq!(context.p95_serialized_bytes, Some(100));
+        assert_eq!(context.p50_estimated_tokens, Some(25));
+        assert_eq!(context.p95_estimated_tokens, Some(25));
+    }
+
+    #[test]
+    fn context_metrics_ring_buffer_is_bounded() {
+        let metrics = InferenceMetrics::new();
+        for bytes in 0..(DURATIONS_RING_CAP + 10) {
+            metrics.record_context(
+                InferenceConsumer::Chat,
+                InferencePhase::PromptAssembly,
+                bytes,
+            );
+        }
+        let context = metrics.snapshot().contexts.remove(0);
+        assert_eq!(context.sample_count, DURATIONS_RING_CAP);
+        assert_eq!(context.p50_serialized_bytes, Some(138));
+    }
+
+    #[test]
+    fn phase_and_context_budgets_flag_a_twenty_five_percent_p95_increase() {
+        let metrics = InferenceMetrics::new();
+        for _ in 0..16 {
+            metrics.record_phase(
+                InferenceConsumer::Chat,
+                InferencePhase::PromptAssembly,
+                std::time::Duration::from_millis(100),
+            );
+            metrics.record_context(InferenceConsumer::Chat, InferencePhase::PromptAssembly, 400);
+        }
+        for _ in 0..16 {
+            metrics.record_phase(
+                InferenceConsumer::Chat,
+                InferencePhase::PromptAssembly,
+                std::time::Duration::from_millis(126),
+            );
+            metrics.record_context(InferenceConsumer::Chat, InferencePhase::PromptAssembly, 504);
+        }
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot.phases[0].baseline_p95_ms, Some(100));
+        assert_eq!(snapshot.phases[0].regression_budget_percent, 25);
+        assert_eq!(snapshot.phases[0].regression_detected, Some(true));
+        assert_eq!(
+            snapshot.contexts[0].baseline_p95_estimated_tokens,
+            Some(100)
+        );
+        assert_eq!(snapshot.contexts[0].regression_detected, Some(true));
     }
 
     #[tokio::test]

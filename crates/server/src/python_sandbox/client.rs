@@ -84,6 +84,9 @@ pub struct KernelInfo {
 
 #[derive(Debug, Error)]
 pub enum GatewayError {
+    #[error("gateway endpoint denied by local sidecar policy: {0}")]
+    EndpointPolicy(String),
+
     #[error("gateway request failed: {0}")]
     Transport(#[from] reqwest::Error),
 
@@ -142,10 +145,33 @@ struct GatewayClientInner {
 impl GatewayClient {
     /// Construct a client against the supervisor-published port.
     pub fn new(base_url: impl Into<String>) -> Result<Self, GatewayError> {
+        let base = trim_trailing_slash(base_url.into());
+        let parsed = url::Url::parse(&base)
+            .map_err(|error| GatewayError::EndpointPolicy(error.to_string()))?;
+        if !matches!(parsed.scheme(), "http" | "https")
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+        {
+            return Err(GatewayError::EndpointPolicy(
+                "only credential-free HTTP(S) endpoints are allowed".into(),
+            ));
+        }
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| GatewayError::EndpointPolicy("endpoint has no host".into()))?;
+        if !host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+        {
+            return Err(GatewayError::EndpointPolicy(
+                "kernel gateway must use a supervisor-published loopback address".into(),
+            ));
+        }
         let http = reqwest::Client::builder()
             .timeout(DEFAULT_REQUEST_TIMEOUT)
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        let base = trim_trailing_slash(base_url.into());
         Ok(Self {
             inner: Arc::new(GatewayClientInner { http, base }),
         })
@@ -153,6 +179,7 @@ impl GatewayClient {
 
     /// Construct with a pre-configured `reqwest::Client`. Tests use
     /// this to swap in a client wired to `wiremock`.
+    #[cfg(test)]
     pub fn with_http(http: reqwest::Client, base_url: impl Into<String>) -> Self {
         let base = trim_trailing_slash(base_url.into());
         Self {
@@ -615,13 +642,11 @@ mod tests {
     }
 
     #[test]
-    fn ws_url_transforms_https_to_wss() {
-        let c = GatewayClient::new("https://gateway.example.com:9443").unwrap();
-        let url = c.ws_channels_url(&KernelId("abc".into()));
-        assert_eq!(
-            url,
-            "wss://gateway.example.com:9443/api/kernels/abc/channels"
-        );
+    fn gateway_rejects_non_loopback_before_network_use() {
+        assert!(matches!(
+            GatewayClient::new("https://gateway.example.com:9443"),
+            Err(GatewayError::EndpointPolicy(_))
+        ));
     }
 
     #[test]

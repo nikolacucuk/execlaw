@@ -13,12 +13,10 @@
 //!   1. What plugin handles channel X? (`lookup_first_supported_binding`)
 //!   2. What sidebar icon does channel X want? (`icon_for`)
 //!
-//! Auto-bridge sites take the answer + call
-//! `plugin_host.call_tool("<channel>.send_message", ...)`
-//! directly. No adapter layer; the plugin's own tool body owns
-//! the wire-format transformation (e.g. signal-cli's
-//! `group.<base64>` recipient encoding lives in
-//! `plugins/signal/main.rhai::wire_recipient`).
+//! Auto-bridge sites persist a transport effect in the outbox. The relay
+//! revalidates the manifest-owned tool and dispatches it through PluginHost;
+//! the plugin tool body owns wire-format transformation (for example,
+//! Signal's group recipient encoding).
 //!
 //! ### Cardinality
 //!
@@ -59,7 +57,7 @@ pub struct ResolvedBinding {
 }
 
 /// The registry. Cheap to clone. Plant on `AppState` once at boot;
-/// auto-bridge call sites read through it on every dispatch.
+/// auto-bridge call sites use it to resolve channels before queueing effects.
 #[derive(Clone, Default)]
 pub struct HostTransportRegistry {
     by_channel: BTreeMap<String, ChannelInfo>,
@@ -108,6 +106,17 @@ impl HostTransportRegistry {
     /// per-row marker via the `/api/chats` thread-list endpoint.
     pub fn icon_for(&self, channel: &str) -> Option<&str> {
         self.by_channel.get(channel).map(|i| i.icon.as_str())
+    }
+
+    /// Return the channel when a registered plugin tool is the user-visible
+    /// send/reply operation for that transport.
+    pub fn channel_for_send_tool(&self, plugin_id: &str, tool_name: &str) -> Option<&str> {
+        self.by_channel.iter().find_map(|(channel, info)| {
+            (info.plugin_id == plugin_id
+                && (tool_name == format!("{channel}.send_message")
+                    || tool_name == format!("{channel}.reply")))
+            .then_some(channel.as_str())
+        })
     }
 
     pub fn len(&self) -> usize {

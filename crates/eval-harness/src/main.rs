@@ -1,4 +1,4 @@
-//! execlaw-eval-harness — LLM-judge harness for execlaw rubrics.
+//! execlaw-eval-harness — local rubric judge and real-task benchmark runner.
 //!
 //! Runs every case in a rubric against the configured local
 //! OpenAI-compatible endpoint (default `http://127.0.0.1:8000/v1`,
@@ -29,7 +29,7 @@
 //! and instead echo back the expected verdict — exercises the
 //! orchestration without needing a model.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use execlaw_inference_api::{ChatMessage, ChatRequest, InferenceClient, ModelId};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -37,22 +37,77 @@ use std::path::PathBuf;
 #[derive(Debug, Parser)]
 #[command(name = "eval-harness")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<EvalCommand>,
     /// Path to a rubric TOML file.
     #[arg(long)]
-    rubric: PathBuf,
+    rubric: Option<PathBuf>,
     /// Inference endpoint URL. Defaults to EXECLAW_INFERENCE_URL or
     /// http://127.0.0.1:8000/v1.
-    #[arg(long)]
+    #[arg(long, global = true)]
     base_url: Option<String>,
     /// Model id passed in the chat request. Default mirrors
     /// `execlaw_server::inference_resolver::DEFAULT_FALLBACK_MODEL`
     /// — keep in sync if that constant moves.
-    #[arg(long, default_value = "QuantTrio/Qwen3.6-27B-AWQ")]
+    #[arg(long, default_value = "QuantTrio/Qwen3.6-27B-AWQ", global = true)]
     model: String,
     /// Skip the network call; echo the case's expected verdict.
     /// Used in CI to exercise the harness without a live LLM.
     #[arg(long, default_value_t = false)]
     mock: bool,
+}
+
+mod benchmark;
+
+#[derive(Debug, Subcommand)]
+enum EvalCommand {
+    /// Run deterministic task verifiers repeatedly and save a benchmark record.
+    Benchmark {
+        /// JSON task suite. Verifiers and expected results are held outside the evaluated workspace.
+        #[arg(long)]
+        suite: PathBuf,
+        /// Path for the machine-readable result record.
+        #[arg(long)]
+        output: PathBuf,
+        /// Number of repeated trials; seeds advance from --seed.
+        #[arg(long, default_value_t = 5)]
+        runs: u32,
+        /// First deterministic task seed.
+        #[arg(long, default_value_t = 1)]
+        seed: u64,
+        /// Human-readable comparison arm, such as baseline or candidate.
+        #[arg(long, default_value = "candidate")]
+        arm: String,
+        /// Backend and quantization identities are recorded verbatim.
+        #[arg(long, default_value = "unspecified")]
+        backend: String,
+        #[arg(long, default_value = "unspecified")]
+        quantization: String,
+        /// Hardware tier label used to group comparable results.
+        #[arg(long, default_value = "unspecified")]
+        hardware_tier: String,
+        /// Max completion tokens for each task.
+        #[arg(long, default_value_t = 512)]
+        max_tokens: u32,
+        /// Use suite-embedded fixture responses; this checks scoring only, not model capability.
+        #[arg(long, default_value_t = false)]
+        offline_fixture: bool,
+        /// Acknowledge that coding tasks compile and execute generated code in an isolated temp workspace.
+        #[arg(long, default_value_t = false)]
+        allow_executing_generated_code: bool,
+        /// Prior baseline record for a paired comparison on the same suite and seeds.
+        #[arg(long)]
+        compare: Option<PathBuf>,
+    },
+    /// Validate a redacted, effects-disabled trajectory without network access.
+    ReplayFixture {
+        /// JSON fixture exported by `execlaw eval export-flagged`.
+        #[arg(long)]
+        fixture: PathBuf,
+        /// Optional path for the machine-readable validation record.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,8 +141,74 @@ struct CaseResult {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let rubric_text = std::fs::read_to_string(&cli.rubric)
-        .map_err(|e| anyhow::anyhow!("read rubric {:?}: {e}", cli.rubric))?;
+    if let Some(EvalCommand::ReplayFixture { fixture, report }) = &cli.command {
+        let bytes = std::fs::read(fixture)
+            .map_err(|error| anyhow::anyhow!("read fixture {}: {error}", fixture.display()))?;
+        if bytes.len() > 8 * 1024 * 1024 {
+            anyhow::bail!("fixture exceeds the 8 MiB replay limit");
+        }
+        let fixture_data: execlaw_core::eval::RegressionFixture = serde_json::from_slice(&bytes)
+            .map_err(|error| anyhow::anyhow!("parse fixture: {error}"))?;
+        let validation = execlaw_core::eval::validate_regression_fixture(&fixture_data)
+            .map_err(|error| anyhow::anyhow!("fixture validation failed: {error}"))?;
+        println!(
+            "fixture valid: id={} events={} tool_calls={} transitions={} effects_enabled={} incident={} release={}",
+            validation.fixture_id,
+            validation.events_checked,
+            validation.tool_calls_checked,
+            validation.transitions_checked,
+            validation.effects_enabled,
+            validation.incident_ref.as_deref().unwrap_or("unlinked"),
+            validation.release_ref.as_deref().unwrap_or("unlinked"),
+        );
+        if let Some(path) = report {
+            let report_bytes = serde_json::to_vec_pretty(&validation)?;
+            std::fs::write(path, report_bytes)
+                .map_err(|error| anyhow::anyhow!("write validation report: {error}"))?;
+        }
+        return Ok(());
+    }
+    if let Some(EvalCommand::Benchmark {
+        suite,
+        output,
+        runs,
+        seed,
+        arm,
+        backend,
+        quantization,
+        hardware_tier,
+        max_tokens,
+        offline_fixture,
+        allow_executing_generated_code,
+        compare,
+    }) = cli.command
+    {
+        return benchmark::run(
+            suite,
+            output,
+            benchmark::RunConfig {
+                runs,
+                seed,
+                arm,
+                backend,
+                quantization,
+                hardware_tier,
+                max_tokens,
+                offline_fixture,
+                allow_executing_generated_code,
+                compare_path: compare,
+                base_url: cli.base_url,
+                model: cli.model,
+            },
+        )
+        .await;
+    }
+
+    let rubric_path = cli.rubric.as_ref().ok_or_else(|| {
+        anyhow::anyhow!("provide --rubric <FILE> or use the benchmark subcommand")
+    })?;
+    let rubric_text = std::fs::read_to_string(rubric_path)
+        .map_err(|e| anyhow::anyhow!("read rubric {:?}: {e}", rubric_path))?;
     let rubric: Rubric =
         toml::from_str(&rubric_text).map_err(|e| anyhow::anyhow!("parse rubric: {e}"))?;
 
@@ -170,6 +291,7 @@ async fn run_one(
             "enable_thinking": false,
         })),
         tool_choice: None,
+        response_format: None,
         guided_decoding_backend: None,
     };
     let resp = client

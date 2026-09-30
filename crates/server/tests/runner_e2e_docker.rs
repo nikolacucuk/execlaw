@@ -130,13 +130,24 @@ async fn ensure_runner_spawns_real_docker_container_and_handshakes() {
     // Give axum's serve task a moment to bind.
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let launcher = Arc::new(BollardRunnerLauncher::new().expect("docker reachable"));
+    let launch_db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+    MigrationRunner::new(&launch_db).apply_all().unwrap();
+    let provenance = execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(
+        launch_db.clone(),
+    );
+    let mut policy = provenance.policy().unwrap();
+    policy.allow_unsigned_local_development = true;
+    provenance.configure("Controller", "runner-e2e", &policy).unwrap();
+    let launcher = Arc::new(
+        BollardRunnerLauncher::new_with_provenance(launch_db).expect("docker reachable"),
+    );
 
     let group_id = format!("e2e-{}", uuid::Uuid::new_v4());
     eprintln!("[e2e] spawning runner for group {group_id}");
     let spec = RunnerSpec {
         group_id: group_id.clone(),
-        image: "execlaw/runner:dev".into(),
+        image: std::env::var("EXECLAW_RUNNER_IMAGE")
+            .unwrap_or_else(|_| "execlaw/runner:dev".into()),
         spawn_secret_hex: String::new(), // ensure_runner fills this
         rpc_url,
         // We're not actually going to drive a turn (which would
@@ -167,7 +178,7 @@ async fn ensure_runner_spawns_real_docker_container_and_handshakes() {
     assert!(
         containers
             .iter()
-            .any(|n| n == &format!("execlaw-runner-{group_id}")),
+            .any(|n| n == &launcher.volume_name_for(&group_id)),
         "workspace volume should exist; got {containers:?}"
     );
 

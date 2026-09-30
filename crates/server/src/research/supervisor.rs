@@ -299,6 +299,7 @@ impl ResearchSupervisor {
             // so no second-tier fallback is needed here.
             let inference = inference_resolver
                 .resolve(&db, BackendPurpose::Standard)
+                .map(|resolved| resolved.with_workload("research"))
                 .map(|r| (r.client.clone(), r.model_id.clone()));
             let ctx = JobRunCtx {
                 db,

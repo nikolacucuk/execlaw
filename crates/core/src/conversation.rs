@@ -523,6 +523,14 @@ impl<'db> ConversationStore<'db> {
                 "DELETE FROM message_archive_conversations WHERE conversation_id = ?1",
                 params![cid],
             )?;
+            tx.execute(
+                "DELETE FROM state_conversation_event_search WHERE conversation_id = ?1",
+                params![cid],
+            )?;
+            tx.execute(
+                "DELETE FROM state_conversation_event_search_state WHERE conversation_id = ?1",
+                params![cid],
+            )?;
             tx.execute_batch(
                 "CREATE TRIGGER memory_evidence_append_only_delete
                  BEFORE DELETE ON memory_evidence BEGIN

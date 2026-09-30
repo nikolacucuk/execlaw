@@ -102,12 +102,14 @@ interface Props {
         text: string,
         sourceSeq: number,
         channel: string,
+        draftRevision?: number,
     ) => Promise<void>;
     onForceTransportResponse?: (sourceSeq: number) => Promise<void>;
     onRerunResponse?: (sourceSeq: number) => Promise<void>;
     onSetTransportReviewDecision?: (
         sourceSeq: number,
         decision: "cancelled" | "pending",
+        draftRevision?: number,
     ) => Promise<void>;
     /**
      * 2026-05-16 — when false, `tool_use` / `tool_result` messages
@@ -669,6 +671,7 @@ export function MessageStream({
                                     m.kind === "model_turn" &&
                                     m.review_state !== "cancelled" &&
                                     optimisticReviewStates[m.seq] !== "cancelled" &&
+                                    (!agentDefinitionLabel(m.actor) || (!!m.draft_id && m.draft_status === "pending" && !m.draft_stale)) &&
                                     !!onSendTransportReply
                                 }
                                 transportSendBusy={sendingReplySeq === m.seq}
@@ -687,9 +690,12 @@ export function MessageStream({
                                     setSendingReplySeq(m.seq);
                                     try {
                                         await onSendTransportReply(
-                                            m.text ?? "",
+                                            agentDefinitionLabel(m.actor)
+                                                ? m.draft_text ?? extractSuggestedReply(m.text ?? "") ?? ""
+                                                : m.text ?? "",
                                             m.seq,
                                             selectedTransportBySeq[m.seq] ?? readChannelOrigin(m) ?? "",
+                                            m.draft_revision ?? undefined,
                                         );
                                         setOptimisticReviewStates((states) => ({
                                             ...states,
@@ -700,26 +706,30 @@ export function MessageStream({
                                     }
                                 }}
                                 onCancelTransportReply={async () => {
+                                    if (onSetTransportReviewDecision) {
+                                        await onSetTransportReviewDecision(m.seq, "cancelled", m.draft_revision ?? undefined);
+                                    }
                                     setOptimisticReviewStates((states) => ({
                                         ...states,
                                         [m.seq]: "cancelled",
                                     }));
-                                    await onSetTransportReviewDecision?.(m.seq, "cancelled");
                                 }}
                                 showCancelTransportReply={
-                                    m.review_state !== "sent" &&
+                                    !["sent", "send_requested", "accepted", "delivered", "failed"].includes(m.review_state ?? "") &&
                                     m.review_state !== "cancelled" &&
+                                    (!agentDefinitionLabel(m.actor) || m.draft_status === "pending") &&
                                     !optimisticReviewStates[m.seq]
                                 }
                                 showReviewOverride={
                                     !!readChannelOrigin(m) &&
                                     m.kind === "model_turn" &&
-                                    (m.review_state === "sent" || m.review_state === "cancelled" ||
+                                    !agentDefinitionLabel(m.actor) &&
+                                    (["sent", "send_requested", "accepted", "delivered", "failed", "cancelled"].includes(m.review_state ?? "") ||
                                         !!optimisticReviewStates[m.seq]) &&
                                     !!onSetTransportReviewDecision
                                 }
                                 onReviewOverride={async () => {
-                                    await onSetTransportReviewDecision?.(m.seq, "pending");
+                                    await onSetTransportReviewDecision?.(m.seq, "pending", m.draft_revision ?? undefined);
                                     setOptimisticReviewStates((states) => {
                                         const next = { ...states };
                                         delete next[m.seq];
@@ -954,7 +964,7 @@ function MessageBubble({
     const showOriginIcon = channelOrigin !== "web";
     const actorSuffix =
         message.actor && message.actor !== role
-            ? ` · ${message.actor}`
+            ? ` · ${agentDefinitionLabel(message.actor) ?? message.actor}`
             : "";
     const isUserMessage =
         message.kind === "user_msg" || message.kind === "cold_contact_arrived";
@@ -1062,8 +1072,20 @@ function MessageBubble({
             )}
             {nexus && message.kind === "model_turn" && channelOrigin !== "web" && <span className="execlaw-nexus__status">
                 <i className="bi bi-circle-half" aria-hidden />
-                {message.review_state === "sent" ? "Send requested" : message.review_state === "cancelled" ? "Cancelled" : "Awaiting review"}
+                {message.review_state === "delivered" ? "Delivered" : message.review_state === "accepted" || message.review_state === "sent" ? "Accepted by transport" : message.review_state === "failed" ? "Delivery failed" : message.review_state === "send_requested" ? "Send requested" : message.review_state === "cancelled" || message.draft_status === "rejected" ? "Rejected" : message.draft_stale ? "Stale draft" : message.draft_status === "approved" ? "Approved, awaiting delivery" : "Awaiting review"}
             </span>}
+            {!!message.delivery_timeline?.length && <ol className="execlaw-nexus__delivery-timeline" aria-label="Transport delivery timeline">
+                {message.delivery_timeline.map((entry, index) => (
+                    <li key={`${entry.occurred_at}-${entry.transition}-${index}`}>
+                        <span>{entry.transition.replaceAll("_", " ")}</span>
+                        {entry.attempt > 0 && <span> · attempt {entry.attempt}</span>}
+                        <time dateTime={new Date(entry.occurred_at * 1000).toISOString()}>
+                            {new Date(entry.occurred_at * 1000).toLocaleString()}
+                        </time>
+                        {entry.external_receipt && <span className="execlaw-nexus__receipt"> · receipt {entry.external_receipt}</span>}
+                    </li>
+                ))}
+            </ol>}
             <div className="execlaw-msg__meta">
                 {showOriginIcon && (
                     <ChannelOriginIcon origin={channelOrigin} />
@@ -1127,6 +1149,11 @@ function MessageBubble({
                     ) : (
                         <MarkdownContent text={text} />
                     ))}
+                {message.kind === "model_turn" && agentDefinitionLabel(message.actor) && text.includes("## Suggested reply") && (
+                    <p className="small text-muted mt-2 mb-0">Review document from {agentDefinitionLabel(message.actor)}. Sending uses only its Suggested reply section.</p>
+                )}
+                {message.draft_stale && <p className="small text-warning mt-2 mb-0">This draft is stale because a newer message arrived. Generate a new review before sending.</p>}
+                {message.draft_revision != null && message.draft_revision > 1 && message.draft_text && <p className="small mt-2 mb-0">Current proposed reply (revision {message.draft_revision}): {message.draft_text}</p>}
                 {appliedSkills.length > 0 && (
                     <div
                         className="execlaw-msg__applied-skills"
@@ -1154,6 +1181,7 @@ function MessageBubble({
                         <select
                             className="form-select form-select-sm"
                             value={selectedTransport}
+                            disabled={!!agentDefinitionLabel(message.actor)}
                             onChange={(event) => onTransportChange?.(event.target.value)}
                             aria-label="Send reply via transport"
                             data-testid="send-transport-select"
@@ -1348,7 +1376,7 @@ function readChannelOrigin(m: MessageView): ChannelOrigin {
 type ChannelOrigin = string;
 
 function messageSource(message: MessageView): string {
-    if (message.kind === "model_turn") return "execlaw";
+    if (message.kind === "model_turn") return agentDefinitionLabel(message.actor) ?? "execlaw";
     if (isToolKind(message.kind)) return message.actor || "Tools";
     const channel = readChannelOrigin(message);
     const labels: Record<string, string> = {
@@ -1356,6 +1384,22 @@ function messageSource(message: MessageView): string {
         sms: "SMS", voice: "Voice", slack: "Slack", discord: "Discord",
     };
     return Object.hasOwn(labels, channel) ? labels[channel] : channel;
+}
+
+function agentDefinitionLabel(actor: string | null | undefined): string | null {
+    if (!actor?.startsWith("agent:")) return null;
+    const name = actor.slice("agent:".length).trim();
+    if (!name) return null;
+    return name.endsWith(".agent.md") ? name : `${name}.agent.md`;
+}
+
+function extractSuggestedReply(report: string): string | null {
+    const lines = report.split(/\r?\n/);
+    const start = lines.findIndex((line) => line.trim().toLowerCase() === "## suggested reply");
+    if (start < 0) return null;
+    const end = lines.findIndex((line, index) => index > start && line.trim().startsWith("## "));
+    const reply = lines.slice(start + 1, end < 0 ? undefined : end).join("\n").trim();
+    return reply || null;
 }
 
 function sourceTone(source: string): number {

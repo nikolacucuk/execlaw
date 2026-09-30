@@ -9,6 +9,25 @@ subsystem in the predecessor project. Every entry below was
 hard-won, often through a production incident — preserve the
 intent, even when the Rust idiom for implementing it differs.
 
+## Implementation delivery plan
+
+All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+The predecessor examples and environment-variable names below are historical
+design context, not current configuration instructions. New operator settings
+belong in SQLite. Implementation does not imply production qualification.
+
+Runner delivery is governed by [H023 shared execution/recovery](llm-harness-roadmap.md#enhancement-023),
+[H029 streaming](llm-harness-roadmap.md#enhancement-029),
+[H030 scheduling](llm-harness-roadmap.md#enhancement-030),
+[H068 independent tool work](llm-harness-roadmap.md#enhancement-068),
+[H069 clocks](llm-harness-roadmap.md#enhancement-069),
+[H072 isolation](llm-harness-roadmap.md#enhancement-072),
+[H075 shutdown](llm-harness-roadmap.md#enhancement-075), and
+[H087 deadlock handling](llm-harness-roadmap.md#enhancement-087).
+Use the real container runner and in-process path in acceptance tests; F07,
+F10, and F11 remain open recovery/streaming/cancellation work. Preserve event
+pairing and effect reconciliation when a worker is replaced.
+
 ## 1. Per-conversation isolation, automatic lifecycle
 
 Each conversation (group) gets **its own runner**. Selfhosted-claw
@@ -178,10 +197,11 @@ chunks arrive, so:
   container that emits results and then dies is treated as "idle
   cleanup," not error. Avoids spurious error logs.
 
-**Rust port intent:** today's runner is in-process and uses tokio
-channels for streaming, which is simpler. When the container-manager
-work lands and runners are real subprocesses, this sentinel-and-
-activity-based timeout pattern is the model.
+**Current Rust paths:** `runner-binary` runs separately and exchanges typed
+`runner-protocol` frames with `server/src/runner_supervisor.rs`; the in-process
+`runner-local` executor also remains. The predecessor's text sentinels are not
+the current wire contract. H023/H029 qualify shared completion, timeout, and
+streaming semantics rather than treating partial output as successful work.
 
 ## 8. Resource hygiene
 
@@ -198,6 +218,22 @@ activity-based timeout pattern is the model.
 A periodic sweeper alongside `LogRetentionSweeper` /
 `RefreshTokenSweeper` / `EphemeralSweeper` that reaps orphaned
 containers.
+
+### 8.1 Local inference admission (H030)
+
+Resolved inference clients share a bounded global semaphore and per-model
+semaphores. Background work has a smaller lane; requests waiting longer than
+the aging threshold can enter the shared lane so background work does not
+starve. Child inference requests carry the durable parent-run scope and hold
+one of two sibling permits until the request or stream is dropped. Parent
+token reservations are persisted in SQLite and charge measured prompt plus
+completion usage; missing usage consumes the full reservation. Time, retry,
+and effect limits persist with each run and are consumed before retry or tool
+dispatch. Child reservations cover aggregate tokens, wall time, retries, and
+effects; delegated inference shares the parent scope, and children cannot
+dispatch effects. Docker runner launch applies a memory cap and serializes
+admission against live RAM and active reservations. Per-tier queue-delay
+qualification remains an H030 acceptance item.
 
 ## 9. Activity-based timeouts (NOT wall-clock)
 

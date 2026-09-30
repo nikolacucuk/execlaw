@@ -23,8 +23,8 @@ pub mod service;
 pub use hf_downloader::{DownloadEvent, DownloadStream, HfDownloader, HfError, ResolvedModel};
 
 pub use hardware::{
-    GpuDevice, GpuId, GpuVendor, HardwareProfile, SysfsSource, detect, detect_sysfs,
-    parse_macos_system_profiler,
+    GpuDevice, GpuId, GpuVendor, HardwareProfile, SysfsSource, available_ram_mb, detect,
+    detect_sysfs, parse_macos_system_profiler,
 };
 pub use service::{
     BollardServiceController, HostMount, MultiplexedServiceController, NativeServiceController,

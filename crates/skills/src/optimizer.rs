@@ -208,7 +208,7 @@ impl OptimizerWorker {
             SummarizerOutput::Skip { reason } => {
                 debug!(
                     skill_id = skill_id.0,
-                    reason = %reason,
+                    reason_chars = reason.chars().count(),
                     "optimizer: model says SKIP"
                 );
                 Ok(None)

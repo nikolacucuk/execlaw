@@ -36,6 +36,7 @@ use execlaw_core::automation_bus::{
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::{Notify, Semaphore, mpsc};
 use tracing::{debug, info, warn};
@@ -60,8 +61,10 @@ pub const INTERNAL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// Big enough that a busy poller doesn't fall behind; small enough
 /// that one tick can't hog SQLite's write lock.
 pub const POLL_BATCH_SIZE: i64 = 256;
+const DISPATCH_LEASE_SECONDS: i64 = 15 * 60;
+static DISPATCH_OWNER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-type BoxFut = Pin<Box<dyn Future<Output = ()> + Send>>;
+type BoxFut = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
 
 /// Handler invoked for each event the dispatcher receives.
 ///
@@ -263,6 +266,8 @@ async fn dispatcher_loop(
     }
 
     info!("automation bus dispatcher running");
+    let mut recovery_tick = tokio::time::interval(Duration::from_millis(250));
+    recovery_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
             _ = &mut stop_watcher => {
@@ -283,28 +288,23 @@ async fn dispatcher_loop(
                     }
                 }
             }
+            _ = recovery_tick.tick() => {
+                match BusEventStore::new(&db).fetch_pending(false, POLL_BATCH_SIZE) {
+                    Ok(ids) => {
+                        for id in ids {
+                            dispatch_one(&db, &handler, &workers, id).await;
+                        }
+                    }
+                    Err(error) => warn!(error = %error, "automation bus recovery poll failed"),
+                }
+            }
         }
     }
 }
 
-/// Quick checks first — no permit needed for skips. Only acquire a
-/// worker slot for events that actually need handler-bound work.
-///
-/// Race guard: we **claim** the row (atomic `mark_dispatched`) BEFORE
-/// running the handler. If another path (crash-recovery scan vs.
-/// live mpsc, poller vs. recovery) already claimed it, we skip.
-/// This guarantees the handler fires at most once per event id
-/// despite the at-least-once delivery from the recovery scan +
-/// channel + poller paths overlapping.
-///
-/// Known limitation (acceptable for M1, fix in M2): if the process is
-/// killed after `mark_dispatched` succeeds but BEFORE the spawned
-/// handler task completes, the row stays marked-as-dispatched and
-/// the handler effectively never ran. The next-boot crash-recovery
-/// scan won't pick it up (it filters on `dispatched_at IS NULL`).
-/// With the M1 no-op handler this is invisible; M2's automation
-/// matcher will either (a) unclaim on shutdown or (b) track a
-/// separate `completed_at` so retention only sweeps fully-run rows.
+/// Claim with an expiring owner-fenced lease before running the handler.
+/// Startup scans, periodic recovery polls, and mpsc delivery may race; only
+/// the active lease owner may invoke or acknowledge the handler.
 async fn dispatch_one(db: &Database, handler: &EventHandler, workers: &Arc<Semaphore>, id: String) {
     let row = match BusEventStore::new(db).get(&id) {
         Ok(Some(r)) => r,
@@ -320,18 +320,37 @@ async fn dispatch_one(db: &Database, handler: &EventHandler, workers: &Arc<Semap
             return;
         }
     };
-    if row.dispatched_at.is_some() {
+    if row.completed_at.is_some() {
         debug!(event_id = %id, "automation bus: event already dispatched, skipping");
         return;
     }
     // Atomically claim. If we lose the race, another dispatcher path
     // owns this event — bail without running the handler. This is
     // the at-most-once-handler-call invariant.
+    // Acquire capacity before taking the lease. A saturated worker pool
+    // must not strand an event without starting its handler.
+    let permit = match workers.clone().acquire_owned().await {
+        Ok(p) => p,
+        Err(_) => {
+            warn!(event_id = %id, "automation bus dispatcher: worker semaphore closed; event remains recoverable");
+            return;
+        }
+    };
     let now = chrono::Utc::now().timestamp();
-    let claimed = match BusEventStore::new(db).mark_dispatched(&row.id, now) {
+    let owner = format!(
+        "{}:{}",
+        std::process::id(),
+        DISPATCH_OWNER_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let claimed = match BusEventStore::new(db).claim_dispatch(
+        &row.id,
+        &owner,
+        now,
+        DISPATCH_LEASE_SECONDS,
+    ) {
         Ok(b) => b,
         Err(e) => {
-            warn!(event_id = %id, error = %e, "automation bus: mark_dispatched failed; will retry on next recovery scan");
+            warn!(event_id = %id, error = %e, "automation bus: lease claim failed; recovery will retry");
             return;
         }
     };
@@ -340,17 +359,30 @@ async fn dispatch_one(db: &Database, handler: &EventHandler, workers: &Arc<Semap
         return;
     }
     // Real work — gate on the worker semaphore (backpressure #2).
-    let permit = match workers.clone().acquire_owned().await {
-        Ok(p) => p,
-        Err(_) => {
-            warn!("automation bus dispatcher: worker semaphore closed; dropping event");
-            return;
-        }
-    };
     let handler = handler.clone();
+    let db = db.clone();
+    let event_id = row.id.clone();
     tokio::spawn(async move {
         let _permit = permit;
-        (handler)(row).await;
+        match (handler)(row).await {
+            Ok(()) => {
+                if let Err(error) = BusEventStore::new(&db).complete_dispatch(
+                    &event_id,
+                    &owner,
+                    chrono::Utc::now().timestamp(),
+                ) {
+                    warn!(event_id = %event_id, error = %error, "automation bus: completion ack failed; lease recovery will retry");
+                }
+            }
+            Err(error) => {
+                warn!(event_id = %event_id, error = %error, "automation bus: handler failed; releasing lease for recovery retry");
+                if let Err(release_error) =
+                    BusEventStore::new(&db).release_dispatch(&event_id, &owner)
+                {
+                    warn!(event_id = %event_id, error = %release_error, "automation bus: failed to release handler lease");
+                }
+            }
+        }
     });
 }
 
@@ -421,6 +453,7 @@ pub fn noop_handler() -> EventHandler {
                 source = %row.source,
                 "automation bus: event dispatched (no automations registered yet)",
             );
+            Ok(())
         })
     })
 }
@@ -440,6 +473,7 @@ pub(crate) fn counting_handler(
         Box::pin(async move {
             counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             seen.lock().unwrap().push(row.id);
+            Ok(())
         })
     })
 }
@@ -550,6 +584,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn handler_failure_is_retried_without_waiting_for_a_process_restart() {
+        let db = fresh_db();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let handler: EventHandler = {
+            let attempts = attempts.clone();
+            Arc::new(move |_row: BusEventRow| {
+                let attempts = attempts.clone();
+                Box::pin(async move {
+                    if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err("retryable handler failure".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                })
+            })
+        };
+        let stop = Arc::new(Notify::new());
+        let (bus, tasks) = AutomationBus::spawn(db.clone(), handler, stop.clone());
+        bus.publish(evt("handler-retry", 100)).await.unwrap();
+        assert!(wait_for_count(&attempts, 2, Duration::from_secs(3)).await);
+        assert!(
+            BusEventStore::new(&db)
+                .get("handler-retry")
+                .unwrap()
+                .unwrap()
+                .completed_at
+                .is_some()
+        );
+        stop.notify_waiters();
+        tasks.join().await;
+    }
+
+    #[tokio::test]
+    async fn failed_handler_releases_lease_and_recovery_poll_retries() {
+        let db = fresh_db();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: EventHandler = {
+            let calls = calls.clone();
+            Arc::new(move |_row: BusEventRow| {
+                let calls = calls.clone();
+                Box::pin(async move {
+                    if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                        Err("synthetic transient handler failure".to_owned())
+                    } else {
+                        Ok(())
+                    }
+                })
+            })
+        };
+        let stop = Arc::new(Notify::new());
+        let (bus, tasks) = AutomationBus::spawn(db.clone(), handler, stop.clone());
+        bus.publish(evt("retry-handler", 100)).await.unwrap();
+        assert!(wait_for_count(&calls, 2, Duration::from_secs(3)).await);
+        let row = BusEventStore::new(&db)
+            .get("retry-handler")
+            .unwrap()
+            .unwrap();
+        assert!(row.completed_at.is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        stop.notify_waiters();
+        tasks.join().await;
+    }
+
+    #[tokio::test]
     async fn internal_publish_is_picked_up_by_poller() {
         let db = fresh_db();
         let counter = Arc::new(AtomicUsize::new(0));
@@ -625,6 +723,7 @@ mod tests {
                 Box::pin(async move {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
                 })
             })
         };

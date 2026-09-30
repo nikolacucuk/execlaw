@@ -36,7 +36,7 @@ use crate::routes::ApiError;
 use crate::state::{AppState, ServerConfig};
 use axum::Router;
 use axum::http::StatusCode;
-use axum::response::Json;
+use axum::response::{IntoResponse, Json};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -181,7 +181,7 @@ pub struct LoginAssertFinishRequest {
 pub fn issue_login_tokens(
     state: &AppState,
     user_id: &str,
-) -> Result<Json<crate::routes::LoginResponse>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let users = execlaw_core::users::UserStore::new(&state.db);
     let _ = users.touch_login(user_id, Utc::now().timestamp());
 
@@ -195,10 +195,19 @@ pub fn issue_login_tokens(
         state
             .refresh_store
             .issue(user_id, &session_id, state.config.refresh_token_ttl_secs)?;
-    Ok(Json(crate::routes::LoginResponse {
-        access_token: access,
-        refresh_token: refresh,
-    }))
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::SET_COOKIE,
+        crate::routes::build_access_cookie(&access, state.config.access_token_ttl_secs),
+    );
+    Ok((
+        headers,
+        Json(crate::routes::LoginResponse {
+            access_token: access,
+            refresh_token: refresh,
+        }),
+    )
+        .into_response())
 }
 
 // `Signer` + `RefreshStore` are kept public-imported above so the

@@ -1,5 +1,33 @@
 # execlaw — Security
 
+## Implementation commitment and current limits
+
+The [implementation plan](implementation-plan.md) tracks the committed
+H001-H130 program; the [roadmap findings](llm-harness-roadmap.md#review-findings-and-unresolved-verification)
+are the authoritative record of open issues F01-F19. Planned controls are not
+current guarantees. In particular, F01/F19 identify missing authorization on
+plugin and automation routes, F02 unsafe plugin upgrades, F03 fetch SSRF,
+F04 unqualified SQLCipher packaging, and F05 incomplete session revocation.
+Loopback access and OpenAPI security declarations do not authenticate callers.
+F18 also means the current automation test-run is not an effect-free preview.
+
+Security implementation is coordinated through
+[H025 network egress](llm-harness-roadmap.md#enhancement-025),
+[H026 authorization](llm-harness-roadmap.md#enhancement-026),
+[H027 plugin isolation/upgrades](llm-harness-roadmap.md#enhancement-027), and
+[H028 release qualification](llm-harness-roadmap.md#enhancement-028).
+The subsequent work covers [H051 provenance](llm-harness-roadmap.md#enhancement-051),
+[H052 dispatch-time authority](llm-harness-roadmap.md#enhancement-052),
+[H054 secret brokering](llm-harness-roadmap.md#enhancement-054),
+[H055 outbound data checks](llm-harness-roadmap.md#enhancement-055),
+[H072 runtime isolation](llm-harness-roadmap.md#enhancement-072),
+[H076 key/secret lifetime](llm-harness-roadmap.md#enhancement-076),
+[H082 publisher revocation](llm-harness-roadmap.md#enhancement-082), and
+[H126 effect-free automation scenarios](llm-harness-roadmap.md#enhancement-126).
+Completion requires the corresponding implementation and adversarial evidence
+in the tracker, including full-router authorization tests and zero-effect
+simulation tests. This documentation update does not close those findings.
+
 This document describes:
 
 1. The disclosure path for security issues.
@@ -89,12 +117,14 @@ user.
   signed durable head records the terminal sequence and tag. Replay verifies
   the complete chain and head without invoking model or plugin code;
   mutation, deletion, insertion, reordering, or truncation before that head
-  surfaces as `DbError::TamperDetected`. Keys live in the SQLCipher-encrypted
-  vault.
-- **Encrypted state at rest** — production builds enable the
-  `sqlcipher` Cargo feature; the SQLite database is encrypted with
-  a key derived from a master key held in the OS keyring (Keychain
-  on macOS, Credential Manager on Windows, Secret Service on Linux).
+  surfaces as `DbError::TamperDetected`. The running service loads its event
+  signer from the separate `event-hmac.key`; protect it with the recovery keys.
+- **Encrypted state at rest** — production builds must enable the
+  `sqlcipher` Cargo feature to enforce encryption. The reviewed desktop build
+  commands omit that opt-in feature (F04); do not infer encryption from the
+  release label or a successful `PRAGMA key`. The master-key loader keeps a
+  durable `master.key` file and mirrors it into the OS keyring. Packaged-binary
+  encryption verification and fail-closed startup remain H028 work.
 - **Forged approval responses** — every cold-contact / sensitive-
   tool approval emits a JWT-signed `approval_token`. The respond
   endpoint verifies the token's `jti` matches the approval id;
@@ -124,6 +154,13 @@ user.
   rejected. Resolution classifications, addresses, and failures are persisted
   for operator inspection. Configured inference, HTTP MCP, Graphiti, and voice
   STT/TTS use this path.
+- **Public web-fetch SSRF and DNS rebinding** — web fetch and research resolve
+  every answer, reject non-global and special-purpose addresses, pin the direct
+  HTTP connection, and validate each redirect before connecting. Ambient
+  proxies are disabled on checked clients because proxy-side DNS would bypass
+  the pin. Script-plugin HTTP uses the same per-connection resolver and permits
+  private destinations only through the configured CIDR/DNS approvals; sidecar
+  HTTP resolves only a currently published supervised-sidecar host and port.
 - **Untraceable injected memory** — current memory projection accepts only an
   approved assertion with at least one append-only evidence row. Evidence binds
   the assertion to a conversation event, payload path, and quote hash; trust is
@@ -134,6 +171,10 @@ user.
   spawn, and sidecar/runner OCI references must be digest-pinned and have a
   verified provenance row. The only bypass is a persisted Controller-enabled
   local-development override, and every use is audited.
+- **Plugin archive expansion** — uploaded and bundled plugin ZIPs are staged
+  only after path containment checks, a 4,096-entry cap, a 64 MiB per-file
+  expanded-size cap, and a 256 MiB total expanded-size cap. Plugin versions
+  used in staging paths accept only bounded, path-safe components.
 
 ### What we explicitly do NOT defend against
 
@@ -193,9 +234,11 @@ future rows and checkpoints while retaining old keys for verification; it does
 not re-sign prior ranges. Destructive event re-signing is rejected after any
 v2 checkpoint exists. JWT signing-key rotation remains a separate operation.
 
-There is no cloud HSM, no remote KMS, no key escrow. Keys are local;
-the vault export bundle (`execlaw backup`) is encrypted with a
-passphrase the operator chooses at backup time.
+There is no cloud HSM, no remote KMS, no key escrow. Keys are local.
+`execlaw backup` writes a database snapshot, not a separately passphrase-wrapped
+vault export. Its encryption depends on the SQLCipher-enabled path. Retain the
+matching master key and event signer separately, following the
+[recovery drill](key-rotation-drill.md).
 
 ---
 
@@ -235,10 +278,11 @@ implications:
   or externally referencing declared schemas reject registration; compiled
   schemas validate arguments before credential lookup and dispatch. The
   host does not analyze plugin code for intent.
-3. **Plugin updates are operator-approved**. The install API
-   refuses to overwrite an installed plugin without
-   `if_existing=upgrade`, and the operator must explicitly enable
-   the new version.
+3. **Plugin updates require an explicit upgrade mode**, but that is not an
+   authorization boundary. The reviewed lifecycle handlers omit caller
+   authentication (F01), and staging can replace files before provenance
+   rejection (F02). Controller authorization and transactional replacement
+   remain H026/H027 acceptance gates.
 
 ### MCP servers
 
@@ -286,22 +330,22 @@ loss across user-profile touch events and session-token rotations.
 `crates/vault/src/keyring_key.rs` implements a defensive fallback:
 the keyring is treated as a cache, the on-disk
 `~/.execlaw/master.key` file is the durable sink. The fallback has
-not been validated in CI on Windows yet (no Windows CI runs at the
-time of writing — pending merge of `.github/workflows/ci.yml`).
+not been qualified here against the installed Windows service account.
+The repository now has Windows CI, but default-feature unit tests are not
+evidence of Credential Manager, key-file ACL, or service-identity behavior in
+the packaged application. H028/H076/H117 require that platform evidence.
 
 ### Plugin sandboxing
 
-There is none. See §4. The roadmap discusses a possible WASM-tier
-plugin runtime that would offer real isolation; until then, the
-trust model is "operator-curated set of audited plugin sources."
-Artifact verification establishes which reviewed source/workflow produced an
-artifact and detects byte substitution; it does not make that plugin safe.
-
-Pre-0022 installed sidecars receive a one-time, reference-scoped
-`legacy_upgrade_override` during plugin hydration. Eligibility is determined
-from `state_plugins.installed_at` and migration 0022's `applied_at`; later
-installs are never grandfathered. The override is durable and audited, so a
-normal restart does not require enabling the global development policy.
+Plugin runtimes remain operator-curated code; the script and subprocess tiers
+are not general-purpose security sandboxes. Optional plugin UI panels run
+separately in an opaque-origin iframe with scripts only, no parent DOM or
+origin-storage access, and `connect-src 'none'`. Panel API calls cross a source- and
+nonce-checked parent RPC broker. The broker permits only that panel's
+manifest-declared plugin routes and narrow own-plugin settings, sidecar,
+identity, or OAuth capabilities. Artifact verification establishes which
+reviewed source/workflow produced an artifact and detects byte substitution;
+it does not make plugin runtime code safe.
 
 ### Release provenance handoff
 
@@ -311,22 +355,22 @@ bundles before desktop packaging. The exact ZIP and sidecars are embedded in
 the desktop artifact and published together; bundled installation verifies
 them offline against the Controller allowlists.
 
-### CI absence (until first push of `.github/workflows/ci.yml`)
+### CI and release evidence gaps
 
-The four supported targets (Linux x86_64, macOS x86_64 + arm64,
-Windows MSVC) are claimed in the README but until the GitHub Actions
-matrix lands, none are continuously validated. Regressions on the
-less-tested targets (notably Windows) are detectable only by
-operator reports.
+`.github/workflows/ci.yml` defines Linux x86_64, Windows MSVC, and Apple Silicon
+macOS checks using plaintext SQLite defaults. It does not provide the SQLCipher
+or Criterion qualification described by H028/H049. F04/F16 record those gaps;
+the presence of a workflow is not evidence that a particular artifact passed.
+Intel macOS is not in that supported CI matrix.
 
-### `execlaw backup` is encrypted but not authenticated against the
-operator's identity
+### Backup confidentiality depends on the artifact and keys
 
-The backup bundle uses a passphrase the operator picks at backup
-time. There is no cryptographic binding between "the operator who
-made this backup" and "the install that restores it." A leaked
-backup file plus its passphrase fully discloses the install's state.
-Treat backup files as you would treat the SQLite database itself.
+A SQLCipher snapshot plus its matching master key discloses database content.
+A plaintext-feature snapshot has no equivalent at-rest protection. Neither
+backup file proves who authorized its restoration. Protect snapshots and key
+material separately, verify the actual artifact, and follow the
+[key-rotation and recovery drill](key-rotation-drill.md). Whole-machine recovery
+and trusted rollback detection remain H118/H063 work.
 
 ### Webhook routes are public endpoints
 
@@ -366,7 +410,9 @@ record and blocks execution until a Controller verdict is recorded.
 Operator model:
 
 1. Approve only the minimum scope needed for this one action.
-2. Prefer proposal-only flows (`dry_run`) for new automations/tools.
+2. Use a verified effect-free simulation for proposals. The current automation
+   `dry_run`/Test run invokes live handlers (F18), so its name is not a safety
+   guarantee; H126 separates simulation from authorized live execution.
 3. Treat "external effect" as high risk even when content appears benign.
 4. Use sideband confirmations for ambiguous requests.
 
@@ -410,10 +456,10 @@ If you're deploying execlaw on a machine that's network-reachable:
 6. Rotate event-integrity keys by adding a new key id and retaining prior keys
   for verification. Do not re-sign historical v2 ranges; the core rejects
   destructive re-signing after a v2 checkpoint exists.
-7. Back up `~/.execlaw/execlaw.db` (and the file-fallback master
-   key, if you're using it) on the same cadence as any other
-   operator-critical state. `execlaw backup` produces an encrypted
-   bundle suitable for offsite storage.
+7. Back up the database and preserve its matching master key and event signer
+   separately on the same cadence as other operator-critical state. Verify
+   snapshot encryption with a qualified SQLCipher artifact before relying on
+   it for offsite confidentiality; inventory plugin state and artifacts too.
 
 ### Discord bot token exposure
 

@@ -156,6 +156,7 @@ impl CandidateExtractor for InferenceCandidateExtractor {
             max_tokens: Some(MAX_OUTPUT_TOKENS),
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
         let adapter = execlaw_model_adapter::adapter_for(

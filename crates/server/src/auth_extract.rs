@@ -30,6 +30,7 @@ use execlaw_core::users::{UserRole, UserRow, UserStore};
 #[derive(Debug, Clone)]
 pub struct AuthedUser {
     pub user_id: String,
+    pub session_id: Option<String>,
     pub username: String,
     pub display_name: String,
     pub email: Option<String>,
@@ -41,6 +42,7 @@ impl From<UserRow> for AuthedUser {
     fn from(u: UserRow) -> Self {
         Self {
             user_id: u.user_id,
+            session_id: None,
             username: u.username,
             display_name: u.display_name,
             email: u.email,
@@ -75,6 +77,9 @@ impl FromRequestParts<AppState> for AuthedUser {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        if let Some(user) = parts.extensions.get::<AuthedUser>() {
+            return Ok(user.clone());
+        }
         // Primary path: `Authorization: Bearer <jwt>` header.
         // Fallback: `execlaw_access` httpOnly cookie (§10 security
         // enhancement). This lets browser clients rely purely on the
@@ -117,6 +122,15 @@ impl FromRequestParts<AppState> for AuthedUser {
             Err(_) => return Err(AuthRejection("token verification failed")),
         };
 
+        match state
+            .refresh_store
+            .session_is_active(&claims.sub, &claims.sid)
+        {
+            Ok(true) => {}
+            Ok(false) => return Err(AuthRejection("session has been revoked or expired")),
+            Err(_) => return Err(AuthRejection("session state lookup failed")),
+        }
+
         let users = UserStore::new(&state.db);
         let row = users
             .get_by_id(&claims.sub)
@@ -124,6 +138,8 @@ impl FromRequestParts<AppState> for AuthedUser {
             .ok_or(AuthRejection(
                 "token references a user that no longer exists",
             ))?;
-        Ok(AuthedUser::from(row))
+        let mut user = AuthedUser::from(row);
+        user.session_id = Some(claims.sid);
+        Ok(user)
     }
 }

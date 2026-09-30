@@ -49,6 +49,7 @@ impl SkillSummarizer for InferenceSummarizer {
             .inference
             .resolve(&self.db, BackendPurpose::Small)
             .or_else(|| self.inference.resolve(&self.db, BackendPurpose::Standard))
+            .map(|resolved| resolved.with_workload("background"))
             .ok_or_else(|| "no inference backend available for summarization".to_string())?;
         let client = resolved.client.clone();
         let model_id = ModelId(resolved.model_id.clone());
@@ -64,6 +65,7 @@ impl SkillSummarizer for InferenceSummarizer {
             // Adapter applies per-family kwargs.
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         };
         let adapter = execlaw_model_adapter::adapter_for(

@@ -2,8 +2,25 @@
 
 How a conversation in execlaw turns into model calls, tool calls, and durable state. This is the *how* doc — read [`architecture.md`](architecture.md) first for the system topology, and [`plugins.md`](plugins.md) for the plugin-author reference.
 
+## Implementation delivery plan
+
+All H001-H130 are accepted implementation scope in the
+[`implementation-plan.md`](implementation-plan.md) tracker. Historical
+implementation labels below are not release qualification. This document owns
+the turn semantics for [H022 completion evidence](llm-harness-roadmap.md#enhancement-022),
+[H023 executor recovery](llm-harness-roadmap.md#enhancement-023),
+[H024 effect reconciliation](llm-harness-roadmap.md#enhancement-024),
+[H031 context budgets](llm-harness-roadmap.md#enhancement-031),
+[H042 child runs](llm-harness-roadmap.md#enhancement-042),
+[H043 steering](llm-harness-roadmap.md#enhancement-043),
+[H051 provenance](llm-harness-roadmap.md#enhancement-051), and
+[H052 live authority](llm-harness-roadmap.md#enhancement-052).
+Implement their linked acceptance gates in both executor paths; findings
+F06-F12 remain open until their fixes and verification land. The tracker owns
+delivery status and dependencies; this page explains the execution contract.
+
 > **Status legend.** Each section is tagged with what's actually built today vs. designed but not yet wired:
-> - `[shipped]` — code is in `main` and exercised by tests.
+> - `[shipped]` — implementation exists in the reviewed tree; the tracker records remaining qualification.
 > - `[schema-ready]` — DB shape and storage layer exist; the runner-side glue still has to land.
 > - `[design]` — committed plan, not yet implemented.
 > Tags update as code lands; if you find a tag out of step with reality, fix it in the same commit as the code change.
@@ -53,7 +70,7 @@ How a conversation in execlaw turns into model calls, tool calls, and durable st
 
 Two shapes worth memorising:
 
-1. **The event log is canonical.** Everything committed by the runner is replayable from `state_events`. If the runner crashes, the supervisor respawns a fresh container and rehydrates the last committed turn. Migration 0017 adds finer run/step recovery primitives, but normal chat turns do not yet execute through that store.
+1. **The event log is canonical.** Committed conversation events are replayable from `state_events`. Migration 0017 adds run/step checkpoints used by chat turns. In-process resume exists, but production runner restart does not yet consume completed initial model checkpoints or discover pending runs at startup (F07). Container respawn alone does not prove unfinished-turn recovery; H023 owns that completion and verification.
 2. **The LLM does not commit anything directly.** Every tool call goes through dispatch; every effect goes through the outbox; every persistence write goes through `EventLog::commit_turn`. The model proposes; the framework disposes.
 
 ---
@@ -73,18 +90,37 @@ Two shapes worth memorising:
 
 ## 2.1 Always-on child agents and live run history
 
-Child agents are durable definitions and mailbox-driven workers stored in
-`config_agents` and `state_agent_messages`. An agent with a trigger containing
-`event_only: true` is not a periodic no-message task: the supervisor skips it
-unless an inbound mailbox message is pending. Transport-triggered messages are
-matched before enqueueing by channel, keywords, and optional `group_only`; the
-WhatsApp camper agent therefore requires both a WhatsApp source and a group
-context.
+Child agents are durable, versioned definitions and mailbox-driven workers
+stored in `config_agents`, `config_agent_definition_revisions`, and
+`state_agent_messages`. Event-only agents and agents with a calendar schedule
+wait for a mailbox fire. Transport admission uses channel, stable group ID,
+group title, and keyword filters; a matching group title scopes the trigger
+and does not by itself establish topic relevance. A five-field cron schedule
+uses an IANA timezone, explicit overlap/catch-up rules, and optional quiet
+hours. Each scheduled fire has a durable queued/skipped receipt.
 
 The supervisor is woken when a matching transport event or controller mailbox
 message is enqueued. It emits `agent_run_changed` on the authenticated
 `/api/stream` WebSocket after a run is inserted (`running`) and after its
-terminal result is persisted (`success` or `failed`). The Agents page uses
+terminal result is persisted (`success`, `not_applicable`, `needs_input`, or
+`failed`). One
+transport mailbox item is processed per run. A nonempty applicable result is
+committed as a named `model_turn` in the originating conversation; an empty
+result fails and retains the mailbox item for retry. A structured reply report
+stays in the conversation for Controller review, while only its `Suggested reply`
+section can be sent through the bound transport recipient. Related archived
+context is limited to the originating channel and recipient, including for a
+shared WhatsApp conversation. Imported `tools: read/search` now exposes a
+bounded local tool loop over only that recipient's archive. The trigger,
+definition version, mailbox ID, and typed outcome are persisted with the run.
+A matching event-only lead specialist owns the inbound; observers may run
+without publishing a reply. Controller takeover fences later automatic
+outbox admission, and the relay checks the ownership generation again before
+delivery. A reply draft records its source event, audience, revision, review
+owner, and stale state; send requires a fresh revision and Controller session.
+The no-effect preview evaluates captured/synthetic trigger events and may,
+when explicitly requested, run a bounded local model pass with no tools.
+The Agents page uses
 those events to reload the selected agent's runs, so run history and generated
 drafts appear without a timer or manual page refresh. The run-history API
 remains the durable source of truth; WebSocket events are notifications that
@@ -137,12 +173,20 @@ Key invariants the executor enforces (`crates/runner-local/src/turn.rs`):
 - **`tool_use ↔ tool_result` pairing.** Every `ToolUse` event committed in a turn has a matching `ToolResult` with the same `ordinal`. Even tool-dispatch errors get a paired `ToolResult` carrying the error string — the chat history must not contain a dangling tool_use, because that wedges resume. `[shipped]` — see `commit_turn` in `crates/core/src/events.rs`.
 - **Atomic commit.** All events from one turn land in a single SQLite transaction. The runner can crash anywhere inside the loop; either the whole turn lands or none of it does. `[shipped]`
 - **Audit-trail on error/cancel.** When a runner-mediated turn aborts mid-loop (cancel button, mid-tool error), any `tool_use` + `tool_result` pairs for tools that **already executed** are committed alongside a synthetic `model_turn` carrying `finish_reason = "cancelled"` or `"error"`. Pre-2026-05-16 these were dropped on the `Err(...)` return path, so executed side effects (HTTP fetches fired, memory written) had no audit trace. `[shipped]` — see `run_runner_turn`'s abnormal-end branch in `crates/server/src/chats.rs`.
+
+### Durable turn controls `[partial — H043]`
+
+`POST /api/chats/{conversation_id}/controls` requires a conversation-scoped idempotency key and stores each accepted intent plus every lifecycle transition in SQLite. Queue-next-turn commits a `UserMsg` event and its `applied` control transition atomically. Runner-backed turns receive steer, pause, resume, and cancel frames; steering IDs are checkpointed with the following model round before the server acknowledges them. Pause controls remain reconnectable until resumed, and cancellation interrupts a stalled stream or delegated child call. Control status is available through the same endpoint; delivered-but-unacknowledged recovery and latency qualification remain open.
+
+### Workspace inspection `[partial — H040/H041]`
+
+Controllers can register a canonical local root, read bounded UTF-8 files, search bounded text files, and create content-addressed checkpoints with isolated per-run copies. Snapshot traversal rejects links/junctions and hard links where supported and omits secret-file paths. The execution inspector previews live-root conflicts and applies only files whose current hash still matches the reviewed base, with per-file idempotent receipts; restore checks the applied result hashes and never reverts a later edit. Manifest-declared coding tools, terminal/LSP jobs, and process-kill/concurrent-human-edit qualification remain open; the plugin's write authority stays disabled until H023–H029 prerequisites close.
 - **OpenAI tool-message order on replay.** When `hydrate_messages` (in-process) or `build_runner_history_messages` (runner-mediated) reconstruct chat history from the event log, every `tool` role message is preceded by an `assistant` message bearing a `tool_calls` array with the matching `tool_call_id`. One synthetic `assistant(content="", tool_calls=[call])` is emitted per `ToolUse` event; the terminal `ModelTurn` becomes a plain `assistant(text=final, tool_calls=[])`. Pre-2026-05-16 the swap-into-final-ModelTurn pattern produced `[user, tool, assistant(tool_calls)]` which vLLM with `--enable-auto-tool-choice` may reject outright and confuses the model into reading past calls as future. `[shipped]`
 - **Bounded tool rounds.** `max_tool_rounds` (default 16, configurable per turn via `TurnRequest.max_tool_rounds`) caps the loop. The runner clamps the requested cap to `min(req, RUNNER_MAX_TOOL_ROUNDS = 24)` as a belt-and-suspenders ceiling. Exceeding it commits an `LlmCancelled` event and returns `TurnError::MaxRounds`. `[shipped]`
 - **Phase observer.** `AwaitingTool` / `Thinking` transitions are signalled to a phase observer the server wires to the WebSocket bus, so transports can keep typing-indicators on through tool calls. `[shipped]`
 - **Versioned HMAC integrity.** Legacy v1 rows retain independent row HMACs. A signed genesis checkpoint commits to that frozen prefix; subsequent v2 rows bind the full canonical row, signing key id, and previous tag. The terminal head is updated in the same transaction and replay verifies the complete chain before returning a suffix. Key rotation retains old verification keys rather than rewriting history. `[shipped]`
 
-### 3.1 Durable step boundaries `[shipped for chat turns]`
+### 3.1 Durable step boundaries `[implemented; production recovery incomplete]`
 
 Migration 0017 and `crates/core/src/runs.rs` add a generic `RunStore` beneath
 the turn model. `state_runs` holds status, parent, cursor, input event, and
@@ -160,8 +204,67 @@ same boundaries in the server before host dispatch. Effectful steps can insert
 an outbox row and complete the step in one transaction, and a repeated enqueue
 must match the already-reserved idempotency key and payload. Reopen tests cover
 lease recovery, completed-step replay, and approval waits. Remaining recovery
-work includes caller-provided HTTP request idempotency and the full process-kill
-matrix for child-run joins.
+work includes production runner replay/startup discovery (F07), caller-provided
+HTTP request idempotency, outbox claim recovery (F06), and the full process-kill
+matrix including child-run joins. These are H023/H024 acceptance gates; store
+reopen tests do not qualify the complete host/runner/effect path.
+
+Each chat run also stores a versioned `state_run_input_manifests` row containing
+SHA-256 hashes of the effective prompt, model settings, and tool catalog. It
+does not duplicate prompt text or tool arguments. Resuming the same run with a
+different manifest fails as input drift; `execlaw replay` prints the recorded
+hashes so an operator can compare turns after a backend or plugin change.
+
+Every executor compiles the complete `ChatRequest` before each model call. The
+estimate includes serialized messages, image URLs, schemas, arguments, and
+tool results, then reserves the requested output tokens. A passing exact
+backend profile supplies the context ceiling; an unqualified backend uses an
+8,192-token ceiling and 1,024-token output cap. The conservative 3-byte/token
+fallback overcounts dense JSON and images. Requests whose mandatory current
+turn still does not fit fail before inference. The estimator uses a measured
+per-profile bytes-per-token ratio when available, clamped to the conservative
+3-byte/token ceiling; otherwise it uses that fallback. Tool results larger than 16 KiB
+are stored as content-addressed artifacts scoped to the conversation and run,
+expire after 30 days, and can be read in bounded 8 KiB chunks through
+`execlaw.read_artifact`. (H031)
+
+When history trimming removes events, all chat paths persist a
+`CompactionReceipt` with its source sequence range and fingerprint, trust label,
+retained constraints, pending work, omitted-detail references, and summary
+version. Summary generation must pass a bounded JSON contract and gets at most
+two correction attempts; invalid output fails the turn. Summaries enter the
+transcript as user-role data and remain explicitly untrusted. A changed source
+fingerprint prevents reuse; Controller-only
+`GET /api/admin/conversations/{conversation_id}/compactions/{receipt_id}` loads
+the authoritative source events for review. (H032)
+
+The initial tool schema catalog is byte-bounded. `execlaw.discover_tool` ranks
+only the run-pinned declarations that passed the same access, trust, and
+capability filters. Search returns concise matches; exact-name selection loads
+that schema into the next round. In-process and container-runner dispatch still
+apply their normal policy gates. The input manifest hashes the complete
+authorized discoverable catalog, including schemas omitted from the first
+request. (H033)
+
+Controller qualification in Settings → Inference probes the configured local
+backend for text, streaming, tool calls, three strict JSON-schema cases, a
+usage-measured context length, and red/blue image identification. Profiles are
+keyed by model ID, quantization, chat template, backend image/version, and
+parser identity. Backend metadata must supply `quantization`, `chat_template`,
+and `backend_version` (or a versioned `image`). Qualified context limits feed
+both executors; native JSON-schema decoding is used only with a matching
+profile, and host validation with at most two correction attempts remains in
+place. Vision requests fail before inference until both image probes pass.
+(H034)
+
+The Controller-only inspector is available at Settings → Runs and through
+`GET /api/admin/runs` plus
+`GET /api/admin/runs/{run_id}/trace?after=<cursor>`. Every page returns the
+authoritative run snapshot, steps, retry metadata, child runs, queue wait,
+model/tool intervals, approval references, and the run-bounded delivery
+timeline. Missing cursors trigger a snapshot reload. Optional local JSON export
+contains metadata and IDs only; prompts, credentials, arguments, and tool
+results are excluded. (H035)
 
 ### 3.2 Typed tool outcomes `[shipped in-process]`
 
@@ -227,7 +330,7 @@ The runner is **stateless against the event log**. Memorise this — it's the pr
 
 The novel part is **trust-class scoping on long-term memory**. The composite primary key `(scope, trust_class, key)` lets the same key carry different values at different trust levels. A `Controller`-class secret is invisible to a `KnownTrusted` caller even when scope+key match — the row simply doesn't exist at their trust level.
 
-### 4.2 Lifecycle `[schema-ready]`
+### 4.2 Lifecycle `[implemented; qualification tracked in H014]`
 
 The four-layer model describes *kinds* of memory. The baseline schema includes **lifecycle dynamics** — recency, frequency, promotion, demotion. The relevant columns on `memory_entries` are:
 
@@ -269,7 +372,7 @@ ALTER TABLE memory_entries ADD COLUMN created_at   INTEGER NOT NULL DEFAULT 0;
 
 **Tier semantics:**
 
-- **HOT** — auto-injected into the runner's per-turn system prompt via the HOT slot (§5). Bounded byte budget. Promotion *requires controller approval*. `[schema-ready, runner injection design]`
+- **HOT** — auto-injected through prompt assembly (§5), with a current character cap. Promotion *requires controller approval*. `[implemented]`
 - **WARM** — reachable via `read_memory` / `list_memory`. The default tier for every fresh `write_memory`. `[shipped]`
 - **COLD** — excluded from `list_memory` and the HOT slot. `read_memory` with a known scope+key still works (audit / never-truly-forget). `[shipped]`
 
@@ -339,9 +442,13 @@ projected as ordinary facts.
 
 ---
 
-## 5. The HOT slot — always-loaded working set `[design]`
+## 5. The HOT slot — always-loaded working set `[implemented]`
 
-Today, memory is only seen by the model if it calls `read_memory`. That's expensive: every turn the agent has to *remember to remember*, often via several speculative tool calls just to discover what's there. Skills like `claude-code`'s `CLAUDE.md` work because they are auto-injected into every turn's system prompt. The HOT slot is the execlaw equivalent.
+`build_hot_memory_snapshot_block` in `crates/server/src/chats/prompt.rs`
+loads HOT rows from the global scope using the conversation's readable trust
+classes. It selects at most 16 rows and bounds rendered lines to 2,048
+characters. Other memory remains available through explicit tools and governed
+asset loadouts. H031 owns complete model-token budgeting beyond this local cap.
 
 ```
    per-turn system prompt assembly (in chats.rs)
@@ -353,7 +460,7 @@ Today, memory is only seen by the model if it calls `read_memory`. That's expens
    ├─────────────────────┤
    │  routing prose      │  (per-tool one-liners)
    ├─────────────────────┤
-   │  HOT MEMORY SLOT    │  ◄── new, capped at N bytes
+   │  HOT MEMORY SLOT    │  ◄── capped rendered characters
    │  (always-loaded     │      MemoryStore::list_hot(
    │   tier='hot')       │        scope, readable_classes,
    │                     │        limit
@@ -363,15 +470,13 @@ Today, memory is only seen by the model if it calls `read_memory`. That's expens
    └─────────────────────┘
 ```
 
-**Wiring plan (not yet shipped):**
+**Remaining qualification:** verify trust filtering and actual request budgets
+through each execution path under H013/H031/H037. The current prompt builder
+uses a fixed character limit; configurable byte/token budgets and HOT-injection
+usage accounting must not be inferred from this historical design.
 
-1. Extend `assemble_system_prompt` to call `MemoryStore::list_hot` with the conversation's read-down trust chain.
-2. Format each row as a single line (`<key>: <truncated value>`).
-3. Cap at a configurable byte budget (default 2 KB; surfaced in `config_general`).
-4. The runner enforces the cap — the agent cannot bloat its own prompt by promoting unbounded values.
-5. Every HOT-slot read also bumps `hits` / `last_used_at` on the rows it shows, so a HOT entry that's actively shaping behavior keeps its place; one that's been irrelevant for 30 days starts showing up in the demotion sweeper's candidate list.
-
-**Why this is bounded.** Promotion to HOT requires controller approval. The approval queue is the natural rate limiter — operators won't approve garbage at scale. Combined with the byte budget, the HOT slot stays focused.
+**Why this is bounded.** Promotion requires Controller approval, and prompt
+assembly applies a fixed rendering cap. Full-request budgeting remains H031.
 
 ---
 
@@ -483,7 +588,7 @@ Read-down memory cascade: a `KnownTrusted` caller can read entries written at `K
 
 ---
 
-## 8. Rule of Two / planner-executor split `[partial - containment shipped]`
+## 8. Rule of Two / planner-executor split `[shipped for untrusted inbound turns]`
 
 For turns that ingest *untrusted content* (web fetch, email body, PDF text), the runner switches to a two-role split:
 
@@ -494,13 +599,13 @@ For turns that ingest *untrusted content* (web fetch, email body, PDF text), the
    │   ┌──────────────┐                  ┌──────────────────┐   │
    │   │   PLANNER    │                  │     EXECUTOR     │   │
    │   │              │                  │                  │   │
-   │   │  full prompt │── plan (text) ──►│  receives plan   │   │
-   │   │  full tools  │                  │  + raw content    │   │
+   │   │ fixed goal + │── bounded plan ─►│  receives plan   │   │
+   │   │ trusted meta │                  │  + raw content   │   │
    │   │  trust:      │                  │                  │   │
    │   │  caller's    │                  │  trust: caller's │   │
-   │   │              │                  │  NO TOOLS        │   │
-   │   │  reasons     │                  │  output: text    │   │
-   │   │  about goal  │                  │  only            │   │
+   │   │  NO TOOLS    │                  │  NO TOOLS        │   │
+   │   │  safe task   │                  │  output: text    │   │
+   │   │  constraints │                  │  only            │   │
    │   └──────────────┘                  └──────────────────┘   │
    │       Qwen3.5                            Qwen3.5            │
    │       reasoning on                       reasoning off      │
@@ -510,13 +615,13 @@ For turns that ingest *untrusted content* (web fetch, email body, PDF text), the
 
 Same model both times — cost is in the second forward pass, not in a different deployment. The split is *role*, not *deployment*. Three things make this useful:
 
-- The planner sees the goal, the executor sees the untrusted content, **but they don't both see both**. An injection in the untrusted content cannot acquire tools because the role that has tools never sees the injection.
+- The planner receives only a framework-owned safe-analysis goal and bounded trust/channel/attachment-presence metadata. It never receives user text, attachment contents, or history. The executor receives the plan and current untrusted content, but no tools.
 - The executor has **no `tools` array at all**. Even if injected text says "call `delete_everything`", the model can't — that capability isn't wired.
-- The planner can ask the executor to "extract X from this text and report" — a constrained sub-goal — and the executor can only return text. That text gets fed back to the planner, which decides the next move.
+- The planner handoff is capped at 2,000 characters and is data, not authorization. The executor's text is final; it is not fed back to a tool-capable planner. This keeps values derived from untrusted content outside tool arguments and effectful sinks.
 
 This is the CaMeL pattern (DeepMind) translated to a single local model. It's not a complete defense — `The Attacker Moves Second` showed every defense shipped in 2025 is breakable in human red-team — but the architectural containment closes the most common vector cheaply.
 
-**Shipped today (2026-05-16):** the *containment half* of the split — when `policy.planner_executor` fires (i.e. `effective_trust < KnownTrusted`), `build_runner_tool_catalog` returns an empty `RunnerToolView` and the runner advertises no tools to the model. The full two-pass planner↔executor choreography (planner runs first with tools, hands a constrained sub-goal to a no-tools executor that sees the untrusted content) is still on the design list. The load-bearing invariant — "the role that sees untrusted content has no tool slots" — is enforced.
+**Shipped:** when `policy.planner_executor` fires (`effective_trust < KnownTrusted`), when a turn contains attachments, or when the conversation already contains external/tainted material, both runner-mediated turns and the in-process fallback execute two local inference passes. The metadata-only planner runs first with no tools. The executor then receives its bounded handoff plus current user text, images, and extracted attachment text; conversation history is omitted and the executor's tool catalog is empty. Untrusted attachment/history text is not placed in system messages. Its assistant event carries an `untrusted_input` marker, so later turns in the same conversation stay on the no-tools split path. The same fixed safe-analysis goal is used because outsider turns do not carry a separately authenticated task/goal field; enabling planner tools without that field would let untrusted requests authorize effects.
 
 ---
 
@@ -595,11 +700,9 @@ A `wakeup` is a deferred re-entry into the conversation's runner, scheduled by a
 
 `config_routines` rows are cron-shaped recurring tasks. The scheduler fires them via the same wakeup channel.
 
-### Subagents `[shipped — DeepResearchExecutor]`
+### Delegated child work `[partial — H042]`
 
-The primary agent can spawn a background subagent (`delegate_task`, `research_*`) that runs in its own context with a narrower tool slice. Subagent results return as a `tool_result` event in the parent's log when complete. The subagent's runner is a separate hot-runner container.
-
-**Capability shrinking:** the subagent's tool catalog is the parent's catalog *minus* `delegate_task` and any other tool the parent's policy says cannot be re-delegated. Subagents cannot fan out unboundedly.
+`delegate_task` currently makes a synchronous, tool-free child inference call. In persistent runner turns, the host records a child `state_runs` row linked to its parent, a typed task/trust contract, durable spawn/join steps, and a child-result artifact. The parent has an 8192-token aggregate child reservation budget; cancellation stops the active child inference and marks its run cancelled. Completed child results replay from their checkpoint after restart, while an interrupted inference request is retried after its lease expires. The child receives no tools, so it cannot gain authority from the parent's context or another child's text. Dependency scheduling, artifact-retrieval qualification, and restart/cancel qualification remain open.
 
 **Auto-bridge of agent text replies.** When a turn was triggered by an inbound transport message (Signal, WhatsApp, SMS, Slack, …) and the agent produced a `model_turn` text response without explicitly calling that channel's `send_message` tool, `bridge_text_reply_to_originating_transport` in `crates/server/src/chats.rs` looks up the conversation's transport bindings and dispatches the text through the originating transport's `<channel>.send_message` host tool. Idempotent against a double-call: if the agent already invoked the explicit transport tool in the same turn, the bridge backs off. This is the path that keeps inbound contacts on Signal / WhatsApp / SMS replied-to even when the model forgets to call the transport tool. `[shipped]`
 
@@ -613,9 +716,9 @@ Mapping the patterns from §6 of the project memory (proactive-agent / self-impr
 |---|---|---|---|
 | Survive context loss | Write-Ahead Log + working buffer | Event log is canonical; runner is stateless | `[shipped]` |
 | Compaction recovery | Read SESSION-STATE.md on resume | Replay `state_events` from seq 0 | `[shipped]` |
-| Preferences are durable | `memory.md` always-loaded | HOT slot in system prompt | `[design]` (schema ready) |
-| Promote what's repeatedly useful | Pattern applied 3+ times → HOT | `MemoryStore::promotion_candidates` + `PromotionStore::propose` | `[schema-ready]` |
-| Demote what's stale | 30 days idle → WARM | `MemoryStore::demotion_candidates` | `[schema-ready]` |
+| Preferences are durable | `memory.md` always-loaded | HOT slot in system prompt | `[implemented]`; H013/H031 qualification |
+| Promote what's repeatedly useful | Pattern applied 3+ times → HOT | `MemoryStore::promotion_candidates` + `PromotionStore::propose` | `[implemented]`; H014 qualification |
+| Demote what's stale | 30 days idle → WARM | `MemoryStore::demotion_candidates` | `[implemented]`; H014 qualification |
 | Archive what's dead | 90 days idle → COLD | `MemoryStore::set_tier(Cold)` via approved demotion | `[schema-ready]` |
 | Reflect after work | CONTEXT / REFLECTION / LESSON | `memory_reflections` table + planner-role pass | `[schema-ready]` (planner pass `[design]`) |
 | Anti-drift | Score before storing | Approval-gated promotion (Rule of Two) | `[shipped]` (gate exists) |
@@ -630,7 +733,7 @@ Mapping the patterns from §6 of the project memory (proactive-agent / self-impr
 
 ---
 
-## 12. What's actually wired today (2026-09-12)
+## 12. Implementation inventory (reviewed 2026-09-27)
 
 ### TencentDB-inspired memory assets `[partially shipped]`
 
@@ -640,8 +743,18 @@ Wiki indexes, code graphs, and research outputs as governed assets while
 leaving their authoritative content in the existing event log and stores.
 Assets carry owner scope, visibility, trust floor, status, version, source
 hash, expiry, and usage metadata. Controller-managed bindings provide bounded
-`hot`, `discoverable`, and `tool_only` loadout modes for future role/task
-assignment.
+`hot`, `discoverable`, and `tool_only` loadout modes; prompt assembly resolves
+governed bindings for current role/task context.
+
+Chat prompt assembly also performs lexical retrieval through
+`MemoryAssetStore::search_eligible`. It applies agent scope, conversation
+trust, owner scope, visibility, lifecycle, and as-of time before ranking, and
+only admits HOT/DISCOVERABLE bindings into model context. TOOL_ONLY assets are
+not prompt candidates; duplicate source hashes collapse before injection.
+Each chat turn stores a metadata-only `state_turn_asset_loadouts` receipt keyed
+by its user-event sequence. The run inspector shows the trust/owner policy,
+asset version and source hash, binding priority, retrieval rank, and injected
+length without copying asset text into the receipt.
 
 The same module provides SQLite FTS5 asset search and optional local embedding
 storage with reciprocal-rank fusion. Embeddings are derived data only: access
@@ -649,11 +762,15 @@ control must be applied before ranking results, and source/model hashes are
 stored for invalidation. Migration `0025_memory_assets_knowledge.sql` adds
 the registry, bindings, Wiki page index, and CodeGraph node/edge index.
 
-This is deliberately not a second MemoryCore service. The follow-up runtime
-work is tracked in [`memory-roadmap.md`](memory-roadmap.md): wire asset
-registration and loadout resolution into turns, add assertion/conversation
-FTS, and expose read-only Wiki/CodeGraph tools behind the existing capability
-and trust gates.
+This is deliberately not a second MemoryCore service. Existing loadout and
+conversation-search implementations are tracked under H012/H013; detailed
+memory delivery remains in [`memory-roadmap.md`](memory-roadmap.md), with
+H037/H038/H092 covering evidence inspection, retrieval qualification, and
+revision-aware knowledge indexes.
+
+H037/H038 remain partial: agent-run loadout receipts, versioned local
+embedding/reranking and rebuild, research/agent retrieval consumers, and
+held-out recall/answer-quality and latency gates remain to be qualified.
 
 A precise read of the codebase, not a status report:
 
@@ -662,10 +779,10 @@ A precise read of the codebase, not a status report:
 - Event log with HMAC chain, atomic commit_turn (`crates/core/src/events.rs`)
 - Versioned event integrity: legacy-v1 verification, v2 genesis/checkpoint,
      chained appends, full-chain replay verification, and retained-key rotation
-- Generic `RunStore` with leased step transitions and recovery decisions
-     (`schema-ready`; normal chat turns are not yet driven by it)
+- Generic `RunStore` with leased step transitions and chat checkpoints;
+     in-process resume exists, while production restart recovery remains H023
 - Typed in-process tool failures, bounded transient retry, repeated-call guard,
-     schema-correction cap, and in-memory integration circuit breaker
+     schema-correction cap, and persisted integration circuit state
 - Evidence-backed memory assertions and projection; durable memory extraction
      and skill-capture jobs
 - MemoryStore with trust-class composite PK, read-down cascade in `DbMemoryApi`, write-at-caller-class only, and baseline tier/hits/last_used_at columns
@@ -683,27 +800,26 @@ A precise read of the codebase, not a status report:
 - Webhook handlers for HTTP-third-party integrations (e.g. WhatsApp via wuzapi) use `host_route_inbound_spawn` so the HTTP ack returns in single-digit milliseconds — without this, third-party retry loops (wuzapi's 30 s default) cause the agent to run 3–5× per inbound and the user receives duplicate replies. The plugin layer also dedupes by upstream message ID as defense in depth.
 
 **Audit-driven invariants landed 2026-05-16 (Codex review):**
-- Runner-mediated turns durably commit paired `tool_use` + `tool_result` events through the WS round-trip; the abnormal-end branch commits already-executed pairs alongside a synthetic `model_turn` carrying the cancel/error reason. Replay/audit reconstructs every executed side effect.
+- Runner-mediated turns commit paired `tool_use` + `tool_result` events through the WS round-trip; the handled abnormal-end branch commits already-executed pairs alongside a synthetic `model_turn` carrying the cancel/error reason. This does not cover every process/power-loss window; F06/F07/F17 and H023/H024/H058 track that qualification.
 - `run_runner_turn` and `run_tool_capable_turn` both build their tool catalog via `build_runner_tool_catalog`, which filters on `config_tool_access`, `caller_caps`, and the planner/executor split. The returned `RunnerToolView` feeds both the runner's `tool_catalog` field AND the system prompt's routing-prose block — single source of truth, no drift.
 - `ChainedToolDispatch::dispatch` consults the descriptor capabilities of each built-in tool via `execlaw_policy::trust::check_builtin_capability` and rejects when the caller lacks the matching policy cap. Built-ins now gate at parity with plugin tools.
 - `dispatch_external_turn` honours `policy.spotlighting` (was hard-coded `false`); `run_tool_capable_turn` threads a `spotlight_delim` into `TurnConfig` so the in-process executor's `hydrate_messages` wraps untrusted user content with the same delimiter the runner uses on its side.
 - `TurnRequest.max_tool_rounds` is part of the runner protocol; the runner clamps to `min(req, RUNNER_MAX_TOOL_ROUNDS)`. Pre-fix the runner used a hard-coded 24, ignoring `config_general.max_tool_rounds`.
 - Inline composer attachments validate up front but persist (blob + `state_attachments` row) only AFTER every identity/Blocked/UnknownPending/Rule-of-Two gate has passed — dropped turns leave no orphan rows or blobs.
-- `inference_probe_handler` enforces Controller-only via the same `require_controller` helper every other admin route uses (was binding `_user: AuthedUser` and discarding the role).
+- `inference_probe_handler` enforces Controller-only via `require_controller` (previously it discarded the authenticated role). This does not establish authorization for all admin routes; F01/F19 and H026 track the uncovered lifecycle/automation routes.
 - `runner-local::hydrate_messages` and `build_runner_history_messages` emit OpenAI-compliant tool-message order — `assistant(content="", tool_calls=[tc])` before each matching `tool` role message, terminal `assistant(text=final, tool_calls=[])`. Replay across multi-turn tool conversations no longer trips vLLM's strict tool-choice validation.
 - `advance_job_handler` wraps the spawned-phase work in an inner `async {}.await` block so the `cancel_tokens` registry cleanup runs on every exit path (success, gather error, missing-notes branch). The `ResearchSupervisor` DashMap no longer leaks entries when a phase errors.
 - `skill_err` maps `InvalidFrontmatter` → 400, `BodyTooLarge` / `ResourceTooLarge` → 413 with structured error codes the SPA's composer can render inline (was 500 catch-all).
 
-**Schema-ready, runner-side glue not yet in main:**
-- HOT slot injection in `assemble_system_prompt` — needs a call to `MemoryStore::list_hot` with byte cap
-- Promotion sweeper — periodic background task feeding `promotion_candidates` into `PromotionStore::propose`
-- Demotion sweeper — periodic background task feeding `demotion_candidates` into `PromotionStore::propose`
+**Implemented memory wiring; qualification tracked separately:**
+- HOT memory injection in `crates/server/src/chats/prompt.rs` calls `MemoryStore::list_hot`.
+- `crates/server/src/memory_lifecycle_sweeper.rs` generates promotion/demotion proposals.
+- `crates/server/src/approvals.rs` exposes Controller-only memory lifecycle decisions; H013/H014 track this baseline and H037/H038 extend it.
 
 **Designed, not yet implemented:**
-- Full two-pass planner/executor choreography (the *containment half* — empty tool catalog when the split fires — landed 2026-05-16; the planner-then-executor hand-off is still on the design list)
+- Reflection pass for trusted Controller turns (separate from the shipped metadata-only untrusted-turn planner/executor boundary)
 - Post-turn reflection pass (planner role)
 - Heuristic gate that decides when reflection fires
-- SPA UI for the memory promotion approval queue (uses the same dropdown infra as skill proposals)
 
 ---
 

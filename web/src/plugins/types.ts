@@ -18,15 +18,11 @@
  * 1. Create `plugins/<your-plugin>/ui/panel.tsx`.
  * 2. Import types from this module (type-only — no runtime
  *    artifacts ship from the host into your bundle).
- * 3. Use the bridge to access React, helpers, and shared UI
- *    components — see `BridgeApi` below. Do NOT import React or
- *    any host module directly; you'd ship duplicate copies and
- *    React's "Invalid hook call" guard would tear your panel down.
- * 4. Build via the shared `scripts/build-plugin-ui.sh <name>` step.
- *    Result: `plugins/<name>/ui/panel.js`, marked external for
- *    `react`, `react-dom`, `@execlaw/plugin-ui` — the bundler
- *    rewrites those imports to `globalThis.execlawHost.*`.
- *
+ * 3. Import React normally; the build bundles a panel-private copy.
+ *    Use the bridge only for manifest-scoped RPC and frame-local UI helpers.
+ *    The parent window and its credentials stay isolated.
+ * 4. Build via `node scripts/build-plugin-ui.mjs <name>`. The output
+ *    is self-contained and runs in an opaque-origin sandboxed frame.
  * # Why a typed interface (not a base class)
  *
  * Function components are how modern React is authored, so the
@@ -93,54 +89,23 @@ export interface PluginPanelProps {
 export type PluginPanelComponent = (props: PluginPanelProps) => ReactNode;
 
 /**
- * The bridge API the host exposes to every plugin panel.
- *
- * Plugins access this object via `props.bridge` rather than via a
- * direct `import`. Behind the scenes the bridge instance is the
- * same `window.execlawHost` global the host puts on the page at
- * boot — passing it via props keeps the plugin's component pure
- * (testable with a mock bridge) while still avoiding the
- * duplicate-React hazard.
+ * The frame-local API passed into one plugin panel. The parent
+ * relays only manifest-declared RPC requests across the frame boundary.
  */
 export interface BridgeApi {
-    /**
-     * The host's React module. **You MUST use this React** — not
-     * a copy bundled into your plugin. Two React copies on a page
-     * = "Invalid hook call" runtime crash.
-     */
+    /** The panel bundle's private React runtime. */
     readonly React: typeof import("react");
-    /**
-     * The host's ReactDOM (for portals, `flushSync`, etc.). Same
-     * "single copy" rule applies.
-     */
-    readonly ReactDOM: typeof import("react-dom");
+    /** The panel bundle's private ReactDOM runtime. */
+    readonly ReactDOM: typeof import("react-dom/client");
 
     /**
-     * Return the current operator's access token, or `null` if the
-     * SPA is logged-out / between sessions. Synchronous: the auth
-     * context keeps the latest token in a ref so this is a cheap
-     * read with no I/O. Pass into `bridge.fetchJson` (which already
-     * does this for you) or any direct `fetch()` that needs the
-     * bearer header.
-     *
-     * Token refresh happens in the AuthContext's background — by
-     * the time a plugin panel reads the token here, it's the
-     * latest valid one. If `null` is returned the operator was
-     * signed out mid-flight; surface an error rather than
-     * silently sending an unauthorised request.
-     */
-    getAccessToken(): string | null;
-
-    /**
-     * Authenticated JSON fetch helper. Threads the access token
-     * into the `Authorization` header, parses JSON, and rejects
-     * on non-2xx with an `Error` whose `.message` carries the
-     * response body. Use this for every host API call from inside
-     * a plugin panel.
+     * Manifest-scoped JSON RPC. The parent validates the method/path and
+     * adds the current operator credential outside the sandboxed frame.
+     * The panel does not receive that credential or arbitrary host fetch.
      *
      * @param method HTTP verb (default `"GET"`).
-     * @param path   API path under the host. `/api/admin/plugins/{id}/...`
-     *               for plugin-scoped admin endpoints.
+     * @param path   API path declared for this panel, its plugin's
+     *               `admin_routes`, or its own OAuth account grant.
      * @param body   Optional JSON-serialisable body.
      */
     fetchJson<T = unknown>(
@@ -239,19 +204,6 @@ export interface ButtonProps {
     type?: "button" | "submit" | "reset";
     className?: string;
     "data-testid"?: string;
-}
-
-// --- globalThis declaration ----------------------------------------
-
-declare global {
-    /**
-     * The host bridge instance, installed by the SPA at boot. Plugin
-     * panels access this indirectly via `props.bridge` — direct use
-     * of the global is reserved for the bundle's hot-path
-     * externalisation rewriter.
-     */
-    // eslint-disable-next-line no-var
-    var execlawHost: BridgeApi | undefined;
 }
 
 export {};

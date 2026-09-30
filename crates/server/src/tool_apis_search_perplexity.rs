@@ -54,18 +54,17 @@ struct PerplexityResult {
 }
 
 pub struct PerplexitySearchApi {
-    client: reqwest::Client,
+    client: super::tool_apis_search::SearchHttpClient,
     api_key: String,
     rate_limit: crate::search_rate_limit::RateLimitGate,
 }
 
 impl PerplexitySearchApi {
     pub fn new(api_key: impl Into<String>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_S))
-            .user_agent(crate::tool_apis_http::DEFAULT_USER_AGENT)
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let client = super::tool_apis_search::SearchHttpClient::public(
+            PERPLEXITY_ENDPOINT,
+            Duration::from_secs(DEFAULT_TIMEOUT_S),
+        );
         Self {
             client,
             api_key: api_key.into(),
@@ -91,8 +90,8 @@ impl WebSearchApi for PerplexitySearchApi {
             "query": query,
             "max_results": max_results_clamped,
         });
-        let resp = self
-            .client
+        let client = self.client.build()?;
+        let resp = client
             .post(PERPLEXITY_ENDPOINT)
             .bearer_auth(&self.api_key)
             .header("Accept", "application/json")

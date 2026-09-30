@@ -50,6 +50,32 @@ pub fn load_or_create_master_key() -> Result<[u8; 32], KeyringLoadError> {
     load_or_create_master_key_with_fallback(&default_passphrase_file_path())
 }
 
+/// Load or initialize the event-log signing key independently of the
+/// SQLCipher encryption key. Keeping it stable across database-key rotations
+/// preserves event HMAC chains and signed checkpoints without rewriting history.
+pub fn load_or_create_event_hmac_key() -> Result<[u8; 32], KeyringLoadError> {
+    let master_path = default_passphrase_file_path();
+    let master_key = load_or_create_master_key_with_fallback(&master_path)?;
+    let hmac_path = master_path.with_file_name("event-hmac.key");
+    ensure_event_hmac_key(&hmac_path, &master_key)
+}
+
+fn ensure_event_hmac_key(
+    hmac_path: &Path,
+    initial_key: &[u8; 32],
+) -> Result<[u8; 32], KeyringLoadError> {
+    if hmac_path.exists() {
+        let key = load_from_file(hmac_path)?;
+        warn_if_key_file_too_permissive(hmac_path);
+        return Ok(key);
+    }
+
+    // Existing installs begin with the master key as their event signer.
+    // Persist the same bytes before any key rotation can replace master.key.
+    replace_master_key_file(hmac_path, initial_key)?;
+    Ok(*initial_key)
+}
+
 /// Same as [`load_or_create_master_key`] but with a caller-supplied
 /// passphrase-file path — useful for tests and for operators who
 /// want the file in a specific location.
@@ -153,6 +179,56 @@ pub fn load_or_create_master_key_with_fallback(
             let _ = try_persist_to_keyring(&key);
             Ok(key)
         }
+    }
+}
+
+/// Persist a newly rotated master key to the durable file source first, then
+/// mirror it into the OS keyring. The keyring remains a cache: a mirror error
+/// is logged and the file still wins on the next load.
+pub fn persist_rotated_master_key(
+    fallback_path: &Path,
+    key: &[u8; 32],
+) -> Result<(), KeyringLoadError> {
+    replace_master_key_file(fallback_path, key)?;
+    if let Err(error) = try_persist_to_keyring(key) {
+        tracing::warn!(error = %error, "rotated master key file saved; OS keyring mirror failed");
+    }
+    Ok(())
+}
+
+fn replace_master_key_file(path: &Path, key: &[u8; 32]) -> Result<(), KeyringLoadError> {
+    #[cfg(windows)]
+    {
+        // Windows rename cannot replace a live destination reliably under
+        // Credential Manager/OneDrive file handles. The rotation command keeps
+        // a verified old-key DB snapshot until this write completes, so an
+        // interrupted write falls back to the old key plus snapshot restore.
+        persist_to_file(path, key)?;
+        warn_if_key_file_too_permissive(path);
+        Ok(())
+    }
+
+    #[cfg(not(windows))]
+    {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let mut temporary = path.as_os_str().to_os_string();
+        temporary.push(format!(".rotation-{}.tmp", std::process::id()));
+        let temporary = PathBuf::from(temporary);
+        if temporary.exists() {
+            std::fs::remove_file(&temporary)?;
+        }
+        persist_to_file(&temporary, key)?;
+        std::fs::File::open(&temporary)?.sync_all()?;
+        if let Err(error) = std::fs::rename(&temporary, path) {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+        if let Ok(directory) = std::fs::File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        warn_if_key_file_too_permissive(path);
+        Ok(())
     }
 }
 
@@ -434,6 +510,36 @@ mod tests {
             k1, k2,
             "load_or_create must be idempotent across calls when the file is the durable sink",
         );
+    }
+
+    #[test]
+    fn rotation_replaces_durable_file_and_leaves_no_temp_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("master.key");
+        let old = [7_u8; 32];
+        let new = [8_u8; 32];
+        persist_to_file(&path, &old).unwrap();
+        replace_master_key_file(&path, &new).unwrap();
+        assert_eq!(load_from_file(&path).unwrap(), new);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn event_signing_key_stays_stable_across_master_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let event_path = dir.path().join("event-hmac.key");
+        let old_master = [7_u8; 32];
+        let new_master = [8_u8; 32];
+
+        assert_eq!(
+            ensure_event_hmac_key(&event_path, &old_master).unwrap(),
+            old_master
+        );
+        assert_eq!(
+            ensure_event_hmac_key(&event_path, &new_master).unwrap(),
+            old_master
+        );
+        assert_eq!(load_from_file(&event_path).unwrap(), old_master);
     }
 
     /// Default path resolves under `$HOME/.execlaw/master.key`.

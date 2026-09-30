@@ -16,6 +16,23 @@ budget, the `iogpu.wired_limit_mb` math), see
 [`docs/setup-mac.md`](setup-mac.md) — that doc is still the
 authoritative reference for first-run setup on a Mac.
 
+## Implementation delivery plan
+
+All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+Discovery and native protocol support are existing implementations, not proof
+that every model/backend combination is qualified. Complete
+[H005 retries](llm-harness-roadmap.md#enhancement-005),
+[H029 streaming](llm-harness-roadmap.md#enhancement-029),
+[H030 scheduling](llm-harness-roadmap.md#enhancement-030),
+[H031 context budgets](llm-harness-roadmap.md#enhancement-031),
+[H034 model profiles](llm-harness-roadmap.md#enhancement-034),
+[H078 hardware qualification](llm-harness-roadmap.md#enhancement-078), and
+[H110 local-only tests](llm-harness-roadmap.md#enhancement-110) against exact
+Ollama/model versions. F09/F10 remain logging/streaming findings; this page
+does not mark them fixed. New operator configuration belongs in SQLite and
+inference stays on approved local hardware. The tracker owns evidence and
+delivery status for both native and OpenAI-compatible paths.
+
 ## Where Ollama fits in the inference matrix
 
 execlaw's control plane supervises inference backends through one of
@@ -139,6 +156,20 @@ wizard's backend step), the form does three things:
 When Ollama is detected, the wizard shows a confirmation badge:
 `Ollama v0.1.43 detected · /opt/homebrew/bin/ollama` (version +
 path help disambiguate on multi-install systems).
+
+### Operator-managed Ollama API
+
+If Ollama is already running outside execlaw, choose the external API
+target and set **API protocol** to **Ollama native API**. Enter the daemon
+root URL (for example `http://127.0.0.1:11434`, not `/api/chat`) and the
+installed model tag (for example `qwen3:8b`). The saved backend remains
+`mode = external`, so execlaw does not start or stop that daemon.
+`model_spec_json.binary_hint = "ollama"` selects native `/api/chat` rather
+than the OpenAI-compatible shim, which can drop tool calls for some models.
+The default external protocol remains OpenAI-compatible and accepts a
+`/v1` URL. Both options are subject to the same local endpoint policy:
+loopback or an explicitly approved local network address; cloud inference
+providers are not supported.
 
 ## Per-instance port isolation
 

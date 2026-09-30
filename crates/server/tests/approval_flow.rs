@@ -11,9 +11,13 @@ use execlaw_core::ids::{ConversationId, EventSeq, PrincipalId};
 use execlaw_core::migrations::MigrationRunner;
 use execlaw_core::principal::{PrincipalStore, TrustLevel as CoreTrustLevel};
 use execlaw_plugin_host::{HookRegistry, PluginHost};
+use execlaw_script::{InboundMessage, RouteOutcome};
 use execlaw_server::{AppState, EventBus, JwtSigner, RefreshStore, ServerConfig};
 use std::sync::Arc;
 use tower::ServiceExt;
+
+#[path = "support/auth.rs"]
+mod test_auth;
 
 fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
     let db_config = DbConfig::in_memory_unencrypted();
@@ -71,30 +75,51 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
         inference_metrics: execlaw_server::inference_metrics::InferenceMetrics::new(),
         login_limiter: execlaw_server::auth_rate_limit::LoginRateLimiter::new(),
     };
-    (execlaw_server::routes::build_router(state.clone()), state)
+    (test_auth::authenticated_router(state.clone()), state)
 }
 
 async fn send_cold_contact(
-    app: axum::Router,
+    state: &AppState,
     conv_id: &str,
     sender: &str,
     text: &str,
 ) -> serde_json::Value {
-    let body = serde_json::to_vec(&serde_json::json!({
-        "text": text,
-        "sender_principal_id": sender,
-    }))
-    .unwrap();
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri(format!("/api/chats/{conv_id}/messages"))
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::ACCEPTED);
-    let bytes = body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
-    serde_json::from_slice(&bytes).unwrap()
+    let principal_id = format!("pri_test_{sender}");
+    let (principal, _) = execlaw_server::principal_admit::admit_external_principal(
+        &state.db,
+        &state.plugin_host,
+        "test",
+        sender,
+        &principal_id,
+    )
+    .await
+    .expect("admit test inbound sender");
+    let cid = ConversationId::from(conv_id);
+    execlaw_server::chats::ensure_conversation_for(&state.db, &cid);
+    execlaw_server::chats::handle_cold_contact_for_inbound(state, &cid, &principal, text, "test")
+        .await
+        .expect("record inbound cold contact");
+    let approval_id = EventLog::new(&state.db)
+        .replay_since(&cid, EventSeq(0))
+        .unwrap()
+        .into_iter()
+        .filter(|event| event.kind == EventKind::ColdContactArrived)
+        .last()
+        .expect("cold-contact event")
+        .decode_payload::<serde_json::Value>()
+        .unwrap()["approval_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let approval_token = execlaw_server::approvals::issue_approval_token(
+        &state.signer,
+        &approval_id,
+        &cid,
+        "cold_contact",
+        None,
+        None,
+    );
+    serde_json::json!({"approval_id": approval_id, "approval_token": approval_token})
 }
 
 async fn respond(
@@ -115,6 +140,30 @@ async fn respond(
     (status, serde_json::from_slice(&bytes).unwrap_or_default())
 }
 
+async fn send_inbound(state: &AppState, sender: &str, text: &str) -> RouteOutcome {
+    execlaw_server::generic_inbound::route_inbound(
+        state,
+        InboundMessage {
+            channel: "test".into(),
+            source_event_id: None,
+            native_id: sender.into(),
+            display_name: None,
+            group_id: None,
+            group_name: None,
+            text: text.into(),
+            timestamp_ms: None,
+            attachments: Vec::new(),
+            mention_of_self: None,
+            reuse_conversation: false,
+            conversation_scope: None,
+            agent_handling_enabled: true,
+            is_self_message: false,
+        },
+    )
+    .await
+    .expect("route inbound test message")
+}
+
 /// End-to-end happy path: cold contact → `Trust` verb → principal
 /// upgraded to KnownTrusted; TrustChanged event committed; original
 /// message replayed on the bus; conversation un-parked.
@@ -123,7 +172,7 @@ async fn trust_verb_upgrades_principal_and_resumes_conversation() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, state) = build_app(tmp.path().to_path_buf());
 
-    let initial = send_cold_contact(app.clone(), "flow-1", "newcomer", "hi there").await;
+    let initial = send_cold_contact(&state, "flow-1", "newcomer", "hi there").await;
     let approval_id = initial["approval_id"].as_str().unwrap().to_owned();
 
     // Subscribe BEFORE responding so we can see the replay broadcast.
@@ -136,7 +185,10 @@ async fn trust_verb_upgrades_principal_and_resumes_conversation() {
 
     // Principal now has KnownTrusted in the store.
     let store = PrincipalStore::new(&state.db);
-    let p = store.get(&PrincipalId::from("newcomer")).unwrap().unwrap();
+    let p = store
+        .get(&PrincipalId::from("pri_test_newcomer"))
+        .unwrap()
+        .unwrap();
     assert!(matches!(p.trust_level, CoreTrustLevel::KnownTrusted { .. }));
 
     // TrustChanged event committed to the conversation log.
@@ -169,7 +221,7 @@ async fn trust_limited_verb_restricts_by_topic() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, state) = build_app(tmp.path().to_path_buf());
 
-    let init = send_cold_contact(app.clone(), "flow-2", "limited-user", "hi").await;
+    let init = send_cold_contact(&state, "flow-2", "limited-user", "hi").await;
     let approval_id = init["approval_id"].as_str().unwrap().to_owned();
 
     let body = serde_json::to_vec(&serde_json::json!({
@@ -187,7 +239,7 @@ async fn trust_limited_verb_restricts_by_topic() {
     assert_eq!(resp.status(), StatusCode::OK);
 
     let p = PrincipalStore::new(&state.db)
-        .get(&PrincipalId::from("limited-user"))
+        .get(&PrincipalId::from("pri_test_limited-user"))
         .unwrap()
         .unwrap();
     match p.trust_level {
@@ -206,30 +258,18 @@ async fn block_verb_drops_all_future_messages() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, state) = build_app(tmp.path().to_path_buf());
 
-    let init = send_cold_contact(app.clone(), "flow-3", "spammer", "spam").await;
+    let init = send_cold_contact(&state, "flow-3", "spammer", "spam").await;
     let approval_id = init["approval_id"].as_str().unwrap().to_owned();
 
     let (status, body) = respond(app.clone(), &approval_id, "block").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["outcome"], "block");
 
-    // Next message from the same sender: 403 sender_blocked.
-    let body = serde_json::to_vec(&serde_json::json!({
-        "text": "still spamming",
-        "sender_principal_id": "spammer"
-    }))
-    .unwrap();
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri("/api/chats/flow-3/messages")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-
-    // Principal is Blocked.
-    let _ = state;
+    // The transport path drops a later message from this sender.
+    assert!(matches!(
+        send_inbound(&state, "spammer", "still spamming").await,
+        RouteOutcome::Blocked
+    ));
 }
 
 /// `IgnoreOnce`: clears the parked state without changing trust.
@@ -240,7 +280,7 @@ async fn ignore_once_clears_parked_state_without_trust_change() {
     let tmp = tempfile::tempdir().unwrap();
     let (app, state) = build_app(tmp.path().to_path_buf());
 
-    let init = send_cold_contact(app.clone(), "flow-4", "maybe-user", "hi").await;
+    let init = send_cold_contact(&state, "flow-4", "maybe-user", "hi").await;
     let approval_id = init["approval_id"].as_str().unwrap().to_owned();
 
     let (status, body) = respond(app.clone(), &approval_id, "ignore_once").await;
@@ -249,7 +289,7 @@ async fn ignore_once_clears_parked_state_without_trust_change() {
 
     // Principal is still UnknownPending (no trust change).
     let p = PrincipalStore::new(&state.db)
-        .get(&PrincipalId::from("maybe-user"))
+        .get(&PrincipalId::from("pri_test_maybe-user"))
         .unwrap()
         .unwrap();
     assert!(matches!(
@@ -258,7 +298,7 @@ async fn ignore_once_clears_parked_state_without_trust_change() {
     ));
 
     // Second cold message from same sender re-parks the conversation.
-    let init2 = send_cold_contact(app.clone(), "flow-4", "maybe-user", "hello again").await;
+    let init2 = send_cold_contact(&state, "flow-4", "maybe-user", "hello again").await;
     // New approval_id — each cold-contact event mints its own.
     assert!(init2["approval_id"].as_str().unwrap().starts_with("appr-"));
     assert_ne!(init2["approval_id"], init["approval_id"]);
@@ -278,9 +318,9 @@ async fn bogus_approval_id_returns_404() {
 #[tokio::test]
 async fn unsupported_verb_for_cold_contact_is_400() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _) = build_app(tmp.path().to_path_buf());
+    let (app, state) = build_app(tmp.path().to_path_buf());
 
-    let init = send_cold_contact(app.clone(), "flow-5", "someone", "hi").await;
+    let init = send_cold_contact(&state, "flow-5", "someone", "hi").await;
     let approval_id = init["approval_id"].as_str().unwrap().to_owned();
 
     let (status, body) = respond(app, &approval_id, "approve").await;
@@ -297,7 +337,7 @@ async fn revoke_trust_drops_future_messages() {
     let (app, _state) = build_app(tmp.path().to_path_buf());
 
     // Trust first.
-    let init = send_cold_contact(app.clone(), "flow-6", "friend", "hey").await;
+    let init = send_cold_contact(&_state, "flow-6", "friend", "hey").await;
     let approval_id = init["approval_id"].as_str().unwrap().to_owned();
     let (_, _) = respond(app.clone(), &approval_id, "trust").await;
 
@@ -308,7 +348,7 @@ async fn revoke_trust_drops_future_messages() {
     .unwrap();
     let req = Request::builder()
         .method(Method::POST)
-        .uri("/api/admin/principals/friend/revoke")
+        .uri("/api/admin/principals/pri_test_friend/revoke")
         .header(header::CONTENT_TYPE, "application/json")
         .body(Body::from(revoke_body))
         .unwrap();
@@ -320,20 +360,10 @@ async fn revoke_trust_drops_future_messages() {
     assert_eq!(body["new_trust_class"], "Blocked");
     assert_eq!(body["outcome"], "revoked");
 
-    // Their next message gets 403.
-    let body = serde_json::to_vec(&serde_json::json!({
-        "text": "you still there?",
-        "sender_principal_id": "friend"
-    }))
-    .unwrap();
-    let req = Request::builder()
-        .method(Method::POST)
-        .uri("/api/chats/flow-6/messages")
-        .header(header::CONTENT_TYPE, "application/json")
-        .body(Body::from(body))
-        .unwrap();
-    let resp = app.oneshot(req).await.unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    assert!(matches!(
+        send_inbound(&_state, "friend", "you still there?").await,
+        RouteOutcome::Blocked
+    ));
 }
 
 /// Revoke on a non-existent principal returns 404.
@@ -357,8 +387,8 @@ async fn revoke_unknown_principal_is_404() {
 #[tokio::test]
 async fn cold_contact_emits_signed_approval_token() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _state) = build_app(tmp.path().to_path_buf());
-    let init = send_cold_contact(app, "flow-token", "stranger", "hi").await;
+    let (_app, state) = build_app(tmp.path().to_path_buf());
+    let init = send_cold_contact(&state, "flow-token", "stranger", "hi").await;
     let token = init["approval_token"]
         .as_str()
         .expect("cold-contact response must include approval_token");
@@ -371,8 +401,8 @@ async fn cold_contact_emits_signed_approval_token() {
 #[tokio::test]
 async fn approval_with_mismatched_token_jti_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _state) = build_app(tmp.path().to_path_buf());
-    let init = send_cold_contact(app.clone(), "flow-bad-jti", "x", "hi").await;
+    let (app, state) = build_app(tmp.path().to_path_buf());
+    let init = send_cold_contact(&state, "flow-bad-jti", "x", "hi").await;
     let approval_id = init["approval_id"].as_str().unwrap().to_owned();
     let token = init["approval_token"].as_str().unwrap().to_owned();
 
@@ -404,8 +434,8 @@ async fn approval_with_mismatched_token_jti_is_rejected() {
 #[tokio::test]
 async fn approval_with_garbage_token_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
-    let (app, _state) = build_app(tmp.path().to_path_buf());
-    let init = send_cold_contact(app.clone(), "flow-garbage", "y", "hi").await;
+    let (app, state) = build_app(tmp.path().to_path_buf());
+    let init = send_cold_contact(&state, "flow-garbage", "y", "hi").await;
     let approval_id = init["approval_id"].as_str().unwrap().to_owned();
 
     let body = serde_json::to_vec(&serde_json::json!({

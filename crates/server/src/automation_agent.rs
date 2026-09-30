@@ -258,6 +258,7 @@ impl AgentInvoker for InferenceAgentInvoker {
         let resolved = if req.config.attachments.is_empty() {
             self.inference
                 .resolve(&self.db, BackendPurpose::Standard)
+                .map(|resolved| resolved.with_workload("automation"))
                 .ok_or(AskAgentError::NoLlmConfigured)?
         } else {
             // Vision routing: only honor a Vision row that actually
@@ -269,6 +270,7 @@ impl AgentInvoker for InferenceAgentInvoker {
             let vision = self
                 .inference
                 .resolve(&self.db, BackendPurpose::Vision)
+                .map(|resolved| resolved.with_workload("automation"))
                 .filter(|r| r.source == "db");
             match vision {
                 Some(v) => v,
@@ -276,6 +278,7 @@ impl AgentInvoker for InferenceAgentInvoker {
                     let standard = self
                         .inference
                         .resolve(&self.db, BackendPurpose::Standard)
+                        .map(|resolved| resolved.with_workload("automation"))
                         .ok_or(AskAgentError::NoLlmConfigured)?;
                     if !model_id_is_vision_capable(&standard.model_id) {
                         return Err(AskAgentError::VisionRequiredButTextOnlyModel {
@@ -363,6 +366,7 @@ async fn do_invoke(
         // pass for tool-bearing requests against vLLM (per the
         // upstream comment) and harmless against backends that
         // ignore the field. The serializer skips None entirely.
+        response_format: None,
         guided_decoding_backend: Some("outlines".into()),
     };
     let resp = client

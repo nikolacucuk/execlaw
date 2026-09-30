@@ -88,3 +88,26 @@ Outputs land under
   separately.
 - Voice mic Info.plist key (`NSMicrophoneUsageDescription`) —
   added when Phase 8 voice UI ships.
+
+## Implementation plan
+
+All 130 enhancements are committed implementation scope under the
+[implementation plan](../docs/implementation-plan.md). This commitment is not a
+claim that they have shipped: the plan owns implementation status, and the
+[roadmap](../docs/llm-harness-roadmap.md) owns acceptance criteria.
+
+Relevant work for this component:
+
+- [H028: packaged release qualification](../docs/llm-harness-roadmap.md#enhancement-028).
+- [H073: macOS isolation](../docs/llm-harness-roadmap.md#enhancement-073).
+- [H075: safe service draining](../docs/llm-harness-roadmap.md#enhancement-075).
+- [H114: reproducible builds](../docs/llm-harness-roadmap.md#enhancement-114).
+- [H116: air-gapped updates](../docs/llm-harness-roadmap.md#enhancement-116).
+- [H117: service authority](../docs/llm-harness-roadmap.md#enhancement-117).
+- [H118: machine-loss recovery](../docs/llm-harness-roadmap.md#enhancement-118).
+
+Production encryption verification remains pending under
+[F04](../docs/llm-harness-roadmap.md#f04---high-desktop-release-builds-omit-production-sqlcipher).
+The reviewed packaging scripts omit the SQLCipher feature; do not infer
+encrypted-at-rest protection from a successful desktop build. H028 requires
+verification of the actual packaged binary before release qualification.

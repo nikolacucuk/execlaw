@@ -262,7 +262,7 @@ impl ConnectionDriver {
                         Err(e) => {
                             tracing::warn!(
                                 error = %e,
-                                payload = %trim(&txt, 200),
+                                payload_chars = txt.chars().count(),
                                 "dropping undecodable ServerToRunner frame"
                             );
                         }

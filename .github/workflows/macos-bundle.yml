@@ -120,6 +120,9 @@ jobs:
           EXECLAW_REUSE_NODE_MODULES: "1"
         run: ./scripts/build-mac.sh
 
+      - name: Smoke-test release SQLCipher binary
+        run: target/aarch64-apple-darwin/release/execlaw doctor
+
       - name: Locate bundle outputs
         id: outputs
         # The `.dmg` filename includes the version from
@@ -134,8 +137,55 @@ jobs:
               echo "::error::expected .app at $APP — build-mac.sh failed silently?"
               exit 1
           fi
+          if [[ -z "$DMG" || ! -f "$DMG" ]]; then
+              echo "::error::expected a DMG under $BUNDLE_ROOT/dmg/"
+              exit 1
+          fi
           echo "app=$APP" >> "$GITHUB_OUTPUT"
           echo "dmg=$DMG" >> "$GITHUB_OUTPUT"
+
+      - name: Sign release artifact and prepare offline provenance
+        env:
+          ARTIFACT: ${{ steps.outputs.outputs.dmg }}
+        run: python3 scripts/prepare-release-provenance.py --artifact-type desktop_release "$ARTIFACT"
+
+      - name: Download previous installer for rollback bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: previous
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          PREVIOUS=$(python3 scripts/fetch-previous-release-artifact.py \
+            --pattern 'execlaw_*_aarch64.dmg' \
+            --output-dir "$RUNNER_TEMP/execlaw-previous")
+          echo "artifact=$PREVIOUS" >> "$GITHUB_OUTPUT"
+
+      - name: Package offline update bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          ARTIFACT: ${{ steps.outputs.outputs.dmg }}
+          ROLLBACK_ARTIFACT: ${{ steps.previous.outputs.artifact }}
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          args=(--artifact "$ARTIFACT" --platform macos-aarch64 --version "$RELEASE_VERSION" \
+            --output "dist/execlaw-offline-update-macos-aarch64-${RELEASE_VERSION}.zip")
+          if [[ -n "$ROLLBACK_ARTIFACT" ]]; then args+=(--rollback-artifact "$ROLLBACK_ARTIFACT"); fi
+          python3 scripts/package-offline-update.py "${args[@]}"
+          python3 scripts/prepare-release-provenance.py --artifact-type desktop_release \
+            "dist/execlaw-offline-update-macos-aarch64-${RELEASE_VERSION}.zip"
+
+      - name: Install and smoke-test packaged DMG
+        env:
+          DMG: ${{ steps.outputs.outputs.dmg }}
+        run: |
+          set -euo pipefail
+          MOUNT="$RUNNER_TEMP/execlaw-dmg"
+          APP="$RUNNER_TEMP/execlaw-installed.app"
+          mkdir -p "$MOUNT"
+          hdiutil attach "$DMG" -mountpoint "$MOUNT" -nobrowse -readonly
+          ditto "$MOUNT/execlaw.app" "$APP"
+          hdiutil detach "$MOUNT"
+          "$APP/Contents/MacOS/execlaw" doctor
 
       - name: Upload .app
         uses: actions/upload-artifact@v4
@@ -150,11 +200,25 @@ jobs:
           retention-days: 14
 
       - name: Upload .dmg
-        if: steps.outputs.outputs.dmg != ''
         uses: actions/upload-artifact@v4
         with:
           name: execlaw-dmg-aarch64
-          path: ${{ steps.outputs.outputs.dmg }}
+          path: |
+            ${{ steps.outputs.outputs.dmg }}
+            ${{ steps.outputs.outputs.dmg }}.sigstore.json
+            ${{ steps.outputs.outputs.dmg }}.provenance.json
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload offline update bundle
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: execlaw-offline-update-macos-aarch64
+          path: |
+            dist/execlaw-offline-update-macos-aarch64-${{ github.ref_name }}.zip
+            dist/execlaw-offline-update-macos-aarch64-${{ github.ref_name }}.zip.sigstore.json
+            dist/execlaw-offline-update-macos-aarch64-${{ github.ref_name }}.zip.provenance.json
           if-no-files-found: error
           retention-days: 90
 
@@ -280,7 +344,12 @@ jobs:
 
           files: |
             ${{ steps.outputs.outputs.dmg }}
+            ${{ steps.outputs.outputs.dmg }}.sigstore.json
+            ${{ steps.outputs.outputs.dmg }}.provenance.json
             ${{ steps.checksum.outputs.sha_file }}
+            dist/execlaw-offline-update-macos-aarch64-${{ github.ref_name }}.zip
+            dist/execlaw-offline-update-macos-aarch64-${{ github.ref_name }}.zip.sigstore.json
+            dist/execlaw-offline-update-macos-aarch64-${{ github.ref_name }}.zip.provenance.json
             dist/*.zip
             dist/*.zip.sha256
             dist/*.zip.spdx.json

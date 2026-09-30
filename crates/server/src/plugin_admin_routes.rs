@@ -88,22 +88,10 @@ async fn dispatch_handler(
 ) -> Result<Response, ApiError> {
     require_controller(&state, &user)?;
 
-    // UI-asset short-circuit. Anything under `/ui/...` is a request
-    // for a file from the plugin's staged directory (panel.js,
-    // panel.css, image assets, …). This is how the SPA dynamically
-    // loads each plugin's self-contained config panel without
-    // baking plugin-specific code into the host bundle.
-    //
-    // The lookup is path-traversal guarded: we canonicalise both the
-    // plugin's stage root and the resolved asset path, and reject
-    // anything that escapes the stage. Auth is already enforced by
-    // `require_controller` above.
-    //
-    // The SPA loads the asset via authenticated `fetch()` and turns
-    // the response into a `URL.createObjectURL()` blob before
-    // `import()`-ing it — the import primitive doesn't carry the
-    // bearer token, so we serve via a normal request and let the
-    // browser's blob loader handle the module instantiation.
+    // UI-entry short-circuit. Only the entry named by a plugin's
+    // `[[ui_panels]]` declaration is served; the remaining `ui/` tree
+    // is not exposed as a generic static-file endpoint. Canonical
+    // containment is checked after the manifest allowlist.
     if method == Method::GET && tail.starts_with("ui/") {
         return serve_plugin_ui_asset(&state, &plugin_id, &tail, &headers).await;
     }
@@ -172,29 +160,12 @@ async fn dispatch_handler(
     Ok((StatusCode::OK, Json(result)).into_response())
 }
 
-/// Serve a static file from a plugin's staged directory.
+/// Serve the manifest-declared panel entry from a plugin stage. The
+/// parent fetches this authenticated source before sending it into the
+/// opaque-origin frame; no other staged file is served by this route.
 ///
-/// The plugin's UI panel ships as part of its ZIP (alongside
-/// `plugin.toml` + `main.rhai`), under `ui/`. The SPA's
-/// `DynamicPluginPanel` component fetches `ui/panel.js` (and any
-/// sibling assets — CSS, source maps) via authenticated `fetch()`,
-/// constructs a Blob URL, and dynamic-`import()`s it. This keeps
-/// every plugin's frontend code inside its own ZIP — no
-/// plugin-specific imports bleed into the host SPA bundle.
-///
-/// **Security:** we canonicalise both the plugin's stage root AND
-/// the resolved asset path, then assert the asset path starts with
-/// the stage root. A `../../../etc/passwd`-style tail is rejected
-/// before any file open. Auth is enforced upstream
-/// (`require_controller` in the caller).
-///
-/// **Caching:** weak ETag derived from `(mtime_ms, size_bytes)`.
-/// If the SPA sends `If-None-Match` matching the current ETag we
-/// return `304 Not Modified` without re-reading the file — useful
-/// for the SPA's panel-load pattern which fetches the same
-/// `ui/panel.js` repeatedly during a session as the operator
-/// navigates around. Plugin upgrades shift mtime, invalidating the
-/// cache.
+/// The entry is canonicalized and checked against the stage root, so
+/// symlinks and traversal cannot expose host files.
 async fn serve_plugin_ui_asset(
     state: &AppState,
     plugin_id: &str,
@@ -216,6 +187,23 @@ async fn serve_plugin_ui_asset(
             code: "plugin_not_installed",
             message: format!("plugin '{plugin_id}' is not installed"),
         })?;
+
+    let manifest =
+        execlaw_plugin_sdk::PluginManifest::parse(&row.manifest_toml).map_err(|error| {
+            ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "plugin_manifest_unreadable",
+                message: format!("installed plugin manifest is invalid: {error}"),
+            }
+        })?;
+    let declared = manifest.ui_panels.iter().any(|panel| panel.entry == tail);
+    if !declared {
+        return Err(ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "ui_asset_not_found",
+            message: format!("plugin '{plugin_id}' has no declared UI asset at '{tail}'"),
+        });
+    }
 
     // Canonicalise the stage root so the symlink-aware comparison
     // below survives operators who put `~/.execlaw/plugins` behind
@@ -367,7 +355,9 @@ mod tests {
         let fake_token = "fake-discord-token-1234";
         let response = handler_failure().into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(!text.contains(fake_token));
         assert!(!text.contains("1234"));
@@ -381,7 +371,9 @@ mod tests {
         let (token, _) = fixture_with_panel(&app, &state, "fixture-auth", b"x").await;
         let stage = state.plugin_host.stage_root().join("fixture-secret-0.1.0");
         fs::create_dir_all(&stage).unwrap();
-        fs::write(stage.join("plugin.toml"), r#"
+        fs::write(
+            stage.join("plugin.toml"),
+            r#"
 [plugin]
 id = "fixture-secret"
 name = "Fixture secret"
@@ -395,12 +387,18 @@ source = "main.rhai"
 method = "POST"
 path = "/config"
 handler = "admin_set_config"
-"#).unwrap();
-        fs::write(stage.join("main.rhai"), r#"
+"#,
+        )
+        .unwrap();
+        fs::write(
+            stage.join("main.rhai"),
+            r#"
 fn admin_set_config(req) {
     throw "upstream echoed " + req.body.bot_token;
 }
-"#).unwrap();
+"#,
+        )
+        .unwrap();
         state.plugin_host.install(&stage).await.unwrap();
         let request = Request::builder()
             .method(Method::POST)
@@ -411,7 +409,9 @@ fn admin_set_config(req) {
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-        let body = body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
         let text = String::from_utf8(body.to_vec()).unwrap();
         assert!(text.contains("plugin_admin_handler_error"));
         assert!(!text.contains("fake-discord-token-1234"));
@@ -611,6 +611,27 @@ entry = "ui/panel.js"
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn ui_asset_404s_for_file_not_declared_by_panel_manifest() {
+        let state = test_app_state();
+        let app = build_router(state.clone());
+        let (token, stage) = fixture_with_panel(&app, &state, "fixture-undeclared", b"panel").await;
+        fs::write(
+            stage.join("ui").join("private.txt"),
+            "private fixture bytes",
+        )
+        .unwrap();
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/admin/plugins/fixture-undeclared/ui/private.txt")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]

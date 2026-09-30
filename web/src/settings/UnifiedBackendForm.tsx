@@ -591,6 +591,7 @@ export function UnifiedBackendForm({
 
     const [endpoint, setEndpoint] = useState("");
     const [remoteModel, setRemoteModel] = useState("");
+    const [remoteProtocol, setRemoteProtocol] = useState<"openai" | "ollama">("openai");
 
     const [submitting, setSubmitting] = useState(false);
     const [submitError, setSubmitError] = useState<string | null>(null);
@@ -619,11 +620,15 @@ export function UnifiedBackendForm({
                         setSubmitting(false);
                         return;
                     }
+                    if (remoteProtocol === "ollama" && !remoteModel.trim()) {
+                        setSubmitError("Enter the Ollama model tag to use for this backend.");
+                        return;
+                    }
                     await onSubmit(purpose, {
                         inference_backend: "external",
                         model_spec:
                             remoteModel.trim().length > 0
-                                ? { model: remoteModel.trim() }
+                                ? { model: remoteModel.trim(), ...(remoteProtocol === "ollama" ? { binary_hint: "ollama" } : {}) }
                                 : {},
                         gpu_id: null,
                         endpoint: trimmed,
@@ -690,7 +695,7 @@ export function UnifiedBackendForm({
                 setSubmitting(false);
             }
         },
-        [target, serving, modelId, endpoint, remoteModel, gpus, onSubmit, purpose],
+        [target, serving, modelId, endpoint, remoteModel, remoteProtocol, gpus, onSubmit, purpose],
     );
 
     return (
@@ -863,6 +868,14 @@ export function UnifiedBackendForm({
 
                 {target.kind === "remote" && (
                     <>
+                        <Form.Group className="mb-3" controlId={`${testIdPrefix}-external-protocol`}>
+                            <Form.Label>API protocol</Form.Label>
+                            <Form.Select value={remoteProtocol} onChange={(e) => setRemoteProtocol(e.target.value as "openai" | "ollama")}
+                                disabled={submitting} data-testid={`${testIdPrefix}-external-protocol`}>
+                                <option value="openai">OpenAI-compatible (local)</option>
+                                <option value="ollama">Ollama native API</option>
+                            </Form.Select>
+                        </Form.Group>
                         <Form.Group
                             className="mb-3"
                             controlId={`${testIdPrefix}-external-endpoint`}
@@ -874,15 +887,16 @@ export function UnifiedBackendForm({
                                 onChange={(e) => setEndpoint(e.target.value)}
                                 isInvalid={!!endpointError}
                                 disabled={submitting}
-                                placeholder="http://localhost:8000/v1"
+                                placeholder={remoteProtocol === "ollama" ? "http://localhost:11434" : "http://localhost:8000/v1"}
                                 data-testid={`${testIdPrefix}-external-endpoint`}
                             />
                             <Form.Control.Feedback type="invalid">
                                 {endpointError}
                             </Form.Control.Feedback>
                             <Form.Text className="execlaw-muted">
-                                Include the <code>/v1</code> suffix if
-                                your server requires it.
+                                {remoteProtocol === "ollama" ? "Enter the local Ollama daemon URL without /api/chat." : <>
+                                    Include the <code>/v1</code> suffix if your server requires it.
+                                </>}
                             </Form.Text>
                         </Form.Group>
                         <Form.Group
@@ -890,15 +904,15 @@ export function UnifiedBackendForm({
                             controlId={`${testIdPrefix}-external-model`}
                         >
                             <Form.Label>
-                                Model id{" "}
-                                <span className="execlaw-muted">(optional)</span>
+                                {remoteProtocol === "ollama" ? "Ollama model tag" : "Model id"}{" "}
+                                {remoteProtocol !== "ollama" && <span className="execlaw-muted">(optional)</span>}
                             </Form.Label>
                             <Form.Control
                                 type="text"
                                 value={remoteModel}
                                 onChange={(e) => setRemoteModel(e.target.value)}
                                 disabled={submitting}
-                                placeholder="QuantTrio/Qwen3.6-27B-AWQ"
+                                placeholder={remoteProtocol === "ollama" ? "qwen3:8b" : "QuantTrio/Qwen3.6-27B-AWQ"}
                                 data-testid={`${testIdPrefix}-external-model`}
                             />
                             <Form.Text className="execlaw-muted">

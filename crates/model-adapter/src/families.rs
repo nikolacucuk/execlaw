@@ -357,6 +357,7 @@ mod tests {
             max_tokens: None,
             chat_template_kwargs: None,
             tool_choice: None,
+            response_format: None,
             guided_decoding_backend: None,
         }
     }

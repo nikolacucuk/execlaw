@@ -133,6 +133,13 @@ describe("RoutinesPage", () => {
         fireEvent.change(screen.getByTestId("routine-prompt"), {
             target: { value: "do the thing" },
         });
+        fireEvent.change(screen.getByLabelText("Required acceptance checks (one per line)"), {
+            target: { value: "Required tests pass" },
+        });
+        fireEvent.change(screen.getByLabelText("Required artifacts (one per line)"), {
+            target: { value: "Review report" },
+        });
+        fireEvent.click(screen.getByLabelText("Require delivery confirmation"));
         // Wait for preview to land (debounced 250ms).
         await waitFor(
             () => {
@@ -165,6 +172,11 @@ describe("RoutinesPage", () => {
         expect(body.name).toBe("morning");
         expect(body.schedule_cron).toBe("0 8 * * *");
         expect(body.prompt).toBe("do the thing");
+        expect(body.completion_contract).toEqual({
+            acceptance_criteria: [{ criterion_id: "criterion-1", description: "Required tests pass", required: true }],
+            required_artifacts: [{ artifact_id: "artifact-1", description: "Review report" }],
+            delivery_required: true,
+        });
     });
 
     it("Run-now POSTs and refreshes the list", async () => {

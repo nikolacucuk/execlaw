@@ -190,6 +190,19 @@ impl ResearchWorkspace {
         }
         Ok(())
     }
+
+    /// Remove the separately stored Obsidian/Graphify projection for a job.
+    pub fn purge_graph_snapshot(&self, job_id: &ResearchJobId) -> Result<bool, WorkspaceError> {
+        let path = PathBuf::from(".obsidian")
+            .join("graphify")
+            .join("research-snapshots")
+            .join(format!("{}.json", job_id.as_str()));
+        match std::fs::remove_file(path) {
+            Ok(()) => Ok(true),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(WorkspaceError::Io(error)),
+        }
+    }
 }
 
 // -----------------------------------------------------------------
@@ -739,6 +752,7 @@ mod tests {
                 title: Some("ex".into()),
                 fetched_ok: true,
                 error: None,
+                ..ResearchSource::default()
             }],
             tokens_used: Some(42),
             error: None,

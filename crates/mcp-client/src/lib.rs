@@ -10,8 +10,11 @@
 //! Locked decisions baked into this crate:
 //!   * Sampling is refused on every connection — execlaw never lets
 //!     a server make us run an LLM call.
-//!   * Tools and resources are first-class. Prompts (the third MCP
-//!     primitive) are deliberately out of scope.
+//!   * Protocol version 2025-06-18 is pinned across stdio and Streamable HTTP.
+//!   * Tools and resources are capability-gated; prompts/tasks/elicitation
+//!     remain unavailable until they have an explicit negotiated contract.
+//!   * Frames, response bodies, discovery pages, and request deadlines are
+//!     bounded. Caller cancellation emits `notifications/cancelled`.
 //!   * Stdio + Streamable HTTP are the supported transports. Stdio
 //!     ships first (8b); HTTP joins in 8c with the connection
 //!     manager.

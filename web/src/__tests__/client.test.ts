@@ -182,7 +182,7 @@ describe("apiFetch", () => {
 
             const out = await apiFetch<{ ok: boolean }>(
                 "/api/x",
-                {},
+                { headers: { "Idempotency-Key": "request-1" } },
                 () => "stale-token",
             );
             expect(out.ok).toBe(true);
@@ -193,6 +193,8 @@ describe("apiFetch", () => {
             const fresh = calls[1]?.headers as Record<string, string>;
             expect(stale.authorization).toBe("Bearer stale-token");
             expect(fresh.authorization).toBe("Bearer fresh-token");
+            expect(stale["Idempotency-Key"]).toBe("request-1");
+            expect(fresh["Idempotency-Key"]).toBe("request-1");
         });
 
         it("does NOT retry when the hook returns null (refresh failed)", async () => {

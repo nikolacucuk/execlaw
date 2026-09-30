@@ -397,6 +397,11 @@ pub struct BackendStatusResponse {
     /// `Downloading model · 8.5 / 18.0 GB · 47%` from these
     /// fields.
     pub download_progress: Option<DownloadProgressView>,
+    /// Persisted, derived observation; not proof the model is currently live.
+    pub observed_model_id: Option<String>,
+    pub last_observed_at: Option<i64>,
+    pub last_success_at: Option<i64>,
+    pub stage_changed_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -431,6 +436,7 @@ pub async fn status_handler(
 
     let store = BackendStore::new(&state.db);
     let row = store.get(purpose).map_err(ApiError::from)?;
+    let readiness = store.readiness(purpose).map_err(ApiError::from)?;
     // No row at all → Stopped + external. The supervisor never sees
     // a row that doesn't exist; the SPA still wants a response so
     // the status pill renders deterministically.
@@ -475,6 +481,10 @@ pub async fn status_handler(
         elapsed_secs,
         last_log_line,
         download_progress,
+        observed_model_id: readiness.as_ref().and_then(|item| item.model_id.clone()),
+        last_observed_at: readiness.as_ref().map(|item| item.last_observed_at),
+        last_success_at: readiness.as_ref().and_then(|item| item.last_success_at),
+        stage_changed_at: readiness.as_ref().map(|item| item.stage_changed_at),
     }))
 }
 
@@ -809,7 +819,10 @@ pub async fn capabilities_handler(
     // rows pick up the operator-typed value. A purpose that has no
     // row at all returns `reachable=false` so the SPA's hooks can
     // surface "not configured" without crashing.
-    let resolved = state.inference.resolve(&state.db, purpose);
+    let resolved = state
+        .inference
+        .resolve(&state.db, purpose)
+        .map(|resolved| resolved.with_workload("background"));
     let endpoint = resolved.as_ref().map(|r| r.endpoint.clone());
     let Some(resolved) = resolved else {
         return Ok(Json(BackendCapabilitiesResponse {
@@ -1300,7 +1313,7 @@ mod tests {
         sup.reconcile_once().await;
         sup.reconcile_once().await;
 
-        let app = build_router(state);
+        let app = build_router(state.clone());
         let tok = setup_controller_token(&app).await;
         let req = Request::builder()
             .method(Method::GET)
@@ -1315,12 +1328,32 @@ mod tests {
         assert_eq!(v["mode"], "managed");
         assert_eq!(v["status"], "Healthy");
         assert_eq!(v["supervisor_available"], true);
+        assert_eq!(v["observed_model_id"], "X");
+        assert!(v["last_observed_at"].as_i64().unwrap() > 0);
+        assert!(v["last_success_at"].as_i64().unwrap() > 0);
+        assert!(v["stage_changed_at"].as_i64().unwrap() > 0);
         assert!(
             v["endpoint"]
                 .as_str()
                 .unwrap()
                 .starts_with("http://127.0.0.1:")
         );
+
+        let last_success = v["last_success_at"].as_i64().unwrap();
+        state.backend_supervisor = None;
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/admin/backends/Standard/status")
+            .header(header::AUTHORIZATION, format!("Bearer {tok}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = build_router(state).oneshot(request).await.unwrap();
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let restarted: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restarted["status"], "Stopped");
+        assert_eq!(restarted["last_success_at"], last_success);
     }
 
     #[tokio::test]

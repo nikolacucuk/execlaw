@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 execlaw-runner-protocol = { path = "../runner-protocol" }
 execlaw-inference-api = { path = "../inference-api" }
+execlaw-context-window = { path = "../context-window" }
 
 # async runtime + websocket client
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }

@@ -364,6 +364,35 @@ pub struct OauthAccountDecl {
 pub struct UiPanelDecl {
     pub mount: String,
     pub entry: String,
+    /// Host RPC scopes exposed to this panel inside its sandbox.
+    #[serde(default)]
+    pub rpc_capabilities: Vec<PanelRpcCapability>,
+}
+
+/// Narrow host services a sandboxed panel may request through RPC.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelRpcCapability {
+    /// Call only this plugin's own manifest-declared `admin_routes`.
+    PluginAdminRoutes,
+    /// Read or change OAuth account configuration declared by this plugin.
+    OwnOauthAccounts,
+    /// Read or change this plugin's namespaced settings entries.
+    OwnPluginSettings,
+    /// Read this plugin's sidecar status only.
+    OwnSidecarStatus,
+    /// Read the controller's configured identifiers for this plugin's panel.
+    ControllerIdentifiers,
+}
+
+fn is_safe_panel_asset_path(path: &str) -> bool {
+    if !path.starts_with("ui/") || path.contains('\\') || path.contains('\0') {
+        return false;
+    }
+    let path = std::path::Path::new(path);
+    let mut components = path.components();
+    matches!(components.next(), Some(std::path::Component::Normal(component)) if component == "ui")
+        && components.all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
 /// Plugin-served admin endpoint — declared in the plugin's
@@ -658,6 +687,8 @@ pub enum ManifestError {
     TomlParse(#[from] toml::de::Error),
     #[error("plugin id is empty or contains invalid characters: '{0}'")]
     BadId(String),
+    #[error("plugin version is not a safe path component: '{0}'")]
+    BadVersion(String),
     #[error("plugin version is empty")]
     EmptyVersion,
     #[error("duplicate tool name: '{0}'")]
@@ -666,6 +697,12 @@ pub enum ManifestError {
     DuplicateOauth(String),
     #[error("duplicate ui panel mount: '{0}'")]
     DuplicatePanel(String),
+    #[error("invalid plugin UI asset path: '{0}'")]
+    BadPanelAsset(String),
+    #[error("panel '{panel}' requests OAuth RPC without declaring any OAuth accounts")]
+    PanelOauthCapabilityWithoutAccounts { panel: String },
+    #[error("panel '{panel}' requests plugin admin RPC without declaring any admin routes")]
+    PanelAdminCapabilityWithoutRoutes { panel: String },
     #[error("unknown runtime.tier '{0}' (must be 'subprocess' or 'script')")]
     UnknownRuntimeTier(String),
     #[error("runtime.tier = 'subprocess' requires 'executable'")]
@@ -725,6 +762,16 @@ impl PluginManifest {
         if self.plugin.version.is_empty() {
             return Err(ManifestError::EmptyVersion);
         }
+        let version = self.plugin.version.as_bytes();
+        if version.len() > 128
+            || !version[0].is_ascii_alphanumeric()
+            || !version[version.len() - 1].is_ascii_alphanumeric()
+            || !version.iter().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(*byte, b'.' | b'-' | b'_' | b'+')
+            })
+        {
+            return Err(ManifestError::BadVersion(self.plugin.version.clone()));
+        }
 
         // Uniqueness + trust_floor validation, in one pass.
         let mut seen: std::collections::HashSet<&str> = Default::default();
@@ -751,6 +798,25 @@ impl PluginManifest {
         for p in &self.ui_panels {
             if !seen.insert(&p.mount) {
                 return Err(ManifestError::DuplicatePanel(p.mount.clone()));
+            }
+            if !is_safe_panel_asset_path(&p.entry) {
+                return Err(ManifestError::BadPanelAsset(p.entry.clone()));
+            }
+            if p.rpc_capabilities
+                .contains(&PanelRpcCapability::OwnOauthAccounts)
+                && self.oauth_accounts.is_empty()
+            {
+                return Err(ManifestError::PanelOauthCapabilityWithoutAccounts {
+                    panel: p.mount.clone(),
+                });
+            }
+            if p.rpc_capabilities
+                .contains(&PanelRpcCapability::PluginAdminRoutes)
+                && self.admin_routes.is_empty()
+            {
+                return Err(ManifestError::PanelAdminCapabilityWithoutRoutes {
+                    panel: p.mount.clone(),
+                });
             }
         }
 
@@ -915,6 +981,64 @@ mod tests {
         let m = PluginManifest::parse(tiny).unwrap();
         assert!(m.tools.is_empty());
         assert!(m.oauth_accounts.is_empty());
+    }
+
+    #[test]
+    fn ui_panel_entry_and_rpc_capabilities_are_narrow() {
+        let valid = r#"
+[plugin]
+id = "panel-test"
+name = "Panel test"
+version = "0.1.0"
+
+[[admin_routes]]
+method = "GET"
+path = "/status"
+handler = "admin_status"
+
+[[ui_panels]]
+mount = "admin/plugins/panel-test"
+entry = "ui/panel.js"
+rpc_capabilities = ["plugin_admin_routes"]
+"#;
+        assert!(PluginManifest::parse(valid).is_ok());
+
+        let escaping_asset = valid.replace("ui/panel.js", "ui/../secret.txt");
+        assert!(matches!(
+            PluginManifest::parse(&escaping_asset),
+            Err(ManifestError::BadPanelAsset(_))
+        ));
+        let unsafe_version = valid.replace("0.1.0", "../escaped");
+        assert!(matches!(
+            PluginManifest::parse(&unsafe_version),
+            Err(ManifestError::BadVersion(_))
+        ));
+    }
+
+    #[test]
+    fn panel_capabilities_require_their_manifest_resources() {
+        let oauth_without_account = r#"
+[plugin]
+id = "panel-test"
+name = "Panel test"
+version = "0.1.0"
+
+[[ui_panels]]
+mount = "admin/plugins/panel-test"
+entry = "ui/panel.js"
+rpc_capabilities = ["own_oauth_accounts"]
+"#;
+        assert!(matches!(
+            PluginManifest::parse(oauth_without_account),
+            Err(ManifestError::PanelOauthCapabilityWithoutAccounts { .. })
+        ));
+
+        let admin_without_route =
+            oauth_without_account.replace("own_oauth_accounts", "plugin_admin_routes");
+        assert!(matches!(
+            PluginManifest::parse(&admin_without_route),
+            Err(ManifestError::PanelAdminCapabilityWithoutRoutes { .. })
+        ));
     }
 
     #[test]
@@ -1208,7 +1332,7 @@ mod tests {
         let m = PluginManifest::parse(SIGNAL_MANIFEST)
             .expect("plugins/signal/plugin.toml must parse cleanly");
         assert_eq!(m.plugin.id, "signal");
-        assert_eq!(m.plugin.version, "0.5.0");
+        assert_eq!(m.plugin.version, "0.5.4");
         // The transport icon must propagate from manifest → SDK so
         // the SPA's sidebar can render a Signal-shaped marker on
         // bridged threads. The SPA's ChannelIcon has a brand-SVG
@@ -1321,7 +1445,7 @@ mod tests {
         let m = PluginManifest::parse(DISCORD_MANIFEST)
             .expect("plugins/discord/plugin.toml must parse cleanly");
         assert_eq!(m.plugin.id, "discord");
-        assert_eq!(m.plugin.version, "0.2.0");
+        assert_eq!(m.plugin.version, "0.2.2");
 
         let transport = m.transport.as_ref().expect("[transport] must be present");
         assert_eq!(transport.transport_id, "discord");
@@ -1395,7 +1519,7 @@ mod tests {
         let m = PluginManifest::parse(GOOGLE_APPS_MANIFEST)
             .expect("plugins/google-apps/plugin.toml must parse cleanly");
         assert_eq!(m.plugin.id, "google-apps");
-        assert_eq!(m.plugin.version, "0.3.0");
+        assert_eq!(m.plugin.version, "0.3.1");
 
         // Identity provider survives the consolidation — same shape
         // as google-contacts had.

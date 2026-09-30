@@ -83,6 +83,15 @@ struct ChainRuntime {
     db: Database,
 }
 
+fn approval_effect_hash(plan: &StoredPlan) -> String {
+    let effects: Vec<&StoredStep> = plan
+        .steps
+        .iter()
+        .filter(|step| step.effect_kind.is_some())
+        .collect();
+    execlaw_core::tool::tool_schema_hash(&json!(effects))
+}
+
 impl ChainRuntime {
     fn new(db: Database) -> Self {
         Self { db }
@@ -231,15 +240,20 @@ impl ChainRuntime {
             .map_err(|e| format!("create run failed: {e}"))
     }
 
-    fn mark_run_waiting_approval(&self, run_id: &str, now: i64) -> Result<String, String> {
+    fn mark_run_waiting_approval(
+        &self,
+        run_id: &str,
+        effect_hash: &str,
+        now: i64,
+    ) -> Result<String, String> {
         let approval_id = uuid::Uuid::new_v4().to_string();
         self.db
             .with_conn(|c| {
                 c.execute(
                     "UPDATE state_chain_runs \
-                     SET status = 'awaiting_approval', approval_id = ?1, updated_at = ?2 \
-                     WHERE id = ?3",
-                    params![approval_id, now, run_id],
+                     SET status = 'awaiting_approval', approval_id = ?1, approval_effect_hash = ?2, updated_at = ?3 \
+                     WHERE id = ?4",
+                    params![approval_id, effect_hash, now, run_id],
                 )?;
                 Ok(())
             })
@@ -250,15 +264,15 @@ impl ChainRuntime {
     fn resolve_run_for_approval(
         &self,
         approval_id: &str,
-    ) -> Result<Option<(String, String, String, i64, String)>, String> {
+    ) -> Result<Option<(String, String, String, i64, String, Option<String>)>, String> {
         self.db
             .with_conn(|c| {
-                let row: Option<(String, String, String, i64, String)> = c
+                let row: Option<(String, String, String, i64, String, Option<String>)> = c
                     .query_row(
-                        "SELECT id, plan_id, conversation_id, run_seq, status \
+                        "SELECT id, plan_id, conversation_id, run_seq, status, approval_effect_hash \
                          FROM state_chain_runs WHERE approval_id = ?1",
                         params![approval_id],
-                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
                     )
                     .optional()?;
                 Ok(row)
@@ -602,7 +616,10 @@ impl ToolImpl for ChainExecuteTool {
             };
 
         if has_external_effects {
-            match self.runtime.mark_run_waiting_approval(&run_id, now) {
+            match self
+                .runtime
+                .mark_run_waiting_approval(&run_id, &approval_effect_hash(&plan), now)
+            {
                 Ok(approval_id) => {
                     return ToolOutcome::ok(json!({
                         "status": "awaiting_approval",
@@ -721,7 +738,7 @@ fn resolve_chain_approval(
     decision: ChainApprovalDecision,
     now: i64,
 ) -> Result<Value, String> {
-    let Some((run_id, plan_id, conv_id, run_seq, status)) =
+    let Some((run_id, plan_id, conv_id, run_seq, status, stored_effect_hash)) =
         runtime.resolve_run_for_approval(approval_id)?
     else {
         return Err("approval_not_found".to_string());
@@ -747,7 +764,6 @@ fn resolve_chain_approval(
             }))
         }
         ChainApprovalDecision::Approve => {
-            runtime.mark_run_status(&run_id, "running", now)?;
             let (plan, _fx, _cid) = match runtime.load_plan(&plan_id) {
                 Ok(v) => v,
                 Err(e) => {
@@ -755,6 +771,16 @@ fn resolve_chain_approval(
                     return Err(e);
                 }
             };
+            if stored_effect_hash.as_deref() != Some(approval_effect_hash(&plan).as_str()) {
+                runtime.mark_run_terminal(
+                    &run_id,
+                    "failed",
+                    Some("approved effect no longer matches the pending approval"),
+                    now,
+                )?;
+                return Err("approval_effect_mismatch".to_string());
+            }
+            runtime.mark_run_status(&run_id, "running", now)?;
             let cid = ConversationId::from(conv_id.clone());
             match runtime.execute_run_steps(&run_id, run_seq, &cid, &plan, now) {
                 Ok((executed, effects)) => {

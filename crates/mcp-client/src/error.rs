@@ -18,4 +18,10 @@ pub enum McpError {
     Timeout(std::time::Duration),
     #[error("client has been shut down")]
     ClientGone,
+    #[error(
+        "MCP HTTP session expired; a new session was initialized; retry the request explicitly"
+    )]
+    SessionExpired,
+    #[error("MCP request was cancelled by the caller")]
+    Cancelled,
 }

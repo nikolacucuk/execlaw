@@ -79,12 +79,12 @@ pub fn resolve_active_provider(db: &Database) -> Arc<dyn WebSearchApi> {
         // Single-provider passthrough — no rotation overhead +
         // skips the global pacing gate (the per-adapter gate is
         // sufficient for one provider).
-        return construct_from_row(&enabled[0]);
+        return construct_from_row_with_db(&enabled[0], db);
     }
 
     let providers: Vec<(SearchProviderKind, Arc<dyn WebSearchApi>)> = enabled
         .iter()
-        .map(|r| (r.kind, construct_from_row(r)))
+        .map(|r| (r.kind, construct_from_row_with_db(r, db)))
         .collect();
     tracing::debug!(
         target: "search_resolver",
@@ -98,6 +98,20 @@ pub fn resolve_active_provider(db: &Database) -> Arc<dyn WebSearchApi> {
 /// admin flows that want to construct an adapter from a row
 /// without going through the store (e.g. the test-search endpoint).
 pub fn construct_from_row(row: &SearchProviderRow) -> Arc<dyn WebSearchApi> {
+    construct_from_row_inner(row, None)
+}
+
+pub(crate) fn construct_from_row_with_db(
+    row: &SearchProviderRow,
+    db: &Database,
+) -> Arc<dyn WebSearchApi> {
+    construct_from_row_inner(row, Some(db))
+}
+
+fn construct_from_row_inner(
+    row: &SearchProviderRow,
+    db: Option<&Database>,
+) -> Arc<dyn WebSearchApi> {
     let cfg: Value = serde_json::from_str(&row.config_json).unwrap_or(Value::Null);
     match row.kind {
         SearchProviderKind::DuckDuckGo => Arc::new(DuckDuckGoSearchApi::new()),
@@ -107,7 +121,13 @@ pub fn construct_from_row(row: &SearchProviderRow) -> Arc<dyn WebSearchApi> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_owned();
-            Arc::new(SearxNGSearchApi::new(base_url))
+            match db {
+                Some(db) => Arc::new(SearxNGSearchApi::new_private_integration(
+                    base_url,
+                    db.clone(),
+                )),
+                None => Arc::new(SearxNGSearchApi::new(base_url)),
+            }
         }
         SearchProviderKind::Brave => {
             let api_key = cfg
@@ -163,7 +183,13 @@ pub fn construct_from_row(row: &SearchProviderRow) -> Arc<dyn WebSearchApi> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_owned();
-            Arc::new(WebsurfxSearchApi::new(base_url))
+            match db {
+                Some(db) => Arc::new(WebsurfxSearchApi::new_private_integration(
+                    base_url,
+                    db.clone(),
+                )),
+                None => Arc::new(WebsurfxSearchApi::new(base_url)),
+            }
         }
     }
 }

@@ -118,18 +118,54 @@ impl<'a> AutomationRunStore<'a> {
         event_id: &str,
         started_at: i64,
     ) -> Result<String, AutomationRunError> {
+        self.insert_pending_with_definition(automation_id, event_id, "{}", started_at)
+    }
+
+    /// Reuse one durable run per automation/event and preserve the exact graph
+    /// definition needed to resume it after process restart.
+    pub fn insert_pending_with_definition(
+        &self,
+        automation_id: &str,
+        event_id: &str,
+        definition_json: &str,
+        started_at: i64,
+    ) -> Result<String, AutomationRunError> {
         let id = Uuid::new_v4().to_string();
         let empty_traces = "[]";
-        self.db.with_conn(|c| {
-            c.execute(
-                "INSERT INTO state_automation_runs \
-                 (id, automation_id, event_id, status, step_traces, started_at) \
-                 VALUES (?1, ?2, ?3, 'pending', ?4, ?5)",
-                params![&id, automation_id, event_id, empty_traces, started_at],
+        Ok(self.db.transaction(|tx| {
+            tx.execute(
+                "INSERT OR IGNORE INTO state_automation_run_claims(automation_id,event_id,run_id) \
+                 VALUES (?1,?2,?3)",
+                params![automation_id, event_id, &id],
             )?;
-            Ok(())
-        })?;
-        Ok(id)
+            let run_id: String = tx.query_row(
+                "SELECT run_id FROM state_automation_run_claims WHERE automation_id = ?1 AND event_id = ?2",
+                params![automation_id, event_id],
+                |row| row.get(0),
+            )?;
+            if run_id == id {
+                tx.execute(
+                    "INSERT INTO state_automation_runs \
+                     (id, automation_id, event_id, status, step_traces, started_at, definition_json) \
+                     VALUES (?1, ?2, ?3, 'pending', ?4, ?5, ?6)",
+                    params![&id, automation_id, event_id, empty_traces, started_at, definition_json],
+                )?;
+            }
+            Ok(run_id)
+        })?)
+    }
+
+    /// Return the graph snapshot recorded with the durable run.
+    pub fn definition_snapshot(&self, run_id: &str) -> Result<Option<String>, AutomationRunError> {
+        Ok(self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT definition_json FROM state_automation_runs WHERE id = ?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .map_err(Into::into)
+        })?)
     }
 
     /// Append a step trace + flip the run to `running` if it was
@@ -338,13 +374,33 @@ mod tests {
     fn list_for_automation_returns_descending_by_started_at() {
         let db = fresh_db();
         let store = AutomationRunStore::new(&db);
-        for ts in [100, 300, 200] {
-            store.insert_pending("auto-1", "evt", ts).unwrap();
+        for (index, ts) in [100, 300, 200].into_iter().enumerate() {
+            store
+                .insert_pending("auto-1", &format!("evt-{index}"), ts)
+                .unwrap();
         }
         let rows = store.list_for_automation("auto-1", 10).unwrap();
         assert_eq!(
             rows.iter().map(|r| r.started_at).collect::<Vec<_>>(),
             vec![300, 200, 100],
+        );
+    }
+
+    #[test]
+    fn insert_pending_reuses_one_run_for_automation_event_pair() {
+        let db = fresh_db();
+        let store = AutomationRunStore::new(&db);
+        let first = store
+            .insert_pending_with_definition("auto-1", "evt-1", "{\"version\":1}", 100)
+            .unwrap();
+        let retry = store
+            .insert_pending_with_definition("auto-1", "evt-1", "{\"version\":2}", 200)
+            .unwrap();
+        assert_eq!(first, retry);
+        assert_eq!(store.list_for_automation("auto-1", 10).unwrap().len(), 1);
+        assert_eq!(
+            store.definition_snapshot(&first).unwrap().as_deref(),
+            Some("{\"version\":1}")
         );
     }
 

@@ -15,6 +15,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent_contract;
+pub mod agent_ownership;
 pub mod agents;
 pub mod alerts;
 pub mod artifact_provenance;
@@ -28,6 +30,8 @@ pub mod backends;
 pub mod builtin_tools;
 pub mod bus_event_retention;
 pub mod cards;
+pub mod chat_requests;
+mod completion_evidence;
 pub mod config;
 pub mod conversation;
 pub mod db;
@@ -38,6 +42,7 @@ pub mod event_retention;
 pub mod events;
 pub mod general_settings;
 pub mod graphiti;
+pub mod harness;
 pub mod history_budget;
 pub mod ids;
 pub mod local_endpoint_policy;
@@ -56,6 +61,7 @@ pub mod personality;
 pub mod principal;
 pub mod principal_groups;
 pub mod refresh_tokens;
+pub mod reply_drafts;
 pub mod research;
 pub mod retention;
 pub mod routine_run_retention;
@@ -71,9 +77,11 @@ pub mod transport_bindings;
 pub mod transport_conversations;
 pub mod transport_cursor;
 pub mod trust_policy;
+pub mod turn_controls;
 pub mod users;
 pub mod vault_row;
 pub mod webauthn;
+pub mod workspaces;
 
 pub use db::{Database, DbConfig, DbError};
 pub use events::{EventKind, EventLog, EventRecord};

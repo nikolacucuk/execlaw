@@ -202,7 +202,14 @@ export interface MessageView {
     /** Event sequence of the inbound transport message answered by this turn. */
     reply_to_seq?: number | null;
     /** Durable review decision for a transport-originated model reply. */
-    review_state?: "sent" | "cancelled" | "pending" | null;
+    review_state?: "sent" | "cancelled" | "pending" | "send_requested" | "accepted" | "delivered" | "failed" | null;
+    draft_id?: string | null;
+    draft_revision?: number | null;
+    draft_status?: string | null;
+    draft_text?: string | null;
+    draft_stale?: boolean | null;
+    /** Append-only outbox lifecycle for effects this message queued. */
+    delivery_timeline?: TransportDeliveryView[];
     /**
      * 2026-05-15 — image attachments included on a user_msg via the
      * composer's `+` menu. Each entry resolves to a download via
@@ -219,6 +226,13 @@ export interface MessageView {
      * message kind and for user_msg events sent without a skill.
      */
     applied_skill_names?: string[];
+}
+
+export interface TransportDeliveryView {
+    transition: string;
+    occurred_at: number;
+    attempt: number;
+    external_receipt: string | null;
 }
 
 export interface MessageAttachment {
@@ -327,10 +341,11 @@ export async function sendTransportReply(
     sourceSeq: number,
     channel: string | undefined,
     tokenAccessor: () => string | null,
+    draftRevision?: number,
 ): Promise<{ sent: boolean; channel: string }> {
     return apiFetch<{ sent: boolean; channel: string }>(
         `/api/chats/${encodeURIComponent(conversationId)}/transport-reply`,
-        { method: "POST", body: { text, source_seq: sourceSeq, channel } },
+        { method: "POST", body: { text, source_seq: sourceSeq, channel, draft_revision: draftRevision } },
         tokenAccessor,
     );
 }
@@ -364,10 +379,11 @@ export async function setTransportReviewDecision(
     modelSeq: number,
     decision: "sent" | "cancelled" | "pending",
     tokenAccessor: () => string | null,
+    draftRevision?: number,
 ): Promise<{ saved: boolean }> {
     return apiFetch<{ saved: boolean }>(
         `/api/chats/${encodeURIComponent(conversationId)}/transport-review-decision`,
-        { method: "POST", body: { model_seq: modelSeq, decision } },
+        { method: "POST", body: { model_seq: modelSeq, decision, draft_revision: draftRevision } },
         tokenAccessor,
     );
 }
@@ -415,8 +431,23 @@ export async function listCards(
     );
 }
 
+export interface RunCompletionContractDraft {
+    acceptance_criteria: Array<{
+        criterion_id: string;
+        description: string;
+        required?: boolean;
+        verifier?: { step_id: string; json_pointer: string; expected: unknown };
+    }>;
+    required_artifacts: Array<{
+        artifact_id: string;
+        description: string;
+    }>;
+    delivery_required?: boolean;
+}
+
 export interface SendMessageRequest {
     text: string;
+    resume_run_id?: string;
     sender_principal_id?: string;
     /// 2026-04-28 — when true, server runs the turn but skips
     /// every persistent write. Streaming token deltas + phase
@@ -450,6 +481,7 @@ export interface SendMessageRequest {
     /// model sees it. Sticky for THIS turn only — the picker clears
     /// after each send. Empty/absent means "no skills attached".
     skill_names?: string[];
+    completion_contract?: RunCompletionContractDraft;
 }
 
 export interface InlineAttachment {
@@ -467,20 +499,73 @@ export interface InlineAttachment {
 }
 
 export interface SendMessageResponse {
+    status?: "in_progress" | "unknown_outcome";
+    request_handle?: string;
     user_msg_seq?: number;
     assistant_text?: string;
     assistant_msg_seq?: number;
+    run_id?: string;
     [extra: string]: unknown;
+}
+
+export type TurnControlKind = "queue_next_turn" | "steer" | "pause" | "resume" | "cancel";
+export type TurnControlStatus = "accepted" | "delivered" | "applied" | "acknowledged" | "cancelled" | "failed";
+
+export interface DurableTurnControl {
+    control_id: string;
+    conversation_id: string;
+    turn_id: string | null;
+    kind: TurnControlKind;
+    payload: Record<string, unknown>;
+    status: TurnControlStatus;
+    acknowledgement: Record<string, unknown> | null;
+    created_at: number;
+    updated_at: number;
+    acknowledged_at: number | null;
+}
+
+export async function submitDurableTurnControl(
+    conversationId: string,
+    kind: TurnControlKind,
+    tokenAccessor: () => string | null,
+    idempotencyKey: string,
+    text?: string,
+): Promise<DurableTurnControl> {
+    return apiFetch(
+        `/api/chats/${encodeURIComponent(conversationId)}/controls`,
+        { method: "POST", body: { kind, text }, headers: { "Idempotency-Key": idempotencyKey } },
+        tokenAccessor,
+    );
+}
+
+export async function listDurableTurnControls(
+    conversationId: string,
+    tokenAccessor: () => string | null,
+    afterCreatedAt = 0,
+): Promise<DurableTurnControl[]> {
+    const query = new URLSearchParams({ after_created_at: String(afterCreatedAt) });
+    return apiFetch(
+        `/api/chats/${encodeURIComponent(conversationId)}/controls?${query}`,
+        {},
+        tokenAccessor,
+    );
 }
 
 export async function postMessage(
     conversationId: string,
     body: SendMessageRequest,
     tokenAccessor: () => string | null,
+    idempotencyKey?: string,
 ): Promise<SendMessageResponse> {
     return apiFetch<SendMessageResponse>(
         `/api/chats/${encodeURIComponent(conversationId)}/messages`,
-        { method: "POST", body },
+        {
+            method: "POST",
+            body,
+            headers: idempotencyKey
+                ? { "Idempotency-Key": idempotencyKey }
+                : undefined,
+        },
         tokenAccessor,
     );
 }
@@ -570,6 +655,7 @@ export async function listGraphifyGraphPage(
 export interface StopTurnResponse {
     conversation_id: string;
     cancelled: boolean;
+    control_id?: string | null;
 }
 
 export async function postStopTurn(
@@ -1166,6 +1252,11 @@ export interface BackendStatusResponse {
     /// In-flight HF model download progress. Populated only while
     /// stage = `DownloadingModel`.
     download_progress: DownloadProgress | null;
+    /// Last persisted supervisor observation; historical, not current health.
+    observed_model_id?: string | null;
+    last_observed_at?: number | null;
+    last_success_at?: number | null;
+    stage_changed_at?: number | null;
 }
 
 // ---- /api/admin/settings/hf-cache (Phase 14.C) -------------------
@@ -1231,6 +1322,24 @@ export async function listBackends(
     return apiFetch<BackendListResponse>(
         "/api/admin/backends",
         {},
+        tokenAccessor,
+    );
+}
+
+export interface InferenceConformanceResponse {
+    model: string;
+    protocol: "ollama" | "openai_compatible";
+    text: { passed: boolean; code: string };
+    streaming: { passed: boolean; code: string };
+    tools: { passed: boolean; code: string };
+}
+
+export async function runInferenceConformance(
+    tokenAccessor: () => string | null,
+): Promise<InferenceConformanceResponse> {
+    return apiFetch<InferenceConformanceResponse>(
+        "/api/admin/inference/conformance",
+        { method: "POST" },
         tokenAccessor,
     );
 }
@@ -1416,6 +1525,15 @@ export interface UiPanelSummary {
     plugin_id: string;
     mount: string;
     entry: string;
+    rpc_routes: Array<{ method: string; path: string }>;
+    oauth_accounts: string[];
+    rpc_capabilities: Array<
+        | "plugin_admin_routes"
+        | "own_oauth_accounts"
+        | "own_plugin_settings"
+        | "own_sidecar_status"
+        | "controller_identifiers"
+    >;
 }
 
 export interface UiPanelListResponse {
@@ -1773,6 +1891,18 @@ export async function promoteSkill(
     );
 }
 
+export async function rollbackSkill(
+    name: string,
+    targetVersion: number,
+    tokenAccessor: () => string | null,
+): Promise<SkillDetail> {
+    return apiFetch<SkillDetail>(
+        `/api/admin/skills/${encodeURIComponent(name)}/rollback`,
+        { method: "POST", body: { target_version: targetVersion } },
+        tokenAccessor,
+    );
+}
+
 export async function archiveSkill(
     name: string,
     tokenAccessor: () => string | null,
@@ -2034,10 +2164,12 @@ export async function getAuditEntries(
     sinceTs: number | undefined,
     limit: number | undefined,
     tokenAccessor: () => string | null,
+    entryId?: number,
 ): Promise<AuditResponse> {
     const qs = new URLSearchParams();
     if (sinceTs !== undefined) qs.set("since_ts", String(sinceTs));
     if (limit !== undefined) qs.set("limit", String(limit));
+    if (entryId !== undefined) qs.set("id", String(entryId));
     const path = qs.toString()
         ? `/api/admin/audit?${qs.toString()}`
         : "/api/admin/audit";
@@ -2127,14 +2259,33 @@ export async function setPrincipalTrust(
 }
 
 export interface PendingApprovalSummary {
+    kind?: "cold_contact" | "effectful_chain";
     approval_id: string;
     conversation_id: string;
     sender_principal_id: string;
     original_text: string;
+    scope: string;
+    reason: string;
+    requested_action: string;
+    approval_token?: string;
 }
 
 export interface PendingApprovalsResponse {
     approvals: PendingApprovalSummary[];
+    memory_promotions: MemoryPromotionSummary[];
+}
+
+export interface MemoryPromotionSummary {
+    id: number;
+    scope: string;
+    trust_class: string;
+    key: string;
+    from_tier: string;
+    to_tier: string;
+    reason: string;
+    proposed_by: string;
+    proposed_at: number;
+    evidence_ref: string;
 }
 
 export async function listPendingApprovals(
@@ -2161,6 +2312,8 @@ export async function listPendingApprovals(
  *                      from this handle will re-prompt
  */
 export type ApprovalVerb =
+    | "approve"
+    | "reject"
     | "trust"
     | "trust_limited"
     | "claim_as_me"
@@ -2174,7 +2327,7 @@ export interface RespondApprovalRequest {
     /** Optional reason recorded with the approval. */
     reason?: string;
     /** Optional signed JWT supplied by the original approval-card link. */
-    token?: string;
+    approval_token?: string;
 }
 
 export async function respondApproval(
@@ -2185,6 +2338,182 @@ export async function respondApproval(
     return apiFetch(
         `/api/admin/approvals/${encodeURIComponent(approvalId)}/respond`,
         { method: "POST", body },
+        tokenAccessor,
+    );
+}
+
+export async function decideMemoryPromotion(
+    proposalId: number,
+    decision: "approve" | "reject",
+    tokenAccessor: () => string | null,
+    note?: string,
+): Promise<unknown> {
+    return apiFetch(
+        `/api/admin/memory-promotions/${proposalId}/respond`,
+        { method: "POST", body: { decision, note } },
+        tokenAccessor,
+    );
+}
+
+export interface AdminMemoryAsset {
+    asset_id: string;
+    asset_type: string;
+    name: string;
+    description: string;
+    owner_scope: string;
+    visibility: string;
+    trust_floor: string;
+    status: string;
+    version: number;
+    expires_at: number | null;
+}
+
+export interface AdminMemoryAssetBinding {
+    asset_id: string;
+    agent_scope: string;
+    injection_mode: "hot" | "discoverable" | "tool_only";
+    priority: number;
+    max_chars: number;
+    created_at: number;
+}
+
+export interface AdminMemoryAssertionEvidence {
+    evidence_id: string;
+    conversation_id: string;
+    event_seq: number;
+    payload_path: string;
+    quote_hash: string;
+    evidence_kind: "direct_quote" | "tool_result" | "operator_correction" | "derived" | string;
+    created_at: number;
+}
+
+export interface AdminMemoryAssertion {
+    assertion_id: string;
+    scope: string;
+    trust_class: string;
+    kind: string;
+    subject: string;
+    predicate: string;
+    object: unknown;
+    confidence: number;
+    status: "proposed" | "approved" | "rejected" | "retracted" | string;
+    observed_from: number;
+    observed_to: number | null;
+    valid_from: number;
+    valid_to: number | null;
+    supersedes_id: string | null;
+    extraction_run_id: string;
+    created_event_seq: number;
+    created_at: number;
+    evidence: AdminMemoryAssertionEvidence[];
+    evidence_total: number;
+    review: {
+        decision: "retracted" | "corrected" | string;
+        conversation_id: string;
+        event_seq: number;
+        reviewer_id: string;
+        reason: string;
+        created_at: number;
+    } | null;
+}
+
+export interface AdminMemoryEvidenceSource {
+    evidence_id: string;
+    conversation_id: string;
+    event_seq: number;
+    payload_path: string;
+    quote_hash: string;
+    evidence_kind: string;
+    source_quote: string;
+    source_quote_bytes: number;
+    truncated: boolean;
+    integrity_verified: boolean;
+}
+
+export interface AdminMemoryAssetsResponse {
+    assets: AdminMemoryAsset[];
+    bindings: AdminMemoryAssetBinding[];
+    agent_scopes: Array<{ id: string; name: string }>;
+    assertions: AdminMemoryAssertion[];
+}
+
+export async function getAdminMemoryAssets(
+    tokenAccessor: () => string | null,
+    agentScope = "default",
+): Promise<AdminMemoryAssetsResponse> {
+    const query = agentScope === "default" ? "" : `?agent_scope=${encodeURIComponent(agentScope)}`;
+    return apiFetch<AdminMemoryAssetsResponse>(`/api/admin/memory-assets${query}`, {}, tokenAccessor);
+}
+
+export async function deleteAdminMemoryAsset(
+    assetId: string,
+    tokenAccessor: () => string | null,
+): Promise<{ asset_id: string; deleted: boolean }> {
+    return apiFetch<{ asset_id: string; deleted: boolean }>(
+        `/api/admin/memory-assets/${encodeURIComponent(assetId)}`,
+        { method: "DELETE" },
+        tokenAccessor,
+    );
+}
+
+export async function getAdminMemoryEvidenceSource(
+    assertionId: string,
+    evidenceId: string,
+    tokenAccessor: () => string | null,
+): Promise<AdminMemoryEvidenceSource> {
+    return apiFetch(
+        `/api/admin/memory-assertions/${encodeURIComponent(assertionId)}/evidence/${encodeURIComponent(evidenceId)}`,
+        {},
+        tokenAccessor,
+    );
+}
+
+export async function retractAdminMemoryAssertion(
+    assertionId: string,
+    reason: string,
+    tokenAccessor: () => string | null,
+): Promise<{ assertion_id: string; retracted: boolean; review_event_seq: number | null }> {
+    return apiFetch(
+        `/api/admin/memory-assertions/${encodeURIComponent(assertionId)}/retract`,
+        { method: "POST", body: { reason } },
+        tokenAccessor,
+    );
+}
+
+export async function correctAdminMemoryAssertion(
+    assertionId: string,
+    replacement: unknown,
+    reason: string,
+    tokenAccessor: () => string | null,
+): Promise<{ source_assertion_id: string; replacement_assertion_id: string; corrected: boolean; review_event_seq: number | null }> {
+    return apiFetch(
+        `/api/admin/memory-assertions/${encodeURIComponent(assertionId)}/correct`,
+        { method: "POST", body: { replacement, reason } },
+        tokenAccessor,
+    );
+}
+
+export async function bindAdminMemoryAsset(
+    assetId: string,
+    binding: Pick<AdminMemoryAssetBinding, "agent_scope" | "injection_mode" | "priority" | "max_chars">,
+    tokenAccessor: () => string | null,
+): Promise<void> {
+    await apiFetch(
+        `/api/admin/memory-assets/${encodeURIComponent(assetId)}/binding`,
+        { method: "PUT", body: binding },
+        tokenAccessor,
+    );
+}
+
+export async function unbindAdminMemoryAsset(
+    assetId: string,
+    tokenAccessor: () => string | null,
+    agentScope = "default",
+): Promise<void> {
+    const query = agentScope === "default" ? "" : `?agent_scope=${encodeURIComponent(agentScope)}`;
+    await apiFetch(
+        `/api/admin/memory-assets/${encodeURIComponent(assetId)}/binding${query}`,
+        { method: "DELETE" },
         tokenAccessor,
     );
 }
@@ -3134,6 +3463,7 @@ export interface RoutineView {
     next_run_at: number | null;
     created_at: number;
     updated_at: number;
+    completion_contract?: RunCompletionContractDraft | null;
 }
 
 export interface RoutineListResponse {
@@ -3162,6 +3492,7 @@ export interface UpsertRoutineBody {
     prompt: string;
     target_conversation_id?: string | null;
     enabled?: boolean;
+    completion_contract?: RunCompletionContractDraft | null;
 }
 
 export interface RoutinePreviewResponse {
@@ -3432,6 +3763,11 @@ export interface ResearchSourceView {
     title?: string | null;
     fetched_ok?: boolean;
     error?: string | null;
+    source_id?: string | null;
+    retrieved_at?: number | null;
+    content_sha256?: string | null;
+    snapshot_text?: string | null;
+    snapshot_truncated?: boolean;
 }
 
 export interface ResearchNoteView {
@@ -3479,6 +3815,17 @@ export interface ResearchJobReportResponse {
     report_markdown: string | null;
 }
 
+export interface ResearchDeletionJobView {
+    deletion_id: string;
+    resource_id: string;
+    status: "pending" | "complete";
+    attempt_count: number;
+    last_error: string | null;
+    requested_at: number;
+    updated_at: number;
+    completed_at: number | null;
+}
+
 export interface ResearchActiveCountResponse {
     active_count: number;
     conversation_id: string | null;
@@ -3515,6 +3862,28 @@ export async function getResearchReport(
 ): Promise<ResearchJobReportResponse> {
     return apiFetch<ResearchJobReportResponse>(
         `/api/admin/research/jobs/${encodeURIComponent(jobId)}/report`,
+        {},
+        tokenAccessor,
+    );
+}
+
+export async function deleteResearchJob(
+    jobId: string,
+    tokenAccessor: () => string | null,
+): Promise<ResearchDeletionJobView> {
+    return apiFetch<ResearchDeletionJobView>(
+        `/api/admin/research/jobs/${encodeURIComponent(jobId)}`,
+        { method: "DELETE" },
+        tokenAccessor,
+    );
+}
+
+export async function getResearchDeletion(
+    deletionId: string,
+    tokenAccessor: () => string | null,
+): Promise<ResearchDeletionJobView> {
+    return apiFetch<ResearchDeletionJobView>(
+        `/api/admin/research/deletions/${encodeURIComponent(deletionId)}`,
         {},
         tokenAccessor,
     );
@@ -3638,6 +4007,117 @@ export interface PreflightResponse {
     /// Optional — older server builds without the cache enumerator
     /// will omit this field entirely; callers default to `{}`.
     cached_models?: Record<string, number>;
+}
+
+export type EndpointApprovalScope = "local_inference" | "private_integration";
+export type EndpointApprovalKind = "cidr" | "dns_name";
+
+export interface EndpointApproval {
+    scope: EndpointApprovalScope;
+    kind: EndpointApprovalKind;
+    value: string;
+}
+
+export async function listEndpointApprovals(
+    tokenAccessor: () => string | null,
+): Promise<EndpointApproval[]> {
+    const response = await apiFetch<{ approvals: EndpointApproval[] }>(
+        "/api/admin/network/endpoint-approvals",
+        {},
+        tokenAccessor,
+    );
+    return response.approvals;
+}
+
+export async function createEndpointApproval(
+    approval: EndpointApproval,
+    tokenAccessor: () => string | null,
+): Promise<EndpointApproval> {
+    return apiFetch<EndpointApproval>(
+        "/api/admin/network/endpoint-approvals",
+        { method: "POST", body: approval },
+        tokenAccessor,
+    );
+}
+
+export async function revokeEndpointApproval(
+    approval: EndpointApproval,
+    tokenAccessor: () => string | null,
+): Promise<void> {
+    const query = new URLSearchParams({
+        scope: approval.scope,
+        kind: approval.kind,
+        value: approval.value,
+    });
+    await apiFetch(
+        `/api/admin/network/endpoint-approvals?${query}`,
+        { method: "DELETE" },
+        tokenAccessor,
+    );
+}
+
+export interface ScrubbedSupportBundle {
+    schema_version: number;
+    generated_at: number;
+    application: {
+        version: string;
+        operating_system: string;
+        architecture: string;
+    };
+    database: {
+        database_file_present: boolean;
+        encryption_mode: string;
+        schema_migrations_applied: number;
+    };
+    hardware: {
+        logical_cpu_count: number | null;
+        available_ram_mb: number | null;
+        total_detected_gpu_memory_mb: number | null;
+        gpus: Array<{ vendor: string; model: string | null; memory_mb: number | null }>;
+        capacity_class: string;
+        capacity_note: string;
+    };
+    protocols: {
+        backends: Array<{
+            purpose: string;
+            configured: boolean;
+            mode: BackendMode | null;
+            last_stage: string | null;
+            has_successful_readiness: boolean;
+        }>;
+        active_model_profiles: number;
+        invalidated_model_profiles: number;
+    };
+    authority: {
+        installed_plugins: number;
+        enabled_plugins: number;
+        quarantined_plugins: number;
+        tool_rules: number;
+        enabled_tool_rules: number;
+        disabled_tool_rules: number;
+        removed_tool_rules: number;
+        wildcard_tool_rules: number;
+    };
+    recovery: {
+        recoverable_runs_by_status: Array<{ status: string; count: number }>;
+        active_research_jobs: number;
+        pending_research_deletions: number;
+        outbox_by_status: Array<{ status: string; count: number }>;
+        approval_waits: number;
+        automation_runs_by_status: Array<{ status: string; count: number }>;
+    };
+    corrective_actions: Array<{ code: string; action: string }>;
+    content_policy: string;
+}
+
+export async function getScrubbedSupportBundle(
+    tokenAccessor: () => string | null,
+): Promise<ScrubbedSupportBundle> {
+    return apiFetch<ScrubbedSupportBundle>(
+        "/api/admin/diagnostics/support-bundle",
+        {},
+        tokenAccessor,
+    );
 }
 
 export async function getSetupPreflight(

@@ -1,6 +1,7 @@
 //! Evidence-backed, append-only memory assertions and durable extraction jobs.
 
 use crate::db::{Database, DbError};
+use crate::events::{EventKind, EventRecord};
 use crate::ids::{ConversationId, EventSeq};
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -44,7 +45,8 @@ impl MemoryKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AssertionStatus {
     Proposed,
     Approved,
@@ -94,7 +96,7 @@ pub struct NewMemoryAssertion {
     pub created_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MemoryAssertion {
     pub assertion_id: String,
     pub scope: String,
@@ -112,6 +114,39 @@ pub struct MemoryAssertion {
     pub supersedes_id: Option<String>,
     pub extraction_run_id: String,
     pub created_event_seq: EventSeq,
+    pub created_at: i64,
+}
+
+/// One append-only source reference supporting a memory assertion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryEvidenceRecord {
+    pub evidence_id: String,
+    pub assertion_id: String,
+    pub conversation_id: String,
+    pub event_seq: i64,
+    pub payload_path: String,
+    pub quote_hash: String,
+    pub evidence_kind: String,
+    pub created_at: i64,
+}
+
+/// An assertion and its source references for Controller review.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MemoryAssertionEvidenceView {
+    pub assertion: MemoryAssertion,
+    pub evidence: Vec<MemoryEvidenceRecord>,
+    pub evidence_total: usize,
+    pub review: Option<MemoryAssertionReviewRecord>,
+}
+
+/// Append-only Controller decision that changed an assertion's current meaning.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryAssertionReviewRecord {
+    pub decision: String,
+    pub conversation_id: String,
+    pub event_seq: i64,
+    pub reviewer_id: String,
+    pub reason: String,
     pub created_at: i64,
 }
 
@@ -201,6 +236,360 @@ pub struct MemoryAssertionStore<'db> {
 impl<'db> MemoryAssertionStore<'db> {
     pub fn new(db: &'db Database) -> Self {
         Self { db }
+    }
+
+    /// Get a stored assertion by its stable identifier.
+    pub fn get(&self, assertion_id: &str) -> Result<Option<MemoryAssertion>, MemoryAssertionError> {
+        self.db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT assertion_id, scope, trust_class, kind, subject, predicate, object_json, \
+                     confidence, status, observed_from, observed_to, valid_from, valid_to, supersedes_id, \
+                     extraction_run_id, created_event_seq, created_at FROM memory_assertions \
+                     WHERE assertion_id = ?1",
+                    [assertion_id],
+                    row_to_assertion,
+                )
+                .optional()
+                .map_err(DbError::from)
+            })
+            .map_err(MemoryAssertionError::from)?
+            .map(parse_assertion)
+            .transpose()
+    }
+
+    /// Return an evidence source suitable for appending an assertion review event.
+    pub fn first_evidence(
+        &self,
+        assertion_id: &str,
+    ) -> Result<Option<MemoryEvidenceRecord>, MemoryAssertionError> {
+        self.db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT evidence_id, assertion_id, conversation_id, event_seq, payload_path, \
+                     quote_hash, evidence_kind, created_at FROM memory_evidence \
+                     WHERE assertion_id = ?1 ORDER BY conversation_id, event_seq, evidence_id LIMIT 1",
+                    [assertion_id],
+                    |row| {
+                        Ok(MemoryEvidenceRecord {
+                            evidence_id: row.get(0)?,
+                            assertion_id: row.get(1)?,
+                            conversation_id: row.get(2)?,
+                            event_seq: row.get(3)?,
+                            payload_path: row.get(4)?,
+                            quote_hash: row.get(5)?,
+                            evidence_kind: row.get(6)?,
+                            created_at: row.get(7)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)
+            })
+            .map_err(MemoryAssertionError::from)
+    }
+
+    /// Load every evidence reference for a bounded local export.
+    pub fn evidence_for(
+        &self,
+        assertion_id: &str,
+        limit: u32,
+    ) -> Result<Vec<MemoryEvidenceRecord>, MemoryAssertionError> {
+        self.db
+            .with_conn(|conn| {
+                let mut statement = conn.prepare_cached(
+                    "SELECT evidence_id, assertion_id, conversation_id, event_seq, payload_path, \
+                     quote_hash, evidence_kind, created_at FROM memory_evidence \
+                     WHERE assertion_id = ?1 ORDER BY conversation_id, event_seq, evidence_id LIMIT ?2",
+                )?;
+                statement
+                    .query_map(rusqlite::params![assertion_id, limit.clamp(1, 501)], |row| {
+                        Ok(MemoryEvidenceRecord {
+                            evidence_id: row.get(0)?,
+                            assertion_id: row.get(1)?,
+                            conversation_id: row.get(2)?,
+                            event_seq: row.get(3)?,
+                            payload_path: row.get(4)?,
+                            quote_hash: row.get(5)?,
+                            evidence_kind: row.get(6)?,
+                            created_at: row.get(7)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)
+            })
+            .map_err(MemoryAssertionError::from)
+    }
+
+    /// Load one evidence reference under its owning assertion.
+    pub fn evidence_by_id(
+        &self,
+        assertion_id: &str,
+        evidence_id: &str,
+    ) -> Result<Option<MemoryEvidenceRecord>, MemoryAssertionError> {
+        self.db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT evidence_id, assertion_id, conversation_id, event_seq, payload_path, \
+                     quote_hash, evidence_kind, created_at FROM memory_evidence \
+                     WHERE assertion_id = ?1 AND evidence_id = ?2",
+                    rusqlite::params![assertion_id, evidence_id],
+                    |row| {
+                        Ok(MemoryEvidenceRecord {
+                            evidence_id: row.get(0)?,
+                            assertion_id: row.get(1)?,
+                            conversation_id: row.get(2)?,
+                            event_seq: row.get(3)?,
+                            payload_path: row.get(4)?,
+                            quote_hash: row.get(5)?,
+                            evidence_kind: row.get(6)?,
+                            created_at: row.get(7)?,
+                        })
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)
+            })
+            .map_err(MemoryAssertionError::from)
+    }
+
+    /// Check whether an append-only retraction review already exists.
+    pub fn is_retracted(&self, assertion_id: &str) -> Result<bool, MemoryAssertionError> {
+        self.db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_memory_assertion_reviews \
+                     WHERE assertion_id = ?1 AND decision = 'retracted')",
+                    [assertion_id],
+                    |row| row.get(0),
+                )
+                .map_err(DbError::from)
+            })
+            .map_err(MemoryAssertionError::from)
+    }
+
+    /// Append a retraction review in the same transaction as its state event and
+    /// remove the retracted assertion plus its superseded ancestors from projections.
+    pub fn insert_retraction_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        assertion_id: &str,
+        reviewer_id: &str,
+        reason: &str,
+        event: &EventRecord,
+        created_at: i64,
+    ) -> Result<(), MemoryAssertionError> {
+        if assertion_id.trim().is_empty()
+            || reviewer_id.trim().is_empty()
+            || reason.trim().is_empty()
+            || reason.len() > 2_000
+            || event.kind != EventKind::Other
+            || event.actor.as_deref() != Some(reviewer_id)
+        {
+            return Err(MemoryAssertionError::Invalid(
+                "retraction requires a bounded reason and matching Controller event".into(),
+            ));
+        }
+        let exists: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_assertions WHERE assertion_id = ?1)",
+                [assertion_id],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if !exists {
+            return Err(MemoryAssertionError::Invalid(
+                "memory assertion was not found".into(),
+            ));
+        }
+        let already_retracted: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_memory_assertion_reviews \
+             WHERE assertion_id = ?1 AND decision = 'retracted')",
+                [assertion_id],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if already_retracted {
+            return Err(MemoryAssertionError::Invalid(
+                "memory assertion was already retracted".into(),
+            ));
+        }
+        let review_id = hex::encode(Sha256::digest(format!(
+            "memory-retraction:{}:{}:{}",
+            assertion_id, event.conversation_id, event.seq.0
+        )));
+        tx.execute(
+            "INSERT INTO state_memory_assertion_reviews \
+             (review_id, assertion_id, conversation_id, event_seq, reviewer_id, decision, reason, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'retracted', ?6, ?7)",
+            rusqlite::params![
+                review_id,
+                assertion_id,
+                event.conversation_id.as_str(),
+                event.seq.0,
+                reviewer_id,
+                reason.trim(),
+                created_at,
+            ],
+        ).map_err(DbError::from)?;
+        tx.execute(
+            "WITH RECURSIVE lineage(assertion_id) AS ( \
+                 SELECT ?1 UNION \
+                 SELECT a.supersedes_id FROM memory_assertions a \
+                 JOIN lineage l ON a.assertion_id = l.assertion_id \
+                 WHERE a.supersedes_id IS NOT NULL \
+             ) DELETE FROM memory_current_projection \
+               WHERE assertion_id IN (SELECT assertion_id FROM lineage)",
+            [assertion_id],
+        )
+        .map_err(DbError::from)?;
+        Ok(())
+    }
+
+    /// Append a Controller-authored replacement assertion and review event in the same
+    /// transaction as the replacement's evidence and current projection.
+    pub fn insert_correction_in_transaction(
+        tx: &rusqlite::Transaction<'_>,
+        original: &MemoryAssertion,
+        replacement: &serde_json::Value,
+        reviewer_id: &str,
+        reason: &str,
+        event: &EventRecord,
+        created_at: i64,
+    ) -> Result<String, MemoryAssertionError> {
+        if reviewer_id.trim().is_empty()
+            || reason.trim().is_empty()
+            || reason.len() > 2_000
+            || event.kind != EventKind::Other
+            || event.actor.as_deref() != Some(reviewer_id)
+        {
+            return Err(MemoryAssertionError::Invalid(
+                "correction requires a bounded reason and matching Controller event".into(),
+            ));
+        }
+        let replacement_json = serde_json::to_string(replacement)
+            .map_err(|error| MemoryAssertionError::Invalid(error.to_string()))?;
+        if replacement_json.len() > 64 * 1024 {
+            return Err(MemoryAssertionError::Invalid(
+                "corrected memory value exceeds 64 KiB".into(),
+            ));
+        }
+        let current: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_assertions WHERE assertion_id = ?1 \
+                 AND scope = ?2 AND trust_class = ?3)",
+                rusqlite::params![original.assertion_id, original.scope, original.trust_class],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if !current {
+            return Err(MemoryAssertionError::Invalid(
+                "memory assertion changed before correction".into(),
+            ));
+        }
+        let newer_approved: bool = tx
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM memory_assertions WHERE supersedes_id = ?1 \
+                 AND status = 'approved')",
+                [&original.assertion_id],
+                |row| row.get(0),
+            )
+            .map_err(DbError::from)?;
+        if newer_approved {
+            return Err(MemoryAssertionError::Invalid(
+                "a newer approved assertion already supersedes this revision".into(),
+            ));
+        }
+        let assertion_id = hex::encode(Sha256::digest(format!(
+            "memory-correction:{}:{}:{}",
+            original.assertion_id, event.conversation_id, event.seq.0
+        )));
+        let extraction_run_id = format!("operator-correction:{reviewer_id}");
+        tx.execute(
+            "INSERT INTO memory_assertions(assertion_id, scope, trust_class, kind, subject, predicate, \
+             object_json, confidence, status, observed_from, observed_to, valid_from, valid_to, \
+             supersedes_id, extraction_run_id, created_event_seq, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1.0, 'approved', ?8, NULL, ?9, NULL, ?10, ?11, ?8, ?9)",
+            rusqlite::params![
+                assertion_id,
+                original.scope,
+                original.trust_class,
+                original.kind.as_str(),
+                original.subject,
+                original.predicate,
+                replacement_json,
+                event.seq.0,
+                created_at,
+                original.assertion_id,
+                extraction_run_id,
+            ],
+        )
+        .map_err(DbError::from)?;
+        let evidence_id = hex::encode(Sha256::digest(format!(
+            "{}:{}:{}:operator_correction",
+            assertion_id, event.seq.0, event.conversation_id
+        )));
+        let quote_hash = hex::encode(Sha256::digest(replacement_json.as_bytes()));
+        tx.execute(
+            "INSERT INTO memory_evidence(evidence_id, assertion_id, conversation_id, event_seq, \
+             payload_path, quote_hash, evidence_kind, created_at) \
+             VALUES (?1, ?2, ?3, ?4, '$.replacement', ?5, 'operator_correction', ?6)",
+            rusqlite::params![
+                evidence_id,
+                assertion_id,
+                event.conversation_id.as_str(),
+                event.seq.0,
+                quote_hash,
+                created_at,
+            ],
+        )
+        .map_err(DbError::from)?;
+        let review_id = hex::encode(Sha256::digest(format!(
+            "memory-correction-review:{}:{}:{}",
+            original.assertion_id, event.conversation_id, event.seq.0
+        )));
+        tx.execute(
+            "INSERT INTO state_memory_assertion_reviews \
+             (review_id, assertion_id, conversation_id, event_seq, reviewer_id, decision, reason, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, 'corrected', ?6, ?7)",
+            rusqlite::params![
+                review_id,
+                original.assertion_id,
+                event.conversation_id.as_str(),
+                event.seq.0,
+                reviewer_id,
+                reason.trim(),
+                created_at,
+            ],
+        )
+        .map_err(DbError::from)?;
+        tx.execute(
+            "WITH RECURSIVE lineage(assertion_id) AS ( \
+                 SELECT ?1 UNION \
+                 SELECT a.supersedes_id FROM memory_assertions a \
+                 JOIN lineage l ON a.assertion_id = l.assertion_id \
+                 WHERE a.supersedes_id IS NOT NULL \
+             ) DELETE FROM memory_current_projection \
+               WHERE assertion_id IN (SELECT assertion_id FROM lineage)",
+            [&original.assertion_id],
+        )
+        .map_err(DbError::from)?;
+        let projection_key = format!("{}:{}", original.subject, original.predicate);
+        tx.execute(
+            "INSERT INTO memory_current_projection(scope, trust_class, key, assertion_id, projected_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(scope, trust_class, key) DO UPDATE SET \
+               assertion_id = excluded.assertion_id, projected_at = excluded.projected_at",
+            rusqlite::params![
+                original.scope,
+                original.trust_class,
+                projection_key,
+                assertion_id,
+                created_at,
+            ],
+        )
+        .map_err(DbError::from)?;
+        Ok(assertion_id)
     }
 
     pub fn append(&self, assertion: &NewMemoryAssertion) -> Result<(), MemoryAssertionError> {
@@ -452,11 +841,17 @@ impl<'db> MemoryAssertionStore<'db> {
                 .collect::<Vec<_>>()
                 .join(",");
             let sql = format!(
-                "WITH trusted AS MATERIALIZED (\
+                "WITH RECURSIVE retracted_lineage(assertion_id) AS (\
+                    SELECT assertion_id FROM state_memory_assertion_reviews WHERE decision = 'retracted' \
+                    UNION SELECT a.supersedes_id FROM memory_assertions a \
+                    JOIN retracted_lineage r ON a.assertion_id = r.assertion_id \
+                    WHERE a.supersedes_id IS NOT NULL \
+                 ), trusted AS MATERIALIZED (\
                     SELECT a.* FROM memory_assertions a \
                     WHERE a.scope = ?1 AND a.valid_from <= ?2 \
                       AND (a.valid_to IS NULL OR a.valid_to > ?2) \
                       AND a.status = 'approved' AND a.trust_class IN ({placeholders}) \
+                      AND NOT EXISTS (SELECT 1 FROM retracted_lineage r WHERE r.assertion_id = a.assertion_id) \
                       AND EXISTS (SELECT 1 FROM memory_evidence e WHERE e.assertion_id = a.assertion_id)\
                  ) SELECT t.assertion_id, t.scope, t.trust_class, t.kind, t.subject, t.predicate, \
                           t.object_json, t.confidence, t.status, t.observed_from, t.observed_to, \
@@ -510,6 +905,88 @@ impl<'db> MemoryAssertionStore<'db> {
         })
         .map_err(MemoryAssertionError::from)
     }
+
+    /// List recent assertions with evidence references for a bounded review surface.
+    pub fn list_recent_with_evidence(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<MemoryAssertionEvidenceView>, MemoryAssertionError> {
+        self.db.with_conn(|conn| {
+            let raw_assertions = {
+                let mut statement = conn.prepare_cached(
+                    "SELECT assertion_id, scope, trust_class, kind, subject, predicate, object_json, \
+                     confidence, status, observed_from, observed_to, valid_from, valid_to, supersedes_id, \
+                     extraction_run_id, created_event_seq, created_at FROM memory_assertions \
+                     ORDER BY created_at DESC, assertion_id LIMIT ?1",
+                )?;
+                statement
+                    .query_map([limit.clamp(1, 200)], row_to_assertion)?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let mut views = Vec::with_capacity(raw_assertions.len());
+            let mut evidence_statement = conn.prepare_cached(
+                "SELECT evidence_id, assertion_id, conversation_id, event_seq, payload_path, \
+                 quote_hash, evidence_kind, created_at FROM memory_evidence \
+                 WHERE assertion_id = ?1 ORDER BY conversation_id, event_seq, evidence_id LIMIT 20",
+            )?;
+            for raw in raw_assertions {
+                let mut assertion = parse_assertion(raw).map_err(|error| {
+                    DbError::Invariant(format!("parse memory assertion for review: {error}"))
+                })?;
+                let review = conn
+                    .query_row(
+                        "SELECT decision, conversation_id, event_seq, reviewer_id, reason, created_at \
+                         FROM state_memory_assertion_reviews WHERE assertion_id = ?1 \
+                         ORDER BY created_at DESC, review_id DESC LIMIT 1",
+                        [&assertion.assertion_id],
+                        |row| {
+                            Ok(MemoryAssertionReviewRecord {
+                                decision: row.get(0)?,
+                                conversation_id: row.get(1)?,
+                                event_seq: row.get(2)?,
+                                reviewer_id: row.get(3)?,
+                                reason: row.get(4)?,
+                                created_at: row.get(5)?,
+                            })
+                        },
+                    )
+                    .optional()?;
+                if review
+                    .as_ref()
+                    .is_some_and(|review| review.decision == "retracted")
+                {
+                    assertion.status = AssertionStatus::Retracted;
+                }
+                let evidence = evidence_statement
+                    .query_map([&assertion.assertion_id], |row| {
+                        Ok(MemoryEvidenceRecord {
+                            evidence_id: row.get(0)?,
+                            assertion_id: row.get(1)?,
+                            conversation_id: row.get(2)?,
+                            event_seq: row.get(3)?,
+                            payload_path: row.get(4)?,
+                            quote_hash: row.get(5)?,
+                            evidence_kind: row.get(6)?,
+                            created_at: row.get(7)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                let evidence_total: usize = conn.query_row(
+                    "SELECT COUNT(*) FROM memory_evidence WHERE assertion_id = ?1",
+                    [&assertion.assertion_id],
+                    |row| row.get(0),
+                )?;
+                views.push(MemoryAssertionEvidenceView {
+                    assertion,
+                    evidence,
+                    evidence_total,
+                    review,
+                });
+            }
+            Ok(views)
+        })
+        .map_err(MemoryAssertionError::from)
+    }
 }
 
 fn value_at_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
@@ -522,6 +999,15 @@ fn value_at_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a ser
     path.strip_prefix("$.")?
         .split('.')
         .try_fold(value, |current, segment| current.get(segment))
+}
+
+/// Resolve the canonical source quote for a persisted evidence payload path.
+pub fn evidence_quote(value: &serde_json::Value, path: &str) -> Option<String> {
+    let value = value_at_path(value, path)?;
+    match value {
+        serde_json::Value::String(text) => Some(text.clone()),
+        other => serde_json::to_string(other).ok(),
+    }
 }
 
 type RawAssertion = (

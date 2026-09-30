@@ -164,9 +164,8 @@ pub async fn install_handler(
         );
     }
 
-    // Stage to a temp dir (existing plugin-sdk helper), then move to
-    // a stable location under <stage_root>/<plugin_id>-<version>/ so
-    // the install persists across restarts.
+    // Stage to a bounded temp directory, then move it under the configured
+    // plugin root. The database row keeps this unique path across restarts.
     let staged = match stage_zip(Cursor::new(&body[..])) {
         Ok(s) => s,
         Err(e) => {
@@ -178,41 +177,40 @@ pub async fn install_handler(
         }
     };
 
-    let target: PathBuf = state.plugin_host.stage_root().join(format!(
-        "{}-{}",
-        staged.manifest.plugin.id, staged.manifest.plugin.version
-    ));
-    // If the new ZIP is the same version as the install we're
-    // about to replace, the stage path is identical to the old
-    // one — that's fine and the host's `upgrade()` notices and
-    // skips the "remove old stage dir" step. Reject only when the
-    // operator is doing a fresh install (Reject mode) since that
-    // would otherwise clobber an unrelated stage.
-    if target.exists() && matches!(q.if_existing, IfExisting::Reject) {
-        return error_response(
-            StatusCode::CONFLICT,
-            "already_staged",
-            &format!("a staged dir already exists at {}", target.display()),
-        );
-    }
-    // For an Upgrade where the same-version stage already exists,
-    // tear it down so the rename below succeeds.
-    if target.exists() && matches!(q.if_existing, IfExisting::Upgrade) {
-        if let Err(e) = std::fs::remove_dir_all(&target) {
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "stage_clear",
-                &format!("could not clear existing stage dir: {e}"),
-            );
-        }
-    }
-    if let Err(e) = std::fs::create_dir_all(target.parent().unwrap()) {
+    let stage_root = state.plugin_host.stage_root();
+    if let Err(e) = std::fs::create_dir_all(stage_root) {
         return error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "stage_mkdir",
             &format!("mkdir: {e}"),
         );
     }
+    let stage_root = match stage_root.canonicalize() {
+        Ok(root) => root,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "stage_root",
+                &format!("canonicalize plugin stage root: {e}"),
+            );
+        }
+    };
+    let target: PathBuf = stage_root.join(format!("upload-{}", uuid::Uuid::new_v4()));
+    if target.parent() != Some(stage_root.as_path()) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "stage_path",
+            "plugin staging destination escaped the configured stage root",
+        );
+    }
+    // If the new ZIP is the same version as the install we're
+    // about to replace, the stage path is identical to the old
+    // one — that's fine and the host's `upgrade()` notices and
+    // skips the "remove old stage dir" step. Reject only when the
+    // operator is doing a fresh install (Reject mode) since that
+    // would otherwise clobber an unrelated stage.
+    // For an Upgrade where the same-version stage already exists,
+    // tear it down so the rename below succeeds.
     // Move the tempdir into place. `TempDir::into_path` releases the
     // auto-cleanup; we then rename the released path to the target.
     let released = staged.tempdir.keep();
@@ -565,6 +563,19 @@ pub struct UiPanelSummary {
     /// Path inside the plugin bundle to the panel's entry module
     /// (relative to the plugin's static-asset root).
     pub entry: String,
+    /// Exact plugin-local methods and paths the parent RPC broker may
+    /// invoke for this panel.
+    pub rpc_routes: Vec<PanelRpcRoute>,
+    pub oauth_accounts: Vec<String>,
+    /// Additional manifest-declared host services available to the panel.
+    pub rpc_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct PanelRpcRoute {
+    pub method: String,
+    /// Path relative to `/api/admin/plugins/{plugin_id}`.
+    pub path: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -576,8 +587,8 @@ pub struct UiPanelListResponse {
 /// declared UI panels, in deterministic order (by mount path) so the
 /// sidebar nav doesn't reshuffle on every refresh.
 ///
-/// Trusted-plugin model: the SPA loads `entry` via dynamic ESM import
-/// with no sandboxing. Install was already gated by controller auth.
+/// The SPA fetches `entry` and mounts it in a sandboxed frame. RPC
+/// authority comes from these manifest-scoped declarations.
 #[utoipa::path(
     get,
     path = "/api/admin/plugins/ui_panels",
@@ -592,10 +603,46 @@ pub async fn list_ui_panels_handler(State(state): State<AppState>) -> impl IntoR
         .registry()
         .ui_panels()
         .into_iter()
-        .map(|p| UiPanelSummary {
-            plugin_id: p.plugin_id,
-            mount: p.mount,
-            entry: p.entry,
+        .map(|p| {
+            let has_admin_rpc = p
+                .rpc_capabilities
+                .contains(&execlaw_plugin_sdk::manifest::PanelRpcCapability::PluginAdminRoutes);
+            let rpc_capabilities = p
+                .rpc_capabilities
+                .iter()
+                .map(|capability| match capability {
+                    execlaw_plugin_sdk::manifest::PanelRpcCapability::PluginAdminRoutes => {
+                        "plugin_admin_routes".to_owned()
+                    }
+                    execlaw_plugin_sdk::manifest::PanelRpcCapability::OwnOauthAccounts => {
+                        "own_oauth_accounts".to_owned()
+                    }
+                    execlaw_plugin_sdk::manifest::PanelRpcCapability::OwnPluginSettings => {
+                        "own_plugin_settings".to_owned()
+                    }
+                    execlaw_plugin_sdk::manifest::PanelRpcCapability::OwnSidecarStatus => {
+                        "own_sidecar_status".to_owned()
+                    }
+                    execlaw_plugin_sdk::manifest::PanelRpcCapability::ControllerIdentifiers => {
+                        "controller_identifiers".to_owned()
+                    }
+                })
+                .collect();
+            UiPanelSummary {
+                plugin_id: p.plugin_id,
+                mount: p.mount,
+                entry: p.entry,
+                rpc_routes: if has_admin_rpc {
+                    p.rpc_routes
+                        .into_iter()
+                        .map(|(method, path)| PanelRpcRoute { method, path })
+                        .collect()
+                } else {
+                    Vec::new()
+                },
+                oauth_accounts: p.rpc_oauth_accounts,
+                rpc_capabilities,
+            }
         })
         .collect();
     panels.sort_by(|a, b| a.mount.cmp(&b.mount));
@@ -610,7 +657,10 @@ pub async fn list_ui_panels_handler(State(state): State<AppState>) -> impl IntoR
 pub fn plugins_router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/plugins", get(list_handler))
-        .route("/api/admin/plugins/install", post(install_handler))
+        .route(
+            "/api/admin/plugins/install",
+            post(install_handler).layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        )
         .route("/api/admin/plugins/tools", get(list_tools_handler))
         .route("/api/admin/plugins/ui_panels", get(list_ui_panels_handler))
         .route(
@@ -666,6 +716,11 @@ fn plugin_error_response(e: PluginHostError) -> axum::response::Response {
         PluginHostError::UnsupportedTier(_) => (StatusCode::BAD_REQUEST, "unsupported_tier"),
         PluginHostError::MissingRuntime => (StatusCode::BAD_REQUEST, "missing_runtime"),
         PluginHostError::Provenance(_) => (StatusCode::FORBIDDEN, "provenance_verification_failed"),
+        PluginHostError::StagePathOutsideRoot(_) => (StatusCode::BAD_REQUEST, "stage_path_invalid"),
+        PluginHostError::UpgradeRolledBack(_) => (StatusCode::CONFLICT, "upgrade_rolled_back"),
+        PluginHostError::UpgradeRollbackFailed { .. } => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "upgrade_rollback_failed")
+        }
         PluginHostError::Spawn(_) => (StatusCode::INTERNAL_SERVER_ERROR, "spawn_failed"),
         PluginHostError::Db(_) | PluginHostError::Io(_) => {
             (StatusCode::INTERNAL_SERVER_ERROR, "internal")
@@ -685,6 +740,90 @@ mod tests {
         crate::routes::build_router(crate::routes::test_app_state())
     }
 
+    #[tokio::test]
+    async fn unverified_candidate_is_rejected_before_an_installed_plugin_is_replaced() {
+        use execlaw_core::users::{UserRole, UserRow, UserStore};
+        use std::io::{Cursor, Write};
+        use zip::ZipWriter;
+        use zip::write::SimpleFileOptions;
+
+        let state = crate::routes::test_app_state();
+        let now = chrono::Utc::now().timestamp();
+        let user_id = "plugin-upgrade-controller";
+        UserStore::new(&state.db)
+            .insert(&UserRow {
+                user_id: user_id.into(),
+                username: "plugin-controller".into(),
+                display_name: "Plugin Controller".into(),
+                email: None,
+                password_hash: "unused-test-hash".into(),
+                role: UserRole::Controller,
+                created_at: now,
+                last_login_at: None,
+            })
+            .unwrap();
+        let session_id = "plugin-upgrade-session";
+        state
+            .refresh_store
+            .issue(user_id, session_id, 3600)
+            .unwrap();
+        let access = state
+            .signer
+            .issue_access_token(user_id, session_id, 3600)
+            .unwrap();
+
+        let old_stage = state.plugin_host.stage_root().join("upload-old-plugin");
+        std::fs::create_dir_all(&old_stage).unwrap();
+        std::fs::write(
+            old_stage.join("plugin.toml"),
+            "[plugin]\nid = \"upgrade-fixture\"\nname = \"Upgrade fixture\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        state.plugin_host.install(&old_stage).await.unwrap();
+        let previous_manifest = std::fs::read(old_stage.join("plugin.toml")).unwrap();
+
+        let candidate_manifest =
+            "[plugin]\nid = \"upgrade-fixture\"\nname = \"Upgrade fixture\"\nversion = \"0.2.0\"\n";
+        let mut archive = Cursor::new(Vec::new());
+        {
+            let mut zip = ZipWriter::new(&mut archive);
+            zip.start_file::<_, ()>("plugin.toml", SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(candidate_manifest.as_bytes()).unwrap();
+            zip.finish().unwrap();
+        }
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/admin/plugins/install?if_existing=upgrade")
+            .header("authorization", format!("Bearer {access}"))
+            .header("content-type", "application/zip")
+            .body(Body::from(archive.into_inner()))
+            .unwrap();
+        let response = crate::routes::build_router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap();
+        let (status, body) = read_json(response).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+        assert_eq!(body["error"]["code"], "provenance_required");
+
+        let restored = state
+            .plugin_host
+            .get_row("upgrade-fixture")
+            .unwrap()
+            .expect("previous plugin row remains installed");
+        assert_eq!(restored.version, "0.1.0");
+        assert_eq!(
+            restored.stage_path,
+            old_stage.canonicalize().unwrap().to_string_lossy()
+        );
+        assert_eq!(
+            std::fs::read(old_stage.join("plugin.toml")).unwrap(),
+            previous_manifest
+        );
+    }
+
     async fn read_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
         let status = resp.status();
         let bytes = body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
@@ -693,16 +832,40 @@ mod tests {
         (status, v)
     }
 
+    async fn setup_controller_token(app: &axum::Router) -> String {
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/setup")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "username": "plugin-controller",
+                    "admin_password": "plugin-controller-password",
+                    "display_name": "Plugin Controller",
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        body["access_token"].as_str().unwrap().to_owned()
+    }
+
     /// With no plugins installed, the route returns an empty list (200,
     /// not 404).
     #[tokio::test]
     async fn ui_panels_empty_when_no_plugins() {
         let app = build_app();
+        let token = setup_controller_token(&app).await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
                     .uri("/api/admin/plugins/ui_panels")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -732,6 +895,16 @@ version = "1.0.0"
 [[ui_panels]]
 mount = "admin/plugins/z-thing"
 entry = "ui/z.js"
+rpc_capabilities = ["plugin_admin_routes", "own_oauth_accounts"]
+
+[[admin_routes]]
+method = "GET"
+path = "/status"
+handler = "admin_status"
+
+[[oauth_accounts]]
+name = "controller"
+provider = "google"
 "#;
         let a = r#"
 [plugin]
@@ -755,11 +928,13 @@ entry = "ui/a.js"
             .unwrap();
 
         let app = crate::routes::build_router(state);
+        let token = setup_controller_token(&app).await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
                     .uri("/api/admin/plugins/ui_panels")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -774,6 +949,20 @@ entry = "ui/a.js"
         assert_eq!(panels[0]["mount"], "admin/plugins/a-thing");
         assert_eq!(panels[0]["entry"], "ui/a.js");
         assert_eq!(panels[1]["plugin_id"], "z-thing");
+        assert_eq!(
+            panels[1]["rpc_capabilities"],
+            serde_json::json!(["plugin_admin_routes", "own_oauth_accounts"])
+        );
+        assert_eq!(
+            panels[1]["oauth_accounts"],
+            serde_json::json!(["controller"])
+        );
+        assert_eq!(
+            panels[1]["rpc_routes"],
+            serde_json::json!([
+                {"method": "GET", "path": "/api/admin/plugins/z-thing/status"}
+            ])
+        );
     }
 
     /// `manifest_has_settings_ui` decides whether the plugins-list
@@ -896,7 +1085,6 @@ version = "1.0.0"
 
 [[tools]]
 name = "noop"
-schema = "s.json"
 latency = "low"
 required_capabilities = []
 "#;
@@ -906,11 +1094,13 @@ required_capabilities = []
             .enable(&execlaw_plugin_sdk::PluginManifest::parse(m).unwrap())
             .unwrap();
         let app = crate::routes::build_router(state);
+        let token = setup_controller_token(&app).await;
         let resp = app
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
                     .uri("/api/admin/plugins/ui_panels")
+                    .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
             )

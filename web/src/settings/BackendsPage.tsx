@@ -23,10 +23,12 @@ import {
     getBackendStatus,
     getHardware,
     getHfCache,
+    getScrubbedSupportBundle,
     getSetupPreflight,
     listBackends,
     putHfCache,
     restartBackend,
+    runInferenceConformance,
     upsertBackend,
     type BackendListEntry,
     type BackendLogsResponse,
@@ -36,6 +38,8 @@ import {
     type BackendView,
     type DetectedGpu,
     type HardwareProfile,
+    type InferenceConformanceResponse,
+    type ScrubbedSupportBundle,
     type UpsertBackendRequest,
 } from "../api/endpoints";
 import { useAuth } from "../auth/AuthContext";
@@ -175,11 +179,16 @@ function fmtElapsed(secs: number | null): string {
 export function BackendsPage() {
     const auth = useAuth();
     const getToken = auth.getAccessToken;
+    const [conformance, setConformance] = useState<InferenceConformanceResponse | null>(null);
+    const [conformanceBusy, setConformanceBusy] = useState(false);
+    const [conformanceError, setConformanceError] = useState<string | null>(null);
     const [entries, setEntries] = useState<BackendListEntry[] | null>(null);
     const [statuses, setStatuses] = useState<
         Record<string, BackendStatusResponse>
     >({});
     const [error, setError] = useState<string | null>(null);
+    const [supportBundle, setSupportBundle] = useState<ScrubbedSupportBundle | null>(null);
+    const [supportBundleBusy, setSupportBundleBusy] = useState(false);
     const [editing, setEditing] = useState<BackendPurpose | null>(null);
     const [form, setForm] = useState<FormState>(EMPTY_FORM);
     const [busy, setBusy] = useState(false);
@@ -329,6 +338,32 @@ export function BackendsPage() {
     const meRole = auth.user?.role ?? "viewer";
     const canMutate = meRole === "controller";
 
+    const downloadSupportBundle = useCallback(async () => {
+        setSupportBundleBusy(true);
+        setError(null);
+        try {
+            const bundle = await getScrubbedSupportBundle(getToken);
+            setSupportBundle(bundle);
+            const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+                type: "application/json",
+            });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement("a");
+            link.href = url;
+            link.download = `execlaw-support-${new Date(bundle.generated_at * 1000)
+                .toISOString()
+                .replace(/[:.]/g, "-")}.json`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            window.setTimeout(() => URL.revokeObjectURL(url), 0);
+        } catch (reason) {
+            setError(reason instanceof Error ? reason.message : String(reason));
+        } finally {
+            setSupportBundleBusy(false);
+        }
+    }, [getToken]);
+
     /// True when the wizard should drive the form. We show it for
     /// fresh "Add backend" clicks (no prior config) and let the
     /// operator skip into raw JSON via the "I'll type the JSON" link.
@@ -448,6 +483,19 @@ export function BackendsPage() {
         [entries, getToken, refreshStatuses],
     );
 
+    const onRunConformance = async () => {
+        setConformanceBusy(true);
+        setConformance(null);
+        setConformanceError(null);
+        try {
+            setConformance(await runInferenceConformance(getToken));
+        } catch (error) {
+            setConformanceError(error instanceof Error ? error.message : "Conformance check unavailable");
+        } finally {
+            setConformanceBusy(false);
+        }
+    };
+
     /// Open the logs modal for a given purpose, then fetch the tail.
     /// Async errors render inside the modal rather than the page so
     /// the operator's mental context (which row they clicked on)
@@ -479,6 +527,17 @@ export function BackendsPage() {
         <div data-testid="settings-backends">
             <div className="d-flex align-items-center mb-3">
                 <h3 className="h6 mb-0 flex-grow-1">Backends</h3>
+                {canMutate && (
+                    <Button
+                        size="sm"
+                        variant="outline-primary"
+                        disabled={supportBundleBusy}
+                        onClick={() => void downloadSupportBundle()}
+                        data-testid="backends-support-bundle"
+                    >
+                        {supportBundleBusy ? "Preparing diagnostics…" : "Download scrubbed diagnostics"}
+                    </Button>
+                )}
                 <Button
                     size="sm"
                     variant="outline-secondary"
@@ -506,6 +565,27 @@ export function BackendsPage() {
             )}
 
             <ErrorBanner message={error} onDismiss={() => setError(null)} className="mb-3" />
+
+            {supportBundle && (
+                <section className="alert alert-secondary mb-3" aria-live="polite" data-testid="support-bundle-summary">
+                    <h4 className="h6">Support snapshot</h4>
+                    <p className="small mb-2">Database: {supportBundle.database.encryption_mode}; {supportBundle.database.schema_migrations_applied} schema migrations. Hardware estimate: {supportBundle.hardware.capacity_class}; {supportBundle.hardware.available_ram_mb ?? "unknown"} MiB RAM, {supportBundle.hardware.total_detected_gpu_memory_mb ?? "unknown"} MiB detected GPU memory.</p>
+                    <p className="small mb-2">Qualified model profiles: {supportBundle.protocols.active_model_profiles}; installed/enabled/quarantined plugins: {supportBundle.authority.installed_plugins}/{supportBundle.authority.enabled_plugins}/{supportBundle.authority.quarantined_plugins}. Recoverable runs: {supportBundle.recovery.recoverable_runs_by_status.reduce((sum, row) => sum + row.count, 0)}; pending local deletions: {supportBundle.recovery.pending_research_deletions}.</p>
+                    <ul className="small mb-2" aria-label="Backend readiness">
+                        {supportBundle.protocols.backends.map((backend) => (
+                            <li key={backend.purpose}>
+                                {backend.purpose}: {!backend.configured ? "not configured" : backend.has_successful_readiness ? "readiness succeeded" : `readiness check has not succeeded${backend.last_stage ? ` (${backend.last_stage})` : ""}`}
+                            </li>
+                        ))}
+                    </ul>
+                    {supportBundle.corrective_actions.length > 0 && (
+                        <ul className="small mb-2">
+                            {supportBundle.corrective_actions.map((action) => <li key={action.code}>{action.action}</li>)}
+                        </ul>
+                    )}
+                    <div className="small text-muted">{supportBundle.content_policy}</div>
+                </section>
+            )}
 
             {entries === null ? (
                 <div className="execlaw-muted small">Loading…</div>
@@ -656,6 +736,12 @@ export function BackendsPage() {
                                 </span>
                                 {canMutate && !isEditing && (
                                     <>
+                                        {purpose === "Standard" && <Button size="sm" variant="outline-secondary"
+                                            disabled={conformanceBusy} onClick={() => void onRunConformance()}
+                                            data-testid="backend-conformance" title="Test local text, streaming, and tool-call support without executing tools">
+                                            <i className="bi bi-clipboard2-check me-1" aria-hidden />
+                                            {conformanceBusy ? "Checking..." : "Check API"}
+                                        </Button>}
                                         <Button
                                             size="sm"
                                             variant="outline-primary"
@@ -706,6 +792,28 @@ export function BackendsPage() {
                             <div className="execlaw-muted small mb-2">
                                 {PURPOSE_HINT[purpose]}
                             </div>
+                            {entry.backend?.mode === "managed" && statuses[purpose]?.last_success_at && (
+                                <div className="execlaw-muted small mb-2" data-testid="backend-last-healthy">
+                                    Last healthy: {new Date(statuses[purpose].last_success_at * 1000).toLocaleString()}
+                                    {statuses[purpose].observed_model_id && ` · ${statuses[purpose].observed_model_id}`}
+                                </div>
+                            )}
+                            {purpose === "Standard" && conformanceError && <div role="alert" className="text-danger small mb-2">
+                                {conformanceError}
+                            </div>}
+                            {purpose === "Standard" && conformance && <div role="status" className="small mb-2"
+                                data-testid="backend-conformance-result">
+                                <span>{conformance.model} · {conformance.protocol === "ollama" ? "Ollama native" : "OpenAI-compatible"}</span>
+                                <div className="d-flex flex-wrap gap-3">
+                                    {(["text", "streaming", "tools"] as const).map((capability) => {
+                                        const check = conformance[capability];
+                                        return <span key={capability} title={check.code}>
+                                            <i className={`bi ${check.passed ? "bi-check-circle text-success" : "bi-x-circle text-danger"} me-1`} aria-hidden />
+                                            {capability === "tools" ? "Tool calls" : capability === "text" ? "Text" : "Streaming"}: {check.passed ? "Pass" : `Fail (${check.code})`}
+                                        </span>;
+                                    })}
+                                </div>
+                            </div>}
                             {entry.backend && !isEditing && (
                                 <div className="execlaw-muted small">
                                     <code>{entry.backend.inference_backend}</code>

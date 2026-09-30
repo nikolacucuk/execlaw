@@ -2,6 +2,24 @@
 
 Status: implementation started 2026-09-12.
 
+## Relationship to the 130-item implementation plan
+
+All H001-H130 are accepted implementation scope in
+[`implementation-plan.md`](implementation-plan.md). This file retains the
+memory subsystem's detailed work breakdown; it is not a separate competing
+status ledger. Coordinate H012-H015, H031-H032, H037-H039, H048, H051,
+H061-H063, H077, H086, H088-H092, H106, H111, H121-H123, and H130 with their
+[canonical requirements](llm-harness-roadmap.md). In particular, distinguish
+existing assertion/asset stores from qualified extraction, retrieval,
+deletion, and evidence UX. A checked subtask here does not complete its broader
+H item. Update both this breakdown and that item's evidence when it changes.
+
+New work must cover trust propagation, correction and deletion across derived
+data, revision-aware indexes, document/multimodal source evidence, and explicit
+collection scope. Rebuild projections from authoritative SQLite records plus
+applicable verified events; not every approved assertion is reconstructible
+from the conversation event log alone.
+
 This roadmap records the TencentDB Agent Memory-inspired work without replacing
 Execlaw's event log, evidence model, trust ladder, or local-only inference rule.
 
@@ -11,9 +29,14 @@ Execlaw's event log, evidence model, trust ladder, or local-only inference rule.
 - [x] Tier, hit, and last-used fields are persisted.
 - [x] Promotion proposals are approval-gated and idempotent.
 - [x] Reflection rows are append-only and event anchored.
-- [ ] Run promotion and demotion sweepers from the server lifecycle.
+- [x] Run promotion and demotion sweepers from the server lifecycle. The
+  hourly bounded worker proposes only; repeated sweeps coalesce against an
+  existing pending proposal.
 - [ ] Add the post-turn planner reflection trigger and heuristic gate.
-- [ ] Add the SPA approval queue for pending memory promotions.
+- [x] Add the SPA approval queue for pending memory promotions. The unified
+  Approvals page shows tier transitions and a stable `memory://` target
+  reference; only Controllers receive proposal details or may decide them.
+  Approval rejects stale tier transitions, and rejection leaves the row alone.
 
 ## Phase 2: Unified Memory-Asset Registry
 
