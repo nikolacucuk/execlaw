@@ -29,7 +29,7 @@ describe("WorkspaceExecutionPage", () => {
                     return response({
                         image_reference: "sha256:" + "a".repeat(64),
                         language_servers: { rust: ["rust-analyzer"] },
-                        approval: "controller_local_digest",
+                        approval: "controller_digest_approval",
                         updated_at: 1,
                         updated_by: "ctrl",
                     });
@@ -48,7 +48,7 @@ describe("WorkspaceExecutionPage", () => {
 
     afterEach(() => vi.unstubAllGlobals());
 
-    it("saves a pinned local image digest and language-server argv map with explicit approval", async () => {
+    it("saves a local image ID and language-server argv map with explicit Controller approval", async () => {
         render(
             <AuthProvider>
                 <WorkspaceExecutionPage />
@@ -64,7 +64,7 @@ describe("WorkspaceExecutionPage", () => {
         });
         fireEvent.click(
             screen.getByLabelText(
-                "Approve this exact local image digest for this installation",
+                "Approve this exact image digest on this installation without remote attestation",
             ),
         );
         fireEvent.click(screen.getByRole("button", { name: "Save toolchain" }));
@@ -82,7 +82,7 @@ describe("WorkspaceExecutionPage", () => {
         expect(JSON.parse((call?.[1] as RequestInit).body as string)).toEqual({
             image_reference: "sha256:" + "a".repeat(64),
             language_servers: { rust: ["rust-analyzer"] },
-            approve_local_image: true,
+            approve_image_digest: true,
         });
         expect(await screen.findByRole("status")).toHaveTextContent(
             "Controller-approved",

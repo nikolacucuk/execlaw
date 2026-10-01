@@ -141,8 +141,8 @@ must not omit either default tier.
 | Public and plugin egress (H025) | Existing URL guards and local endpoint policy coverage | Prove mixed DNS answers, IPv4-mapped IPv6, redirect-to-private, proxy bypass, approved private integrations, and registered-sidecar pinning issue zero prohibited requests |
 | Memory assertions/jobs | Core evidence/trust/reopen tests and skills capture tests | Exercise the startup-wired extraction worker through durable completion and restart |
 | Memory evidence review | Controller can inspect assertion revisions, validity, status, hash-verified source spans, and review history; CLI export requires consent/redaction; chat and agent traces show metadata-only governed loadout receipts; unreceipted legacy HOT prompt injection is disabled | Agent-run restart and runtime ancestor/projection invalidation qualification (H037) |
-| Trust-first memory retrieval | Chat, in-process, runner, agent, and research prompts apply scope/trust/lifecycle/time/mode eligibility before ranking, exclude TOOL_ONLY assets, deduplicate source hashes, and record query/source/rank receipts; local embeddings and rebuild are versioned | Held-out recall/answer accuracy and fixed-budget hardware latency qualification (H038) |
-| Workspace coding (H040) | Root-confined read/search and isolated run checkouts; durable manifest host tools for SHA-checked patching; path, secret, link, hardlink, and idempotency checks | Terminal jobs, language-server diagnostics, approved sandbox toolchain, and multi-file repair benchmark under H023-H029 write-authority prerequisites |
+| Trust-first memory retrieval | Chat, in-process, runner, agent, and research prompts apply scope/trust/lifecycle/time/mode eligibility before ranking, exclude TOOL_ONLY assets, deduplicate source hashes, and record query/source/rank receipts; local embeddings/rebuild are versioned; `eval-harness qualify-memory-retrieval` records held-out lexical/hybrid recall, answer accuracy, leakage, index-build time, and retrieval p50/p95 | Live local-backend held-out pass and fixed-budget supported-hardware qualification; current report records `http_connect` because no inference service is listening (H038) |
+| Workspace coding (H040) | Controller-registered roots and isolated run checkouts; manifest host tools for bounded read/search/SHA-checked patch/terminal/LSP jobs; durable execution receipts; pinned toolchain image; direct Docker smoke passed offline Cargo test, denied-network and read-only mount checks, and Rust Analyzer diagnostics | Execute the Rust-side LSP late-push regression and server/route tests; run the held-out multi-file model-repair benchmark; complete H023-H029 write-authority prerequisites |
 | Artifact provenance | Core/host/container tests plus packaging checks | Verify detached release bundles through bundled install on every platform |
 | Plugin upgrade transaction and panel authority (H027) | Manifest/path and ZIP bounds, rollback and provenance checks; browser test verifies panel credential isolation and denied unrelated RPC routes | Platform release qualification and lifecycle/process-kill rollback matrix |
 | Voice | Pipeline/server/SPA tests | Runtime locking and cancellation are per-session, but the production path remains push-to-talk with non-streaming STT/TTS and an echo callback; H047 endpointing, queue limits, sentence streaming, real agent integration, and hardware qualification remain |
@@ -189,6 +189,10 @@ run then saves the persistent baseline, and following PRs are gated. After a
 hardware or Rust toolchain change, review and
 dispatch the workflow with `replace_baseline` enabled on the default branch.
 Benchmark results from different runner/compiler fingerprints are rejected.
+`python3 -m unittest discover -s scripts/tests -p 'test_performance_gate.py'`
+exercises a deliberate regression failure, an in-tolerance pass, and rejection
+of a different CPU identity. These policy tests do not replace a measured
+baseline from the stable runner.
 Prefix reuse, model residency, batching, and speculative decoding remain
 separate trials; an optimization must preserve task-quality and policy results
 before adoption.

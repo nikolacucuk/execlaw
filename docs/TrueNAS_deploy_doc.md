@@ -205,28 +205,23 @@ sudo docker compose logs -f execlaw
 ### Production database encryption
 
 The `execlaw-core` crate defaults to bundled plaintext SQLite for development.
-Production SQLCipher builds require the `execlaw-core/sqlcipher` feature. The
-checked-in `Dockerfile.control-plane` currently runs the default Cargo build,
-so a production image must change its builder command to:
+The checked-in `Dockerfile.control-plane` explicitly builds the CLI's
+`execlaw/sqlcipher` feature and runs `execlaw doctor` before packaging the
+image. `doctor` verifies the binary's encryption support, not the format or
+key of an existing database.
 
-```dockerfile
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/build/target,sharing=locked \
-    cargo build --locked --release -p execlaw \
-      --no-default-features -F execlaw-core/sqlcipher \
-    && cp target/release/execlaw /tmp/execlaw
-```
-
-Rebuild the image and verify the compiled feature set:
+Rebuild the image and verify its compiled feature set before starting it:
 
 ```bash
 sudo docker compose build --no-cache execlaw
 sudo docker compose run --rm execlaw doctor
 ```
 
-Do not switch an existing plaintext database to a SQLCipher binary without a
-tested export/import or rekey procedure and a current backup. Record whether
-the deployed image is plaintext or SQLCipher in the operations inventory.
+If an existing plaintext database must be carried into this production image,
+stop execlaw and use the verified offline conversion procedure in
+[`truenas-docker.md`](truenas-docker.md#convert-an-existing-plaintext-database).
+Do not start the SQLCipher image against the plaintext file or remove the
+matching `master.key`.
 
 Verify the base layer before enabling plugins:
 

@@ -1226,9 +1226,53 @@ pub async fn archive_handler(
     get_handler(State(state), user, AxumPath(name)).await
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/skills/{name}/forget",
+    params(("name" = String, Path, description = "Full skill name")),
+    responses(
+        (status = 200, description = "Skill content, search entries, proposals, and unshared resource blobs were scrubbed"),
+        (status = 403, description = "Caller is not a Controller"),
+        (status = 404, description = "Skill not found")
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "skills"
+)]
+pub async fn forget_handler(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    AxumPath(name): AxumPath<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    require_controller(&state, &user)?;
+    let report = SkillStore::new(state.db.clone())
+        .forget(&name, &user.user_id, chrono::Utc::now().timestamp_millis())
+        .map_err(skill_err)?;
+    Ok(Json(serde_json::json!({
+        "forgotten": true,
+        "already_forgotten": report.already_forgotten,
+        "versions_scrubbed": report.versions_scrubbed,
+        "proposals_scrubbed": report.proposals_scrubbed,
+        "invocations_scrubbed": report.invocations_scrubbed,
+        "evaluation_runs_scrubbed": report.evaluation_runs_scrubbed,
+        "evaluation_cases_removed": report.evaluation_cases_removed,
+        "resources_removed": report.resources_removed,
+        "unshared_blobs_removed": report.blobs_removed,
+        "backups_retained": true,
+    })))
+}
+
 fn skill_err(e: execlaw_skills::SkillError) -> ApiError {
     use execlaw_skills::SkillError::*;
     match e {
+        Db(execlaw_core::db::DbError::Invariant(message))
+            if message.contains("privacy-deleted") =>
+        {
+            ApiError {
+                status: StatusCode::GONE,
+                code: "skill_privacy_deleted",
+                message: "This skill name was privacy-deleted and cannot be reused.".into(),
+            }
+        }
         Db(execlaw_core::db::DbError::Invariant(message)) if message.contains("held-out") => {
             ApiError {
                 status: StatusCode::CONFLICT,
@@ -2093,4 +2137,5 @@ pub fn skills_admin_router() -> Router<AppState> {
         )
         .route("/api/admin/skills/{name}/evaluate", post(evaluate_skill))
         .route("/api/admin/skills/{name}/archive", post(archive_handler))
+        .route("/api/admin/skills/{name}/forget", post(forget_handler))
 }

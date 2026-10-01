@@ -62,10 +62,12 @@ interface Props {
     sendVoiceFrame?: (bytes: ArrayBuffer) => boolean;
     /// Phase 13.C — voice control passthrough.
     sendVoiceControl?: (payload: object) => boolean;
+    getVoiceConversationId?: () => string | null;
     voiceTranscript?: {
         session: string;
         text: string;
         is_final: boolean;
+        submitted_to_chat?: boolean;
     } | null;
     /**
      * 2026-04-28 — stop-turn handler threaded through to the inner
@@ -116,6 +118,7 @@ export function WelcomeView({
     onSend,
     sendVoiceFrame,
     sendVoiceControl,
+    getVoiceConversationId,
     voiceTranscript,
     onStop,
     busy,
@@ -207,6 +210,7 @@ export function WelcomeView({
                     onSend={onSend}
                     sendVoiceFrame={sendVoiceFrame}
                     sendVoiceControl={sendVoiceControl}
+                    getVoiceConversationId={getVoiceConversationId}
                     voiceTranscript={voiceTranscript}
                     voiceReadiness={voiceReadiness}
                     onStop={onStop}

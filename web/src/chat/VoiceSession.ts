@@ -50,6 +50,9 @@ export interface VoiceSessionOpts {
     /// AudioContext.sampleRate); phone bridges produce 8000 or
     /// 16000 depending on the codec the gateway transcodes to.
     sampleRate: number;
+    /// Existing or newly minted chat thread that receives this utterance.
+    /// Null for private/standalone capture that should remain a draft.
+    conversationId?: string | null;
     /// Optional override for the session id — only used by tests
     /// that need a deterministic UUID. Production always mints a
     /// fresh one via crypto.randomUUID.
@@ -67,6 +70,7 @@ export class VoiceSession {
     readonly sessionId: string;
     readonly codec: string;
     readonly sampleRate: number;
+    readonly conversationId: string | null;
     readonly channels: number;
     readonly startMs: number;
     private seq: number = 0;
@@ -75,6 +79,7 @@ export class VoiceSession {
         this.sessionId = opts.sessionIdOverride ?? mintSessionId();
         this.codec = opts.codec;
         this.sampleRate = opts.sampleRate;
+        this.conversationId = opts.conversationId ?? null;
         this.channels = 1;
         this.startMs = Date.now();
     }

@@ -67,3 +67,5 @@ perf/results/
 /desktop-windows/src-tauri/resources/openssl/*.dll
 server-local.out.log
 server-local.out.log
+server-local.out.log
+server-local.out.log

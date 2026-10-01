@@ -2,12 +2,17 @@
 //! from the suite directory, never copied into the model's prompt/workspace.
 
 use anyhow::{Context, bail};
-use execlaw_inference_api::{ChatMessage, ChatRequest, InferenceClient, ModelId};
+use execlaw_container_manager::{
+    BollardWorkspaceJobExecutor, WorkspaceDiagnosticsRequest, WorkspaceJobExecutor,
+    WorkspaceRunRequest,
+};
+use execlaw_inference_api::{ChatMessage, ChatRequest, InferenceClient, ModelId, ToolDeclaration};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
 struct Suite {
@@ -46,6 +51,14 @@ enum Verifier {
         expected_effects: Vec<Value>,
         fixture_response: String,
     },
+    WorkspaceCoding {
+        fixture_workspace: PathBuf,
+        expected_workspace_files: BTreeMap<String, String>,
+        test_argv: Vec<String>,
+        language_servers: BTreeMap<String, Vec<String>>,
+        required_tools: Vec<String>,
+        fixture_response: String,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -54,6 +67,19 @@ struct Source {
     text: String,
     #[serde(default = "default_source_fetched")]
     fetched_ok: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceFixtureAction {
+    tool: String,
+    arguments: Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct WorkspaceFileEdit {
+    path: String,
+    expected_sha256: Option<String>,
+    content: String,
 }
 
 fn default_source_fetched() -> bool {
@@ -78,6 +104,7 @@ struct Record {
     runs: u32,
     max_tokens: u32,
     offline_fixture: bool,
+    workspace_toolchain_fingerprint_sha256: Option<String>,
     results: Vec<TaskResult>,
     summary: Summary,
     comparison: Option<Comparison>,
@@ -91,6 +118,8 @@ struct TaskResult {
     category: String,
     success: bool,
     failure: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    evidence: Option<Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -138,6 +167,8 @@ pub(super) struct RunConfig {
     pub(super) compare_path: Option<PathBuf>,
     pub(super) base_url: Option<String>,
     pub(super) model: String,
+    pub(super) workspace_image: Option<String>,
+    pub(super) approve_workspace_image: bool,
 }
 
 pub(super) async fn run(
@@ -158,6 +189,8 @@ pub(super) async fn run(
         compare_path,
         base_url,
         model,
+        workspace_image,
+        approve_workspace_image,
     } = config;
     if runs == 0 || max_tokens == 0 {
         bail!("--runs and --max-tokens must be greater than zero");
@@ -173,7 +206,7 @@ pub(super) async fn run(
     if suite
         .tasks
         .iter()
-        .any(|task| matches!(&task.verifier, Verifier::Coding { .. }))
+        .any(|task| matches!(&task.verifier, Verifier::Coding { .. } | Verifier::WorkspaceCoding { .. }))
         && !offline_fixture
         && !allow_executing_generated_code
     {
@@ -181,6 +214,30 @@ pub(super) async fn run(
             "coding tasks execute model-produced code; pass --allow-executing-generated-code to acknowledge"
         );
     }
+    let workspace_executor: Option<Arc<dyn WorkspaceJobExecutor>> = if suite
+        .tasks
+        .iter()
+        .any(|task| matches!(&task.verifier, Verifier::WorkspaceCoding { .. }))
+    {
+        let image = workspace_image
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("workspace coding tasks require --workspace-image"))?;
+        if !approve_workspace_image {
+            bail!("workspace coding benchmark requires --approve-workspace-image to authorize this exact local digest");
+        }
+        let db = execlaw_core::Database::open(&execlaw_core::DbConfig::in_memory_unencrypted())?;
+        execlaw_core::MigrationRunner::new(&db).apply_all()?;
+        execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(db.clone())
+            .approve_controller_oci_reference(
+                execlaw_core::artifact_provenance::ArtifactType::Sidecar,
+                image,
+                "Controller",
+                "eval-harness-workspace-benchmark",
+            )?;
+        Some(Arc::new(BollardWorkspaceJobExecutor::connect(db)?))
+    } else {
+        None
+    };
     let comparison_baseline = if let Some(path) = &compare_path {
         let baseline: Record = serde_json::from_slice(
             &std::fs::read(path)
@@ -197,6 +254,10 @@ pub(super) async fn run(
             || baseline.seed_start != seed
             || baseline.max_tokens != max_tokens
             || baseline.offline_fixture != offline_fixture
+            || baseline.workspace_toolchain_fingerprint_sha256
+                != workspace_image
+                    .as_deref()
+                    .map(|image| hex::encode(Sha256::digest(image.as_bytes())))
         {
             bail!("baseline comparison metadata does not match this run");
         }
@@ -215,6 +276,35 @@ pub(super) async fn run(
     for trial in 0..runs {
         let task_seed = seed.wrapping_add(u64::from(trial));
         for task in &suite.tasks {
+            if let Verifier::WorkspaceCoding { .. } = &task.verifier {
+                let result = run_workspace_coding_task(
+                    &client,
+                    &model,
+                    task,
+                    task_seed,
+                    max_tokens,
+                    offline_fixture,
+                    workspace_executor
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("workspace executor is not configured"))?,
+                    &suite_path,
+                )
+                .await;
+                let (success, evidence, failure) = match result {
+                    Ok(evidence) => (true, Some(evidence), None),
+                    Err(error) => (false, None, Some(format!("{error:#}"))),
+                };
+                results.push(TaskResult {
+                    trial,
+                    seed: task_seed,
+                    task_id: task.id.clone(),
+                    category: task.category.clone(),
+                    success,
+                    failure,
+                    evidence,
+                });
+                continue;
+            }
             let completion = if offline_fixture {
                 Ok(task.fixture_response().to_owned())
             } else {
@@ -231,6 +321,7 @@ pub(super) async fn run(
                 category: task.category.clone(),
                 success: result.is_ok(),
                 failure: result.err(),
+                evidence: None,
             });
         }
     }
@@ -253,6 +344,9 @@ pub(super) async fn run(
         runs,
         max_tokens,
         offline_fixture,
+        workspace_toolchain_fingerprint_sha256: workspace_image
+            .as_deref()
+            .map(|image| hex::encode(Sha256::digest(image.as_bytes()))),
         results,
         summary,
         comparison: None,
@@ -305,6 +399,8 @@ fn compare_records(baseline: &Record, candidate: &Record) -> anyhow::Result<Comp
         || baseline.seed_start != candidate.seed_start
         || baseline.max_tokens != candidate.max_tokens
         || baseline.offline_fixture != candidate.offline_fixture
+        || baseline.workspace_toolchain_fingerprint_sha256
+            != candidate.workspace_toolchain_fingerprint_sha256
     {
         bail!(
             "baseline comparison requires matching dataset, model, backend, quantization, hardware tier, seeds, runs, token budget, and execution mode"
@@ -378,6 +474,9 @@ impl Task {
             }
             | Verifier::Automation {
                 fixture_response, ..
+            }
+            | Verifier::WorkspaceCoding {
+                fixture_response, ..
             } => fixture_response,
         }
     }
@@ -409,6 +508,72 @@ fn validate_suite(suite: &Suite) -> anyhow::Result<()> {
                 bail!("task {} coding fixture must contain Cargo.toml", task.id);
             }
         }
+        if let Verifier::WorkspaceCoding {
+            fixture_workspace,
+            expected_workspace_files,
+            test_argv,
+            language_servers,
+            required_tools,
+            fixture_response,
+        } = &task.verifier
+        {
+            if !fixture_workspace.is_relative()
+                || fixture_workspace
+                    .components()
+                    .any(|part| !matches!(part, Component::Normal(_)))
+                || !fixture_workspace.join("Cargo.toml").is_file()
+            {
+                bail!("task {} workspace fixture must be a safe Cargo project path", task.id);
+            }
+            if expected_workspace_files.is_empty()
+                || expected_workspace_files
+                    .keys()
+                    .any(|path| !valid_workspace_relative_path(path))
+                || expected_workspace_files.values().any(|content| content.len() > 1024 * 1024)
+            {
+                bail!("task {} expected workspace files are empty, unsafe, or oversized", task.id);
+            }
+            if test_argv.is_empty()
+                || test_argv.len() > 64
+                || test_argv.iter().any(|arg| arg.is_empty() || arg.contains('\0'))
+            {
+                bail!("task {} test_argv must be a bounded non-empty argv vector", task.id);
+            }
+            if language_servers.iter().any(|(language, argv)| {
+                language.trim().is_empty()
+                    || argv.is_empty()
+                    || argv.len() > 32
+                    || argv.iter().any(|arg| arg.is_empty() || arg.len() > 1024 || arg.contains('\0'))
+            }) {
+                bail!("task {} contains an invalid language-server argv map", task.id);
+            }
+            if required_tools.is_empty()
+                || required_tools.iter().any(|tool| {
+                    !matches!(
+                        tool.as_str(),
+                        "workspace.read_file"
+                            | "workspace.search"
+                            | "workspace.apply_patch"
+                            | "workspace.run"
+                            | "workspace.diagnostics"
+                    )
+                })
+                || !required_tools.iter().any(|tool| tool == "workspace.run")
+            {
+                bail!("task {} must require the bounded workspace.run test tool", task.id);
+            }
+            let actions: Vec<WorkspaceFixtureAction> = serde_json::from_str(fixture_response)
+                .with_context(|| format!("task {} has invalid workspace fixture actions", task.id))?;
+            if actions.is_empty()
+                || actions.iter().any(|action| {
+                    !required_tools.contains(&action.tool)
+                        || !matches!(action.tool.as_str(), "workspace.read_file" | "workspace.search" | "workspace.apply_patch" | "workspace.run" | "workspace.diagnostics")
+                })
+                || !actions.iter().any(|action| action.tool == "workspace.run")
+            {
+                bail!("task {} fixture actions must include its bounded workspace.run test", task.id);
+            }
+        }
     }
     Ok(())
 }
@@ -437,6 +602,9 @@ async fn request_task(
             "\nReturn only the complete replacement contents for {}.",
             output_file.display()
         )),
+        Verifier::WorkspaceCoding { .. } => user_prompt.push_str(
+            "\nUse the workspace read/search/apply_patch/diagnostics/run tools. Apply the repair across all required files, run the supplied offline test command, and finish only after it exits successfully.",
+        ),
         Verifier::Automation { .. } => {
             user_prompt.push_str("\nReturn only a JSON array of proposed effects.");
         }
@@ -475,6 +643,549 @@ async fn request_task(
                 .map(|content| content.as_text())
         })
         .unwrap_or_default())
+}
+
+const WORKSPACE_EVAL_MAX_ROUNDS: usize = 16;
+const WORKSPACE_EVAL_MAX_CALLS: usize = 32;
+const WORKSPACE_EVAL_MAX_FILE_BYTES: usize = 1_048_576;
+const WORKSPACE_EVAL_MAX_TOTAL_BYTES: usize = 100 * 1024 * 1024;
+
+async fn run_workspace_coding_task(
+    client: &InferenceClient,
+    model: &str,
+    task: &Task,
+    seed: u64,
+    max_tokens: u32,
+    offline_fixture: bool,
+    executor: &Arc<dyn WorkspaceJobExecutor>,
+    suite_path: &Path,
+    image_reference: &str,
+) -> anyhow::Result<Value> {
+    let Verifier::WorkspaceCoding {
+        fixture_workspace,
+        expected_workspace_files,
+        test_argv,
+        language_servers,
+        required_tools,
+        fixture_response,
+    } = &task.verifier
+    else {
+        bail!("task is not a workspace coding task");
+    };
+    let suite_dir = suite_path.parent().unwrap_or_else(|| Path::new("."));
+    let fixture = std::fs::canonicalize(suite_dir.join(fixture_workspace))
+        .with_context(|| format!("open workspace fixture for {}", task.id))?;
+    let workspace = tempfile::tempdir().context("create temporary benchmark workspace")?;
+    copy_workspace_for_container(&fixture, workspace.path())?;
+
+    let mut calls = Vec::new();
+    let mut patched = BTreeSet::new();
+    let mut diagnostics_count = 0usize;
+    let mut successful_test: Option<(String, String)> = None;
+    if offline_fixture {
+        let fixture_actions: Vec<WorkspaceFixtureAction> =
+            serde_json::from_str(fixture_response).context("parse workspace fixture actions")?;
+        for action in fixture_actions {
+            if calls.len() >= WORKSPACE_EVAL_MAX_CALLS {
+                bail!("workspace benchmark action budget exceeded");
+            }
+            execute_workspace_tool(
+                executor,
+                image_reference,
+                &workspace,
+                &task.id,
+                &action.tool,
+                &action.arguments,
+                test_argv,
+                language_servers,
+                &mut calls,
+                &mut patched,
+                &mut diagnostics_count,
+                &mut successful_test,
+            )
+            .await?;
+        }
+    } else {
+        let tools = workspace_tool_declarations();
+        let mut messages = vec![
+            ChatMessage::system(
+                "Repair the supplied isolated source workspace. Use only the workspace tools. Inspect files before patching, use SHA-256 preconditions from read_file, request LSP diagnostics where configured, and run the exact offline test command. The snapshot is disposable, has no network, and contains no credentials. Finish only after the test command exits zero. Do not return source contents in prose.",
+            ),
+            ChatMessage::user(format!(
+                "{}\n\nRun this exact offline test argv after your final patch: {:?}\nAvailable diagnostic language IDs: {:?}\nRequired tool calls: {:?}\n[benchmark trial seed: {}]",
+                task.prompt,
+                test_argv,
+                language_servers.keys().collect::<Vec<_>>(),
+                required_tools,
+                seed
+            )),
+        ];
+        let started = std::time::Instant::now();
+        let mut output_tokens = 0u32;
+        let mut completed = false;
+        for round in 0..WORKSPACE_EVAL_MAX_ROUNDS {
+            if started.elapsed() > std::time::Duration::from_secs(600) {
+                bail!("workspace benchmark exceeded its 10-minute case budget");
+            }
+            let request = ChatRequest {
+                model: ModelId(model.to_owned()),
+                messages: messages.clone(),
+                tools: Some(tools.clone()),
+                stream: false,
+                temperature: Some(0.0),
+                max_tokens: Some(max_tokens),
+                chat_template_kwargs: Some(serde_json::json!({"enable_thinking":false})),
+                tool_choice: Some(serde_json::json!("auto")),
+                response_format: None,
+                guided_decoding_backend: None,
+            };
+            let response = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                client.chat_completions(&request),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("workspace benchmark inference timeout"))?
+            .map_err(|error| anyhow::anyhow!("workspace benchmark inference {}", error.safe_class()))?;
+            let Some(choice) = response.choices.first() else {
+                bail!("workspace benchmark model returned no choice");
+            };
+            let usage = response
+                .usage
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("workspace benchmark model omitted token usage"))?;
+            output_tokens = output_tokens.saturating_add(usage.completion_tokens);
+            if output_tokens > max_tokens.saturating_mul(WORKSPACE_EVAL_MAX_ROUNDS as u32) {
+                bail!("workspace benchmark exceeded its cumulative token budget");
+            }
+            if choice.message.tool_calls.is_empty() {
+                completed = true;
+                break;
+            }
+            messages.push(choice.message.clone());
+            for call in &choice.message.tool_calls {
+                if calls.len() >= WORKSPACE_EVAL_MAX_CALLS {
+                    bail!("workspace benchmark action budget exceeded");
+                }
+                let arguments = serde_json::from_str::<Value>(&call.function.arguments)
+                    .map_err(|_| anyhow::anyhow!("workspace tool arguments were invalid JSON"))?;
+                let tool_result = execute_workspace_tool(
+                    executor,
+                    image_reference,
+                    &workspace,
+                    &task.id,
+                    &call.function.name,
+                    &arguments,
+                    test_argv,
+                    language_servers,
+                    &mut calls,
+                    &mut patched,
+                    &mut diagnostics_count,
+                    &mut successful_test,
+                )
+                .await;
+                let response_body = match tool_result {
+                    Ok(value) => serde_json::json!({"ok":true,"result":value}),
+                    Err(error) => serde_json::json!({"ok":false,"error":error}),
+                };
+                messages.push(ChatMessage::tool_result(
+                    call.id.clone(),
+                    serde_json::to_string(&response_body)?,
+                ));
+            }
+            tracing::debug!(task_id=%task.id, round, tool_calls=calls.len(), output_tokens, "workspace benchmark round completed");
+        }
+        if !completed {
+            bail!("workspace benchmark exhausted its model-round budget");
+        }
+    }
+
+    for required in required_tools {
+        if !calls.iter().any(|call| call == required) {
+            bail!("workspace benchmark omitted required tool {required}");
+        }
+    }
+    let expected_test_hash = workspace_map_sha256(expected_workspace_files)?;
+    let Some((observed_test_hash, test_output_sha256)) = successful_test else {
+        bail!("workspace benchmark did not produce a successful test exit");
+    };
+    if observed_test_hash != expected_test_hash {
+        bail!("workspace changed after its final successful test run");
+    }
+    let actual_files = read_workspace_for_benchmark(workspace.path())?;
+    if actual_files != *expected_workspace_files {
+        bail!("final workspace files did not match the held-out expected workspace");
+    }
+    Ok(serde_json::json!({
+        "tool_calls":calls,
+        "patched_paths":patched,
+        "successful_test_output_sha256":test_output_sha256,
+        "lsp_diagnostic_count":diagnostics_count,
+        "workspace_sha256":expected_test_hash
+    }))
+}
+
+fn workspace_tool_declarations() -> Vec<ToolDeclaration> {
+    vec![
+        ToolDeclaration::function(
+            "workspace.read_file",
+            "Read a bounded UTF-8 file from the temporary benchmark workspace.",
+            serde_json::json!({"type":"object","properties":{"path":{"type":"string"}},"required":["path"],"additionalProperties":false}),
+        ),
+        ToolDeclaration::function(
+            "workspace.search",
+            "Search bounded UTF-8 workspace files for a literal query.",
+            serde_json::json!({"type":"object","properties":{"query":{"type":"string","minLength":1,"maxLength":1024}},"required":["query"],"additionalProperties":false}),
+        ),
+        ToolDeclaration::function(
+            "workspace.apply_patch",
+            "Apply one or more SHA-256 checked replacements in the temporary workspace.",
+            serde_json::json!({"type":"object","properties":{"edits":{"type":"array","minItems":1,"maxItems":32,"items":{"type":"object","properties":{"path":{"type":"string"},"expected_sha256":{"type":["string","null"]},"content":{"type":"string","maxLength":1048576}},"required":["path","expected_sha256","content"],"additionalProperties":false}}},"required":["edits"],"additionalProperties":false}),
+        ),
+        ToolDeclaration::function(
+            "workspace.run",
+            "Run an argv command in a network-disabled, resource-limited, read-only container snapshot.",
+            serde_json::json!({"type":"object","properties":{"argv":{"type":"array","minItems":1,"maxItems":64,"items":{"type":"string","minLength":1,"maxLength":4096}},"timeout_ms":{"type":"integer","minimum":1000,"maximum":180000}},"required":["argv"],"additionalProperties":false}),
+        ),
+        ToolDeclaration::function(
+            "workspace.diagnostics",
+            "Request LSP diagnostics for a file from the Controller-configured language-server map.",
+            serde_json::json!({"type":"object","properties":{"path":{"type":"string"},"language_id":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1000,"maximum":180000}},"required":["path","language_id"],"additionalProperties":false}),
+        ),
+    ]
+}
+
+async fn execute_workspace_tool(
+    executor: &Arc<dyn WorkspaceJobExecutor>,
+    image_reference: &str,
+    workspace: &Path,
+    task_id: &str,
+    tool_name: &str,
+    args: &Value,
+    test_argv: &[String],
+    language_servers: &BTreeMap<String, Vec<String>>,
+    calls: &mut Vec<String>,
+    patched: &mut BTreeSet<String>,
+    diagnostics_count: &mut usize,
+    successful_test: &mut Option<(String, String)>,
+) -> anyhow::Result<Value> {
+    calls.push(tool_name.to_owned());
+    match tool_name {
+        "workspace.read_file" => {
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("read_file requires path"))?;
+            let (content, sha256) = read_workspace_file(workspace, path)?;
+            Ok(serde_json::json!({"path":path,"text":content,"sha256":sha256}))
+        }
+        "workspace.search" => {
+            let query = args
+                .get("query")
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty() && value.len() <= 1024)
+                .ok_or_else(|| anyhow::anyhow!("search query must be 1..=1024 bytes"))?;
+            let mut matches = Vec::new();
+            for (path, text) in read_workspace_files(workspace)? {
+                for (line, value) in text.lines().enumerate() {
+                    if value.contains(query) {
+                        matches.push(serde_json::json!({
+                            "path":path,"line":line+1,
+                            "text":value.chars().take(2048).collect::<String>()
+                        }));
+                        if matches.len() == 500 {
+                            break;
+                        }
+                    }
+                }
+                if matches.len() == 500 {
+                    break;
+                }
+            }
+            Ok(serde_json::json!({"matches":matches}))
+        }
+        "workspace.apply_patch" => {
+            let edits: Vec<WorkspaceFileEdit> = serde_json::from_value(
+                args.get("edits")
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("apply_patch requires edits"))?,
+            )?;
+            if edits.is_empty() || edits.len() > 32 {
+                bail!("apply_patch must contain 1..=32 edits");
+            }
+            let mut results = Vec::with_capacity(edits.len());
+            let mut distinct = BTreeSet::new();
+            for edit in edits {
+                if !valid_workspace_relative_path(&edit.path)
+                    || !distinct.insert(edit.path.clone())
+                    || edit.content.len() > WORKSPACE_EVAL_MAX_FILE_BYTES
+                {
+                    bail!("apply_patch path, duplicate, or content budget is invalid");
+                }
+                let current = read_workspace_file_optional(workspace, &edit.path)?;
+                let current_hash = current
+                    .as_ref()
+                    .map(|(_, digest)| digest.as_str());
+                let next_hash = hex::encode(Sha256::digest(edit.content.as_bytes()));
+                if current_hash == Some(next_hash.as_str()) {
+                    results.push(serde_json::json!({"path":edit.path,"sha256":next_hash,"unchanged":true}));
+                    continue;
+                }
+                if current_hash != edit.expected_sha256.as_deref() {
+                    bail!("apply_patch SHA-256 precondition failed for {}", edit.path);
+                }
+                let target = workspace.join(&edit.path);
+                let parent = target
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("patch target has no parent"))?;
+                std::fs::create_dir_all(parent)?;
+                ensure_workspace_parent(workspace, parent)?;
+                std::fs::write(&target, edit.content.as_bytes())?;
+                patched.insert(edit.path.clone());
+                *successful_test = None;
+                results.push(serde_json::json!({"path":edit.path,"sha256":next_hash,"unchanged":false}));
+            }
+            let total_bytes = read_workspace_files(workspace)?
+                .values()
+                .map(String::len)
+                .sum::<usize>();
+            if total_bytes > WORKSPACE_EVAL_MAX_TOTAL_BYTES {
+                bail!("workspace exceeds its 100 MiB budget after patch");
+            }
+            Ok(serde_json::json!({"edits":results}))
+        }
+        "workspace.run" => {
+            let argv = parse_workspace_argv(args)?;
+            let timeout_ms = args
+                .get("timeout_ms")
+                .and_then(Value::as_u64)
+                .unwrap_or(60_000);
+            if !(1_000..=180_000).contains(&timeout_ms) {
+                bail!("workspace job timeout must be 1000..=180000 ms");
+            }
+            let snapshot = copy_workspace_for_container(workspace)?;
+            let job_name = workspace_job_name(task_id, calls.len());
+            let result = executor
+                .run(WorkspaceRunRequest {
+                    image_reference: image_reference.to_owned(),
+                    checkout_path: snapshot.path().to_owned(),
+                    job_name,
+                    argv: argv.clone(),
+                    timeout_ms,
+                })
+                .await?;
+            if argv == test_argv && result.exit_code == Some(0) && !result.timed_out {
+                *successful_test = Some((workspace_map_sha256(&read_workspace_files(workspace)?)?, hex::encode(Sha256::digest(result.output.as_bytes()))));
+            }
+            Ok(serde_json::json!({
+                "exit_code":result.exit_code,"timed_out":result.timed_out,
+                "output_truncated":result.output_truncated,"output":result.output,
+                "elapsed_ms":result.elapsed_ms,"was_configured_test":argv==test_argv
+            }))
+        }
+        "workspace.diagnostics" => {
+            let path = args
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("diagnostics requires path"))?;
+            let language_id = args
+                .get("language_id")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("diagnostics requires language_id"))?;
+            let server_argv = language_servers
+                .get(language_id)
+                .ok_or_else(|| anyhow::anyhow!("no configured language server for {language_id}"))?;
+            let (text, _) = read_workspace_file(workspace, path)?;
+            let snapshot = copy_workspace_for_container(workspace)?;
+            let result = executor
+                .diagnostics(WorkspaceDiagnosticsRequest {
+                    image_reference: image_reference.to_owned(),
+                    checkout_path: snapshot.path().to_owned(),
+                    job_name: workspace_job_name(task_id, calls.len()),
+                    server_argv: server_argv.clone(),
+                    path: path.to_owned(),
+                    language_id: language_id.to_owned(),
+                    text,
+                    timeout_ms: args
+                        .get("timeout_ms")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(30_000),
+                })
+                .await?;
+            *diagnostics_count += result.diagnostics.len();
+            Ok(serde_json::json!({"language_id":result.language_id,"path":result.path,"diagnostics":result.diagnostics,"elapsed_ms":result.elapsed_ms}))
+        }
+        other => bail!("workspace tool is not in the benchmark tool catalog: {other}"),
+    }
+}
+
+fn parse_workspace_argv(args: &Value) -> anyhow::Result<Vec<String>> {
+    let argv = args
+        .get("argv")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("workspace.run requires argv"))?
+        .iter()
+        .map(|argument| {
+            argument
+                .as_str()
+                .map(str::to_owned)
+                .ok_or_else(|| anyhow::anyhow!("workspace.run argv entries must be strings"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    if argv.is_empty()
+        || argv.len() > 64
+        || argv.iter().any(|value| value.is_empty() || value.contains('\0'))
+        || argv.iter().map(String::len).sum::<usize>() > 16 * 1024
+    {
+        bail!("workspace.run argv is empty or exceeds its bounds");
+    }
+    Ok(argv)
+}
+
+fn valid_workspace_relative_path(path: &str) -> bool {
+    let candidate = Path::new(path);
+    !path.is_empty()
+        && path.len() <= 240
+        && !path.contains('\\')
+        && !path.contains(':')
+        && !candidate.is_absolute()
+        && candidate
+            .components()
+            .all(|part| matches!(part, Component::Normal(_)))
+        && !candidate.components().any(|part| {
+            let name = part.as_os_str().to_string_lossy().to_ascii_lowercase();
+            name.starts_with('.')
+                && [".env", ".ssh", ".npmrc", ".pypirc", ".git-credentials"].contains(&name.as_str())
+                || ["credentials", "secrets", "id_rsa", "id_ed25519", ".pem", ".key", ".p12", ".pfx", ".keystore", ".kubeconfig"]
+                    .iter()
+                    .any(|needle| name.contains(needle))
+        })
+}
+
+fn read_workspace_file(
+    root: &Path,
+    relative: &str,
+) -> anyhow::Result<(String, String)> {
+    read_workspace_file_optional(root, relative)?
+        .ok_or_else(|| anyhow::anyhow!("workspace file does not exist: {relative}"))
+}
+
+fn read_workspace_file_optional(
+    root: &Path,
+    relative: &str,
+) -> anyhow::Result<Option<(String, String)>> {
+    if !valid_workspace_relative_path(relative) {
+        bail!("workspace path is absolute, traversing, secret, or invalid");
+    }
+    let canonical_root = std::fs::canonicalize(root)?;
+    let mut current = canonical_root.clone();
+    for component in Path::new(relative).components() {
+        let Component::Normal(component) = component else {
+            bail!("workspace path contains a non-normal component");
+        };
+        current.push(component);
+        let metadata = match std::fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() {
+            bail!("workspace path crosses a symbolic link");
+        }
+    }
+    let canonical = std::fs::canonicalize(&current)?;
+    if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
+        bail!("workspace file resolves outside the temporary workspace");
+    }
+    let metadata = std::fs::metadata(&canonical)?;
+    if metadata.len() as usize > WORKSPACE_EVAL_MAX_FILE_BYTES {
+        bail!("workspace file exceeds the 1 MiB read limit");
+    }
+    let bytes = std::fs::read(&canonical)?;
+    let text = String::from_utf8(bytes.clone())
+        .map_err(|_| anyhow::anyhow!("workspace file is not UTF-8"))?;
+    Ok(Some((text, hex::encode(Sha256::digest(bytes)))))
+}
+
+fn ensure_workspace_parent(root: &Path, parent: &Path) -> anyhow::Result<()> {
+    let root = std::fs::canonicalize(root)?;
+    let parent = std::fs::canonicalize(parent)?;
+    if !parent.starts_with(root) {
+        bail!("workspace patch parent resolves outside its temporary root");
+    }
+    let mut current = root.clone();
+    for component in parent.strip_prefix(&root)?.components() {
+        let Component::Normal(component) = component else {
+            bail!("workspace patch parent has a non-normal component");
+        };
+        current.push(component);
+        let metadata = std::fs::symlink_metadata(&current)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            bail!("workspace patch parent crosses a link or non-directory");
+        }
+    }
+    Ok(())
+}
+
+fn read_workspace_files(root: &Path) -> anyhow::Result<BTreeMap<String, String>> {
+    const IGNORED_DIRS: &[&str] = &[".git", ".execlaw", "node_modules", "target", ".venv", "dist"];
+    let canonical_root = std::fs::canonicalize(root)?;
+    let mut stack = vec![(canonical_root.clone(), String::new(), 0usize)];
+    let mut files = BTreeMap::new();
+    let mut total_bytes = 0usize;
+    while let Some((directory, relative, depth)) = stack.pop() {
+        if depth > 64 { bail!("workspace exceeds the 64-level depth limit"); }
+        let mut entries = std::fs::read_dir(&directory)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let name = entry.file_name().to_string_lossy().to_string();
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if metadata.file_type().is_symlink() { bail!("workspace contains a symbolic link"); }
+            if metadata.is_dir() {
+                if !IGNORED_DIRS.contains(&name.to_ascii_lowercase().as_str()) {
+                    stack.push((path, join_workspace_path(&relative, &name), depth + 1));
+                }
+                continue;
+            }
+            if !metadata.is_file() { continue; }
+            let file_path = join_workspace_path(&relative, &name);
+            if !valid_workspace_relative_path(&file_path) { bail!("workspace contains a secret path"); }
+            if metadata.len() as usize > WORKSPACE_EVAL_MAX_FILE_BYTES { bail!("workspace file exceeds 1 MiB"); }
+            total_bytes = total_bytes.saturating_add(metadata.len() as usize);
+            if total_bytes > WORKSPACE_EVAL_MAX_TOTAL_BYTES || files.len() >= 10_000 { bail!("workspace exceeds its snapshot budget"); }
+            let bytes = std::fs::read(&path)?;
+            let text = String::from_utf8(bytes).map_err(|_| anyhow::anyhow!("workspace file is not UTF-8"))?;
+            files.insert(file_path, text);
+        }
+    }
+    Ok(files)
+}
+
+fn copy_workspace_for_container(source: &Path) -> anyhow::Result<tempfile::TempDir> {
+    let files = read_workspace_files(source)?;
+    let snapshot = tempfile::tempdir()?;
+    let root = std::fs::canonicalize(snapshot.path())?;
+    for (relative, content) in files {
+        let path = root.join(&relative);
+        std::fs::create_dir_all(path.parent().ok_or_else(|| anyhow::anyhow!("workspace file lacks a parent"))?)?;
+        ensure_workspace_parent(&root, path.parent().unwrap_or(&root))?;
+        std::fs::write(path, content)?;
+    }
+    Ok(snapshot)
+}
+
+fn workspace_map_sha256(files: &BTreeMap<String, String>) -> anyhow::Result<String> {
+    let bytes = serde_json::to_vec(files)?;
+    Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn join_workspace_path(parent: &str, child: &str) -> String {
+    if parent.is_empty() { child.to_owned() } else { format!("{parent}/{child}") }
+}
+
+fn workspace_job_name(task_id: &str, action_count: usize) -> String {
+    let digest = hex::encode(Sha256::digest(task_id.as_bytes()));
+    format!("eval-{}-{action_count}", &digest[..20])
 }
 
 async fn verify_task(task: &Task, output: &str) -> Result<(), String> {
@@ -544,6 +1255,9 @@ async fn verify_task(task: &Task, output: &str) -> Result<(), String> {
                 Err("mock sink effects did not match expected effects".to_owned())
             }
         }
+        Verifier::WorkspaceCoding { .. } => Err(
+            "workspace coding verifier must run through the confined multi-tool workspace loop".into(),
+        ),
     }
 }
 

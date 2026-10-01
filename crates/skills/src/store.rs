@@ -36,6 +36,41 @@ pub struct SkillStore {
     db: Database,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SkillPrivacyDeletionReport {
+    pub already_forgotten: bool,
+    pub versions_scrubbed: usize,
+    pub proposals_scrubbed: usize,
+    pub invocations_scrubbed: usize,
+    pub evaluation_runs_scrubbed: usize,
+    pub evaluation_cases_removed: usize,
+    pub resources_removed: usize,
+    pub blobs_removed: usize,
+}
+
+fn privacy_name_hash(name: &str) -> String {
+    sha256_hex(name.trim().to_ascii_lowercase().as_bytes())
+}
+
+fn ensure_name_not_privacy_deleted(
+    tx: &rusqlite::Transaction<'_>,
+    name: &str,
+) -> Result<(), DbError> {
+    let name_hash = privacy_name_hash(name);
+    let deleted: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM state_skill_privacy_tombstones WHERE name_sha256 = ?1)",
+        [&name_hash],
+        |row| row.get(0),
+    )?;
+    if deleted {
+        return Err(DbError::Invariant(format!(
+            "skill name was privacy-deleted and cannot be reused: {}",
+            name_hash
+        )));
+    }
+    Ok(())
+}
+
 impl SkillStore {
     pub fn new(db: Database) -> Self {
         Self { db }
@@ -268,7 +303,9 @@ impl SkillStore {
             Ok(c.query_row(
                 "SELECT id, name, state, source, registration_kind, owning_plugin_id,
                         created_at, updated_at, archived_at, current_version_id
-                 FROM state_skills WHERE name = ?1",
+                 FROM state_skills WHERE name = ?1 \
+                   AND NOT EXISTS (SELECT 1 FROM state_skill_privacy_tombstones t \
+                       WHERE t.skill_id = state_skills.id)",
                 params![name],
                 |r| {
                     Ok((
@@ -400,6 +437,7 @@ impl SkillStore {
         let version_sha = sha256_hex(new.initial_version.body_md.as_bytes());
 
         let result = self.db.transaction(|tx| {
+            ensure_name_not_privacy_deleted(tx, &new.name)?;
             // Reject up front if the name is already taken.
             let existing: Option<i64> = tx
                 .query_row(
@@ -814,6 +852,147 @@ impl SkillStore {
     ///
     /// Always uses `Strict` scanner mode — plugin-shipped content
     /// must not introduce credentials.
+    /// Scrub a skill's live content and retain an append-only name tombstone.
+    /// Invocation and proposal relationships remain as metadata-only audit rows.
+    pub fn forget(
+        &self,
+        name: &str,
+        requested_by: &str,
+        now_ms: i64,
+    ) -> Result<SkillPrivacyDeletionReport, SkillError> {
+        validate_skill_name(name)?;
+        if requested_by.trim().is_empty() {
+            return Err(SkillError::Denied(
+                "forgetting a skill requires an authenticated Controller".into(),
+            ));
+        }
+        let name_hash = privacy_name_hash(name);
+        let report = self.db.transaction(|tx| {
+            let skill: Option<i64> = tx
+                .query_row(
+                    "SELECT id FROM state_skills WHERE name = ?1",
+                    [name],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(skill_id) = skill else {
+                let already_forgotten: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_skill_privacy_tombstones WHERE name_sha256 = ?1)",
+                    [&name_hash],
+                    |row| row.get(0),
+                )?;
+                if already_forgotten {
+                    return Ok(SkillPrivacyDeletionReport {
+                        already_forgotten: true,
+                        ..SkillPrivacyDeletionReport::default()
+                    });
+                }
+                return Err(DbError::Invariant(format!("skill not found: {name}")));
+            };
+            let already_forgotten: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_skill_privacy_tombstones WHERE skill_id = ?1)",
+                [skill_id],
+                |row| row.get(0),
+            )?;
+            if already_forgotten {
+                return Ok(SkillPrivacyDeletionReport {
+                    already_forgotten: true,
+                    ..SkillPrivacyDeletionReport::default()
+                });
+            }
+
+            tx.execute(
+                "INSERT INTO state_skill_privacy_tombstones(skill_id, name_sha256, requested_by, requested_at) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![skill_id, name_hash, requested_by, now_ms],
+            )?;
+            let versions = {
+                let mut statement = tx.prepare(
+                    "SELECT id, description, body_md FROM state_skill_versions WHERE skill_id = ?1 ORDER BY version",
+                )?;
+                statement
+                    .query_map([skill_id], |row| {
+                        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let mut report = SkillPrivacyDeletionReport {
+                versions_scrubbed: versions.len(),
+                ..SkillPrivacyDeletionReport::default()
+            };
+            let mut blob_hashes = Vec::new();
+            let scrubbed_hash = sha256_hex(b"privacy-deleted-skill-version");
+            for (version_id, description, body_md) in &versions {
+                tx.execute(
+                    "INSERT INTO skill_search(skill_search, rowid, description, body_md) \
+                     VALUES ('delete', ?1, ?2, ?3)",
+                    params![version_id, description, body_md],
+                )?;
+                tx.execute(
+                    "UPDATE state_skill_versions SET description = '', body_md = '', frontmatter_json = '{}', \
+                     body_sha256 = ?1, authored_by = 'privacy-deleted', promotion_notes = NULL WHERE id = ?2",
+                    params![scrubbed_hash, version_id],
+                )?;
+                let mut resources = tx.prepare(
+                    "SELECT blob_sha FROM state_skill_resources WHERE skill_version_id = ?1",
+                )?;
+                blob_hashes.extend(
+                    resources
+                        .query_map([version_id], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                report.resources_removed += tx.execute(
+                    "DELETE FROM state_skill_resources WHERE skill_version_id = ?1",
+                    [version_id],
+                )?;
+            }
+            let placeholder_name = format!("privacy-deleted/{}", uuid::Uuid::new_v4().simple());
+            report.proposals_scrubbed = tx.execute(
+                "UPDATE state_skill_proposals SET proposed_name = ?1, description = '', body_md = '', \
+                 frontmatter_json = '{}', source_run_id = 'privacy-deleted', trajectory_summary = NULL, \
+                 decision_notes = NULL WHERE target_skill_id = ?2 OR promoted_skill_id = ?2 OR proposed_name = ?3",
+                params![placeholder_name, skill_id, name],
+            )?;
+            report.invocations_scrubbed = tx.execute(
+                "UPDATE state_skill_invocations SET notes = NULL WHERE skill_id = ?1 AND notes IS NOT NULL",
+                [skill_id],
+            )?;
+            report.evaluation_runs_scrubbed = tx.execute(
+                "UPDATE state_skill_eval_runs SET skill_name = 'privacy-deleted', body_sha256 = ?1, results_json = '{}' \
+                 WHERE skill_name = ?2 OR version_id IN (SELECT id FROM state_skill_versions WHERE skill_id = ?3)",
+                params![scrubbed_hash, name, skill_id],
+            )?;
+            report.evaluation_cases_removed = tx.execute(
+                "DELETE FROM state_skill_eval_cases WHERE skill_name = ?1",
+                [name],
+            )?;
+            tx.execute(
+                "UPDATE state_skills SET name = ?1, current_version_id = NULL, state = 'archived', \
+                 source = 'privacy_deleted', registration_kind = 'authored', owning_plugin_id = NULL, \
+                 archived_at = ?2, updated_at = ?2 WHERE id = ?3",
+                params![placeholder_name, now_ms, skill_id],
+            )?;
+            blob_hashes.sort_unstable();
+            blob_hashes.dedup();
+            for hash in blob_hashes {
+                report.blobs_removed += tx.execute(
+                    "DELETE FROM state_blobs WHERE sha256 = ?1 AND refcount <= 0",
+                    [hash],
+                )?;
+            }
+            Ok(report)
+        })?;
+        tracing::info!(
+            event = "skill.privacy_deleted",
+            already_forgotten = report.already_forgotten,
+            versions = report.versions_scrubbed,
+            resources = report.resources_removed,
+            blobs = report.blobs_removed,
+            "skill content was scrubbed and its tombstone retained"
+        );
+        Ok(report)
+    }
+
     pub fn import_shipped(&self, new: NewSkill, now_ms: i64) -> Result<SkillId, SkillError> {
         validate_skill_name(&new.name)?;
         validate_frontmatter(&new.initial_version.frontmatter_json)?;
@@ -842,6 +1021,7 @@ impl SkillStore {
         let body_sha = sha256_hex(new.initial_version.body_md.as_bytes());
 
         let id = self.db.transaction(|tx| {
+            ensure_name_not_privacy_deleted(tx, &new.name)?;
             // Look up an existing row.
             let existing: Option<(i64, i64, String, String, Option<String>)> = tx
                 .query_row(
@@ -1123,6 +1303,7 @@ impl SkillStore {
         validate_skill_name(&new.proposed_name)?;
         let target_id = new.target_skill_id.map(|s| s.0);
         let id = self.db.transaction(|tx| {
+            ensure_name_not_privacy_deleted(tx, &new.proposed_name)?;
             // For version_fork: supersede any prior pending proposal
             // for the same target, so the operator only sees the
             // latest improvement suggestion per skill.

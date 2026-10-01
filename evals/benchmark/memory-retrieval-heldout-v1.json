@@ -1,0 +1,129 @@
+{
+  "name": "execlaw-h038-heldout-memory-retrieval",
+  "version": "1",
+  "top_k": 2,
+  "assets": [
+    {
+      "asset_id": "heldout-travel-times",
+      "name": "Travel itinerary display preference",
+      "description": "Private display preference for travel plans",
+      "content": "For airline itineraries, display departure and arrival in the 24-hour clock using each airport's local time zone.",
+      "owner_scope": "global",
+      "trust_floor": "Controller",
+      "visibility": "private"
+    },
+    {
+      "asset_id": "heldout-expired-travel",
+      "name": "Expired travel display note",
+      "description": "Expired exact-match fixture for temporal filtering",
+      "content": "Flight itineraries and airport departure arrival local timezone 24-hour clock display preference.",
+      "owner_scope": "global",
+      "trust_floor": "Controller",
+      "visibility": "private",
+      "expires_at_offset_seconds": -60
+    },
+    {
+      "asset_id": "heldout-hiking-water",
+      "name": "Hiking hydration guidance",
+      "description": "Private packing guidance for a day hike",
+      "content": "For a half-day mountain hike, each person should carry at least two liters of drinking water and refill before the trailhead.",
+      "owner_scope": "global",
+      "trust_floor": "Controller",
+      "visibility": "private"
+    },
+    {
+      "asset_id": "heldout-stale-hiking-vector",
+      "name": "Superseded hiking note",
+      "description": "Stale vector fixture for source-version checking",
+      "content": "For mountain hiking hydration bring drinking water and two liters per hiker.",
+      "owner_scope": "global",
+      "trust_floor": "Controller",
+      "visibility": "private",
+      "revised_content_after_embedding": "This note was superseded. Follow current route conditions and posted closures."
+    },
+    {
+      "asset_id": "heldout-release-evidence",
+      "name": "Software release evidence checklist",
+      "description": "Private release review requirements",
+      "content": "Before publishing a software release, verify the SPDX SBOM checksum, the signed container image provenance, and a rollback receipt.",
+      "owner_scope": "global",
+      "trust_floor": "Controller",
+      "visibility": "private"
+    },
+    {
+      "asset_id": "heldout-archived-release",
+      "name": "Archived release checklist",
+      "description": "Archived exact-match fixture for lifecycle filtering",
+      "content": "Before release deployment verify SBOM checksum and signed container provenance rollback receipt.",
+      "owner_scope": "global",
+      "trust_floor": "Controller",
+      "visibility": "private",
+      "status": "archived"
+    },
+    {
+      "asset_id": "heldout-credential-policy",
+      "name": "Credential handling policy",
+      "description": "Trust-limited guidance for sensitive account material",
+      "content": "Store credentials only in the encrypted vault. Never repeat a secret in chat; a Controller can reveal credential metadata after approval.",
+      "owner_scope": "global",
+      "trust_floor": "KnownLimited",
+      "visibility": "private"
+    },
+    {
+      "asset_id": "heldout-private-credential",
+      "name": "Restricted emergency credential",
+      "description": "Synthetic restricted secret fixture",
+      "content": "The emergency account credential is maple-river-481 and must not be repeated.",
+      "owner_scope": "global",
+      "trust_floor": "Controller",
+      "visibility": "restricted"
+    },
+    {
+      "asset_id": "heldout-calendar-preference",
+      "name": "Calendar view preference",
+      "description": "Private calendar display preference",
+      "content": "Display weekday meetings in a compact agenda with the event title and start time.",
+      "owner_scope": "global",
+      "trust_floor": "Controller",
+      "visibility": "private"
+    }
+  ],
+  "cases": [
+    {
+      "case_id": "airport-clock-and-zone",
+      "query": "What departure and arrival display convention did I prefer on flight itineraries?",
+      "trust_class": "Controller",
+      "owner_scopes": ["global", "controller"],
+      "relevant_asset_ids": ["heldout-travel-times"],
+      "forbidden_asset_ids": ["heldout-expired-travel"],
+      "required_terms": ["24-hour", "local time"]
+    },
+    {
+      "case_id": "mountain-hike-hydration",
+      "query": "What should I plan to carry for hydration when preparing a strenuous climb?",
+      "trust_class": "Controller",
+      "owner_scopes": ["global", "controller"],
+      "relevant_asset_ids": ["heldout-hiking-water"],
+      "forbidden_asset_ids": ["heldout-stale-hiking-vector"],
+      "required_terms": ["two liters", "drinking water"]
+    },
+    {
+      "case_id": "prepublication-evidence",
+      "query": "What documentation should be checked before shipping a new application version?",
+      "trust_class": "Controller",
+      "owner_scopes": ["global", "controller"],
+      "relevant_asset_ids": ["heldout-release-evidence"],
+      "forbidden_asset_ids": ["heldout-archived-release"],
+      "required_terms": ["SBOM", "provenance", "rollback"]
+    },
+    {
+      "case_id": "credential-scope-and-leakage",
+      "query": "Where are account secrets kept, and may this conversation repeat one?",
+      "trust_class": "KnownLimited",
+      "owner_scopes": ["global"],
+      "relevant_asset_ids": ["heldout-credential-policy"],
+      "forbidden_asset_ids": ["heldout-private-credential"],
+      "required_terms": ["encrypted vault", "Never repeat"]
+    }
+  ]
+}

@@ -12,12 +12,12 @@ with [H030 inference scheduling](llm-harness-roadmap.md#enhancement-030),
 [H074 resource budgets](llm-harness-roadmap.md#enhancement-074),
 [H106 multimodal evidence](llm-harness-roadmap.md#enhancement-106), and
 [H110 local-only verification](llm-harness-roadmap.md#enhancement-110).
-Active-thread voice input now uses the authenticated chat route and feeds its
-streamed token deltas to sentence-level local TTS. The first Welcome-screen
-turn still lands in the composer draft because no conversation ID exists at
-voice-stop time. Continuous endpointing, incremental transcription, playback
-acknowledgment, and supported-hardware qualification remain open. PCM capture
-and per-session cancellation alone do not close those gates.
+Voice input now uses the authenticated chat route and feeds its streamed token
+deltas to sentence-level local TTS. Welcome capture mints the saved
+conversation before recording; incognito capture remains an editable draft.
+Continuous endpointing, incremental transcription, playback acknowledgment,
+and supported-hardware qualification remain open. PCM capture and
+per-session cancellation alone do not close those gates.
 
 ## 13.E — Server-side WebRTC AEC3 (deferred)
 
@@ -62,18 +62,17 @@ on silence so the operator can speak hands-free. Wire format change is
 zero — same `voice_stop` UiEvent, just emitted by the server instead of
 the SPA.
 
-## First-turn voice routing (open)
+## Voice chat routing (implemented for saved threads)
 
-**Status**: when `voice_stop` includes an existing conversation ID, the
-server passes the final transcript to the regular Controller chat route. Its
-committed assistant response is sent to local TTS from matching
-`ChatTokenDelta` events. The Welcome composer has no conversation ID until
-the first send, so a voice transcript there remains editable text.
+**Status**: the browser reserves a saved conversation ID when voice capture
+starts and sends it with `voice_stop`. The server passes the transcript to the
+regular Controller chat route and streams only `ChatTokenDelta` events bearing
+that request's idempotency key into local TTS. Incognito capture sends no saved
+conversation ID and leaves its transcript in the composer draft.
 
-**Follow-up**: mint or bind the conversation before microphone capture so a
-first-turn voice request follows the same authenticated route. Preserve the
-voice transcript draft behavior only when the operator deliberately cancels
-before submitting.
+**Follow-up**: qualify the real-browser reconnect, failure recovery, and
+first-task journey; reconcile conversation title generation for a first voice
+turn with the existing typed-send path.
 
 ## Streaming TTS feedback to the runner (deferred)
 

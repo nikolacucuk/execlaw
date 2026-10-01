@@ -75,6 +75,13 @@ pub struct ProtocolDiagnostic {
     pub backends: Vec<BackendDiagnostic>,
     pub active_model_profiles: u64,
     pub invalidated_model_profiles: u64,
+    pub qualified_capabilities: Vec<QualifiedCapabilityDiagnostic>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct QualifiedCapabilityDiagnostic {
+    pub capability: String,
+    pub passing_profiles: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -210,20 +217,26 @@ fn build_support_bundle(state: &AppState) -> Result<SupportBundle, ApiError> {
                 .is_some_and(|row| row.last_success_at.is_some()),
         });
     }
-    let (active_model_profiles, invalidated_model_profiles) = state
+    let (active_model_profiles, invalidated_model_profiles, observations) = state
         .db
         .with_conn(|connection| {
-            connection
-                .query_row(
+            let counts = connection.query_row(
                     "SELECT COALESCE(SUM(CASE WHEN invalidated_at IS NULL THEN 1 ELSE 0 END), 0), \
                             COALESCE(SUM(CASE WHEN invalidated_at IS NOT NULL THEN 1 ELSE 0 END), 0) \
                      FROM state_model_capability_profiles",
                     [],
                     |row| Ok((row.get::<_, u64>(0)?, row.get::<_, u64>(1)?)),
-                )
-                .map_err(execlaw_core::db::DbError::from)
+                )?;
+            let mut statement = connection.prepare(
+                "SELECT observed_json FROM state_model_capability_profiles WHERE invalidated_at IS NULL",
+            )?;
+            let observations = statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok((counts.0, counts.1, observations))
         })
         .map_err(|error| diagnostic_error("diagnostics_profile_read_failed", error))?;
+    let qualified_capabilities = summarize_qualified_capabilities(&observations);
 
     let authority = state
         .db
@@ -398,6 +411,7 @@ fn build_support_bundle(state: &AppState) -> Result<SupportBundle, ApiError> {
             backends,
             active_model_profiles,
             invalidated_model_profiles,
+            qualified_capabilities,
         },
         authority,
         recovery: RecoveryDiagnostic {
@@ -411,6 +425,32 @@ fn build_support_bundle(state: &AppState) -> Result<SupportBundle, ApiError> {
         corrective_actions,
         content_policy: "Counts, statuses, capacities, and corrective actions only; no prompts, message bodies, credentials, endpoints, paths, plugin names, or raw errors.".into(),
     })
+}
+
+fn summarize_qualified_capabilities(observations: &[String]) -> Vec<QualifiedCapabilityDiagnostic> {
+    const CAPABILITIES: &[&str] = &[
+        "text",
+        "streaming",
+        "tools",
+        "structured_json",
+        "context",
+        "vision",
+    ];
+    CAPABILITIES
+        .iter()
+        .map(|capability| QualifiedCapabilityDiagnostic {
+            capability: (*capability).to_owned(),
+            passing_profiles: observations
+                .iter()
+                .filter(|serialized| {
+                    serde_json::from_str::<serde_json::Value>(serialized)
+                        .ok()
+                        .and_then(|observed| observed.get(*capability)?.get("passed")?.as_bool())
+                        == Some(true)
+                })
+                .count() as u64,
+        })
+        .collect()
 }
 
 fn query_status_counts(
@@ -446,4 +486,53 @@ fn diagnostic_error(code: &'static str, error: impl std::fmt::Display) -> ApiErr
 
 pub fn router() -> Router<AppState> {
     Router::new().route("/api/admin/diagnostics/support-bundle", get(support_bundle))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capability_summary_contains_only_pass_counts() {
+        let observations = vec![
+            serde_json::json!({
+                "text": {"passed": true},
+                "streaming": {"passed": true},
+                "tools": {"passed": false},
+                "structured_json": {"passed": true},
+                "context": {"passed": true},
+                "vision": {"passed": false},
+                "private_detail": "must not appear",
+            })
+            .to_string(),
+            serde_json::json!({
+                "text": {"passed": true},
+                "streaming": {"passed": true},
+                "tools": {"passed": true},
+                "structured_json": {"passed": true},
+                "context": {"passed": true},
+                "vision": {"passed": false},
+            })
+            .to_string(),
+        ];
+
+        let summary = summarize_qualified_capabilities(&observations);
+        let text = summary
+            .iter()
+            .find(|item| item.capability == "text")
+            .unwrap();
+        let tools = summary
+            .iter()
+            .find(|item| item.capability == "tools")
+            .unwrap();
+        let vision = summary
+            .iter()
+            .find(|item| item.capability == "vision")
+            .unwrap();
+        assert_eq!(text.passing_profiles, 2);
+        assert_eq!(tools.passing_profiles, 1);
+        assert_eq!(vision.passing_profiles, 0);
+        let serialized = serde_json::to_string(&summary).unwrap();
+        assert!(!serialized.contains("private_detail"));
+    }
 }

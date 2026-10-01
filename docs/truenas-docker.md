@@ -222,7 +222,50 @@ binary before packaging it. The explicit `doctor` command above checks the
 image Compose will run and must report `OK  sqlcipher`. If it reports that the
 binary was built without SQLCipher, do not start it against the persistent
 database: update the source checkout and rebuild the image. Rebuilding does
-not require changing or removing `execlaw.db` or `.execlaw/master.key`.
+not require changing or removing `execlaw.db` or `.execlaw/master.key`. This
+doctor check verifies the binary's SQLCipher support; it does not verify the
+encryption format or key of the existing database.
+
+### Convert an existing plaintext database
+
+If startup reports `file is not a database`, stop the service and inspect the
+database header before changing either file:
+
+```bash
+sudo docker compose stop execlaw
+sudo stat -c '%n %s bytes %y' \
+  /mnt/AI_Pool/execlaw/execlaw.db \
+  /mnt/AI_Pool/execlaw/.execlaw/master.key
+sudo od -An -N16 -tc /mnt/AI_Pool/execlaw/execlaw.db
+```
+
+If the header reads `SQLite format 3`, the database is plaintext. The
+SQLCipher image refuses to open it with the encryption key, so convert it
+offline while the service is stopped. The command below verifies the source,
+creates and checks a plaintext recovery snapshot, exports a keyed SQLCipher
+copy using the existing `master.key`, validates that copy, and only then
+atomically replaces the database. It refuses to run if the database is not
+plaintext, the backup path already exists, or the durable master-key file is
+missing.
+
+```bash
+sudo mkdir -p /mnt/AI_Pool/execlaw/backups
+sudo chown 1000:1000 /mnt/AI_Pool/execlaw/backups
+sudo docker compose run --rm execlaw db encrypt-plaintext \
+  --db /var/lib/execlaw/execlaw.db \
+  --backup /var/lib/execlaw/backups/execlaw-before-sqlcipher-$(date +%F-%H%M%S).db \
+  --i-understand-execlaw-is-stopped
+sudo docker compose run --rm execlaw doctor
+sudo docker compose up -d --force-recreate execlaw
+sudo docker compose logs --tail=100 execlaw
+```
+
+The recovery snapshot is plaintext and contains all database data. The command
+sets it to mode `0600`; keep it in the private dataset and retain it until the
+encrypted database has been verified. Never delete or rotate `.execlaw/master.key`.
+If the header does not read `SQLite format 3`, do not run the conversion command:
+restore the matching master key from backup or investigate the database as an
+already-encrypted or damaged file instead.
 
 ### Installing a locally built plugin ZIP
 

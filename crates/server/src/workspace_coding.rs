@@ -60,7 +60,7 @@ pub struct WorkspaceExecutionConfigRequest {
     pub image_reference: String,
     pub language_servers: std::collections::BTreeMap<String, Vec<String>>,
     #[serde(default)]
-    pub approve_local_image: bool,
+    pub approve_image_digest: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -193,7 +193,7 @@ pub async fn set_execution_config(
     let provenance =
         execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(state.db.clone());
     let valid_reference = is_digest_pinned_oci_reference(&request.image_reference)
-        || (request.approve_local_image && is_local_image_id(&request.image_reference));
+        || (request.approve_image_digest && is_local_image_id(&request.image_reference));
     if !valid_reference {
         return Err(ApiError {
             status: StatusCode::BAD_REQUEST,
@@ -202,14 +202,14 @@ pub async fn set_execution_config(
         });
     }
     let artifact_type = execlaw_core::artifact_provenance::ArtifactType::Sidecar;
-    let mut local_approval_recorded = false;
+    let mut controller_approval_recorded = false;
     if let Err(error) = provenance.authorize_oci_reference(
         "sidecar:workspace-toolchain",
         artifact_type,
         &request.image_reference,
         &user.username,
     ) {
-        if !request.approve_local_image {
+        if !request.approve_image_digest {
             return Err(ApiError {
                 status: StatusCode::FORBIDDEN,
                 code: "workspace_toolchain_provenance_required",
@@ -217,7 +217,7 @@ pub async fn set_execution_config(
             });
         }
         provenance
-            .approve_local_oci_reference(
+            .approve_controller_oci_reference(
                 artifact_type,
                 &request.image_reference,
                 "Controller",
@@ -228,7 +228,7 @@ pub async fn set_execution_config(
                 code: "workspace_toolchain_approval_failed",
                 message: error.to_string(),
             })?;
-        local_approval_recorded = true;
+        controller_approval_recorded = true;
     }
     let saved = WorkspaceStore::new(&state.db)
         .set_execution_config(
@@ -241,7 +241,7 @@ pub async fn set_execution_config(
     Ok(Json(serde_json::json!({
         "image_reference":saved.image_reference,
         "language_servers":saved.language_servers,
-        "approval":if local_approval_recorded { "controller_local_digest" } else { "verified_or_policy_approved" },
+        "approval":if controller_approval_recorded { "controller_digest_approval" } else { "verified_or_prior_controller_approval" },
         "updated_at":saved.updated_at,
         "updated_by":saved.updated_by
     })))
@@ -2121,7 +2121,7 @@ mod tests {
             Json(WorkspaceExecutionConfigRequest {
                 image_reference: digest_reference.clone(),
                 language_servers: languages.clone(),
-                approve_local_image: false,
+                approve_image_digest: false,
             }),
         )
         .await
@@ -2134,7 +2134,7 @@ mod tests {
             Json(WorkspaceExecutionConfigRequest {
                 image_reference: digest_reference.clone(),
                 language_servers: languages.clone(),
-                approve_local_image: false,
+                approve_image_digest: false,
             }),
         )
         .await
@@ -2147,13 +2147,13 @@ mod tests {
             Json(WorkspaceExecutionConfigRequest {
                 image_reference: digest_reference,
                 language_servers: languages.clone(),
-                approve_local_image: true,
+                approve_image_digest: true,
             }),
         )
         .await
         .unwrap();
         assert_eq!(saved.0["language_servers"]["rust"][0], "rust-analyzer");
-        assert_eq!(saved.0["approval"], "controller_local_digest");
+        assert_eq!(saved.0["approval"], "controller_digest_approval");
 
         let reopened = WorkspaceStore::new(&state.db).execution_config().unwrap();
         assert_eq!(reopened.language_servers, languages);

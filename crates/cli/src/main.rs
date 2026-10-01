@@ -478,6 +478,19 @@ enum ServiceOp {
 
 #[derive(Debug, Subcommand)]
 enum DbOp {
+    /// Convert an offline plaintext SQLite database to SQLCipher in place.
+    /// A separate verified plaintext backup is required before replacement.
+    EncryptPlaintext {
+        /// Plaintext database file to convert.
+        #[arg(long)]
+        db: PathBuf,
+        /// New plaintext recovery snapshot. The path must not already exist.
+        #[arg(long)]
+        backup: PathBuf,
+        /// Confirm execlaw is stopped and the live database can be replaced.
+        #[arg(long, default_value_t = false)]
+        i_understand_execlaw_is_stopped: bool,
+    },
     /// Apply pending migrations.
     Migrate {
         #[arg(long)]
@@ -1238,6 +1251,250 @@ fn cmd_db_migrate(db_path: PathBuf, no_encrypt: bool) -> anyhow::Result<()> {
         println!("applied migrations: {applied:?}");
     }
     Ok(())
+}
+
+fn cmd_db_encrypt_plaintext(
+    db_path: PathBuf,
+    backup_path: PathBuf,
+    confirmed_stopped: bool,
+) -> anyhow::Result<()> {
+    if !confirmed_stopped {
+        anyhow::bail!(
+            "refusing to replace the database while execlaw may be running; stop it and pass \
+             --i-understand-execlaw-is-stopped"
+        );
+    }
+
+    #[cfg(not(feature = "sqlcipher"))]
+    {
+        let _ = (db_path, backup_path);
+        anyhow::bail!("plaintext conversion requires an execlaw binary built with SQLCipher");
+    }
+
+    #[cfg(feature = "sqlcipher")]
+    {
+        let key_path = execlaw_vault::keyring_key::default_passphrase_file_path();
+        anyhow::ensure!(
+            key_path.is_file(),
+            "durable master key file is missing at {}; restore the matching key before conversion",
+            key_path.display()
+        );
+        let key = execlaw_vault::load_or_create_master_key()
+            .map_err(|error| anyhow::anyhow!("load existing master key: {error}"))?;
+        encrypt_plaintext_database(&db_path, &backup_path, &key)?;
+
+        println!("encrypted database installed at {}", db_path.display());
+        println!(
+            "verified plaintext recovery backup at {}",
+            backup_path.display()
+        );
+        Ok(())
+    }
+}
+
+#[cfg(feature = "sqlcipher")]
+fn encrypt_plaintext_database(
+    db_path: &std::path::Path,
+    backup_path: &std::path::Path,
+    key: &[u8; 32],
+) -> anyhow::Result<()> {
+    use std::io::Read;
+
+    use execlaw_core::db::SqlCipherKey;
+
+    fn sql_literal(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    fn integrity_and_schema_count(db: &execlaw_core::Database) -> anyhow::Result<i64> {
+        db.with_conn(|connection| {
+            let integrity: String =
+                connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Err(execlaw_core::DbError::Config(format!(
+                    "integrity_check failed: {integrity}"
+                )));
+            }
+            let count = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type IN ('table', 'index', 'view', 'trigger') \
+                   AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(count)
+        })
+        .map_err(Into::into)
+    }
+
+    anyhow::ensure!(
+        db_path.is_file(),
+        "database does not exist or is not a regular file: {}",
+        db_path.display()
+    );
+    anyhow::ensure!(
+        !backup_path.exists(),
+        "backup path already exists; choose a new path: {}",
+        backup_path.display()
+    );
+    let backup_parent = backup_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    anyhow::ensure!(
+        backup_parent.is_dir(),
+        "backup directory does not exist: {}",
+        backup_parent.display()
+    );
+
+    let mut header = [0_u8; 16];
+    std::fs::File::open(db_path)?.read_exact(&mut header)?;
+    anyhow::ensure!(
+        &header == b"SQLite format 3\0",
+        "database is not plaintext SQLite; refusing conversion. It may already be encrypted, use a different key, or be damaged"
+    );
+
+    let original_permissions = std::fs::metadata(db_path)?.permissions();
+    let mut temporary_name = db_path.as_os_str().to_os_string();
+    temporary_name.push(format!(".sqlcipher-{}.tmp", uuid::Uuid::new_v4()));
+    let encrypted_path = PathBuf::from(temporary_name);
+    anyhow::ensure!(
+        !encrypted_path.exists(),
+        "temporary output already exists: {}",
+        encrypted_path.display()
+    );
+
+    let conversion = (|| -> anyhow::Result<()> {
+        let source = execlaw_core::Database::open(&execlaw_core::DbConfig {
+            path: db_path.to_path_buf(),
+            key: None,
+        })?;
+
+        let source_schema_count = source.with_conn(|connection| {
+            let integrity: String =
+                connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+            if integrity != "ok" {
+                return Err(execlaw_core::DbError::Config(format!(
+                    "source integrity_check failed: {integrity}"
+                )));
+            }
+            let schema_count = connection.query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type IN ('table', 'index', 'view', 'trigger') \
+                   AND name NOT LIKE 'sqlite_%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?;
+
+            // VACUUM INTO captures committed pages, including any WAL content,
+            // into a standalone recovery copy before replacing the source.
+            connection.execute(
+                &format!(
+                    "VACUUM INTO {}",
+                    sql_literal(&backup_path.to_string_lossy())
+                ),
+                [],
+            )?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(backup_path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(execlaw_core::DbError::from)?;
+            }
+
+            let target = sql_literal(&encrypted_path.to_string_lossy());
+            let key_hex = hex::encode(key);
+            connection.execute_batch(&format!(
+                "ATTACH DATABASE {target} AS encrypted KEY \"x'{key_hex}'\";"
+            ))?;
+            connection.execute_batch("SELECT sqlcipher_export('encrypted');")?;
+            connection.execute_batch("DETACH DATABASE encrypted;")?;
+            Ok(schema_count)
+        })?;
+        drop(source);
+
+        let plaintext_backup = execlaw_core::Database::open(&execlaw_core::DbConfig {
+            path: backup_path.to_path_buf(),
+            key: None,
+        })?;
+        let backup_schema_count = integrity_and_schema_count(&plaintext_backup)?;
+        drop(plaintext_backup);
+        anyhow::ensure!(
+            backup_schema_count == source_schema_count,
+            "plaintext backup schema differs from source ({backup_schema_count} vs {source_schema_count})"
+        );
+        std::fs::File::open(backup_path)?.sync_all()?;
+
+        let encrypted = execlaw_core::Database::open(&execlaw_core::DbConfig {
+            path: encrypted_path.clone(),
+            key: Some(SqlCipherKey::RawBytes(key.to_vec())),
+        })?;
+        let encrypted_schema_count = integrity_and_schema_count(&encrypted)?;
+        anyhow::ensure!(
+            encrypted_schema_count == source_schema_count,
+            "encrypted output schema differs from source ({encrypted_schema_count} vs {source_schema_count})"
+        );
+        encrypted.with_conn(|connection| {
+            connection.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+            Ok(())
+        })?;
+        drop(encrypted);
+
+        let mut encrypted_header = [0_u8; 16];
+        std::fs::File::open(&encrypted_path)?.read_exact(&mut encrypted_header)?;
+        anyhow::ensure!(
+            &encrypted_header != b"SQLite format 3\0",
+            "encrypted output has a plaintext SQLite header"
+        );
+        std::fs::set_permissions(&encrypted_path, original_permissions)?;
+        std::fs::File::open(&encrypted_path)?.sync_all()?;
+
+        // WAL and shared-memory files belong to the plaintext source and
+        // staging DBs; none may be replayed beside the replacement file.
+        for database_path in [db_path, encrypted_path.as_path()] {
+            for suffix in ["-wal", "-shm"] {
+                let mut sidecar_name = database_path.as_os_str().to_os_string();
+                sidecar_name.push(suffix);
+                let sidecar = PathBuf::from(sidecar_name);
+                match std::fs::remove_file(&sidecar) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+
+        // The verified backup is already durable. POSIX rename replaces the
+        // stopped service's database atomically. Windows needs a reversible
+        // two-rename sequence because std::fs::rename cannot replace a file.
+        #[cfg(not(windows))]
+        std::fs::rename(&encrypted_path, db_path)?;
+        #[cfg(windows)]
+        {
+            let mut displaced_name = db_path.as_os_str().to_os_string();
+            displaced_name.push(format!(".plaintext-{}.old", uuid::Uuid::new_v4()));
+            let displaced = PathBuf::from(displaced_name);
+            std::fs::rename(db_path, &displaced)?;
+            if let Err(error) = std::fs::rename(&encrypted_path, db_path) {
+                let _ = std::fs::rename(&displaced, db_path);
+                return Err(error.into());
+            }
+            std::fs::remove_file(displaced)?;
+        }
+        if let Some(parent) = db_path.parent() {
+            if let Ok(directory) = std::fs::File::open(parent) {
+                let _ = directory.sync_all();
+            }
+        }
+        Ok(())
+    })();
+
+    if conversion.is_err() {
+        let _ = std::fs::remove_file(&encrypted_path);
+        let _ = std::fs::remove_file(encrypted_path.with_extension("tmp-wal"));
+        let _ = std::fs::remove_file(encrypted_path.with_extension("tmp-shm"));
+    }
+    conversion
 }
 
 fn cmd_db_status(db_path: PathBuf, no_encrypt: bool) -> anyhow::Result<()> {
@@ -3905,6 +4162,11 @@ fn main() -> ExitCode {
         },
         Command::Doctor => cmd_doctor(),
         Command::Db { op } => match op {
+            DbOp::EncryptPlaintext {
+                db,
+                backup,
+                i_understand_execlaw_is_stopped,
+            } => cmd_db_encrypt_plaintext(db, backup, i_understand_execlaw_is_stopped),
             DbOp::Migrate { db, no_encrypt } => {
                 cmd_db_migrate(db.unwrap_or_else(default_db_path), no_encrypt)
             }
@@ -4080,6 +4342,65 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "sqlcipher")]
+    #[test]
+    fn plaintext_database_conversion_preserves_data_and_verified_backup() {
+        use std::io::Read;
+
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("execlaw.db");
+        let backup_path = dir.path().join("execlaw-before-encryption.db");
+        let key = [0x17_u8; 32];
+
+        let plaintext = execlaw_core::Database::open(&execlaw_core::DbConfig {
+            path: database_path.clone(),
+            key: None,
+        })
+        .unwrap();
+        plaintext
+            .with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TABLE preserved(value TEXT NOT NULL); \
+                     INSERT INTO preserved(value) VALUES ('state survives');",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        drop(plaintext);
+
+        encrypt_plaintext_database(&database_path, &backup_path, &key)
+            .unwrap_or_else(|error| panic!("plaintext conversion failed: {error:#}"));
+
+        let mut encrypted_header = [0_u8; 16];
+        std::fs::File::open(&database_path)
+            .unwrap()
+            .read_exact(&mut encrypted_header)
+            .unwrap();
+        assert_ne!(&encrypted_header, b"SQLite format 3\0");
+        let mut backup_header = [0_u8; 16];
+        std::fs::File::open(&backup_path)
+            .unwrap()
+            .read_exact(&mut backup_header)
+            .unwrap();
+        assert_eq!(&backup_header, b"SQLite format 3\0");
+
+        let encrypted = execlaw_core::Database::open(&execlaw_core::DbConfig {
+            path: database_path,
+            key: Some(execlaw_core::db::SqlCipherKey::RawBytes(key.to_vec())),
+        })
+        .unwrap();
+        let value = encrypted
+            .with_conn(|connection| {
+                Ok(
+                    connection.query_row("SELECT value FROM preserved", [], |row| {
+                        row.get::<_, String>(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(value, "state survives");
+    }
 
     #[test]
     fn client_send_accepts_repeatable_task_contract_flags() {

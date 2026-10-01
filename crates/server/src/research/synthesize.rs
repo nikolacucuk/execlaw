@@ -584,15 +584,8 @@ fn validate_report_evidence(
                 .unsupported_claims
                 .push(format!("{label} — cited excerpts lack the claim terms"));
         }
-        if citation_sources.len() > 1 {
-            let polarities = citation_sources
-                .iter()
-                .filter_map(|source| source.snapshot_text.as_deref())
-                .map(contains_negation)
-                .collect::<std::collections::HashSet<_>>();
-            if polarities.contains(&true) && polarities.contains(&false) {
-                review.contradictory_claims.push(label);
-            }
+        if has_conflicting_cited_snapshots(&claim, &citation_sources) {
+            review.contradictory_claims.push(label);
         }
     }
 
@@ -645,6 +638,73 @@ fn contains_negation(text: &str) -> bool {
     ]
     .iter()
     .any(|marker| format!(" {lower} ").contains(marker))
+}
+
+fn has_conflicting_cited_snapshots(
+    claim: &str,
+    sources: &[&execlaw_core::research::ResearchSource],
+) -> bool {
+    let claim_topic = research_topic_terms(claim);
+    let claim_numbers = research_numbers(claim);
+    if claim_topic.len() < 2 || sources.len() < 2 {
+        return false;
+    }
+    for left_index in 0..sources.len() {
+        for right_index in left_index + 1..sources.len() {
+            let Some(left) = sources[left_index].snapshot_text.as_deref() else {
+                continue;
+            };
+            let Some(right) = sources[right_index].snapshot_text.as_deref() else {
+                continue;
+            };
+            if topic_overlap(&claim_topic, left) < 2 || topic_overlap(&claim_topic, right) < 2 {
+                continue;
+            }
+            if contains_negation(left) != contains_negation(right) {
+                return true;
+            }
+            let left_numbers = research_numbers(left);
+            let right_numbers = research_numbers(right);
+            if claim_numbers
+                .iter()
+                .any(|number| left_numbers.contains(number) != right_numbers.contains(number))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn topic_overlap(claim_terms: &std::collections::HashSet<String>, source: &str) -> usize {
+    let source_terms = research_topic_terms(source);
+    claim_terms.intersection(&source_terms).count()
+}
+
+fn research_topic_terms(text: &str) -> std::collections::HashSet<String> {
+    const STOP_WORDS: &[&str] = &[
+        "about", "after", "also", "been", "before", "being", "both", "could", "does", "each",
+        "from", "have", "here", "into", "just", "more", "most", "must", "only", "over", "same",
+        "should", "some", "such", "than", "that", "their", "them", "then", "there", "these",
+        "they", "this", "those", "through", "under", "very", "were", "what", "when", "where",
+        "which", "while", "with", "would",
+    ];
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|term| term.len() >= 4 && !term.bytes().all(|byte| byte.is_ascii_digit()))
+        .map(str::to_ascii_lowercase)
+        .filter(|term| !STOP_WORDS.contains(&term.as_str()))
+        .collect()
+}
+
+fn research_numbers(text: &str) -> std::collections::HashSet<String> {
+    static NUMBER: OnceLock<regex::Regex> = OnceLock::new();
+    let number = NUMBER.get_or_init(|| {
+        regex::Regex::new(r"\b\d+(?:[.,]\d+)*\b").expect("static number regex is valid")
+    });
+    number
+        .find_iter(text)
+        .map(|capture| capture.as_str().replace(',', ""))
+        .collect()
 }
 
 fn normalized_source_url(raw_url: &str) -> String {
@@ -1105,6 +1165,28 @@ mod tests {
         assert_eq!(review.supported_claims.len(), 1);
         assert!(review.unsupported_claims.is_empty());
         assert!(review.stale_sources.is_empty());
+    }
+
+    #[test]
+    fn report_evidence_review_flags_conflicting_numeric_facts() {
+        let mut first = fixture_note(0, "port", SubQueryState::Done);
+        first.sources[0].url = "https://example.com/first".into();
+        first.sources[0].source_id = Some(format!("src-{}", "a".repeat(64)));
+        first.sources[0].snapshot_text = Some("The local service listens on port 3031.".into());
+        let mut second = fixture_note(1, "port", SubQueryState::Done);
+        second.sources[0].url = "https://example.com/second".into();
+        second.sources[0].source_id = Some(format!("src-{}", "b".repeat(64)));
+        second.sources[0].snapshot_text = Some("The local service listens on port 9443.".into());
+        let report = format!(
+            "# Findings\n\nThe local service listens on port 3031 [{}] [{}].",
+            first.sources[0].source_id.as_deref().unwrap(),
+            second.sources[0].source_id.as_deref().unwrap(),
+        );
+
+        let (_, review) = validate_report_evidence(&report, &[&first, &second]);
+
+        assert_eq!(review.supported_claims.len(), 1);
+        assert_eq!(review.contradictory_claims.len(), 1);
     }
 
     #[test]

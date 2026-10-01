@@ -171,7 +171,9 @@ export function Chat() {
         session: string;
         text: string;
         is_final: boolean;
+        submitted_to_chat?: boolean;
     } | null>(null);
+    const voiceSubmissionSessionsRef = useRef(new Set<string>());
 
     // Chat shell fade: opacity-only on both ends. Login screen's
     // scale-up + fade picks up after the shell has fully faded out.
@@ -857,7 +859,8 @@ export function Chat() {
                 const text = typeof ev.text === "string" ? ev.text : "";
                 const isFinal = ev.is_final === true;
                 if (session) {
-                    setVoiceTranscript({ session, text, is_final: isFinal });
+                    const submittedToChat = isFinal && voiceSubmissionSessionsRef.current.delete(session);
+                    setVoiceTranscript({ session, text, is_final: isFinal, submitted_to_chat: submittedToChat });
                 }
                 break;
             }
@@ -971,17 +974,37 @@ export function Chat() {
                         wsRef.current?.sendBinary(bytes) ?? false
                     }
                     sendVoiceControl={(payload) =>
-                        wsRef.current?.sendText(
-                            payload &&
-                                typeof payload === "object" &&
-                                (payload as { op?: string }).op === "voice_stop" &&
-                                activeId &&
-                                !activeId.startsWith("incognito:")
-                                ? { ...(payload as object), conversation_id: activeId }
-                                : payload,
-                        ) ?? false
+                        (() => {
+                            const control = payload as {
+                                op?: string;
+                                session?: string;
+                                conversation_id?: string;
+                            };
+                            const conversationId = control.conversation_id ??
+                                (control.op === "voice_stop" && !incognito && activeId && !activeId.startsWith("incognito:")
+                                    ? activeId
+                                    : undefined);
+                            if (control.op === "voice_stop" && control.session && conversationId) {
+                                voiceSubmissionSessionsRef.current.add(control.session);
+                            }
+                            const queued = wsRef.current?.sendText(
+                                conversationId ? { ...control, conversation_id: conversationId } : payload,
+                            ) ?? false;
+                            if (!queued && control.op === "voice_stop" && control.session) {
+                                voiceSubmissionSessionsRef.current.delete(control.session);
+                            }
+                            return queued;
+                        })()
                     }
                     voiceTranscript={voiceTranscript}
+                    getVoiceConversationId={() => {
+                        if (incognito) return null;
+                        if (activeId && !activeId.startsWith("incognito:")) return activeId;
+                        const conversationId = mintConversationId();
+                        setActiveThread(conversationId);
+                        navigate(`/chat/${encodeURIComponent(conversationId)}`, { replace: true });
+                        return conversationId;
+                    }}
                 />
             </main>
         </div>
@@ -1005,6 +1028,7 @@ function ChatPane({
     sendVoiceFrame,
     sendVoiceControl,
     voiceTranscript,
+    getVoiceConversationId,
 }: {
     activeId: string | null;
     availableTransports: AvailableTransportView[];
@@ -1020,10 +1044,12 @@ function ChatPane({
     onToggleIncognito: () => void;
     sendVoiceFrame: (bytes: ArrayBuffer) => boolean;
     sendVoiceControl: (payload: object) => boolean;
+    getVoiceConversationId: () => string | null;
     voiceTranscript: {
         session: string;
         text: string;
         is_final: boolean;
+        submitted_to_chat?: boolean;
     } | null;
 }) {
     // 2026-05-15 — probe the Standard backend's multimodal capability
@@ -1140,6 +1166,7 @@ function ChatPane({
                     sendVoiceFrame={sendVoiceFrame}
                     sendVoiceControl={sendVoiceControl}
                     voiceTranscript={voiceTranscript}
+                    getVoiceConversationId={getVoiceConversationId}
                     onStop={onStop}
                     busy={isSendingActive}
                     incognito={incognito}
@@ -1166,6 +1193,7 @@ function ChatPane({
                 sendVoiceFrame={sendVoiceFrame}
                 sendVoiceControl={sendVoiceControl}
                 voiceTranscript={voiceTranscript}
+                getVoiceConversationId={getVoiceConversationId}
                 multimodal={caps.multimodal}
                 recommendedImageEdge={caps.recommendedImageEdge}
                 getSkills={getSkills}
@@ -1183,6 +1211,7 @@ function ActiveThreadPane({
     sendVoiceFrame,
     sendVoiceControl,
     voiceTranscript,
+    getVoiceConversationId,
     multimodal,
     recommendedImageEdge,
     getSkills,
@@ -1199,6 +1228,7 @@ function ActiveThreadPane({
     ) => Promise<void> | void;
     sendVoiceFrame: (bytes: ArrayBuffer) => boolean;
     sendVoiceControl: (payload: object) => boolean;
+    getVoiceConversationId: () => string | null;
     voiceTranscript: {
         session: string;
         text: string;
@@ -1511,6 +1541,7 @@ function ActiveThreadPane({
                     onSend={onSend}
                     sendVoiceFrame={sendVoiceFrame}
                     sendVoiceControl={sendVoiceControl}
+                    getVoiceConversationId={getVoiceConversationId}
                     voiceTranscript={voiceTranscript}
                     voiceReadiness={voiceReadiness}
                     busy={isSending || (thread?.is_processing ?? false)}

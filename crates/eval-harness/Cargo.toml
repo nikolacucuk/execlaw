@@ -14,6 +14,7 @@ path = "src/main.rs"
 execlaw-inference-api = { path = "../inference-api" }
 execlaw-core = { path = "../core" }
 execlaw-runner-local = { path = "../runner-local" }
+execlaw-container-manager = { path = "../container-manager" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true

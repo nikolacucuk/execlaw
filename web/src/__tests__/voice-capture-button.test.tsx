@@ -164,6 +164,37 @@ describe("VoiceCaptureButton", () => {
         expect(mockTracks[0].stop).toHaveBeenCalled();
     });
 
+    it("routes a first-turn voice capture to its pre-minted saved conversation", async () => {
+        vi.useRealTimers();
+        installMocks({ permissionGranted: true });
+        const sendBinary = vi.fn().mockReturnValue(true);
+        const sendControl = vi.fn().mockReturnValue(true);
+        const getConversationId = vi.fn().mockReturnValue("voice-thread-1");
+        render(
+            <VoiceCaptureButton
+                sendBinary={sendBinary}
+                sendControl={sendControl}
+                getConversationId={getConversationId}
+                timesliceMs={50}
+            />,
+        );
+        fireEvent.click(screen.getByTestId("composer-voice"));
+        await waitFor(() => {
+            expect(screen.getByTestId("composer-voice")).toHaveAttribute(
+                "aria-pressed",
+                "true",
+            );
+        });
+        fireEvent.click(screen.getByTestId("composer-voice"));
+        await waitFor(() => {
+            expect(sendControl).toHaveBeenCalledWith(expect.objectContaining({
+                op: "voice_stop",
+                conversation_id: "voice-thread-1",
+            }));
+        });
+        expect(getConversationId).toHaveBeenCalledOnce();
+    });
+
     it("surfaces a banner when getUserMedia rejects", async () => {
         vi.useRealTimers();
         installMocks({ permissionGranted: false });

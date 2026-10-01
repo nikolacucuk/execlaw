@@ -35,6 +35,8 @@ interface Props {
      * reply path). Returns false silently when the WS is offline.
      */
     sendControl?: (payload: object) => boolean;
+    /** Mints or returns the saved conversation that owns this capture. */
+    getConversationId?: () => string | null;
     /**
      * Disabled when the chat shell is busy with another action
      * (e.g. composer mid-submit) or when the WebSocket is offline.
@@ -61,6 +63,7 @@ const DEFAULT_TIMESLICE_MS = 250;
 export function VoiceCaptureButton({
     sendBinary,
     sendControl,
+    getConversationId,
     disabled,
     readiness,
     timesliceMs = DEFAULT_TIMESLICE_MS,
@@ -116,7 +119,11 @@ export function VoiceCaptureButton({
         // the registry session and emits VoiceSessionEnded.
         const sess = sessionRef.current;
         if (sess && sendControl) {
-            sendControl({ op: "voice_stop", session: sess.sessionId });
+            sendControl({
+                op: "voice_stop",
+                session: sess.sessionId,
+                ...(sess.conversationId ? { conversation_id: sess.conversationId } : {}),
+            });
         }
         sessionRef.current = null;
         setRecording(false);
@@ -180,6 +187,7 @@ export function VoiceCaptureButton({
         const session = new VoiceSession({
             codec: "pcm16",
             sampleRate: audioContext.sampleRate,
+            conversationId: getConversationId?.() ?? null,
         });
         sessionRef.current = session;
         processor.onaudioprocess = (event) => {

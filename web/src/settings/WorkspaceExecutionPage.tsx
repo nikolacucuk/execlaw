@@ -22,7 +22,7 @@ export function WorkspaceExecutionPage() {
     const [config, setConfig] = useState<WorkspaceExecutionConfig | null>(null);
     const [imageReference, setImageReference] = useState("");
     const [languageServers, setLanguageServers] = useState(DEFAULT_SERVERS);
-    const [approveLocal, setApproveLocal] = useState(false);
+    const [approveImageDigest, setApproveImageDigest] = useState(false);
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [notice, setNotice] = useState<string | null>(null);
@@ -73,13 +73,13 @@ export function WorkspaceExecutionPage() {
             const next = await putWorkspaceExecutionConfig(token, {
                 image_reference: imageReference.trim(),
                 language_servers: parsed as Record<string, string[]>,
-                approve_local_image: approveLocal,
+                approve_image_digest: approveImageDigest,
             });
             setConfig(next);
-            setApproveLocal(false);
+            setApproveImageDigest(false);
             setNotice(
-                next.approval === "controller_local_digest"
-                    ? "This exact local image digest was recorded as Controller-approved."
+                next.approval === "controller_digest_approval"
+                    ? "This exact image digest was recorded as Controller-approved on this installation."
                     : "Workspace toolchain configuration saved.",
             );
         } catch (cause) {
@@ -142,9 +142,9 @@ export function WorkspaceExecutionPage() {
                     className="mb-3"
                     id="workspace-approve-local-image"
                     type="checkbox"
-                    checked={approveLocal}
-                    onChange={(event) => setApproveLocal(event.target.checked)}
-                    label="Approve this exact local image digest for this installation"
+                    checked={approveImageDigest}
+                    onChange={(event) => setApproveImageDigest(event.target.checked)}
+                    label="Approve this exact image digest on this installation without remote attestation"
                 />
                 <div className="d-flex gap-2">
                     <Button type="submit" disabled={busy || auth.status !== "authenticated"}>

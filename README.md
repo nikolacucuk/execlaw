@@ -36,6 +36,7 @@ the recorded release checks.
 | [`docs/llm-harness-roadmap.md`](docs/llm-harness-roadmap.md) | Accepted requirements and acceptance criteria for all 130 enhancements, competitive review, and F01-F19 findings. |
 | [`docs/adversarial-evaluations.md`](docs/adversarial-evaluations.md) | Offline deterministic attack-focused regression suite and run command. |
 | [`docs/plugins.md`](docs/plugins.md) | Plugin manifest schema, runtime tiers, sidecar model, Rhai primitives, and a step-by-step guide for writing a custom plugin. |
+| [`docs/workspace-coding.md`](docs/workspace-coding.md) | Digest-pinned workspace toolchain setup, sandbox boundaries, terminal jobs, and LSP diagnostics. |
 | [`docs/operator-decision-rubric.md`](docs/operator-decision-rubric.md) | Structured rubric for placing features in plugins vs MCP vs host core, plus tool-chaining and learning-loop guidance. |
 | [`docs/hermes-porting-todo.md`](docs/hermes-porting-todo.md) | Historical completion checklist for Hermes-originated capabilities ported into execlaw. |
 | [`docs/setup-walkthroughs.md`](docs/setup-walkthroughs.md) | Operator-facing pairing flows for Signal QR, WhatsApp wuzapi, Slack OAuth, Google OAuth + API-key. |
@@ -108,7 +109,7 @@ operator backend, accesses the vault, or sends real transport messages.
 - **Deterministic social archive**: transport messages are retained in SQLite and mirrored as Obsidian-compatible Markdown under `.obsidian/archive/<transport>/<group|direct>/`, without LLM calls; SQLite FTS5 provides exact search and the files are ready for Graphify indexing.
 - **Archive roles**: SQLite is the archive database, Obsidian is the human-readable filesystem projection, Graphify is the navigable graph over that projection, and the LLM is an optional reader, never the archivist.
 - **Outbox + idempotency**: framework-minted `(conversation_id, turn_seq, tool_call_ordinal)` keys, retries with backoff, dead-letter queue.
-- **Plugin framework** (18 in-tree plugins — see [Plugins shipped](#plugins-shipped)): script-tier (Rhai) + subprocess-tier (JSON-RPC), full manifest schema (tools / transports / identity providers / OAuth / sidecars / admin routes / webhook routes / UI panels / skills).
+- **Plugin framework** (19 in-tree plugins — see [Plugins shipped](#plugins-shipped)): script-tier (Rhai) + subprocess-tier (JSON-RPC), full manifest schema (tools / transports / identity providers / OAuth / sidecars / admin routes / webhook routes / UI panels / skills).
 - **Five shipped transports**: Signal (signal-cli sidecar), WhatsApp (wuzapi sidecar), Slack (multi-workspace Socket Mode OAuth), Discord (multi-guild Gateway WebSocket), SMS (Android-gateway WebSocket).
 - **HTTP integrations**: Google Apps (Gmail/Calendar/Contacts/Tasks/Drive in one OAuth), Google Places, Open-Meteo (key-less weather), Yahoo Finance (market data), Pushover.
 - **Research subsystem**: deep-research plan/gather/synthesize pipeline with retention and per-phase event flow.
@@ -120,7 +121,7 @@ See [`docs/architecture.md` §18](docs/architecture.md) for the full milestone b
 
 ## Plugins shipped
 
-All 18 in-tree plugins ship as ZIPs under [`dist/`](dist/) and install via the SPA's Settings → Plugins page (or `POST /api/admin/plugins/install`). Source under [`plugins/`](plugins/).
+All 19 in-tree plugins ship as ZIPs under [`dist/`](dist/) and install via the SPA's Settings → Plugins page (or `POST /api/admin/plugins/install`). Source under [`plugins/`](plugins/).
 
 | Plugin | Version | Tier | Kind | What it does |
 |---|---|---|---|---|
@@ -138,6 +139,7 @@ All 18 in-tree plugins ship as ZIPs under [`dist/`](dist/) and install via the S
 | [`hello`](plugins/hello/) | 0.1.0 | subprocess | reference | Echo tool exercising the subprocess JSON-RPC tier. Template for new plugin authors. |
 | [`autoresearch`](plugins/autoresearch/) | 0.1.0 | script | research | Multi-step query decomposition, parallel web-scraper fan-out, and synthesis workflow. |
 | [`python-sandbox`](plugins/python-sandbox/) | 0.1.0 | script | execution | Persistent per-conversation Python execution through a supervised Jupyter Kernel Gateway sidecar. |
+| [`workspace-coding`](plugins/workspace-coding/) | 0.2.0 | script | execution | Controller-trust scoped workspace tools with durable patch/terminal receipts and LSP diagnostics in a read-only, network-disabled container. Configure an approved digest-pinned toolchain under **Settings → Workspace execution**. |
 | [`web-scraper`](plugins/web-scraper/) | 0.1.0 | script | integration | JavaScript-rendered page extraction through a supervised Playwright sidecar. |
 | [`tool-chain`](plugins/tool-chain/) | 0.1.0 | script | orchestration | Deterministic multi-step plans with approval-aware execution implemented by host tools. |
 | [`humanizer-skills`](plugins/humanizer-skills/) | 0.1.0 | script | skills | Writing-style skills for more natural responses. |

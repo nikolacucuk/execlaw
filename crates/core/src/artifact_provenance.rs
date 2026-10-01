@@ -374,8 +374,8 @@ impl ArtifactProvenanceStore {
         self.record(&local, "local_development_override", actor)
     }
 
-    /// Record a Controller's explicit approval for one exact local OCI digest.
-    pub fn approve_local_oci_reference(
+    /// Record a Controller's explicit per-installation approval for one exact OCI image digest.
+    pub fn approve_controller_oci_reference(
         &self,
         artifact_type: ArtifactType,
         reference: &str,
@@ -391,7 +391,7 @@ impl ArtifactProvenanceStore {
             .or_else(|| reference.strip_prefix("sha256:"))
             .ok_or_else(|| {
                 ArtifactVerificationError::InvalidMetadata(
-                    "Controller-approved local OCI references must be digest-pinned".into(),
+                    "Controller-approved OCI references must be digest-pinned".into(),
                 )
             })?;
         if reference.trim().is_empty()
@@ -411,12 +411,13 @@ impl ArtifactProvenanceStore {
             artifact_type,
             artifact_locator: reference.to_owned(),
             sha256: digest.clone(),
-            publisher_identity: "controller-local-approval".into(),
-            source_repository: "controller-local-approval".into(),
-            source_commit: "controller-local-approval".into(),
-            workflow_identity: "controller-local-approval".into(),
-            signature_reference: "controller-local-approval".into(),
-            attestation_result: "Controller approved this exact local OCI digest".into(),
+            publisher_identity: "controller-digest-approval".into(),
+            source_repository: "controller-digest-approval".into(),
+            source_commit: "controller-digest-approval".into(),
+            workflow_identity: "controller-digest-approval".into(),
+            signature_reference: "controller-digest-approval".into(),
+            attestation_result: "Controller approved this exact OCI digest on this installation"
+                .into(),
             sbom_format: "spdx".into(),
             sbom_location: "not-provided-local-controller-approval".into(),
             sbom_sha256: "0".repeat(64),
@@ -427,7 +428,7 @@ impl ArtifactProvenanceStore {
             connection.execute(
                 "INSERT INTO state_artifact_verification_events \
                  (artifact_id,event_type,status,actor,detail_json,created_at) \
-                 VALUES (?1,'controller_approved_local_oci_reference','recorded',?2,?3,?4)",
+                 VALUES (?1,'controller_approved_oci_reference','recorded',?2,?3,?4)",
                 params![
                     statement.artifact_id,
                     actor,

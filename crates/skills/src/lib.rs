@@ -64,7 +64,7 @@ pub use model::{
 pub use reuse_update::{ReuseUpdateRequest, ReuseUpdateSink, ReuseUpdateWorker};
 pub use sanitizer::{SanitizationReport, SanitizedStep, sanitize_step};
 pub use scanner::{Finding, FindingKind, ScanInput, ScanVerdict, Severity, Strictness, scan};
-pub use store::SkillStore;
+pub use store::{SkillPrivacyDeletionReport, SkillStore};
 pub use summarizer::{
     DraftSkillProposal, SkillSummarizer, SummarizerOutput, SummarizerPrompt,
     build_improvement_prompt, build_prompt, parse_response,

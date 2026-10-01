@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,17 +29,28 @@ const args = [
   "--entrypoint", "/usr/bin/timeout",
   image, "--signal=TERM", "--kill-after=2s", "90s", "rust-analyzer",
 ];
-const fileProbe = spawn("docker", [
-  "run", "--rm", "--network", "none", "--read-only", "--mount",
-  `type=bind,source=${workspace},target=/workspace,readonly`,
-  "--entrypoint", "/bin/cat", image, "/workspace/src/lib.rs",
-], { stdio: ["ignore", "pipe", "pipe"] });
-let probedSource = "";
-fileProbe.stdout.setEncoding("utf8").on("data", (chunk) => { probedSource += chunk; });
-const probeCode = await new Promise((resolve) => fileProbe.once("close", resolve));
-if (probeCode !== 0 || !probedSource.includes("pub mod broken")) {
-  throw new Error(`container could not read the workspace fixture: ${probedSource}`);
+const sandboxPrefix = [
+  "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+  "--security-opt", "no-new-privileges:true", "--pids-limit", "128",
+  "--memory", "2g", "--cpus", "2", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=128m,mode=1777",
+  "--mount", `type=bind,source=${workspace},target=/workspace,readonly`,
+  "--workdir", "/workspace", "--entrypoint", "/usr/bin/timeout", image,
+  "--signal=TERM", "--kill-after=2s", "5s",
+];
+const networkProbe = spawnSync("docker", [
+  ...sandboxPrefix,
+  "node", "-e",
+  "const net=require('node:net');const socket=net.createConnection({host:'1.1.1.1',port:80,timeout:1000});socket.on('connect',()=>process.exit(2));socket.on('error',()=>process.exit(0));socket.on('timeout',()=>process.exit(0));",
+], { encoding: "utf8", timeout: 10_000 });
+if (networkProbe.status !== 0) {
+  throw new Error(`network sandbox probe expected a denied connection; exit=${networkProbe.status} ${networkProbe.stderr}`);
 }
+const writeProbe = spawnSync("docker", [
+  ...sandboxPrefix,
+  "node", "-e", "require('node:fs').writeFileSync('/workspace/src/lib.rs','modified')",
+], { encoding: "utf8", timeout: 10_000 });
+if (writeProbe.status === 0) throw new Error("read-only workspace mount allowed a container write");
+process.stdout.write("workspace_sandbox_probes_ok network=denied workspace_mount=read_only\n");
 const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
 
 let buffer = Buffer.alloc(0);

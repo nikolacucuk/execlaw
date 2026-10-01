@@ -75,7 +75,7 @@ export async function putWorkspaceExecutionConfig(
     request: {
         image_reference: string;
         language_servers: Record<string, string[]>;
-        approve_local_image: boolean;
+        approve_image_digest: boolean;
     },
 ): Promise<WorkspaceExecutionConfig & { approval: string }> {
     return apiFetch<WorkspaceExecutionConfig & { approval: string }>(
@@ -4176,6 +4176,10 @@ export interface ScrubbedSupportBundle {
         }>;
         active_model_profiles: number;
         invalidated_model_profiles: number;
+        qualified_capabilities: Array<{
+            capability: string;
+            passing_profiles: number;
+        }>;
     };
     authority: {
         installed_plugins: number;

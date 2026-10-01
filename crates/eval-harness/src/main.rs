@@ -59,6 +59,7 @@ struct Cli {
 
 mod benchmark;
 mod fixture_replay;
+mod memory_retrieval_eval;
 
 #[derive(Debug, Subcommand)]
 enum EvalCommand {
@@ -99,6 +100,12 @@ enum EvalCommand {
         /// Prior baseline record for a paired comparison on the same suite and seeds.
         #[arg(long)]
         compare: Option<PathBuf>,
+        /// Locally installed digest-pinned workspace toolchain image for H040 tasks.
+        #[arg(long)]
+        workspace_image: Option<String>,
+        /// Acknowledge Controller approval of this exact image in the temporary benchmark database.
+        #[arg(long, default_value_t = false)]
+        approve_workspace_image: bool,
     },
     /// Validate a redacted, effects-disabled trajectory without network access.
     ReplayFixture {
@@ -117,6 +124,24 @@ enum EvalCommand {
         /// Optional path for the machine-readable suite report.
         #[arg(long)]
         report: Option<PathBuf>,
+    },
+    /// Compare lexical and local hybrid memory retrieval on a held-out query suite.
+    QualifyMemoryRetrieval {
+        /// Held-out dataset containing evidence assets, queries, gold asset IDs, and answer terms.
+        #[arg(long)]
+        dataset: PathBuf,
+        /// Machine-readable H038 qualification report path.
+        #[arg(long)]
+        output: PathBuf,
+        /// Local embedding endpoint model identity.
+        #[arg(long)]
+        embedding_model: String,
+        /// Local inference wire engine: openai or ollama.
+        #[arg(long, default_value = "openai")]
+        inference_engine: String,
+        /// Fixed p95 retrieval latency budget including query embedding.
+        #[arg(long, default_value_t = 5_000)]
+        latency_budget_ms: u64,
     },
 }
 
@@ -260,6 +285,30 @@ async fn main() -> anyhow::Result<()> {
         }
         return Ok(());
     }
+    if let Some(EvalCommand::QualifyMemoryRetrieval {
+        dataset,
+        output,
+        embedding_model,
+        inference_engine,
+        latency_budget_ms,
+    }) = &cli.command
+    {
+        let base_url = cli
+            .base_url
+            .clone()
+            .or_else(|| std::env::var("EXECLAW_INFERENCE_URL").ok())
+            .unwrap_or_else(|| "http://127.0.0.1:8000/v1".to_owned());
+        return memory_retrieval_eval::run(
+            dataset.clone(),
+            output.clone(),
+            base_url,
+            cli.model.clone(),
+            embedding_model.clone(),
+            inference_engine.clone(),
+            *latency_budget_ms,
+        )
+        .await;
+    }
     if let Some(EvalCommand::Benchmark {
         suite,
         output,
@@ -273,6 +322,8 @@ async fn main() -> anyhow::Result<()> {
         offline_fixture,
         allow_executing_generated_code,
         compare,
+        workspace_image,
+        approve_workspace_image,
     }) = cli.command
     {
         return benchmark::run(
@@ -291,6 +342,8 @@ async fn main() -> anyhow::Result<()> {
                 compare_path: compare,
                 base_url: cli.base_url,
                 model: cli.model,
+                workspace_image,
+                approve_workspace_image,
             },
         )
         .await;

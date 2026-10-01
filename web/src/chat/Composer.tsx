@@ -244,10 +244,12 @@ interface Props {
     /// `voice_stop` on mic-off so the server flushes Whisper. The
     /// VoiceCaptureButton calls this when its session ends.
     sendVoiceControl?: (payload: object) => boolean;
+    getVoiceConversationId?: () => string | null;
         voiceTranscript?: {
             session: string;
             text: string;
             is_final: boolean;
+            submitted_to_chat?: boolean;
         } | null;
     /**
      * Phase 14.D — voice backend readiness, sourced from
@@ -283,6 +285,7 @@ export function Composer({
     onSend,
     sendVoiceFrame,
     sendVoiceControl,
+    getVoiceConversationId,
         voiceTranscript,
     voiceReadiness,
     busy,
@@ -326,6 +329,7 @@ export function Composer({
     useEffect(() => {
         if (
             !voiceTranscript?.is_final ||
+            voiceTranscript.submitted_to_chat ||
             !voiceTranscript.text.trim() ||
             voiceTranscript.session === lastVoiceSessionRef.current
         ) {
@@ -1214,6 +1218,7 @@ export function Composer({
                         <VoiceCaptureButton
                             sendBinary={sendVoiceFrame ?? null}
                             sendControl={sendVoiceControl}
+                            getConversationId={getVoiceConversationId}
                             disabled={isBusy}
                             readiness={voiceReadiness ?? null}
                         />

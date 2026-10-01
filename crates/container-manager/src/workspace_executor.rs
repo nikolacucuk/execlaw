@@ -14,9 +14,9 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 use tokio::io::AsyncWriteExt;
 
-const OUTPUT_LIMIT_BYTES: usize = 128 * 1024;
+const OUTPUT_LIMIT_BYTES: usize = 24 * 1024;
 const LSP_FRAME_LIMIT_BYTES: usize = 1024 * 1024;
-const DIAGNOSTIC_LIMIT: usize = 512;
+const DIAGNOSTIC_LIMIT: usize = 48;
 const JOB_MEMORY_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const JOB_NANO_CPUS: i64 = 2_000_000_000;
 const JOB_PID_LIMIT: i64 = 128;
@@ -177,34 +177,7 @@ impl BollardWorkspaceJobExecutor {
             format!("{seconds}s"),
         ];
         cmd.extend(command.iter().cloned());
-        let mut tmpfs = HashMap::new();
-        tmpfs.insert(
-            "/tmp".to_owned(),
-            "rw,exec,nosuid,nodev,size=128m,mode=1777".to_owned(),
-        );
-        let host_config = HostConfig {
-            mounts: Some(vec![Mount {
-                source: Some(docker_host_path(&checkout_path)),
-                target: Some("/workspace".into()),
-                typ: Some(MountTypeEnum::BIND),
-                read_only: Some(true),
-                bind_options: Some(MountBindOptions {
-                    non_recursive: Some(true),
-                    ..Default::default()
-                }),
-                ..Default::default()
-            }]),
-            network_mode: Some("none".into()),
-            readonly_rootfs: Some(true),
-            cap_drop: Some(vec!["ALL".into()]),
-            security_opt: Some(vec!["no-new-privileges:true".into()]),
-            memory: Some(JOB_MEMORY_BYTES),
-            nano_cpus: Some(JOB_NANO_CPUS),
-            pids_limit: Some(JOB_PID_LIMIT),
-            tmpfs: Some(tmpfs),
-            auto_remove: Some(false),
-            ..Default::default()
-        };
+        let host_config = sandbox_host_config(&checkout_path);
         let config = Config {
             image: Some(image.to_owned()),
             entrypoint: Some(vec!["/usr/bin/timeout".into()]),
@@ -373,219 +346,223 @@ impl BollardWorkspaceJobExecutor {
             .start_container(name, None::<StartContainerOptions<String>>)
             .await
             .map_err(|error| WorkspaceExecutionError::Runtime(error.to_string()))?;
+        lsp_protocol_exchange(&mut attached.input, &mut attached.output, request).await
+    }
+}
 
-        let root_uri = url::Url::parse("file:///workspace/")
-            .map_err(|_| WorkspaceExecutionError::Protocol("invalid workspace URI".into()))?;
-        let document_uri = root_uri
-            .join(&request.path)
-            .map_err(|_| WorkspaceExecutionError::Protocol("invalid document URI".into()))?
-            .to_string();
-        let root_uri = root_uri.to_string();
-        let initialize = serde_json::json!({
-            "jsonrpc":"2.0","id":1,"method":"initialize","params":{
-                "processId":null,"rootUri":root_uri.clone(),"workspaceFolders":[{"uri":root_uri,"name":"workspace"}],
-                "capabilities":{"general":{"positionEncodings":["utf-16"]},
-                    "workspace":{"configuration":true,"workspaceFolders":true},
-                    "textDocument":{"synchronization":{"didSave":true},"publishDiagnostics":{"relatedInformation":true}}},
-                "clientInfo":{"name":"execlaw","version":env!("CARGO_PKG_VERSION")},
-                "initializationOptions":{"diagnostics":{"enable":true},"checkOnSave":true,"cargo":{"allTargets":true}}
-            }
-        });
-        send_lsp_message(&mut attached.input, &initialize).await?;
-        let deadline = tokio::time::Instant::now() + Duration::from_millis(request.timeout_ms);
-        let mut frames = LspFrameDecoder::default();
-        let mut initialized = false;
-        let mut supports_pull_diagnostics = false;
-        let mut stderr = Vec::new();
-        while !initialized {
-            let message =
-                next_lsp_message(&mut attached.output, &mut frames, deadline, &mut stderr).await?;
-            if message.get("id") == Some(&serde_json::json!(1)) && message.get("method").is_none() {
-                if let Some(error) = message.get("error") {
-                    return Err(WorkspaceExecutionError::Protocol(format!(
-                        "language server initialization failed: {}",
-                        bounded_json(error, 1024)
-                    )));
-                }
-                supports_pull_diagnostics = message
-                    .pointer("/result/capabilities/diagnosticProvider")
-                    .is_some_and(serde_json::Value::is_object);
-                initialized = true;
-            } else if message.get("method").is_some() && message.get("id").is_some() {
-                answer_lsp_request(&mut attached.input, &message).await?;
-            }
+async fn lsp_protocol_exchange<W, S>(
+    input: &mut W,
+    output: &mut S,
+    request: &WorkspaceDiagnosticsRequest,
+) -> Result<Vec<WorkspaceDiagnostic>, WorkspaceExecutionError>
+where
+    W: tokio::io::AsyncWrite + Send + Unpin + ?Sized,
+    S: futures_util::Stream<Item = Result<LogOutput, bollard::errors::Error>>
+        + Send
+        + Unpin
+        + ?Sized,
+{
+    let root_uri = url::Url::parse("file:///workspace/")
+        .map_err(|_| WorkspaceExecutionError::Protocol("invalid workspace URI".into()))?;
+    let document_uri = root_uri
+        .join(&request.path)
+        .map_err(|_| WorkspaceExecutionError::Protocol("invalid document URI".into()))?
+        .to_string();
+    let root_uri = root_uri.to_string();
+    let initialize = serde_json::json!({
+        "jsonrpc":"2.0","id":1,"method":"initialize","params":{
+            "processId":null,"rootUri":root_uri.clone(),"workspaceFolders":[{"uri":root_uri,"name":"workspace"}],
+            "capabilities":{"general":{"positionEncodings":["utf-16"]},
+                "workspace":{"configuration":true,"workspaceFolders":true},
+                "textDocument":{"synchronization":{"didSave":true},"publishDiagnostics":{"relatedInformation":true}}},
+            "clientInfo":{"name":"execlaw","version":env!("CARGO_PKG_VERSION")},
+            "initializationOptions":{"diagnostics":{"enable":true},"checkOnSave":true,"cargo":{"allTargets":true}}
         }
-        send_lsp_message(
-            &mut attached.input,
-            &serde_json::json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
-        )
-        .await?;
-        send_lsp_message(
-            &mut attached.input,
-            &serde_json::json!({
-                "jsonrpc":"2.0","method":"workspace/didChangeConfiguration","params":{
-                    "settings":{"rust-analyzer":{"diagnostics":{"enable":true},"checkOnSave":true,"cargo":{"allTargets":true}}}
-                }
-            }),
-        )
-        .await?;
-        send_lsp_message(
-            &mut attached.input,
-            &serde_json::json!({
-                "jsonrpc":"2.0","method":"textDocument/didOpen","params":{
-                    "textDocument":{"uri":document_uri.clone(),"languageId":request.language_id,
-                        "version":1,"text":request.text}
-                }
-            }),
-        )
-        .await?;
-        send_lsp_message(
-            &mut attached.input,
-            &serde_json::json!({
-                "jsonrpc":"2.0","method":"textDocument/didChange","params":{
-                    "textDocument":{"uri":document_uri.clone(),"version":2},
-                    "contentChanges":[{"text":request.text.clone()}]
-                }
-            }),
-        )
-        .await?;
-        send_lsp_message(
-            &mut attached.input,
-            &serde_json::json!({
-                "jsonrpc":"2.0","method":"textDocument/didSave","params":{
-                    "textDocument":{"uri":document_uri.clone()},"text":request.text.clone()
-                }
-            }),
-        )
-        .await?;
-        if supports_pull_diagnostics {
-            send_lsp_message(
-                &mut attached.input,
-                &serde_json::json!({
-                    "jsonrpc":"2.0","id":2,"method":"textDocument/diagnostic","params":{
-                        "textDocument":{"uri":document_uri.clone()},"identifier":null,"previousResultId":null
-                    }
-                }),
-            )
-            .await?;
+    });
+    send_lsp_message(input, &initialize).await?;
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(request.timeout_ms);
+    let mut frames = LspFrameDecoder::default();
+    let mut initialized = false;
+    let mut supports_pull_diagnostics = false;
+    let mut stderr = Vec::new();
+    while !initialized {
+        let message = next_lsp_message(output, &mut frames, deadline, &mut stderr).await?;
+        if message.get("id") == Some(&serde_json::json!(1)) && message.get("method").is_none() {
+            if let Some(error) = message.get("error") {
+                return Err(WorkspaceExecutionError::Protocol(format!(
+                    "language server initialization failed: {}",
+                    bounded_json(error, 1024)
+                )));
+            }
+            supports_pull_diagnostics = message
+                .pointer("/result/capabilities/diagnosticProvider")
+                .is_some_and(serde_json::Value::is_object);
+            initialized = true;
+        } else if message.get("method").is_some() && message.get("id").is_some() {
+            answer_lsp_request(input, &message).await?;
         }
+    }
+    send_lsp_message(
+        input,
+        &serde_json::json!({"jsonrpc":"2.0","method":"initialized","params":{}}),
+    )
+    .await?;
+    send_lsp_message(
+        input,
+        &serde_json::json!({
+            "jsonrpc":"2.0","method":"workspace/didChangeConfiguration","params":{
+                "settings":{"rust-analyzer":{"diagnostics":{"enable":true},"checkOnSave":true,"cargo":{"allTargets":true}}}
+            }
+        }),
+    )
+    .await?;
+    send_lsp_message(
+        input,
+        &serde_json::json!({
+            "jsonrpc":"2.0","method":"textDocument/didOpen","params":{
+                "textDocument":{"uri":document_uri.clone(),"languageId":request.language_id,
+                    "version":1,"text":request.text}
+            }
+        }),
+    )
+    .await?;
+    send_lsp_message(
+        input,
+        &serde_json::json!({
+            "jsonrpc":"2.0","method":"textDocument/didChange","params":{
+                "textDocument":{"uri":document_uri.clone(),"version":2},
+                "contentChanges":[{"text":request.text.clone()}]
+            }
+        }),
+    )
+    .await?;
+    send_lsp_message(
+        input,
+        &serde_json::json!({
+            "jsonrpc":"2.0","method":"textDocument/didSave","params":{
+                "textDocument":{"uri":document_uri.clone()},"text":request.text.clone()
+            }
+        }),
+    )
+    .await?;
+    if supports_pull_diagnostics {
+        send_lsp_message(
+            input,
+            &serde_json::json!({
+                "jsonrpc":"2.0","id":2,"method":"textDocument/diagnostic","params":{
+                    "textDocument":{"uri":document_uri.clone()},"identifier":null,"previousResultId":null
+                }
+            }),
+        )
+        .await?;
+    }
 
-        let mut empty_push_report = None;
-        let mut empty_push_settle_deadline: Option<tokio::time::Instant> = None;
-        let diagnostics = loop {
-            let message_deadline =
-                empty_push_settle_deadline.map_or(deadline, |settle| settle.min(deadline));
-            let message = match next_lsp_message(
-                &mut attached.output,
-                &mut frames,
-                message_deadline,
-                &mut stderr,
-            )
-            .await
-            {
+    let mut empty_report = None;
+    let mut settle_deadline: Option<tokio::time::Instant> = None;
+    let diagnostics = loop {
+        let message_deadline = settle_deadline.map_or(deadline, |settle| settle.min(deadline));
+        let message =
+            match next_lsp_message(output, &mut frames, message_deadline, &mut stderr).await {
                 Ok(message) => message,
                 Err(error)
-                    if empty_push_report.is_some()
-                        && empty_push_settle_deadline
+                    if empty_report.is_some()
+                        && settle_deadline
                             .is_some_and(|settle| tokio::time::Instant::now() >= settle) =>
                 {
                     let _ = error;
-                    break empty_push_report.take().unwrap_or_default();
+                    break empty_report.take().unwrap_or_default();
                 }
                 Err(error) => return Err(error),
             };
-            if message.get("method").and_then(serde_json::Value::as_str)
-                == Some("textDocument/publishDiagnostics")
-            {
-                let params = message.get("params").ok_or_else(|| {
-                    WorkspaceExecutionError::Protocol(
-                        "publishDiagnostics notification omitted params".into(),
-                    )
-                })?;
-                if params.get("uri") == Some(&serde_json::json!(document_uri.clone())) {
-                    let raw = params
-                        .get("diagnostics")
-                        .and_then(serde_json::Value::as_array)
-                        .ok_or_else(|| {
-                            WorkspaceExecutionError::Protocol(
-                                "publishDiagnostics did not contain a diagnostics array".into(),
-                            )
-                        })?;
-                    let parsed = raw
-                        .iter()
-                        .take(DIAGNOSTIC_LIMIT)
-                        .map(parse_diagnostic)
-                        .collect::<Vec<_>>();
-                    if !parsed.is_empty() || !supports_pull_diagnostics {
-                        if parsed.is_empty() {
-                            empty_push_report = Some(parsed);
-                            empty_push_settle_deadline =
-                                Some(tokio::time::Instant::now() + Duration::from_secs(5));
-                            continue;
-                        }
-                        break parsed;
-                    }
-                    empty_push_report = Some(parsed);
-                }
-            } else if message.get("id") == Some(&serde_json::json!(2))
-                && message.get("method").is_none()
-            {
-                if let Some(error) = message.get("error") {
-                    let message_text = error
-                        .get("message")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or_default();
-                    if !message_text.is_empty() && !message_text.contains("Method not found") {
-                        return Err(WorkspaceExecutionError::Protocol(format!(
-                            "language server diagnostics request failed: {}",
-                            message_text.chars().take(512).collect::<String>()
-                        )));
-                    }
-                    if let Some(pushed) = empty_push_report.take() {
-                        break pushed;
-                    }
-                } else if let Some(items) = message
-                    .pointer("/result/items")
+        if message.get("method").and_then(serde_json::Value::as_str)
+            == Some("textDocument/publishDiagnostics")
+        {
+            let params = message.get("params").ok_or_else(|| {
+                WorkspaceExecutionError::Protocol(
+                    "publishDiagnostics notification omitted params".into(),
+                )
+            })?;
+            if params.get("uri") == Some(&serde_json::json!(document_uri.clone())) {
+                let raw = params
+                    .get("diagnostics")
                     .and_then(serde_json::Value::as_array)
-                {
-                    let parsed = items
-                        .iter()
-                        .take(DIAGNOSTIC_LIMIT)
-                        .map(parse_diagnostic)
-                        .collect::<Vec<_>>();
-                    if !parsed.is_empty() {
-                        break parsed;
+                    .ok_or_else(|| {
+                        WorkspaceExecutionError::Protocol(
+                            "publishDiagnostics did not contain a diagnostics array".into(),
+                        )
+                    })?;
+                let parsed = raw
+                    .iter()
+                    .take(DIAGNOSTIC_LIMIT)
+                    .map(parse_diagnostic)
+                    .collect::<Vec<_>>();
+                if !parsed.is_empty() || !supports_pull_diagnostics {
+                    if parsed.is_empty() {
+                        empty_report = Some(parsed);
+                        settle_deadline =
+                            Some(tokio::time::Instant::now() + Duration::from_secs(5));
+                        continue;
                     }
-                    empty_push_report = Some(parsed);
-                    empty_push_settle_deadline = Some(
-                        tokio::time::Instant::now() + Duration::from_secs(5),
-                    );
-                } else {
-                    return Err(WorkspaceExecutionError::Protocol(
-                        "language server returned an invalid pull-diagnostics report".into(),
-                    ));
+                    break parsed;
                 }
-            } else if message.get("method").is_some() && message.get("id").is_some() {
-                answer_lsp_request(&mut attached.input, &message).await?;
+                empty_report = Some(parsed);
             }
-        };
-        let _ = send_lsp_message(
-            &mut attached.input,
-            &serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":document_uri}}}),
-        )
-        .await;
-        let _ = send_lsp_message(
-            &mut attached.input,
-            &serde_json::json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
-        )
-        .await;
-        let _ = send_lsp_message(
-            &mut attached.input,
-            &serde_json::json!({"jsonrpc":"2.0","method":"exit","params":null}),
-        )
-        .await;
-        Ok(diagnostics)
-    }
+        } else if message.get("id") == Some(&serde_json::json!(2))
+            && message.get("method").is_none()
+        {
+            if let Some(error) = message.get("error") {
+                let message_text = error
+                    .get("message")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                if !message_text.is_empty() && !message_text.contains("Method not found") {
+                    return Err(WorkspaceExecutionError::Protocol(format!(
+                        "language server diagnostics request failed: {}",
+                        message_text.chars().take(512).collect::<String>()
+                    )));
+                }
+                if let Some(pushed) = empty_report.take() {
+                    break pushed;
+                }
+            } else if let Some(items) = message
+                .pointer("/result/items")
+                .and_then(serde_json::Value::as_array)
+            {
+                let parsed = items
+                    .iter()
+                    .take(DIAGNOSTIC_LIMIT)
+                    .map(parse_diagnostic)
+                    .collect::<Vec<_>>();
+                if !parsed.is_empty() {
+                    break parsed;
+                }
+                empty_report = Some(parsed);
+                settle_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(5));
+            } else {
+                return Err(WorkspaceExecutionError::Protocol(
+                    "language server returned an invalid pull-diagnostics report".into(),
+                ));
+            }
+        } else if message.get("method").is_some() && message.get("id").is_some() {
+            answer_lsp_request(input, &message).await?;
+        }
+    };
+    let _ = send_lsp_message(
+        input,
+        &serde_json::json!({"jsonrpc":"2.0","method":"textDocument/didClose","params":{"textDocument":{"uri":document_uri}}}),
+    )
+    .await;
+    let _ = send_lsp_message(
+        input,
+        &serde_json::json!({"jsonrpc":"2.0","id":3,"method":"shutdown","params":null}),
+    )
+    .await;
+    let _ = send_lsp_message(
+        input,
+        &serde_json::json!({"jsonrpc":"2.0","method":"exit","params":null}),
+    )
+    .await;
+    Ok(diagnostics)
 }
 
 #[async_trait]
@@ -780,6 +757,37 @@ fn docker_host_path(path: &Path) -> String {
     path.into_owned()
 }
 
+fn sandbox_host_config(checkout_path: &Path) -> HostConfig {
+    let mut tmpfs = HashMap::new();
+    tmpfs.insert(
+        "/tmp".to_owned(),
+        "rw,exec,nosuid,nodev,size=128m,mode=1777".to_owned(),
+    );
+    HostConfig {
+        mounts: Some(vec![Mount {
+            source: Some(docker_host_path(checkout_path)),
+            target: Some("/workspace".into()),
+            typ: Some(MountTypeEnum::BIND),
+            read_only: Some(true),
+            bind_options: Some(MountBindOptions {
+                non_recursive: Some(true),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }]),
+        network_mode: Some("none".into()),
+        readonly_rootfs: Some(true),
+        cap_drop: Some(vec!["ALL".into()]),
+        security_opt: Some(vec!["no-new-privileges:true".into()]),
+        memory: Some(JOB_MEMORY_BYTES),
+        nano_cpus: Some(JOB_NANO_CPUS),
+        pids_limit: Some(JOB_PID_LIMIT),
+        tmpfs: Some(tmpfs),
+        auto_remove: Some(false),
+        ..Default::default()
+    }
+}
+
 fn validate_job_name(name: &str) -> Result<(), WorkspaceExecutionError> {
     if name.is_empty()
         || name.len() > 96
@@ -896,13 +904,35 @@ fn container_name(job_name: &str) -> String {
 }
 
 fn parse_diagnostic(raw: &serde_json::Value) -> WorkspaceDiagnostic {
+    let position = |value: &serde_json::Value| {
+        serde_json::json!({
+            "line":value.get("line").and_then(serde_json::Value::as_u64).unwrap_or(0).min(u32::MAX as u64),
+            "character":value.get("character").and_then(serde_json::Value::as_u64).unwrap_or(0).min(u32::MAX as u64),
+        })
+    };
+    let range = raw
+        .get("range")
+        .and_then(serde_json::Value::as_object)
+        .map(|value| {
+            serde_json::json!({
+                "start":position(value.get("start").unwrap_or(&serde_json::Value::Null)),
+                "end":position(value.get("end").unwrap_or(&serde_json::Value::Null)),
+            })
+        })
+        .unwrap_or(serde_json::Value::Null);
     WorkspaceDiagnostic {
-        range: raw.get("range").cloned().unwrap_or(serde_json::Value::Null),
+        range,
         severity: raw
             .get("severity")
             .and_then(serde_json::Value::as_u64)
             .and_then(|value| u8::try_from(value).ok()),
-        code: raw.get("code").cloned(),
+        code: raw.get("code").and_then(|value| match value {
+            serde_json::Value::String(code) => {
+                Some(serde_json::Value::String(code.chars().take(128).collect()))
+            }
+            serde_json::Value::Number(_) | serde_json::Value::Bool(_) => Some(value.clone()),
+            _ => None,
+        }),
         source: raw
             .get("source")
             .and_then(serde_json::Value::as_str)
@@ -910,7 +940,7 @@ fn parse_diagnostic(raw: &serde_json::Value) -> WorkspaceDiagnostic {
         message: raw
             .get("message")
             .and_then(serde_json::Value::as_str)
-            .map(|value| value.chars().take(4096).collect())
+            .map(|value| value.chars().take(512).collect())
             .unwrap_or_default(),
     }
 }
@@ -1108,6 +1138,44 @@ mod tests {
     }
 
     #[test]
+    fn workspace_job_container_profile_is_networkless_readonly_and_resource_capped() {
+        let checkout = tempfile::tempdir().unwrap();
+        let config = sandbox_host_config(checkout.path());
+        assert_eq!(config.network_mode.as_deref(), Some("none"));
+        assert_eq!(config.readonly_rootfs, Some(true));
+        assert_eq!(
+            config.cap_drop.as_deref(),
+            Some(["ALL".to_owned()].as_slice())
+        );
+        assert_eq!(
+            config.security_opt.as_deref(),
+            Some(["no-new-privileges:true".to_owned()].as_slice())
+        );
+        assert_eq!(config.memory, Some(JOB_MEMORY_BYTES));
+        assert_eq!(config.nano_cpus, Some(JOB_NANO_CPUS));
+        assert_eq!(config.pids_limit, Some(JOB_PID_LIMIT));
+        assert_eq!(config.binds, None);
+        let mounts = config.mounts.unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].target.as_deref(), Some("/workspace"));
+        assert_eq!(mounts[0].typ, Some(MountTypeEnum::BIND));
+        assert_eq!(mounts[0].read_only, Some(true));
+        assert_eq!(
+            mounts[0].bind_options.as_ref().unwrap().non_recursive,
+            Some(true)
+        );
+        assert!(
+            config
+                .tmpfs
+                .as_ref()
+                .unwrap()
+                .get("/tmp")
+                .unwrap()
+                .contains("nosuid,nodev")
+        );
+    }
+
+    #[test]
     fn lsp_frame_decoder_handles_partial_and_multiple_frames() {
         let mut decoder = LspFrameDecoder::default();
         let first = serde_json::json!({"jsonrpc":"2.0","id":1});
@@ -1124,5 +1192,130 @@ mod tests {
         decoder.push(&bytes[midpoint..]).unwrap();
         assert_eq!(decoder.pop().unwrap().unwrap(), first);
         assert_eq!(decoder.pop().unwrap().unwrap(), second);
+    }
+
+    #[tokio::test]
+    async fn lsp_exchange_waits_for_diagnostics_after_an_empty_pull_response() {
+        use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+        async fn read_message<R>(reader: &mut R, decoder: &mut LspFrameDecoder) -> serde_json::Value
+        where
+            R: AsyncRead + Unpin,
+        {
+            loop {
+                if let Some(message) = decoder.pop().unwrap() {
+                    return message;
+                }
+                let mut chunk = [0u8; 4096];
+                let count = reader.read(&mut chunk).await.unwrap();
+                assert!(count > 0, "client closed LSP stream unexpectedly");
+                decoder.push(&chunk[..count]).unwrap();
+            }
+        }
+
+        async fn write_message<W>(writer: &mut W, message: serde_json::Value)
+        where
+            W: AsyncWrite + Unpin,
+        {
+            let body = serde_json::to_vec(&message).unwrap();
+            writer
+                .write_all(format!("Content-Length: {}\r\n\r\n", body.len()).as_bytes())
+                .await
+                .unwrap();
+            writer.write_all(&body).await.unwrap();
+            writer.flush().await.unwrap();
+        }
+
+        let (client, server) = tokio::io::duplex(128 * 1024);
+        let (client_output, mut client_input) = tokio::io::split(client);
+        let (mut server_input, mut server_output) = tokio::io::split(server);
+        let mut output = futures_util::stream::unfold(client_output, |mut reader| async move {
+            let mut bytes = vec![0u8; 4096];
+            match reader.read(&mut bytes).await {
+                Ok(0) => None,
+                Ok(count) => Some((
+                    Ok(LogOutput::StdOut {
+                        message: bytes::Bytes::copy_from_slice(&bytes[..count]),
+                    }),
+                    reader,
+                )),
+                Err(err) => Some((Err(bollard::errors::Error::IOError { err }), reader)),
+            }
+        })
+        .boxed();
+        let server_task = tokio::spawn(async move {
+            let mut decoder = LspFrameDecoder::default();
+            let initialize = read_message(&mut server_input, &mut decoder).await;
+            assert_eq!(initialize["method"], "initialize");
+            // Server request IDs use the same JSON-RPC number space as
+            // client request IDs. The method field distinguishes the request
+            // from the pending initialize response.
+            write_message(
+                &mut server_output,
+                serde_json::json!({
+                    "jsonrpc":"2.0","id":1,"method":"workspace/configuration",
+                    "params":{"items":[{}]}
+                }),
+            )
+            .await;
+            write_message(
+                &mut server_output,
+                serde_json::json!({
+                    "jsonrpc":"2.0","id":1,"result":{"capabilities":{
+                        "diagnosticProvider":{"interFileDependencies":true,"workspaceDiagnostics":false}
+                    }}
+                }),
+            )
+            .await;
+            let configuration_reply = read_message(&mut server_input, &mut decoder).await;
+            assert_eq!(configuration_reply["id"], 1);
+            assert_eq!(configuration_reply["result"], serde_json::json!([null]));
+            let mut diagnostic_request_seen = false;
+            for _ in 0..8 {
+                let message = read_message(&mut server_input, &mut decoder).await;
+                if message["method"] == "textDocument/diagnostic" {
+                    diagnostic_request_seen = true;
+                    break;
+                }
+            }
+            assert!(diagnostic_request_seen);
+            write_message(
+                &mut server_output,
+                serde_json::json!({
+                    "jsonrpc":"2.0","id":2,"result":{"kind":"full","resultId":"rust-analyzer","items":[]}
+                }),
+            )
+            .await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            write_message(
+                &mut server_output,
+                serde_json::json!({
+                    "jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{
+                        "uri":"file:///workspace/src/broken.rs","diagnostics":[{
+                            "range":{"start":{"line":0,"character":0},"end":{"line":0,"character":4}},
+                            "severity":1,"code":"E0001","source":"rust-analyzer","message":"fixture type error"
+                        }]
+                    }
+                }),
+            )
+            .await;
+        });
+        let request = WorkspaceDiagnosticsRequest {
+            image_reference: String::new(),
+            checkout_path: PathBuf::new(),
+            job_name: "lsp-unit-test".into(),
+            server_argv: vec!["rust-analyzer".into()],
+            path: "src/broken.rs".into(),
+            language_id: "rust".into(),
+            text: "pub fn broken() {}\n".into(),
+            timeout_ms: 5_000,
+        };
+        let diagnostics = lsp_protocol_exchange(&mut client_input, &mut output, &request)
+            .await
+            .unwrap();
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].message, "fixture type error");
+        assert_eq!(diagnostics[0].severity, Some(1));
+        server_task.await.unwrap();
     }
 }

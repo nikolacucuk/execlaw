@@ -1711,6 +1711,17 @@ mod tests {
                 .is_empty()
         );
         assert!(
+            crate::memory::MemoryStore::new(&db)
+                .get("principal:p1", "Controller", "favorite_color")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .append(&assertion("privacy-root", "Controller", "red", None, 50))
+                .is_err()
+        );
+        assert!(
             store
                 .add_evidence(&evidence(
                     "privacy-late-evidence",
@@ -1743,6 +1754,11 @@ mod tests {
             })
             .unwrap();
         assert_eq!(projections, 0);
+        let repeated = store
+            .tombstone_source_event(conversation_id.as_str(), 1, "controller-1", 60)
+            .unwrap();
+        assert_eq!(repeated.assertions_hidden, 0);
+        assert_eq!(repeated.evidence_hidden, 0);
     }
 
     #[test]

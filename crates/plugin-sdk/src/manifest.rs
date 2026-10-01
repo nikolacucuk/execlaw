@@ -1742,4 +1742,41 @@ rpc_capabilities = ["own_oauth_accounts"]
         assert_eq!(rt.executable.as_deref(), Some("./hello"));
         assert!(rt.source.is_none());
     }
+
+    #[test]
+    fn workspace_coding_plugin_declares_all_controller_host_tools() {
+        let manifest = PluginManifest::parse(include_str!(
+            "../../../plugins/workspace-coding/plugin.toml"
+        ))
+        .unwrap();
+        let tools = manifest
+            .tools
+            .iter()
+            .map(|tool| (tool.name.as_str(), tool))
+            .collect::<std::collections::HashMap<_, _>>();
+        for name in [
+            "workspace.read_file",
+            "workspace.search",
+            "workspace.apply_patch",
+            "workspace.run",
+            "workspace.diagnostics",
+        ] {
+            let tool = tools.get(name).unwrap_or_else(|| panic!("missing {name}"));
+            assert!(
+                tool.host_implemented,
+                "{name} must use durable host dispatch"
+            );
+            assert_eq!(tool.trust_floor.as_deref(), Some("Controller"));
+        }
+        assert!(
+            tools["workspace.run"]
+                .required_capabilities
+                .contains(&"workspace.process".to_owned())
+        );
+        assert!(
+            tools["workspace.diagnostics"]
+                .required_capabilities
+                .contains(&"workspace.process".to_owned())
+        );
+    }
 }

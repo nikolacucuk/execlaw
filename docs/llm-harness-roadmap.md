@@ -740,7 +740,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     rebuild a versioned index; chat, durable-run, agent, and research prompt
     paths consume eligible assets and deduplicate source hashes. Held-out
     recall, answer-accuracy comparison, fixed-budget hardware latency, and live
-    local-backend evidence remain open.
+    local-backend evidence remain open. The `eval-harness
+    qualify-memory-retrieval` command now builds a held-out versioned index,
+    compares lexical/hybrid recall and local answers, tests forbidden/expired/
+    archived/stale-vector candidates, and records build time plus retrieval
+    p50/p95 against a fixed budget. Its current report records `http_connect`
+    because the configured local inference service is unavailable; H038 remains
+    unqualified.
 
 39. [ ] <a id="enhancement-039"></a> **Evaluate learned skills by execution and support safe rollback.**
     **P1 / L.** Extend item 15 and `server/src/skills_admin.rs` beyond
@@ -775,10 +781,20 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     route now applies bounded UTF-8 replacements after checking each file's
     expected SHA-256. It uses the isolated checkout and leaves the registered
     workspace root for the existing reviewed diff/apply flow. Manifest-declared
-    read/search/patch tools are wired through the durable host dispatcher and
-    its per-run patch receipt. Terminal jobs and language-server diagnostics
-    are not implemented; a confined, approved toolchain artifact and H023-H029
-    write-authority prerequisites are also absent, so H040 remains open.
+    read/search/patch/terminal/diagnostics tools now use durable run-scoped host
+    dispatch. Terminal and generic LSP jobs mount only a secret-filtered
+    read-only snapshot, use a digest-pinned Controller-approved image, disable
+    networking, drop capabilities, and enforce CPU/memory/PID/output/time
+    limits. A digest-pinned Rust/TypeScript toolchain image is built locally;
+    Controller config requires verified provenance or explicit approval of the
+    exact image digest. A disposable Rust crate passed `cargo test --offline`
+    through the manager. The Docker smoke confirmed blocked networking, a
+    read-only workspace mount, and Rust Analyzer diagnostics. The Rust-side LSP
+    late-push regression and server route tests compile but have not executed
+    because the Windows test binary is blocked by Application Control 4551 and
+    WSL terminates during builds. The held-out multi-file model-repair benchmark
+    and H023-H029 write-authority prerequisites remain open, so H040 is not
+    complete.
 
 41. [x] <a id="enhancement-041"></a> **Add workspace checkpoints, run forks, and safe diff application.**
     **P1 / L.** Extend the coding plugin and run store with isolated working
