@@ -48,7 +48,7 @@ pub mod tools;
 
 /// Version of the deterministic held-out skill evaluator contract.
 /// Increment when its prompt, rubric scoring, or inference settings change.
-pub const SKILL_EVAL_VERSION: &str = "skill-eval-v1";
+pub const SKILL_EVAL_VERSION: &str = "skill-eval-v2-behavioral-assertions";
 
 pub use capture::{AutoCaptureSink, AutoCaptureWorker, CaptureOutcome, CaptureRequest};
 pub use filesystem::import_filesystem_skills;

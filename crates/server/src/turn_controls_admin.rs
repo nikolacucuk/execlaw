@@ -413,3 +413,132 @@ pub fn recover_pending_queued_controls(state: &AppState) -> Result<usize, String
     }
     Ok(recovered)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use execlaw_core::{
+        conversation::{ConversationKind, ConversationRow, ConversationStore, Modality, Phase},
+        events::{EventKind, EventLog, PendingEvent},
+        ids::{ConversationId, EventSeq},
+        turn_controls::{TurnControlKind, TurnControlStatus, TurnControlStore},
+    };
+
+    fn seed_conversation(state: &AppState) -> ConversationId {
+        let id = ConversationId::from("queued-recovery-test");
+        ConversationStore::new(&state.db)
+            .upsert(&ConversationRow {
+                conversation_id: id.clone(),
+                kind: ConversationKind::ControllerDM,
+                last_seq: EventSeq(0),
+                phase: Phase::Idle,
+                controller_id: None,
+                trust_class: "Controller".into(),
+                snapshot_blob: None,
+                snapshot_seq: None,
+                lease_owner: None,
+                lease_expires: None,
+                modality: Modality::Text,
+                display_name: None,
+                display_name_source: "auto".into(),
+                is_pinned: false,
+                is_ephemeral: false,
+                ephemeral_expires_at: None,
+                last_activity_at: 0,
+                context_window_policy: None,
+            })
+            .unwrap();
+        id
+    }
+
+    #[test]
+    fn queued_message_recovery_applies_once_and_reconciles_its_durable_control() {
+        let state = crate::routes::test_app_state();
+        let conversation_id = seed_conversation(&state);
+        let store = TurnControlStore::new(&state.db);
+        let (control, created) = store
+            .enqueue_idempotent(
+                conversation_id.as_str(),
+                None,
+                TurnControlKind::QueueNextTurn,
+                &serde_json::json!({"text":"use the safer patch"}),
+                "queued-message-1",
+                10,
+            )
+            .unwrap();
+        assert!(created);
+
+        let (interrupted, created) = store
+            .enqueue_idempotent(
+                conversation_id.as_str(),
+                None,
+                TurnControlKind::QueueNextTurn,
+                &serde_json::json!({"text":"keep the original behavior"}),
+                "queued-message-2",
+                11,
+            )
+            .unwrap();
+        assert!(created);
+        let log = EventLog::new(&state.db);
+        let base = log.last_seq(&conversation_id).unwrap();
+        log.commit_turn(
+            &conversation_id,
+            base,
+            vec![
+                PendingEvent::encode(
+                    EventKind::UserMsg,
+                    &serde_json::json!({
+                        "text":"keep the original behavior",
+                        "queued_control_id":interrupted.control_id,
+                    }),
+                    Some("controller".into()),
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(recover_pending_queued_controls(&state).unwrap(), 2);
+        assert_eq!(recover_pending_queued_controls(&state).unwrap(), 0);
+        let recovered = store.get(&control.control_id).unwrap().unwrap();
+        assert_eq!(recovered.status, TurnControlStatus::Applied);
+        assert_eq!(
+            store.get(&interrupted.control_id).unwrap().unwrap().status,
+            TurnControlStatus::Applied
+        );
+        let events = EventLog::new(&state.db)
+            .replay_since(&conversation_id, EventSeq(0))
+            .unwrap();
+        let queued = events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::UserMsg
+                    && event
+                        .decode_payload::<serde_json::Value>()
+                        .ok()
+                        .and_then(|payload| payload.get("queued_control_id").cloned())
+                        .and_then(|id| id.as_str().map(str::to_owned))
+                        .as_deref()
+                        == Some(control.control_id.as_str())
+            })
+            .count();
+        assert_eq!(
+            queued, 1,
+            "restart recovery must not append the correction twice"
+        );
+        let reconciled_events = events
+            .iter()
+            .filter(|event| {
+                event.kind == EventKind::UserMsg
+                    && event
+                        .decode_payload::<serde_json::Value>()
+                        .ok()
+                        .and_then(|payload| payload.get("queued_control_id").cloned())
+                        .and_then(|id| id.as_str().map(str::to_owned))
+                        .as_deref()
+                        == Some(interrupted.control_id.as_str())
+            })
+            .count();
+        assert_eq!(reconciled_events, 1);
+    }
+}

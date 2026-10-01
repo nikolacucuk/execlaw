@@ -1,0 +1,31 @@
+#syntax=docker/dockerfile:1
+FROM docker.io/library/node:22.15.0-bookworm-slim@sha256:557e52a0fcb928ee113df7e1fb5d4f60c1341dbda53f55e3d815ca10807efdce AS node
+FROM docker.io/library/rust:1.98.1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e
+
+ARG SOURCE_REVISION=local
+
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/bin/npm /usr/local/bin/npm
+COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
+
+ENV PATH="/usr/local/cargo/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    RUSTUP_HOME="/usr/local/rustup" \
+    CARGO_HOME="/usr/local/cargo" \
+    CARGO_NET_OFFLINE="true"
+
+COPY toolchains/workspace-lsp/package.json toolchains/workspace-lsp/package-lock.json /opt/workspace-lsp/
+
+RUN rustup toolchain install 1.85.1 --profile minimal --component rust-analyzer --component rust-src --no-self-update \
+    && rustup default 1.85.1 \
+    && node /usr/local/lib/node_modules/npm/bin/npm-cli.js ci --prefix /opt/workspace-lsp --omit=dev --ignore-scripts --no-audit --no-fund \
+    && useradd --uid 1000 --create-home --shell /usr/sbin/nologin workspace
+
+ENV PATH="/opt/workspace-lsp/node_modules/.bin:${PATH}"
+
+LABEL org.opencontainers.image.title="execlaw workspace toolchain" \
+      org.opencontainers.image.description="Offline Rust and TypeScript tools for isolated execlaw workspace jobs" \
+      org.opencontainers.image.source="https://github.com/nikolacucuk/execlaw" \
+      org.opencontainers.image.revision="${SOURCE_REVISION}"
+
+USER 1000:1000
+ENTRYPOINT ["/usr/bin/timeout"]

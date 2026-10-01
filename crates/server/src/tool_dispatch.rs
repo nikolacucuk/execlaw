@@ -36,6 +36,7 @@ use execlaw_inference_api::InferenceClient;
 use execlaw_plugin_host::{BuiltinTools, PluginHost};
 use execlaw_policy::trust::TrustLevel;
 use execlaw_runner_local::turn::ToolDispatch;
+use sha2::Digest;
 use std::sync::Arc;
 
 /// Concrete dispatcher built from a `PluginHost` + built-ins +
@@ -119,6 +120,10 @@ pub struct ChainedToolDispatch<B: BuiltinTools> {
     pub host_transports: Option<crate::transport_registry::HostTransportRegistry>,
     /// Framework-owned tool-call ordinal for idempotent effects in the turn.
     pub transport_effect_ordinal: Arc<std::sync::atomic::AtomicU32>,
+    /// Managed isolated workspace directory available to durable-run host tools.
+    pub workspace_checkout_root: Option<std::path::PathBuf>,
+    /// Test seam for the Docker-backed, effect-confined workspace executor.
+    pub workspace_job_executor: Option<Arc<dyn execlaw_container_manager::WorkspaceJobExecutor>>,
 }
 
 impl<B: BuiltinTools> ChainedToolDispatch<B> {
@@ -145,6 +150,8 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
             signal_self_number: None,
             host_transports: None,
             transport_effect_ordinal: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            workspace_checkout_root: None,
+            workspace_job_executor: None,
         }
     }
 
@@ -177,6 +184,8 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
             signal_self_number: None,
             host_transports: None,
             transport_effect_ordinal: Arc::new(std::sync::atomic::AtomicU32::new(0)),
+            workspace_checkout_root: None,
+            workspace_job_executor: None,
         }
     }
 
@@ -221,6 +230,456 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
     /// Attach the durable parent run used to persist delegated child runs.
     pub fn with_parent_run(mut self, run_id: impl Into<String>) -> Self {
         self.parent_run_id = Some(run_id.into());
+        self
+    }
+
+    async fn dispatch_manifest_host_tool(
+        &self,
+        contract: &execlaw_plugin_host::RegisteredTool,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let has_wildcard = self.caller_caps.iter().any(|cap| cap == "*");
+        if !has_wildcard
+            && contract
+                .required_capabilities
+                .iter()
+                .any(|required| !self.caller_caps.iter().any(|cap| cap == required))
+        {
+            return Err(format!(
+                "not authorized: host tool '{tool_name}' capability is not granted"
+            ));
+        }
+        if let Some(floor) = contract.trust_floor.as_deref() {
+            let required = TrustLevel::parse(floor)
+                .ok_or_else(|| format!("host tool '{tool_name}' has an invalid trust floor"))?;
+            if self.caller_trust.rank() < required.rank() {
+                return Err(format!(
+                    "not authorized: host tool '{tool_name}' requires trust >= {floor}"
+                ));
+            }
+        }
+        if let Some(validator) = &contract.schema_validator {
+            validator.validate(args).map_err(|error| {
+                format!("host tool '{tool_name}' arguments failed schema validation: {error}")
+            })?;
+        }
+        if !tool_name.starts_with("workspace.") {
+            return Err(format!(
+                "no host implementation registered for '{tool_name}'"
+            ));
+        }
+        let run_id = self
+            .parent_run_id
+            .as_deref()
+            .ok_or_else(|| "workspace tools require a durable run".to_owned())?;
+        let managed_root = self
+            .workspace_checkout_root
+            .as_deref()
+            .ok_or_else(|| "workspace checkout service is unavailable".to_owned())?;
+        let root = std::fs::canonicalize(managed_root)
+            .map_err(|error| format!("workspace checkout root is unavailable: {error}"))?;
+        let binding = execlaw_core::workspaces::WorkspaceStore::new(&self.host.db())
+            .binding_for_run(run_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "durable run has no isolated workspace checkout".to_owned())?;
+        let checkout = std::fs::canonicalize(&binding.checkout_path)
+            .map_err(|error| format!("workspace checkout is unavailable: {error}"))?;
+        if !checkout.is_dir() || !checkout.starts_with(&root) {
+            return Err("workspace checkout is outside the managed checkout root".into());
+        }
+        match tool_name {
+            "workspace.read_file" => {
+                let path = args
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "workspace.read_file requires a path".to_owned())?;
+                let target = crate::workspace_coding::safe_relative_file(&checkout, path)
+                    .map_err(|error| error.message)?;
+                let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
+                if crate::workspace_coding::has_multiple_links(&target, &metadata) {
+                    return Err("workspace file has multiple hard links".into());
+                }
+                if metadata.len() > 10 * 1024 * 1024 {
+                    return Err("workspace file exceeds the 10 MiB read limit".into());
+                }
+                let bytes = std::fs::read(&target).map_err(|error| error.to_string())?;
+                let content = String::from_utf8(bytes.clone())
+                    .map_err(|_| "workspace file is not UTF-8".to_owned())?;
+                Ok(
+                    serde_json::json!({"path":path,"text":content,"sha256":hex::encode(sha2::Sha256::digest(bytes))}),
+                )
+            }
+            "workspace.search" => {
+                let query = args
+                    .get("query")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "workspace.search requires a query".to_owned())?;
+                if query.is_empty() || query.len() > 1024 {
+                    return Err("workspace search query must contain 1 to 1024 bytes".into());
+                }
+                let mut matches = Vec::new();
+                for (path, bytes) in crate::workspace_coding::scan_workspace(&checkout)
+                    .map_err(|error| error.message)?
+                {
+                    let Ok(text) = std::str::from_utf8(&bytes) else {
+                        continue;
+                    };
+                    for (line, value) in text.lines().enumerate() {
+                        if value.contains(query) {
+                            matches.push(serde_json::json!({
+                                "path":path,
+                                "line":line + 1,
+                                "text":value.chars().take(2048).collect::<String>()
+                            }));
+                            if matches.len() == 500 {
+                                break;
+                            }
+                        }
+                    }
+                    if matches.len() == 500 {
+                        break;
+                    }
+                }
+                Ok(serde_json::json!({"matches":matches}))
+            }
+            "workspace.apply_patch" => {
+                let request: crate::workspace_coding::WorkspacePatchRequest =
+                    serde_json::from_value(args.clone())
+                        .map_err(|_| "invalid workspace patch arguments".to_owned())?;
+                if request.edits.is_empty() || request.edits.len() > 64 {
+                    return Err("workspace patch must contain 1 to 64 file edits".into());
+                }
+                let bytes = serde_json::to_vec(&request).map_err(|error| error.to_string())?;
+                let request_hash = hex::encode(sha2::Sha256::digest(&bytes));
+                let ordinal = self
+                    .transport_effect_ordinal
+                    .load(std::sync::atomic::Ordering::SeqCst);
+                let request_id = format!("tool-{ordinal}");
+                let owner = format!(
+                    "turn-{}",
+                    hex::encode(sha2::Sha256::digest(
+                        format!("{run_id}:{ordinal}").as_bytes()
+                    ))
+                );
+                let store = execlaw_core::workspaces::WorkspaceStore::new(&self.host.db());
+                match store
+                    .begin_patch_job(
+                        run_id,
+                        &request_id,
+                        &request_hash,
+                        &owner,
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .map_err(|error| error.to_string())?
+                {
+                    execlaw_core::workspaces::WorkspacePatchClaim::Succeeded(value) => {
+                        return serde_json::from_str(&value).map_err(|error| error.to_string());
+                    }
+                    execlaw_core::workspaces::WorkspacePatchClaim::Failed(code) => {
+                        return Err(format!("workspace patch failed previously: {code}"));
+                    }
+                    execlaw_core::workspaces::WorkspacePatchClaim::Busy => {
+                        return Err("workspace patch is already running".into());
+                    }
+                    execlaw_core::workspaces::WorkspacePatchClaim::Claimed => {}
+                }
+                let mut results = Vec::with_capacity(request.edits.len());
+                let mut error_code = None;
+                for edit in &request.edits {
+                    match crate::workspace_coding::apply_checkout_edit(&checkout, edit) {
+                        Ok(result) => results.push(result),
+                        Err(error) => {
+                            error_code = Some(error.code.to_owned());
+                            break;
+                        }
+                    }
+                }
+                let result =
+                    serde_json::json!({"run_id":run_id,"request_id":request_id,"edits":results});
+                let result_json =
+                    serde_json::to_string(&result).map_err(|error| error.to_string())?;
+                store
+                    .finish_patch_job(
+                        run_id,
+                        &request_id,
+                        &owner,
+                        error_code.is_none().then_some(result_json.as_str()),
+                        error_code.as_deref(),
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                if let Some(code) = error_code {
+                    return Err(format!("workspace patch failed: {code}"));
+                }
+                Ok(result)
+            }
+            "workspace.run" | "workspace.diagnostics" => {
+                self.dispatch_workspace_execution_job(run_id, &checkout, tool_name, args)
+                    .await
+            }
+            _ => Err(format!(
+                "no host implementation registered for '{tool_name}'"
+            )),
+        }
+    }
+
+    async fn dispatch_workspace_execution_job(
+        &self,
+        run_id: &str,
+        checkout: &std::path::Path,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        use execlaw_container_manager::{
+            BollardWorkspaceJobExecutor, WorkspaceDiagnosticsRequest, WorkspaceJobExecutor,
+            WorkspaceRunRequest,
+        };
+        use execlaw_core::workspaces::{WorkspaceExecutionJobClaim, WorkspaceStore};
+
+        let db = self.host.db();
+        let store = WorkspaceStore::new(db);
+        let config = store
+            .execution_config()
+            .map_err(|error| error.to_string())?;
+        let image_reference = config.image_reference.ok_or_else(|| {
+            "Controller has not configured a workspace toolchain image".to_owned()
+        })?;
+        let timeout_ms = args
+            .get("timeout_ms")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(if tool_name == "workspace.run" {
+                60_000
+            } else {
+                30_000
+            });
+        if !(1_000..=180_000).contains(&timeout_ms) {
+            return Err("workspace job timeout must be between 1000 and 180000 ms".into());
+        }
+        let ordinal = self
+            .transport_effect_ordinal
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let job_id = format!("tool-{ordinal}");
+        let job_name = format!(
+            "{}-{ordinal}",
+            &hex::encode(sha2::Sha256::digest(run_id.as_bytes()))[..20]
+        );
+
+        let (operation, request_hash, run_request, diagnostics_request) =
+            if tool_name == "workspace.run" {
+                let argv =
+                    args.get("argv")
+                        .and_then(serde_json::Value::as_array)
+                        .ok_or_else(|| "workspace.run requires an argv array".to_owned())?
+                        .iter()
+                        .map(|argument| {
+                            argument.as_str().map(str::to_owned).ok_or_else(|| {
+                                "workspace.run argv entries must be strings".to_owned()
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                let request_hash = hex::encode(sha2::Sha256::digest(
+                    serde_json::to_vec(&serde_json::json!({
+                        "tool":tool_name,"args":args,"image":image_reference
+                    }))
+                    .map_err(|error| error.to_string())?,
+                ));
+                (
+                    "terminal",
+                    request_hash,
+                    Some(WorkspaceRunRequest {
+                        image_reference: image_reference.clone(),
+                        checkout_path: std::path::PathBuf::new(),
+                        job_name: job_name.clone(),
+                        argv,
+                        timeout_ms,
+                    }),
+                    None,
+                )
+            } else {
+                let path = args
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "workspace.diagnostics requires a path".to_owned())?;
+                let language_id = args
+                    .get("language_id")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| "workspace.diagnostics requires a language_id".to_owned())?;
+                let server_argv = config
+                    .language_servers
+                    .get(language_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!("no Controller-configured language server for '{language_id}'")
+                    })?;
+                let target = crate::workspace_coding::safe_relative_file(checkout, path)
+                    .map_err(|error| error.message)?;
+                let metadata = std::fs::metadata(&target).map_err(|error| error.to_string())?;
+                if crate::workspace_coding::has_multiple_links(&target, &metadata) {
+                    return Err("workspace diagnostics file has multiple hard links".into());
+                }
+                if metadata.len() > 1024 * 1024 {
+                    return Err("workspace diagnostics file exceeds the 1 MiB limit".into());
+                }
+                let text =
+                    String::from_utf8(std::fs::read(&target).map_err(|error| error.to_string())?)
+                        .map_err(|_| "workspace diagnostics file is not UTF-8".to_owned())?;
+                let request_hash = hex::encode(sha2::Sha256::digest(
+                    serde_json::to_vec(&serde_json::json!({
+                        "tool":tool_name,"path":path,"language_id":language_id,
+                        "text_sha256":hex::encode(sha2::Sha256::digest(text.as_bytes())),
+                        "server_argv":server_argv,"image":image_reference
+                    }))
+                    .map_err(|error| error.to_string())?,
+                ));
+                (
+                    "diagnostics",
+                    request_hash,
+                    None,
+                    Some(WorkspaceDiagnosticsRequest {
+                        image_reference: image_reference.clone(),
+                        checkout_path: std::path::PathBuf::new(),
+                        job_name: job_name.clone(),
+                        server_argv,
+                        path: path.to_owned(),
+                        language_id: language_id.to_owned(),
+                        text,
+                        timeout_ms,
+                    }),
+                )
+            };
+
+        let owner = uuid::Uuid::new_v4().to_string();
+        let lease_seconds = i64::try_from(timeout_ms / 1_000)
+            .unwrap_or(180)
+            .saturating_add(120);
+        match store
+            .begin_execution_job(
+                run_id,
+                &job_id,
+                &request_hash,
+                operation,
+                &owner,
+                lease_seconds,
+                chrono::Utc::now().timestamp(),
+            )
+            .map_err(|error| error.to_string())?
+        {
+            WorkspaceExecutionJobClaim::Succeeded(result) => {
+                return serde_json::from_str(&result).map_err(|error| error.to_string());
+            }
+            WorkspaceExecutionJobClaim::Failed(code) => {
+                return Err(format!("workspace process job failed previously: {code}"));
+            }
+            WorkspaceExecutionJobClaim::Busy => {
+                return Err("workspace process job is already running".into());
+            }
+            WorkspaceExecutionJobClaim::Claimed => {}
+        }
+
+        let snapshot = match crate::workspace_coding::create_tool_snapshot(checkout) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                store
+                    .finish_execution_job(
+                        run_id,
+                        &job_id,
+                        &owner,
+                        None,
+                        Some("workspace_snapshot_failed"),
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .map_err(|finish| finish.to_string())?;
+                return Err(error.message);
+            }
+        };
+        let executor: Arc<dyn WorkspaceJobExecutor> = match &self.workspace_job_executor {
+            Some(executor) => executor.clone(),
+            None => match BollardWorkspaceJobExecutor::connect(db.clone()) {
+                Ok(executor) => Arc::new(executor),
+                Err(error) => {
+                    store
+                        .finish_execution_job(
+                            run_id,
+                            &job_id,
+                            &owner,
+                            None,
+                            Some("workspace_runtime_unavailable"),
+                            chrono::Utc::now().timestamp(),
+                        )
+                        .map_err(|finish| finish.to_string())?;
+                    return Err(error.to_string());
+                }
+            },
+        };
+        let job_result = if let Some(mut request) = run_request {
+            request.checkout_path = snapshot.path().to_owned();
+            executor.run(request).await.map(|result| {
+                serde_json::json!({
+                    "run_id":run_id,"job_id":job_id,"operation":operation,
+                    "exit_code":result.exit_code,"timed_out":result.timed_out,
+                    "output_truncated":result.output_truncated,"output":result.output,
+                    "elapsed_ms":result.elapsed_ms
+                })
+            })
+        } else if let Some(mut request) = diagnostics_request {
+            request.checkout_path = snapshot.path().to_owned();
+            executor.diagnostics(request).await.map(|result| {
+                serde_json::json!({
+                    "run_id":run_id,"job_id":job_id,"operation":operation,
+                    "language_id":result.language_id,"path":result.path,
+                    "diagnostics":result.diagnostics,"elapsed_ms":result.elapsed_ms
+                })
+            })
+        } else {
+            Err(execlaw_container_manager::WorkspaceExecutionError::Invalid(
+                "workspace execution request is empty".into(),
+            ))
+        };
+        match job_result {
+            Ok(result) => {
+                let result_json =
+                    serde_json::to_string(&result).map_err(|error| error.to_string())?;
+                store
+                    .finish_execution_job(
+                        run_id,
+                        &job_id,
+                        &owner,
+                        Some(&result_json),
+                        None,
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                Ok(result)
+            }
+            Err(error) => {
+                store
+                    .finish_execution_job(
+                        run_id,
+                        &job_id,
+                        &owner,
+                        None,
+                        Some("workspace_execution_failed"),
+                        chrono::Utc::now().timestamp(),
+                    )
+                    .map_err(|finish| finish.to_string())?;
+                Err(error.to_string())
+            }
+        }
+    }
+
+    /// Attach the managed isolated-checkout root for manifest-declared workspace host tools.
+    pub fn with_workspace_checkout_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
+        self.workspace_checkout_root = Some(root.into());
+        self
+    }
+
+    /// Attach a workspace job executor; production falls back to Bollard when absent.
+    pub fn with_workspace_job_executor(
+        mut self,
+        executor: Arc<dyn execlaw_container_manager::WorkspaceJobExecutor>,
+    ) -> Self {
+        self.workspace_job_executor = Some(executor);
         self
     }
 
@@ -657,6 +1116,14 @@ impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
             }
         }
 
+        if tool_name.starts_with("workspace.")
+            && let Some(contract) = self.host.registry().host_tool(tool_name)
+        {
+            return self
+                .dispatch_manifest_host_tool(&contract, tool_name, args_json)
+                .await;
+        }
+
         // Phase-8d: prefix-route MCP-sourced tools to the connection
         // manager. Falling back to builtins/plugins for an
         // `mcp:`-prefixed name is wrong — those tiers don't speak
@@ -922,6 +1389,59 @@ impl BuiltinTools for NoBuiltinTools {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(Clone, Default)]
+    struct MockWorkspaceJobExecutor {
+        runs: Arc<std::sync::Mutex<Vec<execlaw_container_manager::WorkspaceRunRequest>>>,
+        diagnostics:
+            Arc<std::sync::Mutex<Vec<execlaw_container_manager::WorkspaceDiagnosticsRequest>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl execlaw_container_manager::WorkspaceJobExecutor for MockWorkspaceJobExecutor {
+        async fn run(
+            &self,
+            request: execlaw_container_manager::WorkspaceRunRequest,
+        ) -> Result<
+            execlaw_container_manager::WorkspaceRunResult,
+            execlaw_container_manager::WorkspaceExecutionError,
+        > {
+            assert!(request.checkout_path.join("src.txt").is_file());
+            assert!(!request.checkout_path.join(".env").exists());
+            self.runs.lock().unwrap().push(request);
+            Ok(execlaw_container_manager::WorkspaceRunResult {
+                exit_code: Some(0),
+                timed_out: false,
+                output_truncated: false,
+                output: "test suite passed".into(),
+                elapsed_ms: 12,
+            })
+        }
+
+        async fn diagnostics(
+            &self,
+            request: execlaw_container_manager::WorkspaceDiagnosticsRequest,
+        ) -> Result<
+            execlaw_container_manager::WorkspaceDiagnosticsResult,
+            execlaw_container_manager::WorkspaceExecutionError,
+        > {
+            assert!(request.checkout_path.join(&request.path).is_file());
+            assert!(!request.checkout_path.join(".env").exists());
+            self.diagnostics.lock().unwrap().push(request.clone());
+            Ok(execlaw_container_manager::WorkspaceDiagnosticsResult {
+                language_id: request.language_id,
+                path: request.path,
+                diagnostics: vec![execlaw_container_manager::WorkspaceDiagnostic {
+                    range: serde_json::json!({"start":{"line":0,"character":0},"end":{"line":0,"character":1}}),
+                    severity: Some(1),
+                    code: Some(serde_json::json!("E0001")),
+                    source: Some("rust-analyzer".into()),
+                    message: "fixture diagnostic".into(),
+                }],
+                elapsed_ms: 8,
+            })
+        }
+    }
     use execlaw_core::db::{Database, DbConfig};
     use execlaw_core::migrations::MigrationRunner;
     use execlaw_plugin_host::HookRegistry;
@@ -973,6 +1493,177 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("not registered"));
+    }
+
+    #[tokio::test]
+    async fn manifest_workspace_tools_dispatch_to_the_run_scoped_checkout() {
+        use execlaw_core::runs::{NewRun, RunStore};
+        use execlaw_core::workspaces::WorkspaceStore;
+        use execlaw_plugin_sdk::manifest::PluginManifest;
+
+        let host = test_host();
+        let db = host.db().clone();
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_conversations (conversation_id,kind,phase,trust_class,modality) VALUES ('workspace-tool-test','ControllerDM','idle','Controller','Text')",
+                [],
+            )?;
+            connection.execute(
+                "INSERT INTO state_events (conversation_id,seq,kind,payload,committed_at,actor) VALUES ('workspace-tool-test',1,'user_msg',X'00',1,'controller')",
+                [],
+            )?;
+            Ok(())
+        }).unwrap();
+        let run_id = RunStore::new(&db)
+            .create_run(&NewRun {
+                conversation_id: execlaw_core::ConversationId::from("workspace-tool-test"),
+                parent_run_id: None,
+                input_event_seq: execlaw_core::EventSeq(1),
+                started_at: 1,
+                deadline_at: None,
+            })
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let checkout_root = temp.path().join("checkouts");
+        let checkout = checkout_root.join("run");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::write(source.join("src.txt"), "operator file").unwrap();
+        std::fs::copy(source.join("src.txt"), checkout.join("src.txt")).unwrap();
+        std::fs::write(checkout.join(".env"), "API_KEY=must-not-enter-container").unwrap();
+        let workspace = WorkspaceStore::new(&db);
+        let registered = workspace
+            .register_root(
+                &std::fs::canonicalize(&source).unwrap().to_string_lossy(),
+                "controller",
+                1,
+            )
+            .unwrap();
+        let checkpoint = workspace
+            .create_checkpoint(
+                &registered.workspace_id,
+                &run_id,
+                None,
+                &[("src.txt".into(), b"operator file".to_vec())],
+                2,
+            )
+            .unwrap();
+        workspace
+            .bind_run_checkout(
+                &run_id,
+                &registered.workspace_id,
+                &checkpoint.checkpoint_id,
+                &std::fs::canonicalize(&checkout).unwrap().to_string_lossy(),
+                2,
+            )
+            .unwrap();
+        workspace
+            .set_execution_config(
+                "controller",
+                &format!("execlaw/workspace-toolchain@sha256:{}", "a".repeat(64)),
+                &std::collections::BTreeMap::from([(
+                    "rust".to_owned(),
+                    vec!["rust-analyzer".to_owned()],
+                )]),
+                3,
+            )
+            .unwrap();
+        host.registry()
+            .enable(
+                &PluginManifest::parse(
+                    r#"
+[plugin]
+id = "workspace-tools-fixture"
+name = "Workspace tools fixture"
+version = "0.1.0"
+[[tools]]
+name = "workspace.read_file"
+host_implemented = true
+latency = "low"
+required_capabilities = ["workspace.read"]
+trust_floor = "Controller"
+[[tools]]
+name = "workspace.search"
+host_implemented = true
+latency = "medium"
+required_capabilities = ["workspace.read"]
+trust_floor = "Controller"
+[[tools]]
+name = "workspace.run"
+host_implemented = true
+latency = "high"
+required_capabilities = ["workspace.read", "workspace.process"]
+trust_floor = "Controller"
+[[tools]]
+name = "workspace.diagnostics"
+host_implemented = true
+latency = "high"
+required_capabilities = ["workspace.read", "workspace.process"]
+trust_floor = "Controller"
+"#,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let dispatch = ChainedToolDispatch::with_access_gate(
+            host,
+            vec!["workspace.read".into(), "workspace.process".into()],
+            TrustLevel::Controller,
+            NoBuiltinTools,
+            db,
+        )
+        .with_parent_run(run_id)
+        .with_workspace_checkout_root(checkout_root)
+        .with_workspace_job_executor(Arc::new(MockWorkspaceJobExecutor::default()));
+        let read = dispatch
+            .call(
+                "workspace.read_file",
+                &serde_json::json!({"path":"src.txt"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(read["text"], "operator file");
+        let matches = dispatch
+            .call("workspace.search", &serde_json::json!({"query":"operator"}))
+            .await
+            .unwrap();
+        assert_eq!(matches["matches"][0]["path"], "src.txt");
+        dispatch.set_effect_ordinal(2);
+        let run = dispatch
+            .call(
+                "workspace.run",
+                &serde_json::json!({"argv":["cargo","test"],"timeout_ms":30000}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(run["exit_code"], 0);
+        assert_eq!(run["output"], "test suite passed");
+        dispatch.set_effect_ordinal(3);
+        let diagnostics = dispatch
+            .call(
+                "workspace.diagnostics",
+                &serde_json::json!({"path":"src.txt","language_id":"rust"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            diagnostics["diagnostics"][0]["message"],
+            "fixture diagnostic"
+        );
+        assert!(
+            dispatch
+                .call(
+                    "workspace.read_file",
+                    &serde_json::json!({"path":"../secret.txt"})
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            std::fs::read_to_string(source.join("src.txt")).unwrap(),
+            "operator file"
+        );
     }
 
     /// Phase-8a gate: a tool that has a policy row but the caller's

@@ -411,6 +411,38 @@ async fn post_token_grant(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "requires live public Google OAuth endpoints"]
+    async fn live_google_token_and_userinfo_endpoints_use_public_policy() {
+        let provider = GoogleOauthProvider::default();
+        let refresh = provider
+            .refresh_access_token(&RefreshParams {
+                client_id: "execlaw-qualification-invalid".into(),
+                client_secret: "invalid".into(),
+                refresh_token: "invalid".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            refresh,
+            OauthProviderError::Status {
+                status: 400 | 401,
+                ..
+            }
+        ));
+        let userinfo = provider
+            .fetch_userinfo("execlaw-qualification-invalid")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            userinfo,
+            OauthProviderError::Status {
+                status: 400 | 401,
+                ..
+            }
+        ));
+    }
+
     #[test]
     fn production_oauth_denies_private_destination_before_a_request() {
         let mut provider = GoogleOauthProvider::default();

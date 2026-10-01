@@ -64,3 +64,6 @@ crates/server/blobs/
 /target-verify-7
 perf/.baseline/
 perf/results/
+/desktop-windows/src-tauri/resources/openssl/*.dll
+server-local.out.log
+server-local.out.log

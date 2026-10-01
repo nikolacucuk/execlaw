@@ -1,0 +1,56 @@
+[plugin]
+id = "workspace-coding"
+name = "Workspace Coding"
+version = "0.2.0"
+description = "Controller-governed coding jobs with root-scoped inspection, patching, terminal execution, and LSP diagnostics."
+author = "execlaw"
+license = "Apache-2.0"
+
+[runtime]
+tier = "script"
+source = "main.rhai"
+
+[[tools]]
+name = "workspace.read_file"
+description = "Read a bounded UTF-8 file from this durable run's isolated workspace. Secret paths and links are denied."
+schema = "schemas/read_file.json"
+latency = "low"
+required_capabilities = ["workspace.read"]
+trust_floor = "Controller"
+host_implemented = true
+
+[[tools]]
+name = "workspace.run"
+description = "Run one bounded argv job inside the network-disabled sandbox using a sanitized read-only run checkout. The registered source workspace is not writable through the process."
+schema = "schemas/run.json"
+latency = "high"
+required_capabilities = ["workspace.read", "workspace.process"]
+trust_floor = "Controller"
+host_implemented = true
+
+[[tools]]
+name = "workspace.diagnostics"
+description = "Request bounded diagnostics from the Controller-configured language server for one file in a sanitized read-only run checkout."
+schema = "schemas/diagnostics.json"
+latency = "high"
+required_capabilities = ["workspace.read", "workspace.process"]
+trust_floor = "Controller"
+host_implemented = true
+
+[[tools]]
+name = "workspace.search"
+description = "Search bounded text in this durable run's isolated workspace. Secret paths and links are denied."
+schema = "schemas/search.json"
+latency = "medium"
+required_capabilities = ["workspace.read"]
+trust_floor = "Controller"
+host_implemented = true
+
+[[tools]]
+name = "workspace.apply_patch"
+description = "Apply SHA-256-checked file replacements only inside this durable run's isolated workspace. The registered source root is updated later through the reviewed diff flow."
+schema = "schemas/apply_patch.json"
+latency = "medium"
+required_capabilities = ["workspace.write"]
+trust_floor = "Controller"
+host_implemented = true

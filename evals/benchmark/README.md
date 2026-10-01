@@ -1,16 +1,20 @@
 # Real-task benchmark suites
 
-`release-v1.json` is the small release suite. `periodic-v1.json` is the
+`release-v2.json` is the small release suite. `periodic-v2.json` is the
 larger recurring suite. Both cover isolated workspace coding tests,
 source-cited research, memory recall, and automation proposals applied only to
-an in-memory mock sink. Expected outputs and verifier definitions stay in the
-suite, outside coding task workspaces.
+an in-memory mock sink. Research scoring requires every claim line to cite a
+fetched source ID whose retained source text contains the claim's evidence
+terms; a citation-shaped but unrelated source does not pass. The v1 suites are
+retained as historical datasets with their original term-only verifier.
+Expected outputs and verifier definitions stay in the suite, outside coding
+task workspaces.
 
 Run the scorer offline to validate the installed harness and suite format:
 
 ```powershell
 cargo run --offline -p execlaw-eval-harness -- benchmark `
-  --suite evals/benchmark/release-v1.json `
+  --suite evals/benchmark/release-v2.json `
   --output target/eval/release-fixture.json `
   --runs 3 --offline-fixture `
   --arm scorer-fixture --backend none --quantization none --hardware-tier cpu
@@ -41,7 +45,8 @@ not written to result files; failure records contain verifier summaries only.
 Coding verifiers copy a suite fixture into a temporary directory, write the
 model response to the declared artifact path, and execute only
 `cargo test --offline --quiet`. This runs only for fixture responses or after
-the operator supplies the execution acknowledgement. Research and memory verifiers use explicit
-required terms; research additionally requires a cited source ID. Automation
+the operator supplies the execution acknowledgement. Research verifiers check
+each cited claim against the cited fetched-source snapshot, then check required
+answer terms. Memory verifiers use explicit required terms. Automation
 verifiers parse JSON effects and compare them to the expected sink records;
 they make no external requests.

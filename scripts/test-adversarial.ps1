@@ -5,6 +5,8 @@ $cases = @(
     @{ Package = "execlaw-server"; Filter = "http_fetch_public_egress_rejects_loopback_before_connecting" },
     @{ Package = "execlaw-server"; Filter = "oauth_token_redirect_does_not_forward_credentials" },
     @{ Package = "execlaw-server"; Filter = "production_oauth_denies_private_destination_before_a_request" },
+    @{ Package = "execlaw-server"; Filter = "denied_private_http_endpoint_waits_for_a_later_policy_grant" },
+    @{ Package = "execlaw-script"; Filter = "sidecar_http_agent_does_not_follow_a_cross_sidecar_redirect" },
     @{ Package = "execlaw-server"; Filter = "plugin_http_denies_mixed_dns_and_preserves_approved_private_endpoint" },
     @{ Package = "execlaw-server"; Filter = "configured_public_endpoint_is_denied_before_request" },
     @{ Package = "execlaw-policy"; Filter = "input_guard::tests" },

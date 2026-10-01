@@ -25,6 +25,8 @@ const HEADER_LEN_BYTES: usize = 4;
 /// 4 KiB is plenty of headroom for new fields and prevents a
 /// malicious or malformed client from forcing a huge alloc.
 const MAX_HEADER_LEN: usize = 4096;
+/// Bounds one inbound frame while admitting ordinary browser PCM chunks.
+pub const MAX_AUDIO_PAYLOAD_BYTES: usize = 256 * 1024;
 
 /// Wire shape of the JSON header. Every audio source (browser,
 /// mobile native, Bluetooth phone bridge) emits the same shape so
@@ -72,6 +74,8 @@ pub enum FrameParseError {
     TooShort(usize, usize),
     #[error("header length {0} exceeds MAX_HEADER_LEN ({1})")]
     HeaderTooLarge(usize, usize),
+    #[error("audio payload length {0} exceeds MAX_AUDIO_PAYLOAD_BYTES ({1})")]
+    PayloadTooLarge(usize, usize),
     #[error("frame truncated: expected {expected} header bytes after prefix, got {actual}")]
     HeaderTruncated { expected: usize, actual: usize },
     #[error("header is not valid JSON: {0}")]
@@ -111,6 +115,12 @@ pub fn parse_frame(bytes: &[u8]) -> Result<(VoiceFrameHeader, &[u8]), FrameParse
         ));
     }
     let payload = &bytes[header_end..];
+    if payload.len() > MAX_AUDIO_PAYLOAD_BYTES {
+        return Err(FrameParseError::PayloadTooLarge(
+            payload.len(),
+            MAX_AUDIO_PAYLOAD_BYTES,
+        ));
+    }
     Ok((header, payload))
 }
 
@@ -226,5 +236,16 @@ mod tests {
         let frame = build_frame(good_header(), b"");
         let (_, payload) = parse_frame(&frame).unwrap();
         assert_eq!(payload.len(), 0);
+    }
+
+    #[test]
+    fn rejects_audio_payload_over_cap() {
+        let payload = vec![0; MAX_AUDIO_PAYLOAD_BYTES + 1];
+        let frame = build_frame(good_header(), &payload);
+        assert!(matches!(
+            parse_frame(&frame),
+            Err(FrameParseError::PayloadTooLarge(actual, MAX_AUDIO_PAYLOAD_BYTES))
+                if actual == MAX_AUDIO_PAYLOAD_BYTES + 1
+        ));
     }
 }

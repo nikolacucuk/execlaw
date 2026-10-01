@@ -2916,4 +2916,19 @@ mod tests {
         .unwrap_err();
         assert!(error.contains("public egress denied"), "error: {error}");
     }
+
+    #[tokio::test]
+    #[ignore = "requires access to a public HTTP endpoint"]
+    async fn http_fetch_reaches_a_public_endpoint_through_the_production_adapter() {
+        let (status, body) = send_public_http_fetch(
+            reqwest::Url::parse("https://example.com/").unwrap(),
+            reqwest::Method::GET,
+            &[],
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, 200);
+        assert!(!body.is_empty());
+    }
 }

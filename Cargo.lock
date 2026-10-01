@@ -1406,6 +1406,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
+ "winapi-util",
  "winreg",
 ]
 
@@ -1454,11 +1456,14 @@ name = "execlaw-eval-harness"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "clap",
  "execlaw-core",
  "execlaw-inference-api",
+ "execlaw-runner-local",
  "hex",
+ "rmp-serde",
  "serde",
  "serde_json",
  "sha2",
@@ -1776,6 +1781,7 @@ dependencies = [
  "uuid",
  "webauthn-rs",
  "webauthn-rs-proto",
+ "winapi-util",
  "zip 2.4.2",
 ]
 

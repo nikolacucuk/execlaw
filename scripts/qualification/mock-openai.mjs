@@ -45,12 +45,29 @@ const server = http.createServer(async (request, response) => {
   }
   requests += 1;
   const text = messageText(body.messages);
-  const scenario = text.includes("H023_HOLD") ? "H023_HOLD" : "default";
+  const scenario = text.includes("H023_TOOL_HOLD")
+    ? "H023_TOOL_HOLD"
+    : text.includes("H023_HOLD") ? "H023_HOLD" : "default";
   const attempt = (attempts.get(scenario) ?? 0) + 1;
   attempts.set(scenario, attempt);
   if (scenario === "H023_HOLD" && attempt === 1) {
     held += 1;
     request.socket.on("close", () => { held -= 1; });
+    return;
+  }
+  if (scenario === "H023_TOOL_HOLD" && attempt === 2) {
+    held += 1;
+    request.socket.on("close", () => { held -= 1; });
+    return;
+  }
+  if (scenario === "H023_TOOL_HOLD" && attempt === 1 && body.stream) {
+    response.writeHead(200, { "content-type": "text/event-stream" });
+    response.write(`data: ${JSON.stringify({ id: "mock-tool", model: "mock-local", choices: [{ index: 0, delta: {
+      tool_calls: [{ index: 0, id: "call-qualification-artifact", type: "function",
+        function: { name: "qualification_artifact.create", arguments: "{}" } }],
+    } }] })}\n\n`);
+    response.write(`data: ${JSON.stringify({ id: "mock-tool", model: "mock-local", choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }] })}\n\n`);
+    response.end("data: [DONE]\n\n");
     return;
   }
   const schema = body.response_format?.json_schema?.schema;
@@ -96,4 +113,4 @@ const server = http.createServer(async (request, response) => {
   });
 });
 
-server.listen(port, "127.0.0.1");
+server.listen(port, process.env.EXECLAW_MOCK_BIND ?? "127.0.0.1");

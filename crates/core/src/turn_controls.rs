@@ -463,6 +463,118 @@ impl<'db> TurnControlStore<'db> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{db::DbConfig, migrations::MigrationRunner};
+
+    fn seeded_db(path: &std::path::Path) -> Database {
+        let db = Database::open(&DbConfig {
+            path: path.to_path_buf(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_conversations (conversation_id,kind,phase,trust_class,modality) VALUES ('control-test','ControllerDM','idle','Controller','Text')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn request_key_replay_is_durable_and_changed_intent_conflicts() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("turn-controls.db");
+        let db = seeded_db(&path);
+        let store = TurnControlStore::new(&db);
+        let payload = serde_json::json!({"text":"check the latest diff"});
+        let (first, created) = store
+            .enqueue_idempotent(
+                "control-test",
+                Some("turn-1"),
+                TurnControlKind::Steer,
+                &payload,
+                "request-1",
+                10,
+            )
+            .unwrap();
+        assert!(created);
+        let (retry, created) = store
+            .enqueue_idempotent(
+                "control-test",
+                Some("turn-1"),
+                TurnControlKind::Steer,
+                &payload,
+                "request-1",
+                11,
+            )
+            .unwrap();
+        assert!(!created);
+        assert_eq!(retry.control_id, first.control_id);
+        assert!(matches!(
+            store.enqueue_idempotent(
+                "control-test",
+                Some("turn-1"),
+                TurnControlKind::Steer,
+                &serde_json::json!({"text":"different correction"}),
+                "request-1",
+                12,
+            ),
+            Err(TurnControlError::IdempotencyConflict)
+        ));
+
+        drop(store);
+        drop(db);
+        let reopened = Database::open(&DbConfig { path, key: None }).unwrap();
+        MigrationRunner::new(&reopened).apply_all().unwrap();
+        let store = TurnControlStore::new(&reopened);
+        let recovered = store.get(&first.control_id).unwrap().unwrap();
+        assert_eq!(recovered.payload, payload);
+        assert_eq!(recovered.status, TurnControlStatus::Accepted);
+        assert_eq!(store.list("control-test", 0, 20).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delivery_claim_is_single_use_and_acknowledgment_is_persisted() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = seeded_db(&temp.path().join("turn-controls.db"));
+        let store = TurnControlStore::new(&db);
+        let control = store
+            .enqueue(
+                "control-test",
+                Some("turn-1"),
+                TurnControlKind::Cancel,
+                &serde_json::json!({}),
+                10,
+            )
+            .unwrap();
+        assert!(store.claim_delivery(&control.control_id, 11).unwrap());
+        assert!(!store.claim_delivery(&control.control_id, 12).unwrap());
+        store
+            .transition(&control.control_id, TurnControlStatus::Delivered, None, 13)
+            .unwrap();
+        let acknowledged = store
+            .transition(
+                &control.control_id,
+                TurnControlStatus::Acknowledged,
+                Some(&serde_json::json!({"runner":"cancelled"})),
+                14,
+            )
+            .unwrap();
+        assert_eq!(acknowledged.status, TurnControlStatus::Acknowledged);
+        assert_eq!(
+            acknowledged.acknowledgement,
+            Some(serde_json::json!({"runner":"cancelled"}))
+        );
+        assert_eq!(acknowledged.acknowledged_at, Some(14));
+    }
+}
+
 fn map_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<TurnControlRecord> {
     let kind = match row.get::<_, String>(3)?.as_str() {
         "queue_next_turn" => TurnControlKind::QueueNextTurn,

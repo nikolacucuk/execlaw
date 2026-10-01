@@ -857,6 +857,12 @@ async fn security_headers(
 
 /// Build the Axum `Router` for execlaw.
 pub fn build_router(state: AppState) -> Router {
+    if let Some(key) = state.event_log_hmac_key.as_ref() {
+        state
+            .db
+            .set_event_hmac_key((**key).clone())
+            .expect("server event signing key must match the database signer");
+    }
     Router::new()
         .route("/api/health", get(health))
         .route("/api/ping", get(ping))

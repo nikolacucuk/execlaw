@@ -48,3 +48,42 @@ pub async fn contract() -> Json<ClientContract> {
 pub fn router() -> Router<crate::state::AppState> {
     Router::new().route("/api/client-contract", get(contract))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn advertised_contract_matches_pinned_schema_and_feature_surface() {
+        let Json(contract) = contract().await;
+        let value = serde_json::to_value(contract).unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../../spec/client-contract-v1.schema.json"))
+                .unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        assert!(validator.is_valid(&value));
+        for required in [
+            "chat_sessions",
+            "message_cursors",
+            "artifacts",
+            "approvals",
+            "cancel",
+            "durable_turn_controls",
+            "workspace_checkpoints",
+            "workspace_diff_preview",
+            "workspace_diff_apply",
+            "workspace_restore",
+            "editor_execute_commands",
+        ] {
+            assert!(
+                value["features"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|feature| feature == required),
+                "contract omits required v1 feature {required}"
+            );
+        }
+        assert_eq!(value["minimum_client_version"], 1);
+    }
+}

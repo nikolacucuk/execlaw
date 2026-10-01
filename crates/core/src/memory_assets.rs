@@ -10,6 +10,8 @@ use rusqlite::{OptionalExtension, params, params_from_iter};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const MEMORY_RERANKER_VERSION: &str = "local-hybrid-rrf-v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssetType {
@@ -185,6 +187,7 @@ pub struct TurnAssetRetrievalEntry {
     pub score_micros: i64,
     pub lexical_rank: i64,
     pub vector_rank: Option<i64>,
+    pub reranker_version: String,
     pub injected_chars: usize,
     pub admission_reasons: Vec<String>,
 }
@@ -195,6 +198,22 @@ pub struct AssetHit {
     pub score: f64,
     pub lexical_rank: i64,
     pub vector_rank: Option<i64>,
+}
+
+/// Operator-selected model identities used by trust-first local retrieval.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryRetrievalConfig {
+    pub embedding_model_id: String,
+    pub reranker_version: String,
+    pub updated_at: i64,
+}
+
+/// Active, source-versioned content that is missing from a selected embedding index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EmbeddingRebuildCandidate {
+    pub asset_id: String,
+    pub source_hash: String,
+    pub input_text: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -229,6 +248,8 @@ pub enum MemoryAssetError {
     InvalidEnum,
     #[error("embedding dimensions do not match")]
     InvalidEmbedding,
+    #[error("unsupported or invalid memory retrieval configuration")]
+    InvalidRetrievalConfig,
     #[error("eligible memory candidate set exceeds the {limit}-asset search bound")]
     CandidateSetTooLarge { limit: usize },
 }
@@ -240,6 +261,98 @@ pub struct MemoryAssetStore<'db> {
 impl<'db> MemoryAssetStore<'db> {
     pub fn new(db: &'db Database) -> Self {
         Self { db }
+    }
+
+    /// Read the configured local embedding model and reranker algorithm version.
+    pub fn retrieval_config(&self) -> Result<Option<MemoryRetrievalConfig>, MemoryAssetError> {
+        self.db
+            .with_conn(|connection| {
+                connection
+                    .query_row(
+                        "SELECT embedding_model_id, reranker_version, updated_at \
+                         FROM config_memory_retrieval WHERE singleton = 1",
+                        [],
+                        |row| {
+                            Ok(MemoryRetrievalConfig {
+                                embedding_model_id: row.get(0)?,
+                                reranker_version: row.get(1)?,
+                                updated_at: row.get(2)?,
+                            })
+                        },
+                    )
+                    .optional()
+                    .map_err(DbError::from)
+            })
+            .map_err(Into::into)
+    }
+
+    /// Save the embedding model and supported local reranker version. Changing the
+    /// embedding model leaves old derived vectors until callers rebuild its index.
+    pub fn set_retrieval_config(
+        &self,
+        embedding_model_id: &str,
+        reranker_version: &str,
+        now_unix: i64,
+    ) -> Result<(), MemoryAssetError> {
+        if embedding_model_id.trim().is_empty()
+            || embedding_model_id.len() > 256
+            || reranker_version != MEMORY_RERANKER_VERSION
+        {
+            return Err(MemoryAssetError::InvalidRetrievalConfig);
+        }
+        self.db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO config_memory_retrieval(singleton, embedding_model_id, reranker_version, updated_at) \
+                 VALUES (1, ?1, ?2, ?3) ON CONFLICT(singleton) DO UPDATE SET \
+                 embedding_model_id=excluded.embedding_model_id, \
+                 reranker_version=excluded.reranker_version, updated_at=excluded.updated_at",
+                params![embedding_model_id, reranker_version, now_unix],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Return bounded assets that lack a current embedding for `model_id`.
+    pub fn embedding_rebuild_candidates(
+        &self,
+        model_id: &str,
+        limit: u32,
+    ) -> Result<Vec<EmbeddingRebuildCandidate>, MemoryAssetError> {
+        if model_id.trim().is_empty() || model_id.len() > 256 {
+            return Err(MemoryAssetError::InvalidEmbedding);
+        }
+        self.db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT a.asset_id, a.source_hash, a.name, a.description, a.content_ref \
+                 FROM memory_assets a LEFT JOIN memory_asset_embeddings e \
+                   ON e.asset_id = a.asset_id AND e.model_id = ?1 \
+                 WHERE a.status = 'active' AND a.source_hash IS NOT NULL \
+                   AND a.content_ref IS NOT NULL \
+                   AND (e.asset_id IS NULL OR e.source_hash <> a.source_hash) \
+                 ORDER BY a.created_at, a.asset_id LIMIT ?2",
+                )?;
+                let rows = statement
+                    .query_map(params![model_id, limit.clamp(1, 128) as i64], |row| {
+                        let asset_id: String = row.get(0)?;
+                        let source_hash: String = row.get(1)?;
+                        let name: String = row.get(2)?;
+                        let description: String = row.get(3)?;
+                        let content: String = row.get(4)?;
+                        Ok(EmbeddingRebuildCandidate {
+                            asset_id,
+                            source_hash,
+                            input_text: format!(
+                                "{name}\n{description}\n{}",
+                                content.chars().take(32_768).collect::<String>()
+                            ),
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .map_err(Into::into)
     }
 
     pub fn create(&self, asset: NewMemoryAsset<'_>) -> Result<(), MemoryAssetError> {
@@ -582,6 +695,9 @@ impl<'db> MemoryAssetStore<'db> {
         model_id: Option<&str>,
         limit: u32,
     ) -> Result<Vec<AssetHit>, MemoryAssetError> {
+        if vector.is_some_and(|vector| !valid_embedding_vector(vector)) {
+            return Err(MemoryAssetError::InvalidEmbedding);
+        }
         let lexical = self.db.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT a.asset_id, bm25(memory_asset_search)
@@ -654,6 +770,9 @@ impl<'db> MemoryAssetStore<'db> {
         limit: u32,
     ) -> Result<Vec<AssetHit>, MemoryAssetError> {
         const MAX_ELIGIBLE_ASSETS: usize = 900;
+        if vector.is_some_and(|vector| !valid_embedding_vector(vector)) {
+            return Err(MemoryAssetError::InvalidEmbedding);
+        }
         if agent_scope.trim().is_empty()
             || readable_trust_classes.is_empty()
             || readable_owner_scopes.is_empty()
@@ -794,8 +913,17 @@ impl<'db> MemoryAssetStore<'db> {
         source_hash: &str,
         now_unix: i64,
     ) -> Result<(), MemoryAssetError> {
-        if self.get(asset_id)?.is_none() {
+        let Some(asset) = self.get(asset_id)? else {
             return Err(MemoryAssetError::NotFound(asset_id.to_owned()));
+        };
+        if model_id.trim().is_empty()
+            || model_id.len() > 256
+            || source_hash.trim().is_empty()
+            || source_hash.len() > 256
+            || asset.source_hash.as_deref() != Some(source_hash)
+            || !valid_embedding_vector(vector)
+        {
+            return Err(MemoryAssetError::InvalidEmbedding);
         }
         let json = serde_json::to_string(vector).map_err(|_| MemoryAssetError::InvalidEmbedding)?;
         self.db.with_conn(|c| {
@@ -1028,8 +1156,11 @@ impl<'db> MemoryAssetStore<'db> {
     ) -> Result<Vec<(String, f32)>, MemoryAssetError> {
         let rows = self.db.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT asset_id, dimensions, vector_json FROM memory_asset_embeddings
-                 WHERE model_id = ?1",
+                "SELECT e.asset_id, e.dimensions, e.vector_json
+                 FROM memory_asset_embeddings e
+                 JOIN memory_assets a ON a.asset_id = e.asset_id
+                 WHERE e.model_id = ?1 AND e.source_hash = a.source_hash
+                   AND a.status = 'active'",
             )?;
             Ok(stmt
                 .query_map(params![model_id], |r| {
@@ -1136,6 +1267,13 @@ fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
     }
 }
 
+fn valid_embedding_vector(vector: &[f32]) -> bool {
+    !vector.is_empty()
+        && vector.len() <= 8192
+        && vector.iter().all(|value| value.is_finite())
+        && vector.iter().any(|value| *value != 0.0)
+}
+
 fn row_to_asset(r: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryAsset> {
     Ok(MemoryAsset {
         asset_id: r.get(0)?,
@@ -1233,6 +1371,138 @@ mod tests {
             .unwrap();
         assert_eq!(hits[0].asset.asset_id, "skill-1");
         assert!(hits[0].score > 0.0);
+    }
+
+    #[test]
+    fn retrieval_config_and_embedding_rebuild_candidates_track_source_versions() {
+        let db = db();
+        let store = MemoryAssetStore::new(&db);
+        store
+            .create(NewMemoryAsset {
+                asset_id: "embed-asset",
+                asset_type: AssetType::Memory,
+                name: "Local embedding test",
+                description: "versioned source",
+                owner_scope: "global",
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: Some("fixture"),
+                content_ref: Some("source text"),
+                source_hash: Some("source-v1"),
+                now_unix: 1,
+            })
+            .unwrap();
+        store
+            .set_retrieval_config("embedding-model-v1", MEMORY_RERANKER_VERSION, 2)
+            .unwrap();
+        assert_eq!(
+            store.retrieval_config().unwrap(),
+            Some(MemoryRetrievalConfig {
+                embedding_model_id: "embedding-model-v1".into(),
+                reranker_version: MEMORY_RERANKER_VERSION.into(),
+                updated_at: 2,
+            })
+        );
+        let candidates = store
+            .embedding_rebuild_candidates("embedding-model-v1", 10)
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source_hash, "source-v1");
+        assert!(candidates[0].input_text.contains("source text"));
+
+        store
+            .upsert_embedding(
+                "embed-asset",
+                "embedding-model-v1",
+                &[1.0, 0.0],
+                "source-v1",
+                3,
+            )
+            .unwrap();
+        assert!(
+            store
+                .embedding_rebuild_candidates("embedding-model-v1", 10)
+                .unwrap()
+                .is_empty()
+        );
+        db.with_conn(|connection| {
+            connection.execute(
+                "UPDATE memory_assets SET source_hash = 'source-v2', content_ref = 'updated source' WHERE asset_id = 'embed-asset'",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let candidates = store
+            .embedding_rebuild_candidates("embedding-model-v1", 10)
+            .unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].source_hash, "source-v2");
+    }
+
+    #[test]
+    fn eligible_hybrid_search_filters_trust_before_vector_ranking() {
+        let db = db();
+        let store = MemoryAssetStore::new(&db);
+        for (asset_id, trust_floor, hash) in [
+            ("eligible", "KnownTrusted", "eligible-source"),
+            ("controller-only", "Controller", "restricted-source"),
+        ] {
+            store
+                .create(NewMemoryAsset {
+                    asset_id,
+                    asset_type: AssetType::Memory,
+                    name: asset_id,
+                    description: "synthetic retrieval fixture",
+                    owner_scope: "global",
+                    visibility: AssetVisibility::Private,
+                    trust_floor,
+                    source_ref: Some("fixture"),
+                    content_ref: Some("synthetic content"),
+                    source_hash: Some(hash),
+                    now_unix: 1,
+                })
+                .unwrap();
+            store
+                .bind(asset_id, "default", InjectionMode::Discoverable, 1, 512, 1)
+                .unwrap();
+        }
+        // The forbidden candidate is a perfect cosine match. Eligibility must
+        // remove it before vector rank assignment and reciprocal-rank fusion.
+        store
+            .upsert_embedding(
+                "eligible",
+                "fixture-index-v1",
+                &[0.0, 1.0],
+                "eligible-source",
+                2,
+            )
+            .unwrap();
+        store
+            .upsert_embedding(
+                "controller-only",
+                "fixture-index-v1",
+                &[1.0, 0.0],
+                "restricted-source",
+                2,
+            )
+            .unwrap();
+        let hits = store
+            .search_eligible(
+                "no lexical match",
+                Some(&[1.0, 0.0]),
+                Some("fixture-index-v1"),
+                "default",
+                &["KnownTrusted", "KnownLimited"],
+                &["global"],
+                &[InjectionMode::Discoverable],
+                3,
+                10,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].asset.asset_id, "eligible");
+        assert_eq!(hits[0].vector_rank, Some(1));
     }
 
     #[test]

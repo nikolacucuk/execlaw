@@ -47,9 +47,10 @@ use crate::graphiti_admin::{
 use crate::inference_metrics::{ConsumerSnapshot, InferenceConsumer, MetricsSnapshot};
 use crate::mcp_admin::{McpServerListResponse, McpServerView, McpServerWriteRequest};
 use crate::memory_assets_admin::{
-    AgentScopeView, BindAssetRequest, MemoryAssertionAdminView, MemoryAssertionReviewAdminView,
-    MemoryAssetAdminView, MemoryAssetBindingView, MemoryAssetsAdminResponse,
-    MemoryEvidenceAdminView, MemoryEvidenceSourceView, RetractMemoryAssertionRequest,
+    AgentScopeView, BindAssetRequest, ForgetMemorySourceRequest, MemoryAssertionAdminView,
+    MemoryAssertionReviewAdminView, MemoryAssetAdminView, MemoryAssetBindingView,
+    MemoryAssetsAdminResponse, MemoryEvidenceAdminView, MemoryEvidenceSourceView,
+    RetractMemoryAssertionRequest,
 };
 use crate::my_identities::{
     AddIdentifierRequest, AvailableTransportView, AvailableTransportsResponse, IdentifierView,
@@ -210,6 +211,10 @@ impl Modify for SecurityAddon {
         crate::approvals::list_principals_handler,
         crate::approvals::list_pending_approvals_handler,
         crate::memory_assets_admin::list,
+        crate::memory_assets_admin::get_retrieval_config,
+        crate::memory_assets_admin::put_retrieval_config,
+        crate::memory_assets_admin::rebuild_embeddings,
+        crate::memory_assets_admin::forget_memory_source,
         crate::memory_assets_admin::retract_assertion,
         crate::memory_assets_admin::bind,
         crate::memory_assets_admin::unbind,
@@ -234,6 +239,7 @@ impl Modify for SecurityAddon {
         crate::workspace_coding::list_roots,
         crate::workspace_coding::read_file,
         crate::workspace_coding::search_files,
+        crate::workspace_coding::patch_run_workspace,
         crate::workspace_coding::create_checkpoint,
         crate::workspace_coding::preview_run_diff,
         crate::workspace_coding::apply_run_diff,
@@ -371,6 +377,7 @@ impl Modify for SecurityAddon {
         MemoryEvidenceSourceView,
         MemoryAssetsAdminResponse,
         RetractMemoryAssertionRequest,
+        ForgetMemorySourceRequest,
         SubmitTurnControl,
         TurnControlCursor,
         BackendView,

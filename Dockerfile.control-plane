@@ -21,6 +21,9 @@ RUN npm run build
 
 FROM rust:1.90-bookworm AS builder
 WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends perl make pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+ENV CARGO_BUILD_JOBS=2
 
 # Copy workspace sources needed by the execlaw CLI build.
 COPY Cargo.toml Cargo.lock ./
@@ -37,7 +40,8 @@ COPY --from=web-builder /web/dist ./web/dist
 # Build the control-plane CLI binary.
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
-    cargo build --locked --release -p execlaw \
+    cargo build --locked --release -p execlaw --no-default-features --features execlaw/sqlcipher \
+    && target/release/execlaw doctor \
     && cp target/release/execlaw /tmp/execlaw
 
 FROM debian:bookworm-slim

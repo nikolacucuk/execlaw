@@ -1,0 +1,12 @@
+.git
+.execlaw
+**/.env*
+**/node_modules
+**/target
+target-*
+web/dist
+dist
+graphify-out
+**/.obsidian
+**/*.log
+**/*.map

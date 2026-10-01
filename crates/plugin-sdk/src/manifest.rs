@@ -930,6 +930,23 @@ mod tests {
     }
 
     #[test]
+    fn workspace_coding_plugin_declares_host_contracts_without_a_plugin_id_branch() {
+        let manifest = PluginManifest::parse(include_str!(
+            "../../../plugins/workspace-coding/plugin.toml"
+        ))
+        .unwrap();
+        assert_eq!(manifest.plugin.id, "workspace-coding");
+        assert!(manifest.tools.len() >= 3);
+        assert!(manifest.tools.iter().all(|tool| tool.host_implemented));
+        assert!(
+            manifest
+                .tools
+                .iter()
+                .all(|tool| tool.trust_floor.as_deref() == Some("Controller"))
+        );
+    }
+
+    #[test]
     fn duplicate_tool_names_rejected() {
         let bad = r#"
             [plugin]

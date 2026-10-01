@@ -11,7 +11,8 @@ use axum::{
 use execlaw_core::{
     users::UserRole,
     workspaces::{
-        WorkspaceApplyReceipt, WorkspaceCheckpointRecord, WorkspaceRootRecord, WorkspaceStore,
+        WorkspaceApplyReceipt, WorkspaceCheckpointRecord, WorkspacePatchClaim, WorkspaceRootRecord,
+        WorkspaceStore,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,27 @@ pub struct WorkspacePathQuery {
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceSearchRequest {
     pub query: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceExecutionConfigRequest {
+    pub image_reference: String,
+    pub language_servers: std::collections::BTreeMap<String, Vec<String>>,
+    #[serde(default)]
+    pub approve_local_image: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkspacePatchRequest {
+    pub edits: Vec<WorkspaceFileEdit>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkspaceFileEdit {
+    pub path: String,
+    /// SHA-256 of the current checkout file, or null when creating a file.
+    pub expected_sha256: Option<String>,
+    pub content: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +128,10 @@ pub fn router() -> Router<AppState> {
             post(search_files),
         )
         .route(
+            "/api/admin/runs/{run_id}/workspace-patch",
+            post(patch_run_workspace),
+        )
+        .route(
             "/api/admin/runs/{run_id}/workspace-checkpoints",
             post(create_checkpoint),
         )
@@ -121,6 +147,119 @@ pub fn router() -> Router<AppState> {
             "/api/admin/runs/{run_id}/workspace-restore",
             post(restore_run_workspace),
         )
+        .route(
+            "/api/admin/workspace-execution",
+            get(get_execution_config).put(set_execution_config),
+        )
+}
+
+/// Read the Controller-selected, provenance-verified workspace toolchain.
+#[utoipa::path(
+    get,
+    path = "/api/admin/workspace-execution",
+    responses((status = 200, description = "Workspace execution configuration", body = serde_json::Value)),
+    tag = "workspaces"
+)]
+pub async fn get_execution_config(
+    State(state): State<AppState>,
+    user: AuthedUser,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    controller(&user)?;
+    let config = WorkspaceStore::new(&state.db)
+        .execution_config()
+        .map_err(map_store)?;
+    Ok(Json(serde_json::json!({
+        "image_reference":config.image_reference,
+        "language_servers":config.language_servers,
+        "updated_at":config.updated_at,
+        "updated_by":config.updated_by
+    })))
+}
+
+/// Configure an installed, digest-pinned toolchain and its generic LSP commands.
+#[utoipa::path(
+    put,
+    path = "/api/admin/workspace-execution",
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Workspace execution configuration saved", body = serde_json::Value)),
+    tag = "workspaces"
+)]
+pub async fn set_execution_config(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Json(request): Json<WorkspaceExecutionConfigRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    controller(&user)?;
+    let provenance =
+        execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(state.db.clone());
+    let valid_reference = is_digest_pinned_oci_reference(&request.image_reference)
+        || (request.approve_local_image && is_local_image_id(&request.image_reference));
+    if !valid_reference {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "workspace_toolchain_digest_required",
+            message: "workspace toolchain must use an OCI digest; local image IDs require the explicit Controller development override".into(),
+        });
+    }
+    let artifact_type = execlaw_core::artifact_provenance::ArtifactType::Sidecar;
+    let mut local_approval_recorded = false;
+    if let Err(error) = provenance.authorize_oci_reference(
+        "sidecar:workspace-toolchain",
+        artifact_type,
+        &request.image_reference,
+        &user.username,
+    ) {
+        if !request.approve_local_image {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                code: "workspace_toolchain_provenance_required",
+                message: error.to_string(),
+            });
+        }
+        provenance
+            .approve_local_oci_reference(
+                artifact_type,
+                &request.image_reference,
+                "Controller",
+                &user.username,
+            )
+            .map_err(|error| ApiError {
+                status: StatusCode::FORBIDDEN,
+                code: "workspace_toolchain_approval_failed",
+                message: error.to_string(),
+            })?;
+        local_approval_recorded = true;
+    }
+    let saved = WorkspaceStore::new(&state.db)
+        .set_execution_config(
+            &user.username,
+            &request.image_reference,
+            &request.language_servers,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(map_store)?;
+    Ok(Json(serde_json::json!({
+        "image_reference":saved.image_reference,
+        "language_servers":saved.language_servers,
+        "approval":if local_approval_recorded { "controller_local_digest" } else { "verified_or_policy_approved" },
+        "updated_at":saved.updated_at,
+        "updated_by":saved.updated_by
+    })))
+}
+
+fn is_digest_pinned_oci_reference(reference: &str) -> bool {
+    let Some((name, digest)) = reference.rsplit_once("@sha256:") else {
+        return false;
+    };
+    !name.trim().is_empty()
+        && digest.len() == 64
+        && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_local_image_id(reference: &str) -> bool {
+    reference.strip_prefix("sha256:").is_some_and(|digest| {
+        digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    })
 }
 
 #[utoipa::path(
@@ -158,17 +297,20 @@ fn controller(user: &AuthedUser) -> Result<(), ApiError> {
 }
 
 fn map_store(error: execlaw_core::workspaces::WorkspaceStoreError) -> ApiError {
-    let invalid = matches!(
-        &error,
-        execlaw_core::workspaces::WorkspaceStoreError::Invalid(_)
-    );
+    let (status, code) = match &error {
+        execlaw_core::workspaces::WorkspaceStoreError::Invalid(_) => {
+            (StatusCode::BAD_REQUEST, "workspace_error")
+        }
+        execlaw_core::workspaces::WorkspaceStoreError::Conflict(_) => {
+            (StatusCode::CONFLICT, "workspace_conflict")
+        }
+        execlaw_core::workspaces::WorkspaceStoreError::Db(_) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, "workspace_error")
+        }
+    };
     ApiError {
-        status: if invalid {
-            StatusCode::BAD_REQUEST
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        },
-        code: "workspace_error",
+        status,
+        code,
         message: error.to_string(),
     }
 }
@@ -228,7 +370,7 @@ pub async fn read_file(
     let path = safe_relative_file(&root, &query.path)?;
     let metadata =
         std::fs::metadata(&path).map_err(|error| io_error("workspace_file_read", error))?;
-    if has_multiple_links(&metadata) {
+    if has_multiple_links(&path, &metadata) {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
             code: "workspace_hardlink_denied",
@@ -288,6 +430,425 @@ pub async fn search_files(
         }
     }
     Ok(Json(matches))
+}
+
+/// Apply bounded, hash-checked file replacements inside a run's isolated checkout.
+/// The registered workspace root remains untouched until a reviewed diff is applied.
+#[utoipa::path(
+    post,
+    path = "/api/admin/runs/{run_id}/workspace-patch",
+    params(("run_id" = String, Path, description = "Run whose isolated workspace checkout will be edited"), ("Idempotency-Key" = String, Header, description = "Retry identity for this durable patch job")),
+    request_body = serde_json::Value,
+    responses((status = 200, description = "Hash-checked workspace edit results", body = serde_json::Value)),
+    tag = "workspaces"
+)]
+pub async fn patch_run_workspace(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(run_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<WorkspacePatchRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    controller(&user)?;
+    if request.edits.is_empty() || request.edits.len() > 64 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "workspace_patch_size_invalid",
+            message: "workspace patch must contain 1 to 64 file edits".into(),
+        });
+    }
+    let mut total_bytes = 0u64;
+    let mut paths = std::collections::HashSet::new();
+    for edit in &request.edits {
+        if edit.content.len() as u64 > MAX_FILE_BYTES {
+            return Err(ApiError {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                code: "workspace_file_too_large",
+                message: "workspace patch file exceeds the 10 MiB limit".into(),
+            });
+        }
+        total_bytes = total_bytes.saturating_add(edit.content.len() as u64);
+        if total_bytes > MAX_SNAPSHOT_BYTES {
+            return Err(ApiError {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                code: "workspace_patch_too_large",
+                message: "workspace patch exceeds the 100 MiB limit".into(),
+            });
+        }
+        if !paths.insert(edit.path.as_str()) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "workspace_patch_duplicate_path",
+                message: "workspace patch contains duplicate paths".into(),
+            });
+        }
+        if edit.expected_sha256.as_ref().is_some_and(|hash| {
+            hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "workspace_patch_hash_invalid",
+                message: "expected_sha256 must be a 64-character hexadecimal digest".into(),
+            });
+        }
+    }
+
+    let request_id = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "workspace_patch_idempotency_required",
+            message: "Idempotency-Key header is required".into(),
+        })?;
+    let serialized_request = serde_json::to_vec(&request).map_err(|error| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "workspace_patch_request_invalid",
+        message: error.to_string(),
+    })?;
+    let request_hash = hex::encode(Sha256::digest(&serialized_request));
+    let lease_owner = uuid::Uuid::new_v4().to_string();
+    let store = WorkspaceStore::new(&state.db);
+    match store
+        .begin_patch_job(
+            &run_id,
+            request_id,
+            &request_hash,
+            &lease_owner,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(map_store)?
+    {
+        WorkspacePatchClaim::Succeeded(result) => {
+            return serde_json::from_str(&result)
+                .map(Json)
+                .map_err(|error| ApiError {
+                    status: StatusCode::INTERNAL_SERVER_ERROR,
+                    code: "workspace_patch_receipt_invalid",
+                    message: error.to_string(),
+                });
+        }
+        WorkspacePatchClaim::Failed(code) => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "workspace_patch_failed",
+                message: format!("a prior attempt for this request ended with {code}"),
+            });
+        }
+        WorkspacePatchClaim::Busy => {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "workspace_patch_busy",
+                message: "another request is processing this idempotency key".into(),
+            });
+        }
+        WorkspacePatchClaim::Claimed => {}
+    }
+    let mut lease = WorkspacePatchLease::new(state.db.clone(), &run_id, request_id, &lease_owner);
+
+    let binding = store
+        .binding_for_run(&run_id)
+        .map_err(map_store)?
+        .ok_or_else(|| ApiError {
+            status: StatusCode::NOT_FOUND,
+            code: "workspace_binding_not_found",
+            message: "run has no isolated workspace checkout".into(),
+        })?;
+    let checkout_root = std::fs::canonicalize(state.data_dir.join("workspace-checkouts"))
+        .map_err(|error| io_error("workspace_checkout_root", error))?;
+    let checkout = std::fs::canonicalize(&binding.checkout_path)
+        .map_err(|error| io_error("workspace_checkout_access", error))?;
+    if !checkout.is_dir() || !checkout.starts_with(&checkout_root) {
+        return Err(ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "workspace_checkout_escape",
+            message: "run checkout is outside the managed workspace directory".into(),
+        });
+    }
+
+    let mut results = Vec::with_capacity(request.edits.len());
+    for edit in request.edits {
+        let target = match safe_target(&checkout, &edit.path, true) {
+            Ok((_, target)) => target,
+            Err(message) => {
+                return Err(ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "workspace_patch_path_denied",
+                    message,
+                });
+            }
+        };
+        let current = match read_target(&checkout, &edit.path, false) {
+            Ok(content) => content,
+            Err(message) => {
+                return Err(ApiError {
+                    status: StatusCode::FORBIDDEN,
+                    code: "workspace_patch_path_denied",
+                    message,
+                });
+            }
+        };
+        let current_hash = current
+            .as_ref()
+            .map(|bytes| hex::encode(Sha256::digest(bytes)));
+        let content = edit.content.into_bytes();
+        let next_hash = hex::encode(Sha256::digest(&content));
+        if current_hash.as_deref() == Some(next_hash.as_str()) {
+            results.push(serde_json::json!({"path": edit.path, "sha256": next_hash}));
+            continue;
+        }
+        if current_hash.as_deref() != edit.expected_sha256.as_deref() {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "workspace_patch_conflict",
+                message: format!("workspace file changed since it was read: {}", edit.path),
+            });
+        }
+        if current.as_deref() != Some(content.as_slice()) {
+            let parent = target.parent().ok_or_else(|| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "workspace_patch_path_denied",
+                message: "workspace patch target has no parent directory".into(),
+            })?;
+            let mut temp = tempfile::NamedTempFile::new_in(parent)
+                .map_err(|error| io_error("workspace_patch_temp_create", error))?;
+            temp.write_all(&content)
+                .and_then(|()| temp.as_file().sync_all())
+                .map_err(|error| io_error("workspace_patch_write", error))?;
+            let mut backup = None;
+            if current.is_some() {
+                let placeholder = tempfile::NamedTempFile::new_in(parent)
+                    .map_err(|error| io_error("workspace_patch_backup_create", error))?;
+                let backup_path = placeholder.into_temp_path();
+                std::fs::remove_file(&backup_path)
+                    .map_err(|error| io_error("workspace_patch_backup_stage", error))?;
+                std::fs::rename(&target, &backup_path)
+                    .map_err(|error| io_error("workspace_patch_backup", error))?;
+                let moved_hash = match std::fs::read(&backup_path) {
+                    Ok(bytes) => hex::encode(Sha256::digest(bytes)),
+                    Err(error) => {
+                        let preserved = restore_patch_backup(backup_path, &target);
+                        return Err(io_error(
+                            "workspace_patch_backup_read",
+                            std::io::Error::other(format!(
+                                "{error}; backup {}",
+                                preserved.unwrap_or_else(|| "restored".into())
+                            )),
+                        ));
+                    }
+                };
+                if edit.expected_sha256.as_deref() != Some(moved_hash.as_str()) {
+                    let preserved = restore_patch_backup(backup_path, &target);
+                    return Err(ApiError {
+                        status: StatusCode::CONFLICT,
+                        code: "workspace_patch_conflict",
+                        message: format!(
+                            "workspace file changed while patching: {}{}",
+                            edit.path,
+                            preserved
+                                .map(|path| format!("; original preserved at {path}"))
+                                .unwrap_or_default()
+                        ),
+                    });
+                }
+                backup = Some(backup_path);
+            }
+            if let Err(error) = temp.persist_noclobber(&target) {
+                if let Some(backup_path) = backup.take() {
+                    if let Some(preserved) = restore_patch_backup(backup_path, &target) {
+                        return Err(ApiError {
+                            status: StatusCode::CONFLICT,
+                            code: "workspace_patch_conflict",
+                            message: format!(
+                                "workspace target appeared during patching; original content was preserved at {}",
+                                preserved
+                            ),
+                        });
+                    }
+                }
+                return Err(io_error("workspace_patch_replace", error.error));
+            }
+            if let Some(backup_path) = backup {
+                std::fs::remove_file(backup_path)
+                    .map_err(|error| io_error("workspace_patch_backup_remove", error))?;
+            }
+        }
+        results.push(serde_json::json!({"path": edit.path, "sha256": next_hash}));
+    }
+    let result = serde_json::json!({"run_id": run_id, "request_id": request_id, "edits": results});
+    let result_json = serde_json::to_string(&result).map_err(|error| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "workspace_patch_result_encode_failed",
+        message: error.to_string(),
+    })?;
+    lease.finish(Some(&result_json), None)?;
+    Ok(Json(result))
+}
+
+fn restore_patch_backup(backup_path: tempfile::TempPath, target: &FsPath) -> Option<String> {
+    if !target.exists() && std::fs::rename(&backup_path, target).is_ok() {
+        return None;
+    }
+    backup_path
+        .keep()
+        .ok()
+        .map(|path| path.display().to_string())
+}
+
+pub(crate) fn apply_checkout_edit(
+    checkout: &FsPath,
+    edit: &WorkspaceFileEdit,
+) -> Result<serde_json::Value, ApiError> {
+    let target = safe_target(checkout, &edit.path, true)
+        .map_err(|message| ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "workspace_patch_path_denied",
+            message,
+        })?
+        .1;
+    let current = read_target(checkout, &edit.path, false).map_err(|message| ApiError {
+        status: StatusCode::FORBIDDEN,
+        code: "workspace_patch_path_denied",
+        message,
+    })?;
+    let current_hash = current
+        .as_ref()
+        .map(|bytes| hex::encode(Sha256::digest(bytes)));
+    let content = edit.content.as_bytes();
+    let next_hash = hex::encode(Sha256::digest(content));
+    if current_hash.as_deref() == Some(next_hash.as_str()) {
+        return Ok(serde_json::json!({"path": edit.path, "sha256": next_hash}));
+    }
+    if current_hash.as_deref() != edit.expected_sha256.as_deref() {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "workspace_patch_conflict",
+            message: format!("workspace file changed since it was read: {}", edit.path),
+        });
+    }
+    let parent = target.parent().ok_or_else(|| ApiError {
+        status: StatusCode::BAD_REQUEST,
+        code: "workspace_patch_path_denied",
+        message: "workspace patch target has no parent directory".into(),
+    })?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|error| io_error("workspace_patch_temp_create", error))?;
+    temp.write_all(content)
+        .and_then(|()| temp.as_file().sync_all())
+        .map_err(|error| io_error("workspace_patch_write", error))?;
+    let mut backup = None;
+    if current.is_some() {
+        let placeholder = tempfile::NamedTempFile::new_in(parent)
+            .map_err(|error| io_error("workspace_patch_backup_create", error))?;
+        let backup_path = placeholder.into_temp_path();
+        std::fs::remove_file(&backup_path)
+            .map_err(|error| io_error("workspace_patch_backup_stage", error))?;
+        std::fs::rename(&target, &backup_path)
+            .map_err(|error| io_error("workspace_patch_backup", error))?;
+        let moved_hash = match std::fs::read(&backup_path) {
+            Ok(bytes) => hex::encode(Sha256::digest(bytes)),
+            Err(error) => {
+                let preserved = restore_patch_backup(backup_path, &target);
+                return Err(io_error(
+                    "workspace_patch_backup_read",
+                    std::io::Error::other(format!(
+                        "{error}; backup {}",
+                        preserved.unwrap_or_else(|| "restored".into())
+                    )),
+                ));
+            }
+        };
+        if edit.expected_sha256.as_deref() != Some(moved_hash.as_str()) {
+            let preserved = restore_patch_backup(backup_path, &target);
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "workspace_patch_conflict",
+                message: format!(
+                    "workspace file changed while patching: {}{}",
+                    edit.path,
+                    preserved
+                        .map(|path| format!("; original preserved at {path}"))
+                        .unwrap_or_default()
+                ),
+            });
+        }
+        backup = Some(backup_path);
+    }
+    if let Err(error) = temp.persist_noclobber(&target) {
+        if let Some(backup_path) = backup.take()
+            && let Some(preserved) = restore_patch_backup(backup_path, &target)
+        {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "workspace_patch_conflict",
+                message: format!(
+                    "workspace target appeared during patching; original content was preserved at {preserved}"
+                ),
+            });
+        }
+        return Err(io_error("workspace_patch_replace", error.error));
+    }
+    if let Some(backup_path) = backup {
+        std::fs::remove_file(backup_path)
+            .map_err(|error| io_error("workspace_patch_backup_remove", error))?;
+    }
+    Ok(serde_json::json!({"path": edit.path, "sha256": next_hash}))
+}
+
+struct WorkspacePatchLease {
+    db: execlaw_core::Database,
+    run_id: String,
+    request_id: String,
+    owner: String,
+    finished: bool,
+}
+
+impl WorkspacePatchLease {
+    fn new(db: execlaw_core::Database, run_id: &str, request_id: &str, owner: &str) -> Self {
+        Self {
+            db,
+            run_id: run_id.to_owned(),
+            request_id: request_id.to_owned(),
+            owner: owner.to_owned(),
+            finished: false,
+        }
+    }
+
+    fn finish(
+        &mut self,
+        result_json: Option<&str>,
+        error_code: Option<&str>,
+    ) -> Result<(), ApiError> {
+        WorkspaceStore::new(&self.db)
+            .finish_patch_job(
+                &self.run_id,
+                &self.request_id,
+                &self.owner,
+                result_json,
+                error_code,
+                chrono::Utc::now().timestamp(),
+            )
+            .map_err(map_store)?;
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for WorkspacePatchLease {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = WorkspaceStore::new(&self.db).finish_patch_job(
+                &self.run_id,
+                &self.request_id,
+                &self.owner,
+                None,
+                Some("workspace_patch_interrupted"),
+                chrono::Utc::now().timestamp(),
+            );
+        }
+    }
 }
 
 #[utoipa::path(post,path="/api/admin/runs/{run_id}/workspace-checkpoints",params(("run_id"=String,Path)),request_body=serde_json::Value,responses((status=201,description="Content-addressed workspace checkpoint and isolated checkout",body=serde_json::Value)),tag="workspaces")]
@@ -699,6 +1260,7 @@ pub async fn restore_run_workspace(
         })
 }
 
+#[derive(Debug)]
 enum WorkspaceApplyError {
     Conflict(String),
     Failure(String),
@@ -832,7 +1394,7 @@ fn apply_workspace_file(
         if metadata.file_type().is_symlink()
             || is_reparse_point(&metadata)
             || !metadata.is_file()
-            || has_multiple_links(&metadata)
+            || has_multiple_links(&backup, &metadata)
         {
             return Err(WorkspaceApplyError::Conflict(format!(
                 "rollback file for '{}' is not a safe regular file",
@@ -989,7 +1551,7 @@ fn read_safe_regular_file(path: &FsPath) -> Result<Vec<u8>, String> {
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || is_reparse_point(&metadata)
-        || has_multiple_links(&metadata)
+        || has_multiple_links(path, &metadata)
     {
         return Err("path is not a regular single-link file".into());
     }
@@ -1048,7 +1610,7 @@ fn safe_target(
         if !metadata.is_file()
             || metadata.file_type().is_symlink()
             || is_reparse_point(&metadata)
-            || has_multiple_links(&metadata)
+            || has_multiple_links(&destination, &metadata)
         {
             return Err("workspace target is not a regular single-link file".into());
         }
@@ -1069,7 +1631,7 @@ fn read_target(
     if !metadata.is_file()
         || metadata.file_type().is_symlink()
         || is_reparse_point(&metadata)
-        || has_multiple_links(&metadata)
+        || has_multiple_links(&path, &metadata)
     {
         return Err("workspace target is not a regular single-link file".into());
     }
@@ -1185,7 +1747,7 @@ fn root_path(state: &AppState, workspace_id: &str) -> Result<PathBuf, ApiError> 
     Ok(canonical)
 }
 
-fn safe_relative_file(root: &FsPath, relative: &str) -> Result<PathBuf, ApiError> {
+pub(crate) fn safe_relative_file(root: &FsPath, relative: &str) -> Result<PathBuf, ApiError> {
     let path = PathBuf::from(relative);
     if path.is_absolute()
         || path
@@ -1224,7 +1786,7 @@ fn safe_relative_file(root: &FsPath, relative: &str) -> Result<PathBuf, ApiError
     Ok(canonical)
 }
 
-fn scan_workspace(root: &FsPath) -> Result<Vec<(String, Vec<u8>)>, ApiError> {
+pub(crate) fn scan_workspace(root: &FsPath) -> Result<Vec<(String, Vec<u8>)>, ApiError> {
     const IGNORED_DIRS: &[&str] = &[".git", ".execlaw", "node_modules", "target", ".venv"];
     let canonical_root =
         std::fs::canonicalize(root).map_err(|error| io_error("workspace_snapshot_root", error))?;
@@ -1258,7 +1820,7 @@ fn scan_workspace(root: &FsPath) -> Result<Vec<(String, Vec<u8>)>, ApiError> {
                     message: format!("snapshot contains symbolic link or junction '{name}'"),
                 });
             }
-            if metadata.is_file() && has_multiple_links(&metadata) {
+            if metadata.is_file() && has_multiple_links(&entry.path(), &metadata) {
                 return Err(ApiError {
                     status: StatusCode::FORBIDDEN,
                     code: "workspace_hardlink_denied",
@@ -1299,6 +1861,54 @@ fn scan_workspace(root: &FsPath) -> Result<Vec<(String, Vec<u8>)>, ApiError> {
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(files)
+}
+
+/// Copy only bounded, regular, non-secret workspace files into a disposable tool container mount.
+pub(crate) fn create_tool_snapshot(source_root: &FsPath) -> Result<tempfile::TempDir, ApiError> {
+    let source_root = std::fs::canonicalize(source_root)
+        .map_err(|error| io_error("workspace_job_source", error))?;
+    let files = scan_workspace(&source_root)?;
+    let snapshot = tempfile::Builder::new()
+        .prefix("execlaw-workspace-job-")
+        .tempdir()
+        .map_err(|error| io_error("workspace_job_snapshot", error))?;
+    let snapshot_root = std::fs::canonicalize(snapshot.path())
+        .map_err(|error| io_error("workspace_job_snapshot", error))?;
+    for (relative, contents) in files {
+        let relative_path = PathBuf::from(&relative);
+        if relative_path.is_absolute()
+            || relative_path
+                .components()
+                .any(|part| !matches!(part, std::path::Component::Normal(_)))
+            || is_secret_path(&relative_path)
+        {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                code: "workspace_job_snapshot_path_denied",
+                message: "snapshot contains a secret or invalid relative path".into(),
+            });
+        }
+        let target = snapshot_root.join(&relative_path);
+        let parent = target.parent().ok_or_else(|| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "workspace_job_snapshot_path_denied",
+            message: "snapshot file has no parent directory".into(),
+        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|error| io_error("workspace_job_snapshot_directory", error))?;
+        let canonical_parent = std::fs::canonicalize(parent)
+            .map_err(|error| io_error("workspace_job_snapshot_directory", error))?;
+        if !canonical_parent.starts_with(&snapshot_root) {
+            return Err(ApiError {
+                status: StatusCode::FORBIDDEN,
+                code: "workspace_job_snapshot_escape",
+                message: "snapshot path resolved outside its temporary root".into(),
+            });
+        }
+        std::fs::write(&target, contents)
+            .map_err(|error| io_error("workspace_job_snapshot_file", error))?;
+    }
+    Ok(snapshot)
 }
 
 pub(crate) fn clone_workspace_for_run(
@@ -1446,14 +2056,19 @@ fn is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(unix)]
-fn has_multiple_links(metadata: &std::fs::Metadata) -> bool {
+pub(crate) fn has_multiple_links(_path: &FsPath, metadata: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::MetadataExt;
     metadata.nlink() > 1
 }
 
 #[cfg(windows)]
-fn has_multiple_links(_metadata: &std::fs::Metadata) -> bool {
-    false
+pub(crate) fn has_multiple_links(path: &FsPath, _metadata: &std::fs::Metadata) -> bool {
+    let Ok(file) = std::fs::File::open(path) else {
+        return true;
+    };
+    winapi_util::file::information(file)
+        .map(|information| information.number_of_links() != 1)
+        .unwrap_or(true)
 }
 
 fn io_error(code: &'static str, error: std::io::Error) -> ApiError {
@@ -1468,5 +2083,469 @@ fn map_workspace_error(error: execlaw_core::workspaces::WorkspaceStoreError) -> 
         status: StatusCode::INTERNAL_SERVER_ERROR,
         code: "workspace_checkpoint_error",
         message: error.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use execlaw_core::workspaces::WorkspaceApplyFile;
+
+    fn workspace_controller() -> AuthedUser {
+        AuthedUser {
+            user_id: "workspace-controller".into(),
+            session_id: None,
+            username: "workspace-controller".into(),
+            display_name: "Workspace Controller".into(),
+            email: None,
+            role: UserRole::Controller,
+            last_login_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_toolchain_config_requires_controller_and_digest_provenance() {
+        let state = crate::routes::test_app_state();
+        let digest_reference = format!("execlaw/workspace-toolchain@sha256:{}", "a".repeat(64));
+        let languages = std::collections::BTreeMap::from([(
+            "rust".to_owned(),
+            vec!["rust-analyzer".to_owned()],
+        )]);
+
+        let denied = set_execution_config(
+            State(state.clone()),
+            AuthedUser {
+                role: UserRole::Viewer,
+                ..workspace_controller()
+            },
+            Json(WorkspaceExecutionConfigRequest {
+                image_reference: digest_reference.clone(),
+                language_servers: languages.clone(),
+                approve_local_image: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied.status, StatusCode::FORBIDDEN);
+
+        let unverified = set_execution_config(
+            State(state.clone()),
+            workspace_controller(),
+            Json(WorkspaceExecutionConfigRequest {
+                image_reference: digest_reference.clone(),
+                language_servers: languages.clone(),
+                approve_local_image: false,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unverified.code, "workspace_toolchain_provenance_required");
+
+        let saved = set_execution_config(
+            State(state.clone()),
+            workspace_controller(),
+            Json(WorkspaceExecutionConfigRequest {
+                image_reference: digest_reference,
+                language_servers: languages.clone(),
+                approve_local_image: true,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(saved.0["language_servers"]["rust"][0], "rust-analyzer");
+        assert_eq!(saved.0["approval"], "controller_local_digest");
+
+        let reopened = WorkspaceStore::new(&state.db).execution_config().unwrap();
+        assert_eq!(reopened.language_servers, languages);
+    }
+
+    #[test]
+    fn container_snapshot_omits_secrets_and_never_mutates_run_checkout() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(source.path().join("src")).unwrap();
+        std::fs::write(source.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(source.path().join(".env"), "API_KEY=private\n").unwrap();
+        std::fs::create_dir_all(source.path().join("target/debug")).unwrap();
+        std::fs::write(source.path().join("target/debug/output"), "ignored\n").unwrap();
+
+        let snapshot = create_tool_snapshot(source.path()).unwrap();
+        assert!(snapshot.path().join("src/main.rs").is_file());
+        assert!(!snapshot.path().join(".env").exists());
+        assert!(!snapshot.path().join("target/debug/output").exists());
+        std::fs::write(
+            snapshot.path().join("src/main.rs"),
+            "changed in container\n",
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(source.path().join("src/main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+    }
+
+    fn digest(bytes: &[u8]) -> String {
+        hex::encode(Sha256::digest(bytes))
+    }
+
+    #[tokio::test]
+    async fn patch_route_is_durable_idempotent_and_edits_only_the_run_checkout() {
+        let state = crate::routes::test_app_state();
+        let source_root = tempfile::tempdir().unwrap();
+        let original = b"operator-owned source";
+        std::fs::write(source_root.path().join("src.txt"), original).unwrap();
+        let canonical_root = std::fs::canonicalize(source_root.path()).unwrap();
+        let store = WorkspaceStore::new(&state.db);
+        let root = store
+            .register_root(&canonical_root.to_string_lossy(), "controller", 1)
+            .unwrap();
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO state_conversations (conversation_id,kind,phase,trust_class,modality) VALUES ('workspace-patch-test','ControllerDM','idle','Controller','Text')",
+                    [],
+                )?;
+                connection.execute(
+                    "INSERT INTO state_events (conversation_id,seq,kind,payload,committed_at,actor) VALUES ('workspace-patch-test',1,'user_msg',X'00',1,'controller')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let run = execlaw_core::runs::RunStore::new(&state.db)
+            .create_run(&execlaw_core::runs::NewRun {
+                conversation_id: execlaw_core::ConversationId::from("workspace-patch-test"),
+                parent_run_id: None,
+                input_event_seq: execlaw_core::EventSeq(1),
+                started_at: 1,
+                deadline_at: None,
+            })
+            .unwrap();
+        let checkout_root = state.data_dir.join("workspace-checkouts");
+        std::fs::create_dir_all(&checkout_root).unwrap();
+        let checkout = checkout_root.join("patch-test-checkout");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::copy(source_root.path().join("src.txt"), checkout.join("src.txt")).unwrap();
+        let checkpoint = store
+            .create_checkpoint(
+                &root.workspace_id,
+                &run,
+                None,
+                &[("src.txt".into(), original.to_vec())],
+                2,
+            )
+            .unwrap();
+        store
+            .bind_run_checkout(
+                &run,
+                &root.workspace_id,
+                &checkpoint.checkpoint_id,
+                &std::fs::canonicalize(&checkout).unwrap().to_string_lossy(),
+                2,
+            )
+            .unwrap();
+        let call = |content: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("idempotency-key", "patch-1".parse().unwrap());
+            patch_run_workspace(
+                State(state.clone()),
+                crate::auth_extract::AuthedUser {
+                    user_id: "controller".into(),
+                    session_id: None,
+                    username: "controller".into(),
+                    display_name: "Controller".into(),
+                    email: None,
+                    role: UserRole::Controller,
+                    last_login_at: None,
+                },
+                Path(run.clone()),
+                headers,
+                Json(WorkspacePatchRequest {
+                    edits: vec![WorkspaceFileEdit {
+                        path: "src.txt".into(),
+                        expected_sha256: Some(digest(original)),
+                        content: content.into(),
+                    }],
+                }),
+            )
+        };
+        let first = call("agent proposal").await.unwrap().0;
+        let replayed = call("agent proposal").await.unwrap().0;
+        assert_eq!(first, replayed);
+        assert_eq!(
+            std::fs::read(source_root.path().join("src.txt")).unwrap(),
+            original,
+            "patching a run checkout cannot modify the registered source root"
+        );
+        assert_eq!(
+            std::fs::read(checkout.join("src.txt")).unwrap(),
+            b"agent proposal"
+        );
+        let conflict = call("different proposal").await.unwrap_err();
+        assert_eq!(conflict.status, StatusCode::CONFLICT);
+    }
+
+    fn change(path: &str, base: &[u8], proposed: &[u8]) -> WorkspaceApplyFile {
+        WorkspaceApplyFile {
+            path: path.into(),
+            base_sha256: Some(digest(base)),
+            proposed_sha256: Some(digest(proposed)),
+            status: "pending".into(),
+            error: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn workspace_patch_route_replays_durable_receipts_and_leaves_source_root_untouched() {
+        let state = crate::routes::test_app_state();
+        let source = tempfile::tempdir().unwrap();
+        let source_file = source.path().join("src.txt");
+        std::fs::write(&source_file, b"controller source").unwrap();
+        let workspace = WorkspaceStore::new(&state.db);
+        let root = workspace
+            .register_root(
+                &std::fs::canonicalize(source.path())
+                    .unwrap()
+                    .to_string_lossy(),
+                "controller",
+                1,
+            )
+            .unwrap();
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO state_conversations (conversation_id,kind,phase,trust_class,modality) VALUES ('workspace-patch-test','ControllerDM','idle','Controller','Text')",
+                    [],
+                )?;
+                connection.execute(
+                    "INSERT INTO state_events (conversation_id,seq,kind,payload,committed_at,actor) VALUES ('workspace-patch-test',1,'user_msg',X'00',1,'controller')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let run = execlaw_core::runs::RunStore::new(&state.db)
+            .create_run(&execlaw_core::runs::NewRun {
+                conversation_id: execlaw_core::ConversationId::from("workspace-patch-test"),
+                parent_run_id: None,
+                input_event_seq: execlaw_core::EventSeq(1),
+                started_at: 1,
+                deadline_at: None,
+            })
+            .unwrap();
+        let checkout_parent = state.data_dir.join("workspace-checkouts");
+        let checkout = checkout_parent.join("patch-receipt-test");
+        std::fs::create_dir_all(&checkout).unwrap();
+        std::fs::copy(&source_file, checkout.join("src.txt")).unwrap();
+        let checkpoint = workspace
+            .create_checkpoint(
+                &root.workspace_id,
+                &run,
+                None,
+                &[("src.txt".into(), b"controller source".to_vec())],
+                2,
+            )
+            .unwrap();
+        workspace
+            .bind_run_checkout(
+                &run,
+                &root.workspace_id,
+                &checkpoint.checkpoint_id,
+                &std::fs::canonicalize(&checkout).unwrap().to_string_lossy(),
+                2,
+            )
+            .unwrap();
+        let invoke = |content: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert("Idempotency-Key", "patch-request-1".parse().unwrap());
+            patch_run_workspace(
+                State(state.clone()),
+                crate::auth_extract::AuthedUser {
+                    user_id: "controller".into(),
+                    session_id: None,
+                    username: "controller".into(),
+                    display_name: "Controller".into(),
+                    email: None,
+                    role: UserRole::Controller,
+                    last_login_at: None,
+                },
+                Path(run.clone()),
+                headers,
+                Json(WorkspacePatchRequest {
+                    edits: vec![WorkspaceFileEdit {
+                        path: "src.txt".into(),
+                        expected_sha256: Some(digest(b"controller source")),
+                        content: content.to_owned(),
+                    }],
+                }),
+            )
+        };
+        let first = invoke("run proposal").await.unwrap().0;
+        let replay = invoke("run proposal").await.unwrap().0;
+        assert_eq!(first, replay);
+        assert_eq!(
+            std::fs::read(checkout.join("src.txt")).unwrap(),
+            b"run proposal"
+        );
+        assert_eq!(std::fs::read(&source_file).unwrap(), b"controller source");
+        assert_eq!(
+            invoke("changed intent").await.unwrap_err().status,
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn workspace_apply_is_retry_safe_and_never_overwrites_a_later_human_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_dir = temp.path().join("root");
+        let checkout_dir = temp.path().join("checkout");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&checkout_dir).unwrap();
+        std::fs::write(root_dir.join("src.rs"), b"base").unwrap();
+        std::fs::write(checkout_dir.join("src.rs"), b"proposed").unwrap();
+        let root = std::fs::canonicalize(root_dir).unwrap();
+        let checkout = std::fs::canonicalize(checkout_dir).unwrap();
+        let change = change("src.rs", b"base", b"proposed");
+
+        apply_workspace_file(&root, &checkout, "apply-1", &change).unwrap();
+        assert_eq!(std::fs::read(root.join("src.rs")).unwrap(), b"proposed");
+
+        // Reopening the service after the replace repeats the same journaled
+        // file operation; the proposed hash makes the operation idempotent.
+        apply_workspace_file(&root, &checkout, "apply-1", &change).unwrap();
+        std::fs::write(root.join("src.rs"), b"operator edit").unwrap();
+        let error = apply_workspace_file(&root, &checkout, "apply-1", &change).unwrap_err();
+        assert!(matches!(error, WorkspaceApplyError::Conflict(_)));
+        assert_eq!(
+            std::fs::read(root.join("src.rs")).unwrap(),
+            b"operator edit",
+            "a post-apply human edit must remain untouched"
+        );
+    }
+
+    #[test]
+    fn competing_run_preview_cannot_replace_an_already_applied_workspace_change() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_dir = temp.path().join("root");
+        let first_checkout_dir = temp.path().join("first");
+        let second_checkout_dir = temp.path().join("second");
+        for directory in [&root_dir, &first_checkout_dir, &second_checkout_dir] {
+            std::fs::create_dir(directory).unwrap();
+        }
+        std::fs::write(root_dir.join("src.rs"), b"base").unwrap();
+        std::fs::write(first_checkout_dir.join("src.rs"), b"run one").unwrap();
+        std::fs::write(second_checkout_dir.join("src.rs"), b"run two").unwrap();
+        let root = std::fs::canonicalize(root_dir).unwrap();
+        let first_checkout = std::fs::canonicalize(first_checkout_dir).unwrap();
+        let second_checkout = std::fs::canonicalize(second_checkout_dir).unwrap();
+
+        let run_one = change("src.rs", b"base", b"run one");
+        apply_workspace_file(&root, &first_checkout, "run-one-apply", &run_one).unwrap();
+        let run_two = change("src.rs", b"base", b"run two");
+        let error =
+            apply_workspace_file(&root, &second_checkout, "run-two-apply", &run_two).unwrap_err();
+        assert!(matches!(error, WorkspaceApplyError::Conflict(_)));
+        assert_eq!(std::fs::read(root.join("src.rs")).unwrap(), b"run one");
+    }
+
+    #[test]
+    fn workspace_targets_reject_traversal_secrets_and_hardlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        assert!(safe_target(&root, "../outside.txt", true).is_err());
+        assert!(safe_target(&root, ".env", true).is_err());
+
+        #[cfg(unix)]
+        {
+            std::fs::write(root.join("source.txt"), b"private").unwrap();
+            std::fs::hard_link(root.join("source.txt"), root.join("linked.txt")).unwrap();
+            assert!(safe_target(&root, "linked.txt", false).is_err());
+            assert!(safe_relative_file(&root, "linked.txt").is_err());
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_targets_reject_symbolic_link_escapes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"private").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("linked")).unwrap();
+        let root = std::fs::canonicalize(root).unwrap();
+        assert!(safe_target(&root, "linked/secret.txt", false).is_err());
+        assert!(safe_relative_file(&root, "linked/secret.txt").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn workspace_targets_reject_symlink_file_escapes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("root");
+        let outside = temp.path().join("outside.txt");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::write(&outside, b"private").unwrap();
+        if let Err(error) = std::os::windows::fs::symlink_file(&outside, root.join("linked.txt")) {
+            // ERROR_PRIVILEGE_NOT_HELD is expected when Developer Mode is off.
+            if error.raw_os_error() == Some(1314) {
+                return;
+            }
+            panic!("could not create symlink fixture: {error}");
+        }
+        let root = std::fs::canonicalize(root).unwrap();
+        assert!(safe_target(&root, "linked.txt", false).is_err());
+        assert!(safe_relative_file(&root, "linked.txt").is_err());
+    }
+
+    #[test]
+    fn owned_change_restore_uses_hash_preconditions_and_preserves_external_edits() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_dir = temp.path().join("root");
+        let checkout_dir = temp.path().join("checkout");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&checkout_dir).unwrap();
+        std::fs::write(root_dir.join("src.rs"), b"run-owned change").unwrap();
+        std::fs::write(checkout_dir.join("src.rs"), b"base").unwrap();
+        let root = std::fs::canonicalize(root_dir).unwrap();
+        let checkout = std::fs::canonicalize(checkout_dir).unwrap();
+        let restore = change("src.rs", b"run-owned change", b"base");
+
+        apply_workspace_file(&root, &checkout, "restore-1", &restore).unwrap();
+        assert_eq!(std::fs::read(root.join("src.rs")).unwrap(), b"base");
+
+        std::fs::write(root.join("src.rs"), b"operator edit").unwrap();
+        let error = apply_workspace_file(&root, &checkout, "restore-2", &restore).unwrap_err();
+        assert!(matches!(error, WorkspaceApplyError::Conflict(_)));
+        assert_eq!(
+            std::fs::read(root.join("src.rs")).unwrap(),
+            b"operator edit"
+        );
+    }
+
+    #[test]
+    fn interrupted_replace_recovers_from_its_owned_backup() {
+        let temp = tempfile::tempdir().unwrap();
+        let root_dir = temp.path().join("root");
+        let checkout_dir = temp.path().join("checkout");
+        std::fs::create_dir(&root_dir).unwrap();
+        std::fs::create_dir(&checkout_dir).unwrap();
+        std::fs::write(checkout_dir.join("src.rs"), b"proposed").unwrap();
+        let root = std::fs::canonicalize(root_dir).unwrap();
+        let checkout = std::fs::canonicalize(checkout_dir).unwrap();
+        let change = change("src.rs", b"base", b"proposed");
+        let backup = root.join(format!(
+            ".execlaw-apply-apply-2-{}.bak",
+            hex::encode(Sha256::digest(b"src.rs"))[..16].to_owned()
+        ));
+        // This is the durable state after the original was renamed but before
+        // the staged replacement was installed.
+        std::fs::write(&backup, b"base").unwrap();
+
+        apply_workspace_file(&root, &checkout, "apply-2", &change).unwrap();
+        assert_eq!(std::fs::read(root.join("src.rs")).unwrap(), b"proposed");
+        assert!(!backup.exists());
     }
 }

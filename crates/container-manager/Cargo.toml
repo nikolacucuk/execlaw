@@ -28,6 +28,7 @@ async-trait.workspace = true
 # Phase 12.B — service-container HTTP health probes + bollard pull
 # stream draining.
 reqwest = { workspace = true }
+url.workspace = true
 futures-util = "0.3"
 
 # Phase 14.C — host-side HuggingFace model downloader. We call the
@@ -57,6 +58,7 @@ nvml-wrapper = "0.12"
 # for >4 GB Intel Arc / large NVIDIA cards. WMI alone caps out.
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
+winapi-util = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

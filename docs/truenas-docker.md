@@ -211,10 +211,18 @@ installation, Docker's socket is root-owned, so use `sudo` consistently unless
 you have explicitly granted your account access to that socket:
 
 ```bash
-sudo docker compose build execlaw runner-image
+sudo docker compose build --no-cache execlaw runner-image
+sudo docker compose run --rm execlaw doctor
 sudo docker compose up -d execlaw
 sudo docker compose logs -f execlaw
 ```
+
+The Docker build runs `execlaw doctor` against the newly compiled control-plane
+binary before packaging it. The explicit `doctor` command above checks the
+image Compose will run and must report `OK  sqlcipher`. If it reports that the
+binary was built without SQLCipher, do not start it against the persistent
+database: update the source checkout and rebuild the image. Rebuilding does
+not require changing or removing `execlaw.db` or `.execlaw/master.key`.
 
 ### Installing a locally built plugin ZIP
 
@@ -640,7 +648,8 @@ From the source directory, fetch the desired revision and rebuild both images:
 
 ```bash
 git pull --ff-only
-docker compose build execlaw runner-image
+docker compose build --no-cache execlaw runner-image
+docker compose run --rm execlaw doctor
 docker compose up -d --force-recreate execlaw
 ```
 

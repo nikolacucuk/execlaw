@@ -216,6 +216,101 @@ pub struct ResearchSource {
     pub snapshot_truncated: bool,
 }
 
+/// Decide whether a short research claim is directly supported by a retained
+/// source snapshot using conservative, ordered phrase matching within one
+/// sentence. This rejects citation-shaped text whose terms only occur across
+/// unrelated sentences or in a different relationship. It is not a semantic
+/// entailment judge and intentionally rejects paraphrases it cannot verify.
+pub fn research_claim_supported_by_snapshot(claim: &str, snapshot: &str) -> bool {
+    let claim_terms = research_evidence_terms(claim);
+    if claim_terms.len() < 2 {
+        return false;
+    }
+    let claim_is_negated = claim_terms.iter().any(|term| is_research_negation(term));
+    research_evidence_sentences(snapshot)
+        .into_iter()
+        .map(research_evidence_terms)
+        .any(|evidence_terms| {
+            if evidence_terms.len() < claim_terms.len()
+                || evidence_terms.iter().any(|term| is_research_negation(term)) != claim_is_negated
+            {
+                return false;
+            }
+
+            // Preserve order and keep gaps small. Stop words are omitted from
+            // both sides, but a claim cannot be assembled from distant clauses.
+            let mut evidence_index = 0usize;
+            for claim_term in &claim_terms {
+                let Some(found) = evidence_terms[evidence_index..]
+                    .iter()
+                    .position(|term| term == claim_term)
+                else {
+                    return false;
+                };
+                if found > 4 {
+                    return false;
+                }
+                evidence_index += found + 1;
+            }
+            true
+        })
+}
+
+fn research_evidence_sentences(text: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    for (index, character) in text.char_indices() {
+        let next_index = index + character.len_utf8();
+        let sentence_boundary = match character {
+            '!' | '?' | '\n' | ';' => true,
+            '.' => {
+                let previous_is_digit = index > 0 && text.as_bytes()[index - 1].is_ascii_digit();
+                let next_is_digit = text
+                    .as_bytes()
+                    .get(next_index)
+                    .is_some_and(u8::is_ascii_digit);
+                !previous_is_digit
+                    && !next_is_digit
+                    && text[next_index..]
+                        .chars()
+                        .next()
+                        .is_none_or(char::is_whitespace)
+            }
+            _ => false,
+        };
+        if sentence_boundary {
+            sentences.push(&text[start..next_index]);
+            start = next_index;
+        }
+    }
+    if start < text.len() {
+        sentences.push(&text[start..]);
+    }
+    sentences
+}
+
+fn research_evidence_terms(text: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "a", "about", "after", "all", "also", "an", "and", "are", "as", "at", "be", "because",
+        "been", "before", "being", "between", "both", "but", "by", "can", "could", "did", "do",
+        "does", "during", "each", "for", "from", "had", "has", "have", "he", "her", "here", "his",
+        "how", "i", "if", "in", "into", "is", "it", "its", "may", "might", "more", "most", "must",
+        "of", "on", "one", "or", "our", "out", "over", "s", "same", "she", "should", "so", "some",
+        "such", "than", "that", "the", "their", "them", "then", "there", "these", "they", "this",
+        "those", "through", "to", "under", "up", "was", "we", "were", "what", "when", "where",
+        "which", "while", "who", "will", "with", "would", "you", "your",
+    ];
+    text.split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .map(|term| term.to_lowercase())
+        .filter(|term| !STOP_WORDS.contains(&term.as_str()))
+        .collect()
+}
+
+fn is_research_negation(term: &str) -> bool {
+    matches!(term, "no" | "not" | "never" | "without" | "neither" | "nor")
+}
+
 /// One gather worker's output, persisted into
 /// `state_research_jobs.notes_json` (and as `notes/<n>.json` on
 /// disk). The runner appends one `ResearchNote` per `PlanStep` after
@@ -1479,6 +1574,39 @@ mod tests {
     }
 
     #[test]
+    fn research_claim_gate_rejects_citation_shaped_but_unsupported_text() {
+        let evidence = "The local service listens on 127.0.0.1:3031 by default.";
+        assert!(research_claim_supported_by_snapshot(
+            "The service listens on 127.0.0.1:3031 by default.",
+            evidence
+        ));
+        assert!(!research_claim_supported_by_snapshot(
+            "The service listens on port 9443 and requires a public IP.",
+            evidence
+        ));
+        assert!(!research_claim_supported_by_snapshot(
+            "Yes, correct.",
+            evidence
+        ));
+        assert!(!research_claim_supported_by_snapshot(
+            "The service does not listen on 127.0.0.1:3031.",
+            evidence
+        ));
+        assert!(!research_claim_supported_by_snapshot(
+            "The service binds on 127.0.0.1 at port 9443.",
+            "The service uses port 9443. It binds on 127.0.0.1.",
+        ));
+        assert!(!research_claim_supported_by_snapshot(
+            "The service does not listen on 127.0.0.1:3031.",
+            "The service listens on 127.0.0.1:3031 by default.",
+        ));
+        assert!(!research_claim_supported_by_snapshot(
+            "Service port 3031 is loopback-only.",
+            "Loopback-only service. It listens on port 3031.",
+        ));
+    }
+
+    #[test]
     fn status_parse_round_trips_every_variant() {
         for s in [
             ResearchJobStatus::Pending,
@@ -2491,6 +2619,34 @@ mod tests {
         assert_eq!(summary.notes[0].sub_query, "first");
         assert_eq!(summary.notes[0].state, SubQueryState::Done);
         assert_eq!(summary.notes[1].state, SubQueryState::Running);
+    }
+
+    #[test]
+    fn fetched_source_evidence_survives_notes_persistence() {
+        let db = fresh_db();
+        let store = ResearchJobStore::new(&db);
+        let id = ResearchJobId::new();
+        store
+            .insert_pending(
+                &id,
+                &ConversationId::from("c"),
+                "q",
+                "Controller",
+                None,
+                100,
+            )
+            .unwrap();
+        let mut fetched = note(0, "evidence", SubQueryState::Done);
+        fetched.sources[0].source_id = Some(format!("src-{}", "a".repeat(64)));
+        fetched.sources[0].retrieved_at = Some(1_790_000_000);
+        fetched.sources[0].content_sha256 = Some("b".repeat(64));
+        fetched.sources[0].snapshot_text = Some("retained local source excerpt".into());
+        fetched.sources[0].snapshot_truncated = true;
+
+        store.set_notes(&id, &[fetched.clone()], 200).unwrap();
+        let summary = store.get(&id).unwrap().unwrap().to_summary();
+
+        assert_eq!(summary.notes[0].sources[0], fetched.sources[0]);
     }
 
     #[test]

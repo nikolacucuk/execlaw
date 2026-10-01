@@ -297,7 +297,39 @@ impl<'db> DurableRun<'db> {
             approval_id,
             outbox_idempotency_key,
         )?;
+        self.enter_defined_step(&step_id, ordinal, kind, now)
+    }
 
+    /// Reclaim a previously defined step after the run's immutable input
+    /// manifest has been checked by its executor. The transport turn ID is
+    /// allowed to change across process restarts; the persisted step kind
+    /// and ordinal are still required to match.
+    pub fn resume_existing<T: DeserializeOwned>(
+        &self,
+        step_id: &str,
+        ordinal: i64,
+        kind: RunStepKind,
+        now: i64,
+    ) -> Result<StepDecision<T>, RunStoreError> {
+        let step = self
+            .store
+            .get_step(&self.run_id, step_id)?
+            .ok_or_else(|| RunStoreError::Conflict(format!("step '{step_id}' is not defined")))?;
+        if step.ordinal != ordinal || step.kind != kind {
+            return Err(RunStoreError::Conflict(format!(
+                "step '{step_id}' has a different kind or ordinal"
+            )));
+        }
+        self.enter_defined_step(step_id, ordinal, kind, now)
+    }
+
+    fn enter_defined_step<T: DeserializeOwned>(
+        &self,
+        step_id: &str,
+        ordinal: i64,
+        kind: RunStepKind,
+        now: i64,
+    ) -> Result<StepDecision<T>, RunStoreError> {
         if let Some(step) = self.store.get_step(&self.run_id, &step_id)?
             && step.status == RunStepStatus::Completed
         {
@@ -672,6 +704,52 @@ mod tests {
             StepDecision::Replay(serde_json::json!({"text": "done"}))
         );
         assert_eq!(run.advance(0, 116).unwrap().cursor, 1);
+    }
+
+    #[test]
+    fn existing_model_step_reclaims_after_transport_turn_id_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("turn-id-recovery.db");
+        let db = file_db(&path);
+        let cid = seed(&db);
+        let first = DurableRun::open(
+            &db,
+            "turn:durable-turn:1",
+            "worker-a",
+            cid.clone(),
+            EventSeq(1),
+            None,
+            100,
+        )
+        .unwrap()
+        .with_lease_seconds(5);
+        assert!(matches!(
+            first.begin::<Value>(
+                "model:0", 0, RunStepKind::ModelRequest,
+                &serde_json::json!({"turn_id":"first"}), None, None, 100,
+            ).unwrap(),
+            StepDecision::Execute(step) if step.attempt == 1
+        ));
+        let resumed = DurableRun::open(
+            &db,
+            "turn:durable-turn:1",
+            "worker-b",
+            cid,
+            EventSeq(1),
+            None,
+            106,
+        )
+        .unwrap()
+        .with_lease_seconds(5);
+        assert!(
+            resumed
+                .resume_existing::<Value>("model:0", 1, RunStepKind::ModelRequest, 106)
+                .is_err()
+        );
+        assert!(matches!(
+            resumed.resume_existing::<Value>("model:0", 0, RunStepKind::ModelRequest, 106).unwrap(),
+            StepDecision::Execute(step) if step.attempt == 2
+        ));
     }
 
     #[test]

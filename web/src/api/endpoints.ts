@@ -53,6 +53,38 @@ export async function dismissSetupWizard(
     );
 }
 
+export interface WorkspaceExecutionConfig {
+    image_reference: string | null;
+    language_servers: Record<string, string[]>;
+    updated_at: number;
+    updated_by: string;
+}
+
+export async function getWorkspaceExecutionConfig(
+    tokenAccessor: () => string | null,
+): Promise<WorkspaceExecutionConfig> {
+    return apiFetch<WorkspaceExecutionConfig>(
+        "/api/admin/workspace-execution",
+        {},
+        tokenAccessor,
+    );
+}
+
+export async function putWorkspaceExecutionConfig(
+    tokenAccessor: () => string | null,
+    request: {
+        image_reference: string;
+        language_servers: Record<string, string[]>;
+        approve_local_image: boolean;
+    },
+): Promise<WorkspaceExecutionConfig & { approval: string }> {
+    return apiFetch<WorkspaceExecutionConfig & { approval: string }>(
+        "/api/admin/workspace-execution",
+        { method: "PUT", body: request },
+        tokenAccessor,
+    );
+}
+
 // ---- /api/setup ----------------------------------------------------
 
 export interface SetupRequest {
@@ -2430,11 +2462,56 @@ export interface AdminMemoryEvidenceSource {
     integrity_verified: boolean;
 }
 
+export interface AdminMemoryPrivacyDeletionReport {
+    conversation_id: string;
+    event_seq: number;
+    assertions_hidden: number;
+    evidence_hidden: number;
+}
+
 export interface AdminMemoryAssetsResponse {
     assets: AdminMemoryAsset[];
     bindings: AdminMemoryAssetBinding[];
     agent_scopes: Array<{ id: string; name: string }>;
     assertions: AdminMemoryAssertion[];
+}
+
+export interface AdminMemoryRetrievalConfig {
+    embedding_model_id: string;
+    reranker_version: string;
+    updated_at: number;
+}
+
+export async function getAdminMemoryRetrievalConfig(
+    tokenAccessor: () => string | null,
+): Promise<AdminMemoryRetrievalConfig | null> {
+    return apiFetch<AdminMemoryRetrievalConfig | null>(
+        "/api/admin/memory-assets/retrieval-config",
+        {},
+        tokenAccessor,
+    );
+}
+
+export async function putAdminMemoryRetrievalConfig(
+    config: Pick<AdminMemoryRetrievalConfig, "embedding_model_id" | "reranker_version">,
+    tokenAccessor: () => string | null,
+): Promise<AdminMemoryRetrievalConfig> {
+    return apiFetch<AdminMemoryRetrievalConfig>(
+        "/api/admin/memory-assets/retrieval-config",
+        { method: "PUT", body: config },
+        tokenAccessor,
+    );
+}
+
+export async function rebuildAdminMemoryEmbeddings(
+    tokenAccessor: () => string | null,
+    limit = 32,
+): Promise<{ embedding_model_id: string; index_id: string; embedded: number; has_more: boolean }> {
+    return apiFetch(
+        "/api/admin/memory-assets/embeddings/rebuild",
+        { method: "POST", body: { limit } },
+        tokenAccessor,
+    );
 }
 
 export async function getAdminMemoryAssets(
@@ -2464,6 +2541,18 @@ export async function getAdminMemoryEvidenceSource(
     return apiFetch(
         `/api/admin/memory-assertions/${encodeURIComponent(assertionId)}/evidence/${encodeURIComponent(evidenceId)}`,
         {},
+        tokenAccessor,
+    );
+}
+
+export async function forgetAdminMemorySourceEvent(
+    conversationId: string,
+    eventSeq: number,
+    tokenAccessor: () => string | null,
+): Promise<AdminMemoryPrivacyDeletionReport> {
+    return apiFetch(
+        "/api/admin/memory-assertions/forget-source",
+        { method: "POST", body: { conversation_id: conversationId, event_seq: eventSeq } },
         tokenAccessor,
     );
 }

@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 /// manually configured a bare `http://host:port` still hit the right
 /// path. Trailing slashes are trimmed before the `/v1` check so
 /// `…:8101/v1/` is handled the same as `…:8101/v1`.
-fn daemon_root(base_url: &str) -> String {
+pub(super) fn daemon_root(base_url: &str) -> String {
     let trimmed = base_url.trim_end_matches('/');
     trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_owned()
 }

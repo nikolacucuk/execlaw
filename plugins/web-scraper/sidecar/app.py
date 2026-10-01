@@ -12,6 +12,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from scrapling.fetchers import DynamicFetcher, Fetcher, StealthyFetcher
+from evidence import source_evidence
 
 app = FastAPI(title="execlaw web-scraper sidecar", version="0.1.0")
 
@@ -108,6 +109,10 @@ class PageData:
     text: str
     html_excerpt: str
     links: List[str]
+    source_id: str
+    retrieved_at: int
+    content_sha256: str
+    snapshot_truncated: bool
 
 
 def _normalize_domains(domains: Optional[List[str]]) -> Set[str]:
@@ -298,12 +303,14 @@ def _page_data(url: str, mode: Mode, timeout_ms: int, max_chars: int) -> PageDat
             text_raw = _to_text(page.get())
         except Exception:
             text_raw = ""
-    text, _ = _clip(text_raw, max_chars)
+    text, text_truncated = _clip(text_raw, max_chars)
 
     html_raw = _to_text(getattr(page, "html", ""))
-    html_excerpt, _ = _clip(html_raw, min(max_chars, 8000))
+    html_excerpt, html_truncated = _clip(html_raw, min(max_chars, 8000))
 
     links = _extract_links(page, final_url)
+    evidence = source_evidence(final_url, html_raw, text, max_chars)
+    evidence["snapshot_truncated"] = text_truncated or html_truncated
 
     return PageData(
         final_url=final_url,
@@ -313,6 +320,10 @@ def _page_data(url: str, mode: Mode, timeout_ms: int, max_chars: int) -> PageDat
         text=text,
         html_excerpt=html_excerpt,
         links=links,
+        source_id=evidence["source_id"],
+        retrieved_at=evidence["retrieved_at"],
+        content_sha256=evidence["content_sha256"],
+        snapshot_truncated=evidence["snapshot_truncated"],
     )
 
 
@@ -335,6 +346,11 @@ def fetch(req: FetchRequest) -> Dict[str, Any]:
         "text": text,
         "html_excerpt": page.html_excerpt,
         "truncated": truncated,
+        "source_id": page.source_id,
+        "retrieved_at": page.retrieved_at,
+        "content_sha256": page.content_sha256,
+        "snapshot_text": page.text,
+        "snapshot_truncated": page.snapshot_truncated or truncated,
         "timings_ms": {"fetch": 0, "render": 0, "extract": 0},
     }
 
@@ -351,9 +367,11 @@ def extract(req: ExtractRequest) -> Dict[str, Any]:
     fields = _extract_fields(page, req.fields)
 
     main_text = ""
+    raw_text = _to_text(getattr(page, "text", ""))
+    html_raw = _to_text(getattr(page, "html", ""))
     if req.main_text:
-        raw = _to_text(getattr(page, "text", ""))
-        main_text, _ = _clip(raw, req.max_chars)
+        main_text, _ = _clip(raw_text, req.max_chars)
+    evidence = source_evidence(final_url, html_raw, main_text, req.max_chars)
 
     links: List[str] = []
     if req.include_links:
@@ -367,6 +385,7 @@ def extract(req: ExtractRequest) -> Dict[str, Any]:
         "main_text": main_text,
         "links": links,
         "truncated": len(main_text) >= req.max_chars if req.main_text else False,
+        **evidence,
         "timings_ms": {"fetch": 0, "render": 0, "extract": 0},
     }
 
@@ -384,6 +403,11 @@ def clip(req: ClipRequest) -> Dict[str, Any]:
         "title": req.title or page.title,
         "markdown": markdown,
         "truncated": truncated,
+        "source_id": page.source_id,
+        "retrieved_at": page.retrieved_at,
+        "content_sha256": page.content_sha256,
+        "snapshot_text": page.text,
+        "snapshot_truncated": page.snapshot_truncated or truncated,
         "timings_ms": {"fetch": 0, "render": 0, "extract": 0},
     }
 
@@ -407,6 +431,10 @@ def crawl(req: CrawlRequest) -> Dict[str, Any]:
             page = _fetch(url, req.mode, req.timeout_ms)
             final_url = _to_text(getattr(page, "url", url))
             status = int(getattr(page, "status", 200) or 200)
+            raw_text = _to_text(getattr(page, "text", ""))
+            html_raw = _to_text(getattr(page, "html", ""))
+            evidence_text = raw_text if req.extract and req.extract.main_text else ""
+            evidence = source_evidence(final_url, html_raw, evidence_text, 4000)
 
             item: Dict[str, Any] = {
                 "url": final_url,
@@ -415,9 +443,10 @@ def crawl(req: CrawlRequest) -> Dict[str, Any]:
             }
 
             if req.extract and req.extract.main_text:
-                item["main_text"] = _to_text(getattr(page, "text", ""))[:4000]
+                item["main_text"] = evidence["snapshot_text"]
             if req.extract and req.extract.fields:
                 item["fields"] = _extract_fields(page, req.extract.fields)
+            item.update(evidence)
 
             pages.append(item)
 

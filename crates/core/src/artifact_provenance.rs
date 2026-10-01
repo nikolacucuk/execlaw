@@ -374,6 +374,72 @@ impl ArtifactProvenanceStore {
         self.record(&local, "local_development_override", actor)
     }
 
+    /// Record a Controller's explicit approval for one exact local OCI digest.
+    pub fn approve_local_oci_reference(
+        &self,
+        artifact_type: ArtifactType,
+        reference: &str,
+        actor_trust: &str,
+        actor: &str,
+    ) -> Result<(), ArtifactVerificationError> {
+        if actor_trust != "Controller" {
+            return Err(ArtifactVerificationError::ControllerRequired);
+        }
+        let digest = reference
+            .rsplit_once("@sha256:")
+            .map(|(_, digest)| digest)
+            .or_else(|| reference.strip_prefix("sha256:"))
+            .ok_or_else(|| {
+                ArtifactVerificationError::InvalidMetadata(
+                    "Controller-approved local OCI references must be digest-pinned".into(),
+                )
+            })?;
+        if reference.trim().is_empty()
+            || reference.len() > 512
+            || digest.len() != 64
+            || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || actor.trim().is_empty()
+            || actor.len() > 128
+        {
+            return Err(ArtifactVerificationError::InvalidMetadata(
+                "Controller-approved OCI reference metadata is invalid".into(),
+            ));
+        }
+        let digest = digest.to_ascii_lowercase();
+        let statement = ProvenanceStatement {
+            artifact_id: format!("{}:workspace-toolchain:{digest}", artifact_type.as_str()),
+            artifact_type,
+            artifact_locator: reference.to_owned(),
+            sha256: digest.clone(),
+            publisher_identity: "controller-local-approval".into(),
+            source_repository: "controller-local-approval".into(),
+            source_commit: "controller-local-approval".into(),
+            workflow_identity: "controller-local-approval".into(),
+            signature_reference: "controller-local-approval".into(),
+            attestation_result: "Controller approved this exact local OCI digest".into(),
+            sbom_format: "spdx".into(),
+            sbom_location: "not-provided-local-controller-approval".into(),
+            sbom_sha256: "0".repeat(64),
+        };
+        self.record(&statement, "local_development_override", actor)?;
+        let now = chrono::Utc::now().timestamp();
+        self.db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_artifact_verification_events \
+                 (artifact_id,event_type,status,actor,detail_json,created_at) \
+                 VALUES (?1,'controller_approved_local_oci_reference','recorded',?2,?3,?4)",
+                params![
+                    statement.artifact_id,
+                    actor,
+                    serde_json::json!({"artifact_type":artifact_type.as_str(),"reference":reference,"sha256":digest}).to_string(),
+                    now
+                ],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     pub fn authorize_oci_reference(
         &self,
         artifact_id: &str,

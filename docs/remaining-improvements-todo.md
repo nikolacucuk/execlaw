@@ -99,8 +99,9 @@ verify that boundary after deploying the current build.
 | 8 | Establish qualification evidence | [H021](llm-harness-roadmap.md#enhancement-021), [H107](llm-harness-roadmap.md#enhancement-107)-[H111](llm-harness-roadmap.md#enhancement-111), [H120](llm-harness-roadmap.md#enhancement-120): real tasks, invariant/fuzz/mutation checks, local-only tests, support records | F16 and per-fix regressions |
 
 Regression tests accompany each fix; order 8 does not defer verification until
-the end. Track voice lock remediation under H047/F15 and the remaining
-findings in the [closure ledger](implementation-plan.md#finding-closure-ledger).
+the end. F15's cross-session voice lock regression is recorded as closed
+under H047; track the remaining findings in the
+[closure ledger](implementation-plan.md#finding-closure-ledger).
 Advance complete user journeys in the six workstreams after their blocking
 dependencies pass. Lab work remains in scope as qualified trials.
 
@@ -144,8 +145,11 @@ the same idempotent lease and per-file journal as apply; retries reuse the
 durable plan, and the checkpoint materializes into a fresh managed temporary
 checkout.
 
-H041 remains partial pending process-kill recovery and concurrent external-edit
-qualification.
+H041's current focused tests now cover checkpoint/database reopen, resumable
+per-file receipts, interrupted replace recovery, competing-run conflicts,
+owned-change restore, and external-edit preservation. Installed process-kill
+qualification remains open; the Windows symlink fixture also needs a host with
+Developer Mode or symlink privilege to exercise that branch.
 
 ## Delivered implementation slice: H031-H035 (2026-09-28)
 
@@ -380,6 +384,24 @@ runner-local (25), runner protocol (10), outbox (19), and SPA (537) passed;
 TypeScript lint passed. Full affected-crate/workspace and release tests still
 need their final run on the settled source tree. H022-H025 remain Partial.
 
+2026-09-30 closeout for H022-H025: all four remain **Partial**. H022 gained
+real-model headless/editor-style API, routine, agent, plugin attachment, and
+research attachment evidence, but the actual CLI/editor adapter processes
+and settled-build matrix remain. H023's expired-budget startup hot loop was
+fixed and a disposable restart terminalized once. Database-scoped runner
+resources and a real runner turn worked; a held runner kill persisted its
+first attempt but was not successfully resumed before its budget expired.
+The full cross-path/effect kill matrix is still open. H024's debug-copy sink
+kill still proves only Unknown with one effect; Windows Application Control
+4551 blocked release compilation, and the alternate Docker SQLCipher build
+was stopped before producing an image when host RAM became scarce. H025 gained
+live public OpenMeteo/research fetch, MCP approval/denial/redirect, and
+focused public automation/Google OAuth policy evidence; the final-tree full
+adversarial matrix and authenticated supported endpoints are unproved. The
+[runbook](h022-h025-qualification.md) lists exact evidence and environment
+constraints. The final isolated build was canceled when work was stopped;
+do not promote earlier focused tests into final-tree acceptance.
+
 ## Current implementation slices: H027-H030 and H036 (2026-09-29)
 
 H028-H030 implementation code, release workflow definitions, and documentation
@@ -448,14 +470,17 @@ implemented or cannot be qualified on this Windows host.
 | H033 | Server `build_runner_tool_catalog` tests | 4 tests passed | No dedicated test exercised progressive search plus exact-schema activation end to end |
 | H034 | Mocked inference probe, Controller authorization, and exact-identity requalification tests | 8 focused tests passed; a failed recheck now invalidates the prior profile | Run the held-out model/template/backend matrix against each deployed local backend; the active Standard endpoint is currently unavailable |
 | H035 | Metadata-only reconnectable run-trace asset receipt test | 1 test passed; follow-up full SPA suite passed 531 tests | Live restart/reconnect qualification |
-| H036 | `cargo test -p execlaw-core --lib`; offline `eval-harness replay-fixture` | 709 tests passed; fixture report valid, effects disabled, incident/release refs retained | Production executor replay and release-linked regression gate |
-| H037-H038 | Core suite; server run-trace, governed-asset injection, and memory-admin tests; Memory Assets/Skills SPA tests | Core 709 passed; server 3 passed; SPA 7 passed | Agent-run history/invalidation; embedding rebuild, research/agent consumers, held-out recall/answer quality, hardware latency |
-| H039 | `cargo test -p execlaw-skills --lib`; server `skills_admin::tests` | 157 and 9 tests passed; Skills UI was part of the 7 passing Memory Assets/Skills tests above | Evaluation still uses substring scoring; isolated task execution, forbidden-action/resource checks, comparative promotion |
-| H040 | Source and test inventory reviewed | No workspace coding handler/plugin tests exist | Plugin model tools, safe patching, confined terminal/LSP dispatch, durable dispatch, and H023-H029 write-authority prerequisites |
-| H041 | Source/test inventory reviewed | No workspace checkpoint/restore tests exist | Process-kill and concurrent external-edit recovery qualification |
-| H043 | Existing stop-turn route tests | 2 tests passed | Durable steer/queue/pause/resume idempotency tests, delivered-but-unacknowledged recovery, and latency measurements; the new control store has no unit tests |
-| H046 | Full server library suite | Source-fetch and research unit tests passed as part of the server suite | Semantic citation support, stale/contradictory evidence, browser actions, and held-out research scoring are implementation/quality gates |
-| H047 | Voice-pipeline library tests; full server library suite | 41 pipeline tests and server voice unit tests passed | Continuous endpointing, production agent wiring, supported hardware, and end-to-end streaming remain incomplete |
+| H036 | Offline `eval-harness replay-fixtures --directory evals/fixtures` | Both checked-in fixtures passed production `TurnExecutor` replay with fixture-only dispatch, HMAC verification, incident/release references, and effects disabled; Windows test runner remains blocked by Application Control 4551 | Catalog/policy-only trajectories, attached media, raw stream framing, and broader release-linked regression matrix |
+| H037-H038 | Core/server suites and Memory Assets SPA tests from the prior verification pass; current server library test target compiled with `--no-run` | Prior core suite: 739 passed, with one unrelated concurrent `runs.rs` test transiently failing and passing in isolation; current Windows test launch blocked by Application Control 4551 | Agent-run restart/projection invalidation; live local embeddings, held-out recall/answer quality, and fixed-budget hardware latency |
+| H039 | Prior focused `execlaw-skills` and server behavioral-evaluation tests; current server test target compiled with `--no-run` | Earlier tests passed before cumulative-token/denied-action enforcement was tightened; current Windows test launch blocked by Application Control 4551 | Re-run focused evaluator and promotion tests; live-model held-out candidate/parent qualification |
+| H040 | Workspace path/patch tests from prior verification; current server test target compiled with `--no-run` | Earlier traversal/hardlink and checkout dispatch tests passed; route-level idempotency and manifest-dispatch tests are in the current compiled target but could not be launched under Application Control 4551 | Confined terminal jobs, language-server diagnostics, approved toolchain, multi-file repair benchmark, and H023-H029 write-authority prerequisites |
+| H041 | Core `workspaces::tests`; server `workspace_coding::tests` | 4 core and 6 server tests passed: content-addressed checkpoint/database reopen, durable per-file receipt resume, crash-state backup recovery, competing-run conflict, owned-change restore, external-edit preservation, traversal/secret/hardlink denial. Windows symlink creation is skipped when privilege error 1314 is returned. | Installed-process-kill recovery; run the symlink-escape fixture on a Windows host with Developer Mode or symlink privilege |
+| H042 | Server child-join replay and killed-child recovery; core parent-cancel and fork tests; Criterion child reservation benchmark | Completed join replay (1), killed child inference recovery (1), cancellation tree (1), and fresh fork (1) passed. Local dev-profile reservation benchmark: 1.6854–1.8185 ms; model inference excluded. | Production runner restart and supported-hardware delegation qualification |
+| H043 | Core `turn_controls::tests`; server `turn_controls_admin::tests`, stalled-inference stop, and chat idempotency | 2 core tests and 3 server tests passed. Recovery reconciles a queued event committed before its control acknowledgment without duplicate append; stop returned under 500 ms while the local inference request was held open. | In-process steer/pause/resume; installed runner delivery and delivered-but-unacknowledged control reconnect |
+| H044 | Server client-contract schema; CLI compatibility and editor-adapter tests; chat idempotency | Contract schema, older-client minimum-version handling, allowlisted editor command mapping, and same-key response replay/body conflict tests passed. | Authenticated SPA-to-client handoff and WebAuthn-assisted installed-client qualification |
+| H045 | Server `mcp_http_client::tests`; full `execlaw-mcp-client` suite | 7 HTTP tests and 15 stdio client/integration tests passed: pinned version negotiation, session expiry without effect replay, wrong IDs, oversized responses/frames, cancellation, and matching SSE response before EOF. | Installed MCP endpoint and cross-platform process/session qualification |
+| H046 | Core source-evidence persistence and claim-gate tests; server report evidence tests; evaluator research verifier; sidecar evidence tests | Fetched snapshots survive notes persistence; fabricated/unrelated citations fail; stale/hash-changed, failed, truncated, and conflicting snapshots are exposed; web-scraper results carry bounded IDs/times/hashes/excerpts; offline release-v2 4/4 and periodic-v2 7/7 | Lexical support remains conservative rather than semantic entailment; broader browser-action qualification and held-out local-model scoring remain |
+| H047 | Voice frame cap, Whisper buffer cap, per-session stalled-STT interrupt, token-to-sentence TTS tests | Frame parser enforces 256 KiB payload maximum; Whisper caps utterances at 30 seconds; active-thread voice input is committed through the normal Controller chat path and ChatTokenDelta text is spoken sentence-by-sentence; per-session lock/cancellation regression passed | Push-to-talk transport, non-streaming Whisper, no automatic first-turn routing from Welcome, no continuous server VAD, supported-hardware noise/silence/reconnect/barging suite |
 | H048 | Full core and server library suites | Unit suites passed; deletion tombstone paths compile and existing projections run | Descendant deletion, backup restore reapplication, and full seeded projection qualification remain open |
 | H049 | No stable-runner Criterion workflow or benchmark execution was available in this local verification | No baseline or optimization result produced | Self-hosted baseline, repeated hardware measurements, and quality/policy equivalence |
 | H050 | Full SPA suite and focused Memory Assets/Skills/panel tests | Follow-up full SPA run passed 531 tests; TypeScript lint passed | Real-browser onboarding/recovery, keyboard/screen-reader, per-OS, and accessibility regression gates |
@@ -523,16 +548,14 @@ Additional workspace checks:
 - `cargo fmt --all -- --check` still reports differences in other dirty-tree
   Rust files; touched Rust files were formatted individually.
 
-H043's Controller chat panel now offers steer-at-boundary, queue-next-turn,
-pause, resume, and runner cancel, while the existing stop path also creates a
-durable cancel control. Runner acknowledgements update the SQLite control
-lifecycle. Queued messages are appended as user events and marked applied in
-that same event-log transaction; startup verifies old event chains and
-reconciles accepted queue controls idempotently. Conversation-scoped request
-keys are reused from session storage after a lost response and reject changed
-intent. Reconciliation of delivered-but-unacknowledged runner controls and
-stop/steer latency qualification remain open; duplicate-key/body-conflict
-behavior needs focused verification.
+H043's Controller chat panel offers steer-at-boundary, queue-next-turn, pause,
+resume, and runner cancel. Runner acknowledgments update the SQLite lifecycle.
+Queued messages are appended as user events and marked applied in the same
+event-log transaction; startup also recognizes the older split-write state and
+reconciles an existing event without duplicating it. Request-key/body conflict,
+queue recovery, and stop during a held local inference request now have focused
+tests. Direct in-process steer/pause/resume and installed runner
+delivery/reconnect reconciliation remain open.
 
 ## Delivered implementation slice: H046 fetched-source evidence (2026-09-28)
 
@@ -542,9 +565,11 @@ state. Research cards and the job inspector expose that evidence as an
 untrusted excerpt. Report Markdown links must match a successfully fetched URL;
 unmatched links are rendered as unverified text and listed in a warning section.
 
-H046 remains partial: semantic claim-to-source support, stale-page and
-contradiction detection, browser-action qualification, and held-out research
-scoring remain open.
+H046 remains partial: the report had not previously checked each claim against
+its cited snapshot or reported stale/hash-changed evidence and extraction
+failures. The follow-up below adds a conservative lexical support gate and
+those evidence review fields. Semantic entailment, broader browser-action
+qualification, and held-out research scoring remain open.
 
 ## Delivered implementation slice: H048 research retention retry (2026-09-28)
 
@@ -579,10 +604,10 @@ Agent callbacks now run in a cancellation select and receive a token they can
 pass to inference/tool work; audio broadcast checks cancellation per chunk.
 
 H047 remains partial: the current transport is push-to-talk, Whisper is
-request/response, Kokoro returns a complete synthesis, and the voice route still
-uses an echo callback. Continuous endpointing, bounded streaming queues,
-incremental STT, sentence-streamed TTS, production agent wiring, and supported
-hardware qualification remain open.
+request/response, and the voice route still uses an echo callback. Continuous
+endpointing, true incremental STT, production agent wiring, and supported
+hardware qualification remain open. Sentence-based TTS and explicit audio
+buffer bounds are recorded in the follow-up below.
 
 ## Delivered implementation slice: H049 stable-runner Criterion gate (2026-09-28)
 
@@ -596,6 +621,48 @@ contended inference admission, and 4 MiB artifact publishing.
 
 H049 remains partial until the stable runner supplies its first baseline and
 optimization trials demonstrate unchanged task quality and policy behavior.
+
+## H046-H047 implementation follow-up (2026-09-30)
+
+Research synthesis now includes retained excerpts and provenance fields in the
+local prompt, requires exact fetched source IDs, checks each factual line
+against cited snapshots, and appends an evidence review listing unsupported
+claims, stale or hash-changed snapshots, extraction failures, truncation,
+unverified citations, and possible mixed-negation conflicts. URL citations that
+were not fetched in the job are unlinked, redacted, and called out. Claim
+support is a lexical containment gate; it does not establish semantic
+entailment. The research benchmark verifier applies the same claim/source
+check, with updated offline release and periodic fixture suites.
+
+The web-scraper sidecar attaches a stable normalized-URL ID, retrieval time,
+body hash, bounded excerpt, and truncation flag to fetch, extract, clip, and
+crawl results. Private URLs remain subject to the plugin's existing
+Controller trust floor, configured domain allow list, and local endpoint
+policy; this code change does not broaden those grants.
+
+Voice stop on an active chat thread now routes the transcript through the same
+authenticated `/api/chats/:id/messages` path used by typed input, with a
+session-keyed idempotency key. The voice runtime consumes matching chat token
+deltas as they arrive, releases complete sentences to local TTS, and checks
+cancellation during inference, synthesis, and outbound audio. A bounded
+16-sentence channel applies backpressure; if the broadcast stream lags or no
+longer matches the committed reply, the runtime suppresses its uncertain tail.
+The Welcome screen still has no conversation ID at microphone stop, so its
+transcript remains a composer draft. Inbound WebSocket audio frames have a
+256 KiB maximum and Whisper retains no more than 30 seconds per utterance,
+with excess input dropped and logged. Push-to-talk and non-streaming Whisper
+still leave continuous endpointing and incremental transcription open.
+
+Focused validation: source evidence database round-trip (1 test), report
+evidence tests (3), research verifier (1), offline benchmark suites (4/4 and
+7/7), sidecar evidence tests (2), voice frame cap (1), Whisper buffer cap (1),
+sentence-streamed runtime synthesis (1), and cross-session stalled-STT
+interruption (1). One-trial offline release and periodic suites passed 4/4 and
+7/7. Five-trial sweeps passed 18/20 and 32/35 respectively; all failures were
+the separate coding-fixture subprocess tests, whose stderr is currently
+collapsed to a generic failure. H046-H047 remain Partial and unchecked pending
+semantic held-out research scoring and the voice implementation/runtime
+acceptance gates above.
 
 ## Delivered implementation slice: H049 stable-runner Criterion gate (2026-09-28)
 

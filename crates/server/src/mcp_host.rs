@@ -441,7 +441,16 @@ async fn http_actor_loop(
                     Some(&error),
                     now,
                 );
-                return;
+                // An operator may grant this endpoint later. Keep the actor
+                // alive so the next bounded retry re-resolves and rechecks
+                // the policy; a denied address still receives no request.
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = shutdown.notified() => return,
+                    _ = global_stop.notified() => return,
+                }
+                backoff = (backoff * 2).min(RECONNECT_MAX);
+                continue;
             }
         };
 
@@ -600,6 +609,55 @@ pub fn parse_prefixed_tool_name(name: &str) -> Option<(&str, &str)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn denied_private_http_endpoint_waits_for_a_later_policy_grant() {
+        use execlaw_core::db::DbConfig;
+        use execlaw_core::migrations::MigrationRunner;
+
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let row = McpServerRow {
+            id: "qualification-mcp".into(),
+            display_name: "Qualification MCP".into(),
+            transport: McpTransport::StreamableHttp,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("http://10.1.2.3:30072/mcp".into()),
+            auth_secret_ref: None,
+            enabled: true,
+            default_allowed_classes: vec!["Controller".into()],
+            status: McpServerStatus::Idle,
+            last_error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let shutdown = Arc::new(Notify::new());
+        let handle = Arc::new(ServerHandle {
+            client: Mutex::new(None),
+            tool_schemas: Mutex::new(HashMap::new()),
+            shutdown: shutdown.clone(),
+        });
+        let task = tokio::spawn(http_actor_loop(
+            db,
+            row,
+            handle,
+            shutdown.clone(),
+            Arc::new(Notify::new()),
+        ));
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            !task.is_finished(),
+            "a denied endpoint must remain eligible after approval"
+        );
+        shutdown.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+    }
 
     #[test]
     fn parse_prefixed_tool_name_round_trips() {

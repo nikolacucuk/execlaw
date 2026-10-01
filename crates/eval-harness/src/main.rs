@@ -58,6 +58,7 @@ struct Cli {
 }
 
 mod benchmark;
+mod fixture_replay;
 
 #[derive(Debug, Subcommand)]
 enum EvalCommand {
@@ -108,6 +109,31 @@ enum EvalCommand {
         #[arg(long)]
         report: Option<PathBuf>,
     },
+    /// Replay every regular JSON fixture in a directory and emit one qualification record.
+    ReplayFixtures {
+        /// Directory containing checked-in or operator-approved regression fixtures.
+        #[arg(long)]
+        directory: PathBuf,
+        /// Optional path for the machine-readable suite report.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct FixtureReplayRecord {
+    file: String,
+    sha256: String,
+    validation: execlaw_core::eval::RegressionFixtureValidation,
+    execution: fixture_replay::ReplayExecution,
+}
+
+#[derive(Debug, Serialize)]
+struct FixtureReplayReport {
+    schema_version: u32,
+    effects_enabled: bool,
+    fixture_count: usize,
+    fixtures: Vec<FixtureReplayRecord>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -142,29 +168,95 @@ struct CaseResult {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     if let Some(EvalCommand::ReplayFixture { fixture, report }) = &cli.command {
-        let bytes = std::fs::read(fixture)
-            .map_err(|error| anyhow::anyhow!("read fixture {}: {error}", fixture.display()))?;
-        if bytes.len() > 8 * 1024 * 1024 {
-            anyhow::bail!("fixture exceeds the 8 MiB replay limit");
-        }
-        let fixture_data: execlaw_core::eval::RegressionFixture = serde_json::from_slice(&bytes)
-            .map_err(|error| anyhow::anyhow!("parse fixture: {error}"))?;
-        let validation = execlaw_core::eval::validate_regression_fixture(&fixture_data)
-            .map_err(|error| anyhow::anyhow!("fixture validation failed: {error}"))?;
+        let record = replay_fixture(fixture).await?;
+        let validation = &record.validation;
         println!(
-            "fixture valid: id={} events={} tool_calls={} transitions={} effects_enabled={} incident={} release={}",
+            "fixture replayed: id={} events={} tool_calls={} transitions={} executor_turns={} effects_enabled={} hmac_verified={} replay_sha256={} incident={} release={}",
             validation.fixture_id,
-            validation.events_checked,
-            validation.tool_calls_checked,
+            record.execution.events_replayed,
+            record.execution.mock_tool_responses_replayed,
             validation.transitions_checked,
-            validation.effects_enabled,
+            record.execution.executor_replayed_turns,
+            record.execution.effects_enabled,
+            record.execution.hmac_verified,
+            record.execution.replay_sha256,
             validation.incident_ref.as_deref().unwrap_or("unlinked"),
             validation.release_ref.as_deref().unwrap_or("unlinked"),
         );
         if let Some(path) = report {
-            let report_bytes = serde_json::to_vec_pretty(&validation)?;
+            let report_bytes = serde_json::to_vec_pretty(&record)?;
             std::fs::write(path, report_bytes)
                 .map_err(|error| anyhow::anyhow!("write validation report: {error}"))?;
+        }
+        return Ok(());
+    }
+    if let Some(EvalCommand::ReplayFixtures { directory, report }) = &cli.command {
+        let root = std::fs::canonicalize(directory).map_err(|error| {
+            anyhow::anyhow!("open fixture directory {}: {error}", directory.display())
+        })?;
+        if !root.is_dir() {
+            anyhow::bail!("fixture path is not a directory: {}", root.display());
+        }
+        let mut paths = std::fs::read_dir(&root)
+            .map_err(|error| anyhow::anyhow!("read fixture directory: {error}"))?
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<Result<Vec<_>, _>>()?;
+        paths.retain(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        });
+        paths.sort();
+        if paths.is_empty() {
+            anyhow::bail!("fixture directory contains no .json fixtures");
+        }
+        let mut fixtures = Vec::with_capacity(paths.len());
+        for path in paths {
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file() {
+                anyhow::bail!("fixture is not a regular file: {}", path.display());
+            }
+            let canonical = std::fs::canonicalize(&path)?;
+            if !canonical.starts_with(&root) {
+                anyhow::bail!("fixture resolves outside the requested directory");
+            }
+            let record = replay_fixture(&canonical).await?;
+            if record.validation.incident_ref.is_none() || record.validation.release_ref.is_none() {
+                anyhow::bail!(
+                    "catalog fixture {} must link both an incident and a release",
+                    canonical.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+            println!(
+                "fixture replayed: file={} id={} events={} tools={} executor_turns={} hmac_verified={} incident={} release={}",
+                canonical.file_name().unwrap_or_default().to_string_lossy(),
+                record.validation.fixture_id,
+                record.execution.events_replayed,
+                record.execution.mock_tool_responses_replayed,
+                record.execution.executor_replayed_turns,
+                record.execution.hmac_verified,
+                record
+                    .validation
+                    .incident_ref
+                    .as_deref()
+                    .unwrap_or("unlinked"),
+                record
+                    .validation
+                    .release_ref
+                    .as_deref()
+                    .unwrap_or("unlinked"),
+            );
+            fixtures.push(record);
+        }
+        let report_data = FixtureReplayReport {
+            schema_version: 1,
+            effects_enabled: false,
+            fixture_count: fixtures.len(),
+            fixtures,
+        };
+        if let Some(path) = report {
+            let report_bytes = serde_json::to_vec_pretty(&report_data)?;
+            std::fs::write(path, report_bytes)
+                .map_err(|error| anyhow::anyhow!("write fixture suite report: {error}"))?;
         }
         return Ok(());
     }
@@ -263,6 +355,37 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+async fn replay_fixture(path: &std::path::Path) -> anyhow::Result<FixtureReplayRecord> {
+    use sha2::{Digest, Sha256};
+
+    let bytes = std::fs::read(path)
+        .map_err(|error| anyhow::anyhow!("read fixture {}: {error}", path.display()))?;
+    if bytes.len() > 8 * 1024 * 1024 {
+        anyhow::bail!("fixture exceeds the 8 MiB replay limit: {}", path.display());
+    }
+    let fixture_data: execlaw_core::eval::RegressionFixture = serde_json::from_slice(&bytes)
+        .map_err(|error| anyhow::anyhow!("parse fixture {}: {error}", path.display()))?;
+    let validation =
+        execlaw_core::eval::validate_regression_fixture(&fixture_data).map_err(|error| {
+            anyhow::anyhow!("fixture validation failed for {}: {error}", path.display())
+        })?;
+    let execution = fixture_replay::replay(&fixture_data)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("fixture replay failed for {}: {error:#}", path.display())
+        })?;
+    Ok(FixtureReplayRecord {
+        file: path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+        sha256: hex::encode(Sha256::digest(&bytes)),
+        validation,
+        execution,
+    })
 }
 
 async fn run_one(

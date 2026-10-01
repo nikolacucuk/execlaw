@@ -19,6 +19,10 @@ use std::time::Duration;
 
 /// Sample rate the WAV header encodes. Whisper expects 16 kHz mono.
 pub const WHISPER_SAMPLE_RATE: u32 = 16_000;
+/// Hard per-utterance cap prevents a stuck push-to-talk client from retaining
+/// unbounded microphone audio before `flush()`.
+pub const MAX_BUFFERED_AUDIO_SECONDS: usize = 30;
+const MAX_BUFFERED_AUDIO_SAMPLES: usize = WHISPER_SAMPLE_RATE as usize * MAX_BUFFERED_AUDIO_SECONDS;
 
 /// HTTP client around faster-whisper's `/v1/audio/transcriptions`.
 pub struct WhisperClient {
@@ -29,6 +33,7 @@ pub struct WhisperClient {
     /// (voice_runtime) endpoint-detects via VAD and flushes well
     /// under the ~30s practical cap.
     buffer: Vec<i16>,
+    warned_buffer_cap: bool,
     /// Optional model name to pass. Speaches needs a concrete model
     /// id and downloads it on first use.
     model: String,
@@ -66,6 +71,7 @@ impl WhisperClient {
             base_url,
             client,
             buffer: Vec::new(),
+            warned_buffer_cap: false,
             model: "Systran/faster-distil-whisper-small.en".to_owned(),
             // Whisper inference is bounded by audio length; 30s
             // upload + decode is plenty for the VAD-segmented chunks
@@ -177,11 +183,21 @@ impl WhisperClient {
 #[async_trait]
 impl SttClient for WhisperClient {
     async fn push(&mut self, chunk: &AudioChunk) {
-        self.buffer.extend_from_slice(&chunk.samples);
+        let remaining = MAX_BUFFERED_AUDIO_SAMPLES.saturating_sub(self.buffer.len());
+        let accepted = remaining.min(chunk.samples.len());
+        self.buffer.extend_from_slice(&chunk.samples[..accepted]);
+        if accepted < chunk.samples.len() && !self.warned_buffer_cap {
+            tracing::warn!(
+                buffered_seconds = MAX_BUFFERED_AUDIO_SECONDS,
+                "voice utterance reached the local STT audio limit; dropping excess samples"
+            );
+            self.warned_buffer_cap = true;
+        }
     }
 
     async fn flush(&mut self) -> SttEvent {
         let samples = std::mem::take(&mut self.buffer);
+        self.warned_buffer_cap = false;
         match self.post_transcribe(&samples).await {
             Ok(text) => SttEvent::Final { text },
             Err(e) => {
@@ -206,6 +222,7 @@ impl SttClient for WhisperClient {
 
     async fn reset(&mut self) {
         self.buffer.clear();
+        self.warned_buffer_cap = false;
     }
 }
 
@@ -305,6 +322,20 @@ mod tests {
             other => panic!("expected Final, got {other:?}"),
         }
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn push_caps_stalled_utterance_audio_buffer() {
+        let mut client = WhisperClient::new("http://127.0.0.1:1");
+        client
+            .push(&one_chunk(MAX_BUFFERED_AUDIO_SAMPLES + 10_000))
+            .await;
+        client.push(&one_chunk(32_000)).await;
+        assert_eq!(client.buffered_samples(), MAX_BUFFERED_AUDIO_SAMPLES);
+        assert!(client.warned_buffer_cap);
+        client.reset().await;
+        assert_eq!(client.buffered_samples(), 0);
+        assert!(!client.warned_buffer_cap);
     }
 
     #[tokio::test]

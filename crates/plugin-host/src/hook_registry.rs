@@ -534,6 +534,9 @@ struct HookRegistryInner {
     /// a refcount, not the underlying 4 Strings + Vec. Saves
     /// ~250 ns per tool lookup (§0 axiom #14 benchmark).
     tools_by_name: BTreeMap<String, Arc<RegisteredTool>>,
+    /// Manifest-declared host execution contracts, with generic implementations
+    /// supplied by the host and lifecycle controlled by the declaring plugin.
+    host_tools_by_name: BTreeMap<String, Arc<RegisteredTool>>,
     /// First-class built-in tools — distinct from plugin tools so the
     /// dispatch layer can pull a live `Arc<dyn ToolImpl>` out and
     /// invoke it directly. Tool names CANNOT collide with the plugin
@@ -660,6 +663,12 @@ impl HookRegistry {
         // — let the builtin layer surface that conflict.
         for t in &manifest.tools {
             if t.host_implemented {
+                if let Some(existing) = w.host_tools_by_name.get(&t.name) {
+                    return Err(format!(
+                        "host tool '{}' is already declared by plugin '{}'",
+                        t.name, existing.plugin_id
+                    ));
+                }
                 continue;
             }
             if let Some(existing) = w.tools_by_name.get(&t.name) {
@@ -672,6 +681,12 @@ impl HookRegistry {
                 return Err(format!(
                     "tool '{}' is already registered as a built-in",
                     t.name
+                ));
+            }
+            if let Some(existing) = w.host_tools_by_name.get(&t.name) {
+                return Err(format!(
+                    "tool '{}' is already reserved by host plugin '{}'",
+                    t.name, existing.plugin_id
                 ));
             }
         }
@@ -719,6 +734,39 @@ impl HookRegistry {
                 // plugin — that's wired by listing both the builtin
                 // descriptor and the plugin's manifest tools, then
                 // joining on name.
+                let latency = match t.latency {
+                    execlaw_plugin_sdk::manifest::ToolLatency::Low => "low",
+                    execlaw_plugin_sdk::manifest::ToolLatency::Medium => "medium",
+                    execlaw_plugin_sdk::manifest::ToolLatency::High => "high",
+                };
+                let loaded_schemas = tool_schemas.remove(&t.name);
+                let input_schema = loaded_schemas
+                    .as_ref()
+                    .and_then(|loaded| loaded.input.as_ref());
+                let result_schema = loaded_schemas
+                    .as_ref()
+                    .and_then(|loaded| loaded.result.as_ref());
+                w.host_tools_by_name.insert(
+                    t.name.clone(),
+                    Arc::new(RegisteredTool {
+                        plugin_id: plugin_id.clone(),
+                        tool_name: t.name.clone(),
+                        latency: latency.to_owned(),
+                        required_capabilities: t.required_capabilities.clone(),
+                        schema_path: t.schema.clone(),
+                        description: t.description.clone(),
+                        schema_json: input_schema.map(|loaded| loaded.schema.clone()),
+                        schema_validator: input_schema.map(|loaded| loaded.validator.clone()),
+                        schema_hash: input_schema.map(|loaded| loaded.hash.clone()),
+                        result_schema_path: t.result_schema.clone(),
+                        result_schema_json: result_schema.map(|loaded| loaded.schema.clone()),
+                        result_schema_validator: result_schema
+                            .map(|loaded| loaded.validator.clone()),
+                        result_schema_hash: result_schema.map(|loaded| loaded.hash.clone()),
+                        trust_floor: t.trust_floor.clone(),
+                        host_internal: t.host_internal,
+                    }),
+                );
                 continue;
             }
             let latency = match t.latency {
@@ -935,6 +983,7 @@ impl HookRegistry {
     pub fn disable(&self, plugin_id: &str) {
         let mut w = self.inner.write().unwrap();
         w.tools_by_name.retain(|_, v| v.plugin_id != plugin_id);
+        w.host_tools_by_name.retain(|_, v| v.plugin_id != plugin_id);
         w.ui_panels_by_mount.retain(|_, v| v.plugin_id != plugin_id);
         w.transports_by_id.retain(|_, v| v.plugin_id != plugin_id);
         w.sidecars_by_name.retain(|_, v| v.plugin_id != plugin_id);
@@ -969,12 +1018,28 @@ impl HookRegistry {
         self.inner.read().unwrap().tools_by_name.get(name).cloned()
     }
 
-    pub fn all_tools(&self) -> Vec<Arc<RegisteredTool>> {
+    /// Look up a host implementation contract declared by an enabled plugin.
+    pub fn host_tool(&self, name: &str) -> Option<Arc<RegisteredTool>> {
         self.inner
             .read()
             .unwrap()
+            .host_tools_by_name
+            .get(name)
+            .cloned()
+    }
+
+    pub fn all_tools(&self) -> Vec<Arc<RegisteredTool>> {
+        let registry = self.inner.read().unwrap();
+        registry
             .tools_by_name
             .values()
+            .chain(
+                registry
+                    .host_tools_by_name
+                    .iter()
+                    .filter(|(name, _)| !registry.builtins_by_name.contains_key(*name))
+                    .map(|(_, tool)| tool),
+            )
             .cloned()
             .collect()
     }
@@ -986,11 +1051,17 @@ impl HookRegistry {
     /// the planner (typing-indicator, attachment-bridge convention
     /// tools, etc.).
     pub fn agent_callable_tools(&self) -> Vec<Arc<RegisteredTool>> {
-        self.inner
-            .read()
-            .unwrap()
+        let registry = self.inner.read().unwrap();
+        registry
             .tools_by_name
             .values()
+            .chain(
+                registry
+                    .host_tools_by_name
+                    .iter()
+                    .filter(|(name, _)| !registry.builtins_by_name.contains_key(*name))
+                    .map(|(_, tool)| tool),
+            )
             .filter(|t| !t.host_internal)
             .cloned()
             .collect()
@@ -2000,6 +2071,7 @@ latency = "low"
         // does NOT pollute tools_by_name.
         assert!(reg.builtin("signal.send_message").is_some());
         assert!(reg.tool("signal.send_message").is_none());
+        assert!(reg.host_tool("signal.send_message").is_some());
         assert!(reg.is_enabled("signal"));
     }
 
@@ -2029,6 +2101,40 @@ latency = "low"
             .expect("builtin must land cleanly when plugin entry was host_implemented");
     }
 
+    #[test]
+    fn host_implemented_plugin_tools_remain_manifest_owned_and_visible_to_the_agent() {
+        let registry = HookRegistry::new();
+        let manifest = PluginManifest::parse(
+            r#"
+[plugin]
+id = "workspace-contract-fixture"
+name = "Workspace contract fixture"
+version = "0.1.0"
+
+[[tools]]
+name = "workspace.read_file"
+description = "Read the isolated run workspace."
+latency = "low"
+required_capabilities = ["workspace.read"]
+trust_floor = "Controller"
+host_implemented = true
+"#,
+        )
+        .unwrap();
+        registry.enable(&manifest).unwrap();
+        let host_tool = registry.host_tool("workspace.read_file").unwrap();
+        assert_eq!(host_tool.plugin_id, "workspace-contract-fixture");
+        assert!(registry.tool("workspace.read_file").is_none());
+        assert!(
+            registry
+                .agent_callable_tools()
+                .iter()
+                .any(|tool| tool.tool_name == "workspace.read_file")
+        );
+        registry.disable("workspace-contract-fixture");
+        assert!(registry.host_tool("workspace.read_file").is_none());
+    }
+
     /// Symmetric guard: registering a built-in whose name is already
     /// owned by an enabled plugin must fail rather than silently
     /// taking precedence at lookup time.
@@ -2049,6 +2155,7 @@ latency = "low"
         reg.enable(&manifest_with_tools("p1", &["a"])).unwrap();
         reg.disable("p1");
         assert!(reg.tool("a").is_none());
+        assert!(reg.host_tool("a").is_none());
         // The built-in stays.
         assert!(reg.builtin("read_memory").is_some());
     }

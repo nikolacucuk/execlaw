@@ -98,8 +98,8 @@ pub mod settings_search;
 pub mod setup_preflight;
 pub mod sidecar_supervisor;
 pub mod sidecars_admin;
-pub mod transport_registry;
 pub mod transport_outbox;
+pub mod transport_registry;
 // Phase B: signal_admin / signal_inbound / signal_tools /
 // signal_transport retired. Every Signal capability lives in
 // plugins/signal/main.rhai (v0.4.0+) and reaches the sidecar via

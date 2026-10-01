@@ -2629,6 +2629,9 @@ async fn cmd_serve(
             .map_err(|error| anyhow::anyhow!("event HMAC key: {error}"))?
             .to_vec(),
     ));
+    if let Some(key) = hmac_key.as_ref() {
+        db.set_event_hmac_key((**key).clone())?;
+    }
 
     // Stage root for installed plugins — defaults to
     // `<db_parent>/plugins/`. Each install lands under
@@ -3043,13 +3046,34 @@ async fn cmd_serve(
                 // image not found locally" warning + disabled
                 // supervisor — same end-state, fast.
                 let runner_probe_timeout = std::time::Duration::from_secs(5);
-                let probe_result = tokio::time::timeout(runner_probe_timeout, async {
-                    let _ = ensure_runner_image_fresh(&runner_image).await;
-                    launcher.image_present(&runner_image).await
-                })
+                // Image compilation is a separate operation and can take
+                // minutes. Keeping it inside the five-second daemon probe
+                // falsely disabled runners even when the build succeeded.
+                let probe_result = tokio::time::timeout(
+                    runner_probe_timeout,
+                    launcher.image_present(&runner_image),
+                )
                 .await;
                 let image_present = match probe_result {
-                    Ok(present) => present,
+                    Ok(_) => {
+                        let _ = ensure_runner_image_fresh(&runner_image).await;
+                        match tokio::time::timeout(
+                            runner_probe_timeout,
+                            launcher.image_present(&runner_image),
+                        )
+                        .await
+                        {
+                            Ok(present) => present,
+                            Err(_) => {
+                                tracing::warn!(
+                                    image = %runner_image,
+                                    timeout_secs = runner_probe_timeout.as_secs(),
+                                    "runner image inspect timed out after refresh"
+                                );
+                                false
+                            }
+                        }
+                    }
                     Err(_) => {
                         tracing::warn!(
                             image = %runner_image,
@@ -3130,9 +3154,8 @@ async fn cmd_serve(
     // its `cancel_tokens` registry. C6c — this is what closes the
     // gap where the cancel admin endpoint flipped the DB row but
     // the gather phase kept burning tokens.
-    let research_workspace = execlaw_server::research::ResearchWorkspace::new(
-        execlaw_server::research::ResearchWorkspace::default_root(),
-    );
+    let research_workspace =
+        execlaw_server::research::ResearchWorkspace::new(data_dir.join("research"));
     // Channel-keyed transport registry. Phase B refactor: just a
     // `channel → (plugin_id, icon)` lookup. Auto-bridge sites
     // (text-reply bridge, attachment fan-out, research-PDF
@@ -3726,6 +3749,7 @@ async fn cmd_serve(
         let prewarm_launcher = launcher.clone();
         let prewarm_db = db.clone();
         let prewarm_inference = state.inference.clone();
+        let prewarm_bind_port = config.bind_addr.port();
         tokio::spawn(async move {
             // Wait briefly so the WS endpoint is up before the
             // runner phones home. (Axum's `serve` task hasn't
@@ -3747,11 +3771,8 @@ async fn cmd_serve(
 
             let image = std::env::var("EXECLAW_RUNNER_IMAGE")
                 .unwrap_or_else(|_| "execlaw/runner:dev".to_owned());
-            let rpc_url = std::env::var("EXECLAW_RPC_URL").unwrap_or_else(|_| {
-                // Default points at the host's loopback; the
-                // runner container reaches it via host-gateway.
-                "ws://host.docker.internal:3031".to_owned()
-            });
+            let rpc_url = std::env::var("EXECLAW_RPC_URL")
+                .unwrap_or_else(|_| format!("ws://host.docker.internal:{prewarm_bind_port}"));
             let network = std::env::var("EXECLAW_RUNNER_NETWORK").ok();
 
             let spec = execlaw_server::runner_spawn::RunnerSpec {

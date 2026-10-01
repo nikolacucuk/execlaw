@@ -52,6 +52,12 @@ enum Verifier {
 struct Source {
     id: String,
     text: String,
+    #[serde(default = "default_source_fetched")]
+    fetched_ok: bool,
+}
+
+fn default_source_fetched() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -419,9 +425,13 @@ async fn request_task(
         Verifier::Research { sources, .. } => {
             user_prompt.push_str("\n\nEvidence sources:\n");
             for source in sources {
-                user_prompt.push_str(&format!("[{}] {}\n", source.id, source.text));
+                if source.fetched_ok {
+                    user_prompt.push_str(&format!("[{}] {}\n", source.id, source.text));
+                }
             }
-            user_prompt.push_str("Cite source IDs exactly as [id].");
+            user_prompt.push_str(
+                "Cite every factual sentence with one or more exact fetched source IDs as [id]. Do not cite an unavailable source or add a factual claim unsupported by its cited source text.",
+            );
         }
         Verifier::Coding { output_file, .. } => user_prompt.push_str(&format!(
             "\nReturn only the complete replacement contents for {}.",
@@ -517,16 +527,8 @@ async fn verify_task(task: &Task, output: &str) -> Result<(), String> {
             required_terms,
             ..
         } => {
-            let cited = sources
-                .iter()
-                .any(|source| output.contains(&format!("[{}]", source.id)));
-            check_terms(output, required_terms).and_then(|()| {
-                if cited {
-                    Ok(())
-                } else {
-                    Err("answer omitted a source citation".to_owned())
-                }
-            })
+            verify_research_claims(output, sources)?;
+            check_terms(output, required_terms)
         }
         Verifier::Memory { required_terms, .. } => check_terms(output, required_terms),
         Verifier::Automation {
@@ -543,6 +545,92 @@ async fn verify_task(task: &Task, output: &str) -> Result<(), String> {
             }
         }
     }
+}
+
+fn verify_research_claims(output: &str, sources: &[Source]) -> Result<(), String> {
+    let sources_by_id = sources
+        .iter()
+        .map(|source| (source.id.as_str(), source))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut in_references = false;
+    let mut claims = 0usize;
+    for line in output.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('#') || line.eq_ignore_ascii_case("sources:") {
+            let heading = line
+                .trim_start_matches('#')
+                .trim()
+                .trim_end_matches(':')
+                .to_ascii_lowercase();
+            in_references = matches!(
+                heading.as_str(),
+                "sources" | "references" | "evidence review"
+            );
+            continue;
+        }
+        if in_references {
+            continue;
+        }
+        let (claim, citations) = strip_research_citations(line);
+        if claim.trim().is_empty() {
+            continue;
+        }
+        if citations.is_empty() {
+            return Err("research claim omitted a fetched source ID".into());
+        }
+        claims = claims.saturating_add(1);
+        let mut supported = false;
+        for id in citations {
+            let source = sources_by_id
+                .get(id.as_str())
+                .ok_or_else(|| format!("research claim cited unknown source ID '{id}'"))?;
+            if !source.fetched_ok {
+                return Err(format!("research claim cited unavailable source ID '{id}'"));
+            }
+            supported |=
+                execlaw_core::research::research_claim_supported_by_snapshot(&claim, &source.text);
+        }
+        if !supported {
+            return Err("cited source text does not support the research claim".into());
+        }
+    }
+    if claims == 0 {
+        return Err("research answer contained no verifiable claims".into());
+    }
+    Ok(())
+}
+
+fn strip_research_citations(line: &str) -> (String, Vec<String>) {
+    let mut claim = String::with_capacity(line.len());
+    let mut citations = Vec::new();
+    let mut rest = line;
+    while let Some(open) = rest.find('[') {
+        claim.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find(']') else {
+            claim.push_str(&rest[open..]);
+            return (claim, citations);
+        };
+        let id = &after_open[..close];
+        if !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_-".contains(&byte))
+        {
+            citations.push(id.to_owned());
+        } else {
+            claim.push('[');
+            claim.push_str(id);
+            claim.push(']');
+        }
+        rest = &after_open[close + 1..];
+    }
+    claim.push_str(rest);
+    (claim, citations)
 }
 
 fn check_terms(output: &str, terms: &[String]) -> Result<(), String> {
@@ -657,5 +745,55 @@ mod tests {
             .await
             .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn research_verifier_scores_claim_support_not_citation_shape() {
+        let task: Task = serde_json::from_value(serde_json::json!({
+            "id":"research-proof",
+            "category":"research",
+            "prompt":"What address and port does the service use?",
+            "verifier":"research",
+            "sources":[
+                {"id":"config","text":"The service listens on loopback address 127.0.0.1 at port 3031 by default."},
+                {"id":"unfetched","text":"The service listens on port 9443.","fetched_ok":false}
+            ],
+            "required_terms":["127.0.0.1","3031"],
+            "fixture_response":"The service listens on loopback address 127.0.0.1 at port 3031 by default [config]."
+        })).unwrap();
+        assert!(
+            verify_task(&task, &task_fixture_response(&task))
+                .await
+                .is_ok()
+        );
+        assert!(
+            verify_task(&task, "The service listens on port 9443 [config].")
+                .await
+                .is_err()
+        );
+        assert!(
+            verify_task(&task, "The service listens on port 3031 [unfetched].")
+                .await
+                .is_err()
+        );
+        assert!(
+            verify_task(&task, "The service listens on port 3031 [invented].")
+                .await
+                .is_err()
+        );
+        assert!(
+            verify_task(&task, "The service listens on port 3031.")
+                .await
+                .is_err()
+        );
+    }
+
+    fn task_fixture_response(task: &Task) -> &str {
+        match &task.verifier {
+            Verifier::Research {
+                fixture_response, ..
+            } => fixture_response,
+            _ => panic!("test task uses the research verifier"),
+        }
     }
 }

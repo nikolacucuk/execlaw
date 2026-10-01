@@ -15,7 +15,9 @@ and never overwrites an existing destination.
 Flagged eval ranges can be exported with `execlaw eval export-flagged` after
 providing a local redaction map and the explicit `--consent` flag. The exporter
 never sends transcript data to a service; see [testing](../../docs/testing.md)
-for the offline `eval-harness replay-fixture` validator.
+for the offline `eval-harness replay-fixture` validator. CI can replay a
+whole catalog with `eval-harness replay-fixtures --directory evals/fixtures`;
+the report records each fixture's SHA-256 and validation result.
 Optional `--incident-ref INC-42` and `--release-ref v2026.09.29` links are
 validated as bounded identifiers and are retained in the exported fixture and
 offline validation report.

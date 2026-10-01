@@ -12,10 +12,12 @@ with [H030 inference scheduling](llm-harness-roadmap.md#enhancement-030),
 [H074 resource budgets](llm-harness-roadmap.md#enhancement-074),
 [H106 multimodal evidence](llm-harness-roadmap.md#enhancement-106), and
 [H110 local-only verification](llm-harness-roadmap.md#enhancement-110).
-Implement the real chat-path adapter, continuous endpointing, and incremental
-playback with tested interruption and per-session isolation. F15's shared-lock
-STT stall remains open. Existing PCM capture does not close those gates; the
-tracker records implementation and qualification separately.
+Active-thread voice input now uses the authenticated chat route and feeds its
+streamed token deltas to sentence-level local TTS. The first Welcome-screen
+turn still lands in the composer draft because no conversation ID exists at
+voice-stop time. Continuous endpointing, incremental transcription, playback
+acknowledgment, and supported-hardware qualification remain open. PCM capture
+and per-session cancellation alone do not close those gates.
 
 ## 13.E — Server-side WebRTC AEC3 (deferred)
 
@@ -60,25 +62,26 @@ on silence so the operator can speak hands-free. Wire format change is
 zero — same `voice_stop` UiEvent, just emitted by the server instead of
 the SPA.
 
-## Real chat-path agent reply on voice_stop (deferred)
+## First-turn voice routing (open)
 
-**Status**: the `voice_stop` control handler currently echoes the
-transcript back as `you said: <text>` instead of routing through the
-chat / runner / LLM path. Verifies the round-trip without coupling
-`voice_runtime` to `chats::dispatch_turn`.
+**Status**: when `voice_stop` includes an existing conversation ID, the
+server passes the final transcript to the regular Controller chat route. Its
+committed assistant response is sent to local TTS from matching
+`ChatTokenDelta` events. The Welcome composer has no conversation ID until
+the first send, so a voice transcript there remains editable text.
 
-**Follow-up**: replace the echo callback with a thin adapter that opens a
-conversation against the controller's thread, posts the transcript as a
-`ChatMessageInbound`, and consumes the resulting `ChatTokenDelta` /
-`ChatMessageOutbound` stream as the TTS source. The voice pipeline already
-streams TTS chunks per call; the adapter just feeds it the runner's
-output sentence-by-sentence.
+**Follow-up**: mint or bind the conversation before microphone capture so a
+first-turn voice request follows the same authenticated route. Preserve the
+voice transcript draft behavior only when the operator deliberately cancels
+before submitting.
 
 ## Streaming TTS feedback to the runner (deferred)
 
-**Status**: barge-in fires `KokoroClient::cancel()` and SPA-side
-`VoicePlayback.flush()`, but the runner doesn't know how much of its
-reply was actually heard before the interrupt.
+**Status**: chat tokens now drive sentence-level synthesis while the
+assistant turn runs. Barge-in cancels the active chat future and fires
+`KokoroClient::cancel()` while SPA-side `VoicePlayback.flush()` drops queued
+audio, but the runner doesn't know how much was actually heard before the
+interrupt.
 
 **Follow-up**: track `played_through_sentence` from acknowledged client
 playback, not merely completion of synthesis. On `voice_interrupt`, append a structured

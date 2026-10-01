@@ -126,17 +126,20 @@ pub struct BollardRunnerLauncher {
     docker: bollard::Docker,
     provenance: Option<execlaw_core::artifact_provenance::ArtifactProvenanceStore>,
     spawn_gate: AsyncMutex<()>,
-    memory_budget_bytes: i64,
     installation_id: String,
 }
 
 const DEFAULT_RUNNER_MEMORY_BYTES: i64 = 1024 * 1024 * 1024;
 
-fn runner_memory_budget_bytes() -> i64 {
-    execlaw_container_manager::hardware::available_ram_mb()
-        .and_then(|available| available.checked_mul(1024 * 1024))
-        .and_then(|available| i64::try_from(available / 2).ok())
-        .unwrap_or(0)
+fn runner_reservation_ceiling_bytes(
+    daemon_total_bytes: Option<i64>,
+    host_available_bytes: i64,
+    existing_reserved_bytes: i64,
+) -> i64 {
+    daemon_total_bytes
+        .filter(|total| *total > 0)
+        .map(|total| total / 2)
+        .unwrap_or_else(|| host_available_bytes.saturating_add(existing_reserved_bytes) / 2)
 }
 
 impl BollardRunnerLauncher {
@@ -147,7 +150,6 @@ impl BollardRunnerLauncher {
             docker,
             provenance: None,
             spawn_gate: AsyncMutex::new(()),
-            memory_budget_bytes: runner_memory_budget_bytes(),
             installation_id: uuid::Uuid::new_v4().simple().to_string(),
         })
     }
@@ -165,7 +167,6 @@ impl BollardRunnerLauncher {
             docker,
             provenance: None,
             spawn_gate: AsyncMutex::new(()),
-            memory_budget_bytes: runner_memory_budget_bytes(),
             installation_id: uuid::Uuid::new_v4().simple().to_string(),
         }
     }
@@ -240,10 +241,9 @@ impl RunnerLauncher for BollardRunnerLauncher {
             .ok_or_else(|| {
                 LauncherError::ResourceAdmission("live host RAM sample is unavailable".into())
             })?;
-        if self.memory_budget_bytes <= 0 || available_bytes < memory_bytes {
+        if available_bytes < memory_bytes {
             return Err(LauncherError::ResourceAdmission(format!(
-                "requested {memory_bytes} bytes with {available_bytes} available and a {} byte runner ceiling",
-                self.memory_budget_bytes
+                "requested {memory_bytes} bytes with {available_bytes} available",
             )));
         }
         let active = self
@@ -280,11 +280,21 @@ impl RunnerLauncher for BollardRunnerLauncher {
                 })
             })
             .fold(0_i64, i64::saturating_add);
-        if reserved_bytes.saturating_add(memory_bytes) > self.memory_budget_bytes {
+        let daemon_total_bytes = self
+            .docker
+            .info()
+            .await
+            .ok()
+            .and_then(|info| info.mem_total);
+        let memory_budget_bytes =
+            runner_reservation_ceiling_bytes(daemon_total_bytes, available_bytes, reserved_bytes);
+        if memory_budget_bytes <= 0
+            || reserved_bytes.saturating_add(memory_bytes) > memory_budget_bytes
+        {
             return Err(LauncherError::ResourceAdmission(format!(
                 "runner reservations would reach {} bytes, above the {} byte ceiling",
                 reserved_bytes.saturating_add(memory_bytes),
-                self.memory_budget_bytes
+                memory_budget_bytes
             )));
         }
 
@@ -557,6 +567,19 @@ mod tests {
     #[test]
     fn volume_name_uses_prefix() {
         assert_eq!(volume_name_for("abc"), "execlaw-runner-abc");
+    }
+
+    #[test]
+    fn runner_ceiling_uses_daemon_total_without_double_counting_live_runners() {
+        let gib = 1024_i64 * 1024 * 1024;
+        let ceiling = runner_reservation_ceiling_bytes(Some(8 * gib), 4 * gib, gib);
+        assert_eq!(ceiling, 4 * gib);
+        assert!(gib + 2 * gib <= ceiling);
+        assert!(3 * gib + 2 * gib > ceiling);
+        assert_eq!(
+            runner_reservation_ceiling_bytes(None, 4 * gib, gib),
+            5 * gib / 2
+        );
     }
 
     #[test]

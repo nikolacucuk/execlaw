@@ -194,4 +194,15 @@ mod tests {
         // Only the trailing newline; the embedded one is escaped to "\n" in JSON.
         assert_eq!(s.matches('\n').count(), 1);
     }
+
+    #[test]
+    fn frame_line_rejects_payloads_over_the_pinned_frame_limit() {
+        let request = RpcRequest::new(
+            RpcId::Int(1),
+            "tools/call",
+            Some(serde_json::json!({"payload":"x".repeat(MAX_FRAME_BYTES)})),
+        );
+        let error = frame_line(&request).unwrap_err();
+        assert!(error.to_string().contains("outbound stdio frame exceeds"));
+    }
 }

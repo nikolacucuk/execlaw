@@ -124,6 +124,9 @@ components:
         conversation_id: { type: string }
         seq: { type: integer, format: int64 }
         text: { type: string }
+        request_id:
+          type: string
+          description: Optional idempotency key that correlates token deltas with one chat request.
     AgentThinking:
       type: object
       required: [conversation_id]

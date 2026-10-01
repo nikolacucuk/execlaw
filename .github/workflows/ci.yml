@@ -114,8 +114,8 @@ jobs:
         # the report shows everything broken, not just the first.
         run: cargo test --workspace --locked --no-fail-fast
 
-      - name: Replay synthetic offline regression fixture
-        run: cargo run -p execlaw-eval-harness --locked -- replay-fixture --fixture evals/fixtures/synthetic-offline-regression.json
+      - name: Replay offline regression fixture catalog
+        run: cargo run -p execlaw-eval-harness --locked -- replay-fixtures --directory evals/fixtures --report target/eval-fixture-report.json
 
   spa:
     name: spa

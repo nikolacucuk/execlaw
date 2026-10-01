@@ -639,6 +639,40 @@ mod tests {
             .is_err()
         );
     }
+
+    #[tokio::test]
+    async fn older_client_accepts_compatible_contract_and_rejects_newer_minimum() {
+        async fn serve_contract(body: &'static str) -> String {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes())
+                    .await
+                    .unwrap();
+            });
+            format!("http://{address}")
+        }
+
+        let http = Client::builder().no_proxy().build().unwrap();
+        let compatible = serve_contract(
+            r#"{"version":1,"minimum_client_version":1,"api_schema":"/api/openapi.json","event_cursor_unit":"conversation event sequence; exclusive before cursor","features":["chat_sessions"]}"#,
+        )
+        .await;
+        check_contract(&http, &compatible).await.unwrap();
+
+        let incompatible = serve_contract(
+            r#"{"version":2,"minimum_client_version":2,"api_schema":"/api/openapi.json","event_cursor_unit":"conversation event sequence; exclusive before cursor","features":["chat_sessions"]}"#,
+        )
+        .await;
+        assert!(check_contract(&http, &incompatible).await.is_err());
+    }
 }
 
 struct AuthenticatedClient {

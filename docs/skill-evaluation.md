@@ -1,60 +1,50 @@
 # Held-out skill evaluation
 
-## Current gate and committed extensions
+## H015 baseline and H039 behavioral gate
 
-The [implementation plan](implementation-plan.md) tracks H001-H130. The gate
-below implements the current [H015](llm-harness-roadmap.md#enhancement-015)
-text-evaluation baseline: a pass means required terms appeared, not that a
-tool-using task succeeded. [Finding F16](llm-harness-roadmap.md#review-findings-and-unresolved-verification)
-records that limit; no comparative capability or production-release claim
-should be inferred from these scores alone.
-
-[H039 executable skill evaluation and rollback](llm-harness-roadmap.md#enhancement-039)
-extends the gate with isolated task execution, deterministic verifiers,
-side-effect policy checks, and reversible promotion. It depends on
-[H021 real-task benchmarks](llm-harness-roadmap.md#enhancement-021),
+The [implementation plan](implementation-plan.md) tracks H001-H130. H015's
+text-only baseline reports required-term matches; by itself, that score does
+not establish that a tool-using task succeeded. H039 extends evaluation with
+isolated task execution, deterministic mock integrations, forbidden-action
+checks, resource limits, parent/candidate comparison, and governed promotion.
+H039 still depends on [H021 real-task benchmarks](llm-harness-roadmap.md#enhancement-021),
 [H096 independently attributable evidence](llm-harness-roadmap.md#enhancement-096),
 and [H111 protected holdouts and calibrated judges](llm-harness-roadmap.md#enhancement-111).
-Expected answers and verifier policy must stay outside the evaluated workspace
-and skill-capture path; repeating rubric terms must not manufacture task
-success. The implementation tracker owns status and execution evidence for
-these planned gates. This update changes neither promotion behavior nor test
-results.
-
-Trial skills can only be promoted after a Controller-configured held-out suite
-passes against the exact current immutable version. The suite is stored apart
-from the skill body in `state_skill_eval_cases`; evaluation records bind the
-version body hash and a hash of the current suite in `state_skill_eval_runs`.
-Changing either the skill or the suite invalidates the previous pass. A run
-also records the latest comparable parent-version score and score delta when
-the suite, evaluator version, model, endpoint, and wire protocol match.
 
 The Controller API is:
 
-* `PUT /api/admin/skills/{name}/eval-suite` with 1–20 cases. Each case has a
-  unique `case_id`, task `prompt`, and 1–12 case-insensitively unique
-  `required_terms`. Prompts, IDs, and rubric terms have size limits.
-* `POST /api/admin/skills/{name}/evaluate` runs each case through the configured
-  Standard local inference backend with the skill as system guidance and no
-  tools. Prompts, expected terms, and generated outputs are not returned or
-  persisted in run results; only per-case pass counts and aggregate score are
-  retained. A case passes only when the output contains every required term.
-  Runs record the immutable skill body hash, suite hash, evaluator version, model
-  ID, and a hash of the endpoint/model/wire-protocol tuple; endpoint values and
-  generated output are not stored. Increment the evaluator version when its
-  prompt, rubric scoring, or inference settings change.
-* `POST /api/admin/skills/{name}/promote` requires at least 80% of cases to
-  pass for the current version and current suite. Legacy runs without backend
-  identity cannot authorize promotion. The skill scanner remains mandatory on
-  create and update.
+* `PUT /api/admin/skills/{name}/eval-suite` accepts 1–20 unique cases. Every
+  case must define a behavioral workspace change or an expected mock
+  integration call. Cases can include initial and expected workspace files,
+  deterministic mock responses, exact call order, required and forbidden
+  output terms, forbidden actions, output character limits, and output-token
+  limits. Expected files and verifier rules remain outside the skill body and
+  evaluated workspace.
+* `POST /api/admin/skills/{name}/evaluate` runs each case against the configured
+  local Standard inference backend in a temporary workspace. The closed tool
+  catalog provides bounded file reads/writes and deterministic mock calls;
+  it cannot perform live network effects. Traversal and secret paths are
+  denied. Each case is bounded to eight inference rounds, 32 tool calls,
+  60 seconds per inference request, 16 files, 64 KiB per file, 512 KiB total
+  workspace, and a ten-minute suite run. The output-token budget is cumulative
+  across rounds; missing backend token-usage records fail the case closed. Any
+  denied/forbidden action, failed behavioral assertion, or resource-budget
+  violation fails the case.
+* Candidate and immediate parent versions run against the same cases and
+  backend. Results record per-case behavioral match counts, action counts,
+  output size, token use, suite hash, version body hash, evaluator version,
+  model identity, and a backend fingerprint; prompts and generated output are
+  not persisted in evaluation results. Promotion rechecks the current suite
+  hash and requires every candidate case to pass. Rollback creates a new
+  monotonic trial version, so it must pass the current suite before promotion.
 
-Evaluation cases are Controller-authored; keep expected terms discriminative,
-avoid including evaluation answers in skill text, and revise the suite when a
-skill's intended behavior changes. A before score is reported only when the
-parent skill version was evaluated against the same suite, evaluator version,
-model ID, and endpoint/model/protocol fingerprint. The evaluator calls only the
-configured local or explicitly approved endpoint. No cloud judge is used.
+Expected answers and verifier policy must stay outside the evaluated workspace
+and skill-capture path. Merely repeating rubric terms cannot satisfy the
+workspace or integration assertions. Integration effects are mock-only during
+evaluation. Full live-model held-out qualification and promotion evidence are
+still required before H039 can be marked qualified.
 
 The implementation is in `crates/server/src/skills_admin.rs`,
-`crates/skills/src/store.rs`, and migrations `0036_skill_eval_runs.sql` and
-`0037_skill_eval_comparison_identity.sql`.
+`crates/skills/src/store.rs`, and migrations `0036_skill_eval_runs.sql`,
+`0037_skill_eval_comparison_identity.sql`, `0063_skill_eval_behavioral_assertions.sql`,
+and `0065_skill_eval_mock_workspaces.sql`.

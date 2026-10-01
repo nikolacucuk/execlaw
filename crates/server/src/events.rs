@@ -59,6 +59,8 @@ pub enum UiEvent {
     ChatTokenDelta {
         conversation_id: String,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
 
     AgentToolUse {
@@ -372,7 +374,9 @@ pub async fn stream_handler(
     let voice = state.voice_sessions.clone();
     let runtime = state.voice_runtime.clone();
     let refresh_store = state.refresh_store.clone();
-    let principal_id = user.user_id;
+    let principal_id = user.user_id.clone();
+    let state_for_voice = state.clone();
+    let user_for_voice = user.clone();
     ws.on_upgrade(move |socket| {
         handle_socket(
             socket,
@@ -382,6 +386,8 @@ pub async fn stream_handler(
             refresh_store,
             principal_id,
             session_id,
+            state_for_voice,
+            user_for_voice,
         )
     })
     .into_response()
@@ -395,6 +401,8 @@ async fn handle_socket(
     refresh_store: std::sync::Arc<crate::auth::RefreshStore>,
     principal_id: String,
     session_id: String,
+    app_state: AppState,
+    authenticated_user: crate::auth_extract::AuthedUser,
 ) {
     let mut rx = bus.subscribe();
     debug!(
@@ -498,7 +506,24 @@ async fn handle_socket(
                     // Anything else is ignored. The control surface
                     // is intentionally tiny so a malformed message
                     // can't tear down the WS.
-                    let closed = handle_voice_control(&text, &voice, &runtime).await;
+                    let state_for_reply = app_state.clone();
+                    let user_for_reply = authenticated_user.clone();
+                    let closed = handle_voice_control_with_agent(
+                        &text,
+                        &voice,
+                        &runtime,
+                        move |voice_session, conversation_id, transcript, cancel| async move {
+                            voice_chat_reply(
+                                state_for_reply,
+                                user_for_reply,
+                                voice_session,
+                                conversation_id,
+                                transcript,
+                                cancel,
+                            )
+                        },
+                    )
+                    .await;
                     // The voice_stop branch closes its own session;
                     // remove it from the per-WS tracking set so we
                     // don't double-close on disconnect.
@@ -554,11 +579,17 @@ fn socket_session_is_active(
 /// (i.e. `voice_stop`) so the caller's per-WS owned-session tracker
 /// can drop it without double-closing. Returns `None` for
 /// `voice_interrupt`, malformed input, and unknown ops.
-pub async fn handle_voice_control(
+pub async fn handle_voice_control_with_agent<F, Fut, S>(
     text: &str,
     voice: &crate::voice_session::VoiceSessionRegistry,
     runtime: &crate::voice_runtime::VoiceRuntime,
-) -> Option<String> {
+    agent_reply: F,
+) -> Option<String>
+where
+    F: FnOnce(String, String, String, tokio_util::sync::CancellationToken) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = S> + Send + 'static,
+    S: futures::Stream<Item = String> + Send + Unpin + 'static,
+{
     let parsed: serde_json::Value = match serde_json::from_str(text) {
         Ok(v) => v,
         Err(_) => return None, // not JSON — silently ignore (could be a future text op)
@@ -570,12 +601,9 @@ pub async fn handle_voice_control(
     }
     match op {
         "voice_stop" => {
-            // Operator toggled mic off. Flush STT, then run the
-            // agent reply path. The agent callback is wired in the
-            // chat layer (Phase 13.C+); for v1 we stub with the
-            // identity transcript so the pipeline is observable
-            // end-to-end without yet plumbing into the chat router.
-            // The real agent_reply hookup lands in 13.D.
+            // The browser supplies the originating conversation ID so this
+            // transcript follows the same authenticated chat and tool-policy
+            // path as typed input.
             //
             // Panic safety (audit closure): the spawned task runs
             // finalize_utterance + cleanup. A panic in either would
@@ -585,6 +613,11 @@ pub async fn handle_voice_control(
             // survives any panic in finalize_utterance or in a
             // future real `agent_reply` callback.
             let session_id = session.to_owned();
+            let conversation_id = parsed
+                .get("conversation_id")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default()
+                .to_owned();
             let runtime_for_finalize = runtime.clone();
             let guard = VoiceStopGuard {
                 session_id: session_id.clone(),
@@ -593,12 +626,10 @@ pub async fn handle_voice_control(
             };
             tokio::spawn(async move {
                 let _guard = guard;
+                let reply_session_id = session_id.clone();
                 runtime_for_finalize
-                    .finalize_utterance_cancellable(&session_id, |transcript, _cancel| async move {
-                        // Placeholder: echo the transcript so the
-                        // SPA can verify the round-trip. Phase 13.D
-                        // wires this to the runner / chat path.
-                        format!("you said: {transcript}")
+                    .finalize_utterance_streaming(&session_id, move |transcript, cancel| {
+                        agent_reply(reply_session_id, conversation_id, transcript, cancel)
                     })
                     .await;
                 // _guard drops here on the happy path → end_session
@@ -615,6 +646,222 @@ pub async fn handle_voice_control(
         _ => {}
     }
     None
+}
+
+#[cfg(test)]
+pub async fn handle_voice_control(
+    text: &str,
+    voice: &crate::voice_session::VoiceSessionRegistry,
+    runtime: &crate::voice_runtime::VoiceRuntime,
+) -> Option<String> {
+    handle_voice_control_with_agent(text, voice, runtime, |_, _, transcript, _| async move {
+        futures::stream::iter(execlaw_voice_pipeline::chunk_at_sentence_boundaries(
+            &format!("you said: {transcript}"),
+        ))
+    })
+    .await
+}
+
+fn voice_chat_reply(
+    state: AppState,
+    user: crate::auth_extract::AuthedUser,
+    voice_session: String,
+    conversation_id: String,
+    transcript: String,
+    cancel: tokio_util::sync::CancellationToken,
+) -> futures::stream::BoxStream<'static, String> {
+    if conversation_id.trim().is_empty() {
+        return Box::pin(futures::stream::empty());
+    }
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    tokio::spawn(async move {
+        let mut events = state.events.subscribe();
+        let mut turn = Box::pin(run_voice_chat_turn(
+            state,
+            user,
+            voice_session.clone(),
+            conversation_id.clone(),
+            transcript,
+            cancel.clone(),
+        ));
+        let mut collected = String::new();
+        let mut pending = String::new();
+        let mut stream_lost = false;
+        'turn: loop {
+            tokio::select! {
+                _ = cancel.cancelled() => break,
+                result = &mut turn => {
+                    let final_reply = result;
+                    if collected.is_empty() {
+                        pending = final_reply;
+                    } else if final_reply.starts_with(&collected) {
+                        pending.push_str(&final_reply[collected.len()..]);
+                    } else {
+                        stream_lost = true;
+                        tracing::warn!(
+                            conversation_id = %conversation_id,
+                            "voice chat token stream diverged from the committed reply; suppressing its unspoken tail"
+                        );
+                    }
+                    break;
+                }
+                event = events.recv() => match event {
+                    Ok(UiEvent::ChatTokenDelta {
+                        conversation_id: event_conversation,
+                        text,
+                        request_id: Some(event_request),
+                    }) if !stream_lost
+                        && voice_delta_matches(
+                            &event_conversation,
+                            &event_request,
+                            &conversation_id,
+                            &voice_session,
+                        ) =>
+                    {
+                        collected.push_str(&text);
+                        pending.push_str(&text);
+                        while let Some(sentence) = take_voice_sentence(&mut pending) {
+                            let sent = tokio::select! {
+                                _ = cancel.cancelled() => break 'turn,
+                                result = sender.send(sentence) => result.is_ok(),
+                            };
+                            if !sent {
+                                stream_lost = true;
+                                break;
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        stream_lost = true;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        stream_lost = true;
+                    }
+                }
+            }
+        }
+        if !cancel.is_cancelled() && !stream_lost && !pending.trim().is_empty() {
+            for sentence in execlaw_voice_pipeline::chunk_at_sentence_boundaries(&pending) {
+                tokio::select! {
+                    _ = cancel.cancelled() => break,
+                    _ = sender.send(sentence) => {},
+                }
+            }
+        }
+    });
+    Box::pin(futures::stream::unfold(
+        receiver,
+        |mut receiver| async move { receiver.recv().await.map(|sentence| (sentence, receiver)) },
+    ))
+}
+
+fn take_voice_sentence(pending: &mut String) -> Option<String> {
+    let boundary = pending.char_indices().find_map(|(index, character)| {
+        if !matches!(character, '.' | '!' | '?') {
+            return None;
+        }
+        let end = index + character.len_utf8();
+        pending[end..]
+            .chars()
+            .next()
+            .is_some_and(char::is_whitespace)
+            .then_some(end)
+    })?;
+    let sentence = pending[..boundary].trim().to_owned();
+    *pending = pending[boundary..].trim_start().to_owned();
+    (!sentence.is_empty()).then_some(sentence)
+}
+
+fn voice_delta_matches(
+    event_conversation: &str,
+    event_request: &str,
+    conversation_id: &str,
+    request_id: &str,
+) -> bool {
+    event_conversation == conversation_id && event_request == request_id
+}
+
+async fn run_voice_chat_turn(
+    state: AppState,
+    user: crate::auth_extract::AuthedUser,
+    voice_session: String,
+    conversation_id: String,
+    transcript: String,
+    cancel: tokio_util::sync::CancellationToken,
+) -> String {
+    use axum::http::{HeaderMap, HeaderValue};
+
+    let request = crate::chats::SendMessageRequest {
+        text: transcript,
+        completion_contract: None,
+        resume_run_id: None,
+        sender_principal_id: Some("controller".to_owned()),
+        incognito: false,
+        prior_messages: Vec::new(),
+        timezone: None,
+        attachments: Vec::new(),
+        skill_names: Vec::new(),
+    };
+    let mut headers = HeaderMap::new();
+    if let Ok(value) = HeaderValue::from_str(&voice_session) {
+        headers.insert("Idempotency-Key", value);
+    }
+    let turn_cancel = state.turn_cancel.clone();
+    let cancel_conversation_id = conversation_id.clone();
+    let turn = crate::chats::send_message(
+        State(state),
+        Ok(user),
+        axum::extract::Path(conversation_id.clone()),
+        headers,
+        axum::Json(request),
+    );
+    let response = tokio::select! {
+        _ = cancel.cancelled() => {
+            turn_cancel.cancel(&cancel_conversation_id);
+            return String::new();
+        },
+        response = turn => response.into_response(),
+    };
+    if !response.status().is_success() {
+        tracing::warn!(
+            conversation_id = %conversation_id,
+            status = %response.status(),
+            "voice chat turn did not produce a successful response"
+        );
+        return String::new();
+    }
+    let response = response.into_body();
+    let bytes = match axum::body::to_bytes(response, 1024 * 1024).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::warn!(
+                conversation_id = %conversation_id,
+                %error,
+                "could not read voice chat response"
+            );
+            return String::new();
+        }
+    };
+    let parsed: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(response) => response,
+        Err(error) => {
+            tracing::warn!(
+                conversation_id = %conversation_id,
+                %error,
+                "voice chat response had an unexpected body"
+            );
+            return String::new();
+        }
+    };
+    if cancel.is_cancelled() {
+        return String::new();
+    }
+    parsed
+        .get("assistant_text")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// Phase 13.D audit closure — RAII guard that closes a voice
@@ -794,6 +1041,78 @@ mod tests {
     use execlaw_voice_pipeline::traits::{MockStt, MockTts, TtsClient};
     use std::sync::Arc;
     use std::time::Duration;
+
+    #[test]
+    fn voice_sentence_chunker_preserves_decimal_addresses() {
+        let mut pending = "The service binds to 127.0.0.1. It uses port 3031. ".to_owned();
+        assert_eq!(
+            take_voice_sentence(&mut pending).as_deref(),
+            Some("The service binds to 127.0.0.1.")
+        );
+        assert_eq!(
+            take_voice_sentence(&mut pending).as_deref(),
+            Some("It uses port 3031.")
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn voice_delta_filter_requires_conversation_and_request_identity() {
+        assert!(voice_delta_matches(
+            "thread-a",
+            "session-a",
+            "thread-a",
+            "session-a"
+        ));
+        assert!(!voice_delta_matches(
+            "thread-b",
+            "session-a",
+            "thread-a",
+            "session-a"
+        ));
+        assert!(!voice_delta_matches(
+            "thread-a",
+            "session-b",
+            "thread-a",
+            "session-a"
+        ));
+    }
+
+    #[tokio::test]
+    async fn voice_chat_adapter_uses_the_controller_chat_route() {
+        use execlaw_core::users::UserRole;
+        use futures::StreamExt;
+
+        let state = crate::routes::test_app_state();
+        let user = crate::auth_extract::AuthedUser {
+            user_id: "voice-controller".into(),
+            session_id: Some("voice-controller-session".into()),
+            username: "voice-controller".into(),
+            display_name: "Voice Controller".into(),
+            email: None,
+            role: UserRole::Controller,
+            last_login_at: None,
+        };
+        let mut sentences = voice_chat_reply(
+            state,
+            user,
+            "voice-session-idempotency".into(),
+            "voice-chat-conversation".into(),
+            "Please answer this voice turn.".into(),
+            tokio_util::sync::CancellationToken::new(),
+        );
+        let mut reply = String::new();
+        while let Some(sentence) = tokio::time::timeout(Duration::from_secs(3), sentences.next())
+            .await
+            .expect("chat route should produce a voice reply")
+        {
+            reply.push_str(&sentence);
+        }
+        assert!(reply.contains(&format!(
+            "received {} chars",
+            "Please answer this voice turn.".chars().count()
+        )));
+    }
 
     fn mock_runtime(bus: EventBus) -> VoiceRuntime {
         let stt: SttFactory =

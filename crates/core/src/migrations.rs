@@ -336,6 +336,36 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "agent_schedules",
         sql: include_str!("../migrations/0062_agent_schedules.sql"),
     },
+    Migration {
+        id: 63,
+        name: "skill_eval_behavioral_assertions",
+        sql: include_str!("../migrations/0063_skill_eval_behavioral_assertions.sql"),
+    },
+    Migration {
+        id: 64,
+        name: "memory_retrieval_config",
+        sql: include_str!("../migrations/0064_memory_retrieval_config.sql"),
+    },
+    Migration {
+        id: 65,
+        name: "skill_eval_mock_workspaces",
+        sql: include_str!("../migrations/0065_skill_eval_mock_workspaces.sql"),
+    },
+    Migration {
+        id: 66,
+        name: "workspace_patch_jobs",
+        sql: include_str!("../migrations/0066_workspace_patch_jobs.sql"),
+    },
+    Migration {
+        id: 67,
+        name: "workspace_execution_jobs",
+        sql: include_str!("../migrations/0067_workspace_execution_jobs.sql"),
+    },
+    Migration {
+        id: 68,
+        name: "memory_privacy_tombstones",
+        sql: include_str!("../migrations/0068_memory_privacy_tombstones.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

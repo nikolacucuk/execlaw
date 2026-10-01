@@ -989,6 +989,77 @@ impl InferenceClient {
         })
     }
 
+    /// Create a local text embedding through the configured backend.
+    /// Input and output are bounded so retrieval cannot turn a prompt into an
+    /// unbounded inference or index-write operation.
+    pub async fn embeddings(&self, model: &str, input: &str) -> Result<Vec<f32>, InferenceError> {
+        self.enforce_endpoint_policy()?;
+        if model.trim().is_empty() || model.len() > 256 || input.is_empty() || input.len() > 32_768
+        {
+            return Err(InferenceError::Decode(
+                "embedding model or input exceeds its bounds".into(),
+            ));
+        }
+        let _admission = self.acquire_admission(model).await?;
+        let (url, body, provider_shape) = if self.engine == InferenceEngine::Ollama {
+            let url = format!("{}/api/embed", ollama::daemon_root(&self.base_url));
+            (
+                url,
+                serde_json::json!({"model": model, "input": [input]}),
+                true,
+            )
+        } else {
+            (
+                format!("{}/embeddings", self.base_url.trim_end_matches('/')),
+                serde_json::json!({"model": model, "input": input}),
+                false,
+            )
+        };
+        let mut request = self.http.post(&url).json(&body);
+        if let Some(key) = &self.api_key {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().await?;
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let body = response.text().await.unwrap_or_default();
+            return Err(InferenceError::BadStatus { status, body });
+        }
+        let value: serde_json::Value = response.json().await?;
+        let vector = if provider_shape {
+            value
+                .get("embeddings")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(serde_json::Value::as_array)
+        } else {
+            value
+                .get("data")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("embedding"))
+                .and_then(serde_json::Value::as_array)
+        }
+        .ok_or_else(|| InferenceError::Decode("embedding response had no vector".into()))?;
+        let vector = vector
+            .iter()
+            .map(|value| {
+                value
+                    .as_f64()
+                    .filter(|value| value.is_finite())
+                    .map(|value| value as f32)
+                    .filter(|value| value.is_finite())
+                    .ok_or_else(|| InferenceError::Decode("embedding contains a non-number".into()))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if vector.is_empty() || vector.len() > 8192 {
+            return Err(InferenceError::Decode(
+                "embedding dimensions are outside 1..=8192".into(),
+            ));
+        }
+        Ok(vector)
+    }
+
     /// Execute a non-streaming completion with a bounded retry policy.
     ///
     /// This intentionally does not retry a stream after bytes have been
@@ -1690,6 +1761,39 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::net::IpAddr;
+
+    #[tokio::test]
+    async fn openai_embeddings_call_is_local_and_decodes_bounded_vectors() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 4096];
+            let count = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(request.starts_with("POST /v1/embeddings "));
+            let body = r#"{"data":[{"embedding":[0.25,-0.5,1.0]}]}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let client = InferenceClient::new(format!("http://{address}/v1"));
+        let embedding = client
+            .embeddings("local-embed-v1", "synthetic query")
+            .await
+            .unwrap();
+        assert_eq!(embedding, vec![0.25, -0.5, 1.0]);
+        server.await.unwrap();
+    }
 
     #[test]
     fn configured_reasoning_effort_is_sent_on_both_chat_wire_shapes() {

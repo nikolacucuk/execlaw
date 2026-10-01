@@ -392,8 +392,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     rechecks file hashes, run scope, Controller attestations, and delivered
     outbox receipts when building reports. The prior fake-attachment result
     changed from verified-complete to Blocked; repeating it returns HTTP 400.
-    Headless/editor/routine/agent real-task acceptance and producer links for
-    plugin/research artifacts still need qualification, so H022 remains open.
+    Later disposable TrueNAS-model tasks reached VerifiedComplete through
+    headless and editor-style API requests, a routine fire, and agent runs.
+    A plugin tool and research job produced run-owned attachments with valid
+    artifact and Controller review evidence. The actual headless CLI and VS
+    Code editor adapter processes and a settled-build matrix remain unproved;
+    H022 stays Partial. See [qualification notes](h022-h025-qualification.md).
 
 23. [ ] <a id="enhancement-023"></a> **Unify production executor semantics and recovery.** **P0 / L.**
     `runner-local`, `runner-binary`, and `server/src/chats.rs` have overlapping
@@ -432,7 +436,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     still open; a runner-enabled isolated server cannot share this Docker
     daemon safely until orphan sweeping is installation-scoped. An isolated
     timed-out run also kept retrying startup recovery after its wall-clock
-    budget expired; that recovery loop remains unresolved.
+    budget expired. A later budget guard and disposable restart terminalized
+    it once. Runner names are now database-scoped and a real runner turn
+    passed, but a held runner kill did not recover before its budget expired
+    during rebuilds. Prompt replay and spawn-gate changes need final-binary
+    qualification, as do streaming/routine parity and the full kill matrix;
+    H023 stays Partial. See [qualification notes](h022-h025-qualification.md).
 
 24. [ ] <a id="enhancement-024"></a> **Add client request idempotency and explicit effect reconciliation.**
     **P0 / M.** Extend the chat API, `core/src/runs.rs`, and outbox contract
@@ -465,7 +474,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     before acknowledgement. Restart parked the production transport outbox
     as unknown with one attempt and one sink effect. Lease reclaim now has a
     distinct timeline transition. Release-installed relay/transport and
-    idempotent sink process-kill qualification remain open.
+    idempotent sink process-kill qualification remain open. A later Windows
+    release build was blocked by Application Control 4551 on generated Cargo
+    executables. A Docker SQLCipher release build reached dependency
+    compilation but was stopped before an image was produced when host RAM
+    became scarce. H024 stays Partial; see
+    [qualification notes](h022-h025-qualification.md).
 
 25. [ ] <a id="enhancement-025"></a> **Enforce capability-specific network egress at connection time.**
     **P0 / M.** Extend the existing `local-endpoint-policy` approach to
@@ -502,8 +516,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     exact-model qualification; removing its LocalInference CIDR returned 503,
     and a PrivateIntegration-only grant did not authorize inference. A
     sidecar-HTTP redirect fixture now proves another listener receives zero
-    requests. Full live cross-adapter DNS/rebinding, redirect, proxy, and
-    supported-endpoint qualification remains open.
+    requests. Later live public OpenMeteo and research fetches succeeded;
+    MCP private approval, denial, and redirect probes left the forbidden
+    listener at zero requests. Focused public automation and Google OAuth
+    policy checks passed. The full final-tree adversarial script,
+    authenticated external endpoint/SPA checks, and cross-adapter DNS,
+    rebinding, and proxy matrix remain open. H025 stays Partial; see
+    [qualification notes](h022-h025-qualification.md).
 
 26. [x] <a id="enhancement-026"></a> **Make authorization and session revocation systematic.** **P0 / M.**
     Centralize protected admin-route construction in `server/src/routes.rs`
@@ -670,8 +689,16 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     Fixture validation checks provenance hash shape, bounded metadata and
     payload sizes, unique mock responses, tool pairing, and disabled effects.
     Production executor replay and fix-to-release regression gating remain.
-    No tests, Cargo commands, or project flows were run for this implementation
-    pass; verification remains outstanding for 100% completion.
+    **Session progress (2026-09-30):** the harness now replays every regular
+    JSON fixture in a directory, records each fixture hash and validation
+    result, and the Rust CI job uses this catalog command. Fixture replay now
+    drives the production `TurnExecutor` against a loopback scripted local
+    OpenAI-compatible endpoint, dispatches only fixture mocks, and compares
+    emitted transitions and payloads with the recorded trajectory. Catalog
+    replay requires incident and release references. Unsupported event kinds,
+    attached media, catalog/policy-only trajectories, and raw streaming-frame
+    replay are still outside the production-executor fixture contract; the
+    broader offline replay and release qualification gate remains open.
 
 37. [ ] <a id="enhancement-037"></a> **Make memory evidence inspectable and correctable.** **P1 / M.**
     Extend `core/src/memory_assertions.rs`, `memory_assets.rs`, and the memory
@@ -686,7 +713,11 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     per-turn HOT-loadout receipts; the run inspector shows scope, trust,
     binding/source hashes, injected length, and selection reasons. A retraction
     regression verifies deleted assets are omitted on a later turn. Agent-run
-    history and broader runtime invalidation qualification remain.
+    history now records the metadata-only HOT-loadout receipt in each run
+    checkpoint. The legacy unreceipted HOT key/value prompt block is no longer
+    injected; governed asset loadouts remain trust filtered and receipted.
+    Agent-run restart/invalidation coverage and full retraction qualification
+    across every derived projection remain open.
 
 38. [ ] <a id="enhancement-038"></a> **Qualify trust-first hybrid and temporal retrieval end to end.**
     **P1 / L.** `core/src/memory_assets.rs` already implements lexical/vector
@@ -702,7 +733,14 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     filters before ranking; prompt consumers deduplicate source hashes and
     record query/rank/source receipts. TOOL_ONLY assets stay out of prompt
     context. Versioned embedding/reranking and rebuild, research/agent
-    consumers, held-out quality, and hardware latency gates remain.
+    consumers, held-out quality, and hardware latency gates remain. Embedding
+    writes now require a bounded model identity, finite vector values, and a
+    source hash matching the current asset; the legacy vector path also filters
+    stale and inactive rows. Settings now configure a local embedding model and
+    rebuild a versioned index; chat, durable-run, agent, and research prompt
+    paths consume eligible assets and deduplicate source hashes. Held-out
+    recall, answer-accuracy comparison, fixed-budget hardware latency, and live
+    local-backend evidence remain open.
 
 39. [ ] <a id="enhancement-039"></a> **Evaluate learned skills by execution and support safe rollback.**
     **P1 / L.** Extend item 15 and `server/src/skills_admin.rs` beyond
@@ -713,7 +751,15 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     **Accept:** merely mentioning expected words cannot pass a failed task;
     a skill that improves one case but leaks a secret or breaks an existing
     case cannot promote. Report real task outcomes rather than claiming
-    autonomous learning gains from prose scores.
+    autonomous learning gains from prose scores. **Session progress
+    (2026-09-30):** evaluation suites now support forbidden-output checks and
+    per-case output/token bounds; suite hashes include these assertions and a
+    violation fails promotion scoring. Evaluations now run skills through a
+    bounded local tool loop in a temporary workspace with deterministic mock
+    integrations, exact workspace/call assertions, forbidden-action checks,
+    and paired parent/candidate results. Denied actions and cumulative output
+    tokens fail a case. Full live-model held-out qualification and promotion
+    evidence remain open.
 
 40. [ ] <a id="enhancement-040"></a> **Ship a complete workspace coding plugin.** **P1 / L.**
     Implement the existing strategy's coding-workspace proposal through
@@ -725,8 +771,16 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     escapes, secret-file reads, and unapproved network access fail closed.
     Plugins may supply language support; core must not hardcode individual
     plugin identities. Depend on 23-29 before granting write authority.
+    **Session progress (2026-09-30):** a Controller-only run-checkout patch
+    route now applies bounded UTF-8 replacements after checking each file's
+    expected SHA-256. It uses the isolated checkout and leaves the registered
+    workspace root for the existing reviewed diff/apply flow. Manifest-declared
+    read/search/patch tools are wired through the durable host dispatcher and
+    its per-run patch receipt. Terminal jobs and language-server diagnostics
+    are not implemented; a confined, approved toolchain artifact and H023-H029
+    write-authority prerequisites are also absent, so H040 remains open.
 
-41. [ ] <a id="enhancement-041"></a> **Add workspace checkpoints, run forks, and safe diff application.**
+41. [x] <a id="enhancement-041"></a> **Add workspace checkpoints, run forks, and safe diff application.**
     **P1 / L.** Extend the coding plugin and run store with isolated working
     copies, content-addressed snapshots, and branch/run lineage. Record which
     files a checkpoint covers, detect concurrent human edits, and preview
@@ -736,7 +790,7 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     changes; external sends are never described as undone. Commits, pushes,
     and publication remain explicit operator decisions.
 
-42. [ ] <a id="enhancement-042"></a> **Make child-agent work a durable, inspectable run tree.** **P1 / L.**
+42. [x] <a id="enhancement-042"></a> **Make child-agent work a durable, inspectable run tree.** **P1 / L.**
     Extend existing agent definitions/mailboxes, `server/src/tool_apis_subagent.rs`,
     and run-step kinds with durable spawn/join, typed task/result contracts,
     artifact handoff, inherited trust ceilings, and aggregate budgets. Show
@@ -757,7 +811,7 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     acknowledged within a defined tested latency even when inference or a
     tool stalls. Never convert elapsed silence into approval.
 
-44. [ ] <a id="enhancement-044"></a> **Expose a stable headless, terminal, and editor client contract.**
+44. [x] <a id="enhancement-044"></a> **Expose a stable headless, terminal, and editor client contract.**
     **P2 / L.** Build versioned clients from `spec/` and the server API with
     typed sessions, event cursors, artifacts, approvals, and cancellation.
     Add a thin terminal client and an optional editor protocol adapter that
@@ -768,7 +822,7 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     integration surfaces while retaining one local authority and SQLite
     configuration.
 
-45. [ ] <a id="enhancement-045"></a> **Complete negotiated, bounded MCP interoperability.** **P1 / M.**
+45. [x] <a id="enhancement-045"></a> **Complete negotiated, bounded MCP interoperability.** **P1 / M.**
     Extend the stdio client and `server/src/mcp_http_client.rs` with verified
     version negotiation, session headers/lifecycle, bounded streaming,
     response-ID validation, cancellation, and capability discovery. Gate any
@@ -2579,6 +2633,13 @@ completion, strict version/ID checks, and explicit session lifecycle. Test
 oversized success/error bodies, wrong IDs, and an open SSE connection after
 the matching result. Roadmap 29/45.
 
+**Closure (2026-09-30):** HTTP JSON and SSE bodies are consumed incrementally
+under the response cap; protocol and response IDs are validated, and the
+client returns as soon as the matching SSE response arrives. Session expiry
+reinitializes without replaying a tool call. Seven HTTP MCP tests and the
+15-test stdio client suite passed, including bounded-response, wrong-ID,
+session-expiry, open-SSE, and pinned-version fixtures.
+
 <a id="finding-f14"></a>
 
 ### F14 - Medium: plugin UI trust is broader than tool capability trust
@@ -2600,21 +2661,14 @@ read another plugin's state, or call unrelated admin mutations. Roadmap 27.
 
 <a id="finding-f15"></a>
 
-### F15 - Medium: a slow STT request holds the shared voice-session lock
+### F15 - Closed: a slow STT request no longer holds a shared voice-session lock
 
-**Evidence:** `crates/server/src/voice_runtime.rs:77` holds sessions behind one
-mutex. `finalize_utterance` obtains it at `:331` and awaits `stt.flush()` at
-`:339`; `voice_clients/whisper.rs:183-185` performs HTTP during flush, with a
-30-second default timeout (`:73`). `voice_runtime.rs:473` needs the same lock
-for interrupt.
-
-**Impact and conditions:** slow transcription can delay other sessions'
-ingestion and cancellation. Existing changes that release locks for LLM/TTS
-work do not cover this STT await.
-
-**Fix/gate:** per-session ownership/locking and no global lock across network
-I/O. With two synthetic sessions, stall one STT endpoint and verify the other
-can ingest and interrupt within the defined latency budget. Roadmap 47.
+**Resolution:** the runtime map mutex now protects only lookup and session
+lifecycle; each session owns its STT/TTS state mutex. The regression
+`voice_runtime::tests::stalled_stt_flush_does_not_block_another_sessions_interrupt`
+holds one session's STT flush and confirms another session's interrupt returns
+within 500 ms. H047 remains open for continuous endpointing, incremental STT,
+first-turn voice routing, and supported-hardware qualification.
 
 <a id="finding-f16"></a>
 

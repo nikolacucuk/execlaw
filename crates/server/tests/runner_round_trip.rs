@@ -280,6 +280,7 @@ async fn forward_turn_round_trips_token_delta_to_runner_and_event_bus() {
         UiEvent::ChatTokenDelta {
             conversation_id,
             text,
+            ..
         } => {
             assert_eq!(conversation_id, "conv-x");
             assert_eq!(text, "tok-A");

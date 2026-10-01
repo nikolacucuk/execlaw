@@ -19,6 +19,7 @@ pub mod gpu_memory;
 pub mod hardware;
 pub mod hf_downloader;
 pub mod service;
+pub mod workspace_executor;
 
 pub use hf_downloader::{DownloadEvent, DownloadStream, HfDownloader, HfError, ResolvedModel};
 
@@ -29,6 +30,12 @@ pub use hardware::{
 pub use service::{
     BollardServiceController, HostMount, MultiplexedServiceController, NativeServiceController,
     ServiceController, ServiceError, ServiceHandle, ServiceRuntime, ServiceSpec, ServiceStatus,
+};
+
+pub use workspace_executor::{
+    BollardWorkspaceJobExecutor, WorkspaceDiagnostic, WorkspaceDiagnosticsRequest,
+    WorkspaceDiagnosticsResult, WorkspaceExecutionError, WorkspaceJobExecutor, WorkspaceRunRequest,
+    WorkspaceRunResult,
 };
 
 #[cfg(any(test, feature = "test-mock"))]

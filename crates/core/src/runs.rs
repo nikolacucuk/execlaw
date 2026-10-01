@@ -1004,7 +1004,11 @@ impl<'db> RunStore<'db> {
                 || stored.3 != manifest.tool_catalog_hash
             {
                 return Err(DbError::Invariant(format!(
-                    "run '{run_id}' was reopened with changed turn inputs"
+                    "run '{run_id}' was reopened with changed turn inputs (version={}, prompt={}, model_settings={}, tool_catalog={})",
+                    stored.0 != i64::from(manifest.input_version),
+                    stored.1 != manifest.prompt_hash,
+                    stored.2 != manifest.model_settings_hash,
+                    stored.3 != manifest.tool_catalog_hash,
                 )));
             }
             Ok(())
@@ -2254,20 +2258,54 @@ impl<'db> RunStore<'db> {
         self.required_run(run_id)
     }
 
-    /// Cancel one active child run and fail its unfinished checkpoints so
-    /// recovery cannot mistake an interrupted inference wait for live work.
+    /// Cancel an active run and its active descendants, failing their
+    /// unfinished checkpoints so recovery cannot mistake an interrupted
+    /// inference wait for live work.
     pub fn cancel_run(&self, run_id: &str, cancelled_at: i64) -> Result<bool, RunStoreError> {
         self.db.transaction(|tx| {
+            let prior_status: Option<String> = tx
+                .query_row(
+                    "SELECT status FROM state_runs WHERE run_id=?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            let Some(prior_status) = prior_status else {
+                return Ok(false);
+            };
             let changed = tx.execute(
                 "UPDATE state_runs SET status='cancelled',updated_at=?2 WHERE run_id=?1 AND status IN ('pending','running','waiting')",
                 params![run_id,cancelled_at],
             )?;
-            if changed == 0 { return Ok(false); }
+            if changed == 0 && prior_status != "cancelled" {
+                return Ok(false);
+            }
             tx.execute(
-                "UPDATE state_run_steps SET status='failed',output_ref='error:cancelled',lease_owner=NULL,lease_expires_at=NULL,completed_at=?2 WHERE run_id=?1 AND status IN ('pending','running','waiting')",
+                "WITH RECURSIVE descendants(run_id) AS (\
+                    SELECT run_id FROM state_runs WHERE parent_run_id=?1 \
+                    UNION \
+                    SELECT child.run_id FROM state_runs child \
+                    JOIN descendants parent ON child.parent_run_id=parent.run_id \
+                 ) \
+                 UPDATE state_runs SET status='cancelled',updated_at=?2 \
+                 WHERE run_id IN (SELECT run_id FROM descendants) \
+                   AND status IN ('pending','running','waiting')",
+                params![run_id, cancelled_at],
+            )?;
+            tx.execute(
+                "WITH RECURSIVE cancelled_runs(run_id) AS (\
+                    SELECT ?1 \
+                    UNION \
+                    SELECT child.run_id FROM state_runs child \
+                    JOIN cancelled_runs parent ON child.parent_run_id=parent.run_id \
+                 ) \
+                 UPDATE state_run_steps SET status='failed',output_ref='error:cancelled', \
+                    lease_owner=NULL,lease_expires_at=NULL,completed_at=?2 \
+                 WHERE run_id IN (SELECT run_id FROM cancelled_runs) \
+                   AND status IN ('pending','running','waiting')",
                 params![run_id,cancelled_at],
             )?;
-            Ok(true)
+            Ok(changed == 1)
         }).map_err(RunStoreError::from)
     }
 
@@ -2943,7 +2981,7 @@ mod tests {
             pair(
                 1,
                 "research.start",
-                serde_json::json!({"job_id": research_id.as_str()}),
+                serde_json::json!({"job": {"id": research_id.as_str()}}),
             ),
         )
         .unwrap();
@@ -3918,5 +3956,123 @@ mod tests {
             .unwrap();
         assert_eq!(step.attempt, 2);
         assert_eq!(step.lease_owner.as_deref(), Some("worker-b"));
+    }
+
+    #[test]
+    fn cancelling_parent_stops_active_descendants_and_closes_their_steps() {
+        let db = fresh_db();
+        let store = RunStore::new(&db);
+        let parent = create_run(&store, None);
+        let child = create_run(&store, Some(parent.clone()));
+        let grandchild = create_run(&store, Some(child.clone()));
+        store
+            .add_step(&child, &step("child-work", 0, RunStepKind::ModelRequest))
+            .unwrap();
+        store
+            .add_step(
+                &grandchild,
+                &step("grandchild-work", 0, RunStepKind::ModelRequest),
+            )
+            .unwrap();
+        store
+            .claim_step(&child, "child-work", "worker-child", 10, 100)
+            .unwrap();
+        store
+            .claim_step(&grandchild, "grandchild-work", "worker-grandchild", 10, 100)
+            .unwrap();
+
+        assert!(store.cancel_run(&parent, 20).unwrap());
+        assert_eq!(
+            store.get_run(&parent).unwrap().unwrap().status,
+            RunStatus::Cancelled
+        );
+        assert_eq!(
+            store.get_run(&child).unwrap().unwrap().status,
+            RunStatus::Cancelled
+        );
+        assert_eq!(
+            store.get_run(&grandchild).unwrap().unwrap().status,
+            RunStatus::Cancelled
+        );
+        for (run_id, step_id) in [(&child, "child-work"), (&grandchild, "grandchild-work")] {
+            let step = store.get_step(run_id, step_id).unwrap().unwrap();
+            assert_eq!(step.status, RunStepStatus::Failed);
+            assert_eq!(step.output_ref.as_deref(), Some("error:cancelled"));
+            assert_eq!(step.lease_owner, None);
+        }
+        // Simulate a child made eligible by an older interrupted cascade.
+        // Repeating the parent cancel reconciles descendants even though the
+        // parent itself is already terminal.
+        db.with_conn(|connection| {
+            connection.execute(
+                "UPDATE state_runs SET status='running' WHERE run_id=?1",
+                [&child],
+            )?;
+            connection.execute(
+                "UPDATE state_run_steps SET status='running',output_ref=NULL,completed_at=NULL,lease_owner='recovered-child',lease_expires_at=100 WHERE run_id=?1 AND step_id='child-work'",
+                [&child],
+            )?;
+            connection.execute(
+                "UPDATE state_runs SET status='running' WHERE run_id=?1",
+                [&grandchild],
+            )?;
+            connection.execute(
+                "UPDATE state_run_steps SET status='running',output_ref=NULL,completed_at=NULL,lease_owner='recovered-grandchild',lease_expires_at=100 WHERE run_id=?1 AND step_id='grandchild-work'",
+                [&grandchild],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(!store.cancel_run(&parent, 21).unwrap());
+        assert_eq!(
+            store.get_run(&child).unwrap().unwrap().status,
+            RunStatus::Cancelled
+        );
+        assert_eq!(
+            store.get_run(&grandchild).unwrap().unwrap().status,
+            RunStatus::Cancelled
+        );
+        assert_eq!(
+            store
+                .get_step(&child, "child-work")
+                .unwrap()
+                .unwrap()
+                .status,
+            RunStepStatus::Failed
+        );
+        assert_eq!(
+            store
+                .get_step(&grandchild, "grandchild-work")
+                .unwrap()
+                .unwrap()
+                .status,
+            RunStepStatus::Failed
+        );
+    }
+
+    #[test]
+    fn fork_links_lineage_without_copying_steps_approvals_or_effect_keys() {
+        let db = fresh_db();
+        let store = RunStore::new(&db);
+        let source = create_run(&store, None);
+        store
+            .add_step(
+                &source,
+                &NewRunStep {
+                    step_id: "approved-send".into(),
+                    ordinal: 0,
+                    kind: RunStepKind::OutboxEnqueue,
+                    input_hash: "send-hash".into(),
+                    approval_id: Some("approval-source".into()),
+                    outbox_idempotency_key: Some("effect-source".into()),
+                },
+            )
+            .unwrap();
+
+        let fork = store.fork_run(&source, 20).unwrap();
+        assert_eq!(fork.parent_run_id.as_deref(), Some(source.as_str()));
+        assert_eq!(fork.status, RunStatus::Pending);
+        assert!(store.list_steps(&fork.run_id).unwrap().is_empty());
+        assert_eq!(store.list_steps(&source).unwrap().len(), 1);
     }
 }

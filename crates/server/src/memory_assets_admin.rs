@@ -9,10 +9,12 @@ use axum::{
     routing::{get, put},
 };
 use execlaw_core::memory_assertions::{
-    MemoryAssertionEvidenceView, MemoryAssertionReviewRecord, MemoryAssertionStore,
-    MemoryEvidenceRecord,
+    MemoryAssertionError, MemoryAssertionEvidenceView, MemoryAssertionReviewRecord,
+    MemoryAssertionStore, MemoryEvidenceRecord,
 };
-use execlaw_core::memory_assets::{AssetBinding, InjectionMode, MemoryAsset, MemoryAssetStore};
+use execlaw_core::memory_assets::{
+    AssetBinding, InjectionMode, MemoryAsset, MemoryAssetStore, MemoryRetrievalConfig,
+};
 use execlaw_core::users::UserRole;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -42,10 +44,48 @@ pub struct AgentScopeQuery {
     pub agent_scope: Option<String>,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct MemoryRetrievalConfigRequest {
+    pub embedding_model_id: String,
+    #[serde(default = "default_memory_reranker_version")]
+    pub reranker_version: String,
+}
+
+fn default_memory_reranker_version() -> String {
+    execlaw_core::memory_assets::MEMORY_RERANKER_VERSION.to_owned()
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct EmbeddingRebuildRequest {
+    #[serde(default = "default_embedding_rebuild_batch")]
+    pub limit: u32,
+}
+
+fn default_embedding_rebuild_batch() -> u32 {
+    32
+}
+
 #[derive(Debug, serde::Serialize, ToSchema)]
 pub struct AgentScopeView {
     pub id: String,
     pub name: String,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct MemoryRetrievalConfigView {
+    pub embedding_model_id: String,
+    pub reranker_version: String,
+    pub updated_at: i64,
+}
+
+impl From<MemoryRetrievalConfig> for MemoryRetrievalConfigView {
+    fn from(config: MemoryRetrievalConfig) -> Self {
+        Self {
+            embedding_model_id: config.embedding_model_id,
+            reranker_version: config.reranker_version,
+            updated_at: config.updated_at,
+        }
+    }
 }
 
 #[derive(Debug, serde::Serialize, ToSchema)]
@@ -185,6 +225,12 @@ pub struct RetractMemoryAssertionRequest {
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
+pub struct ForgetMemorySourceRequest {
+    pub conversation_id: String,
+    pub event_seq: i64,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct CorrectMemoryAssertionRequest {
     pub replacement: serde_json::Value,
     pub reason: String,
@@ -290,6 +336,10 @@ pub async fn list(
         id: "default".into(),
         name: "Default chat agent".into(),
     }];
+    agent_scopes.push(AgentScopeView {
+        id: "research".into(),
+        name: "Deep research".into(),
+    });
     match execlaw_core::agents::AgentStore::new(&state.db).list() {
         Ok(agents) => agent_scopes.extend(agents.into_iter().map(|agent| AgentScopeView {
             id: agent.id,
@@ -415,7 +465,7 @@ pub async fn unbind(
 }
 
 fn agent_scope_exists(state: &AppState, agent_scope: &str) -> bool {
-    if agent_scope == "default" {
+    if matches!(agent_scope, "default" | "research") {
         return true;
     }
     if let Some(routine_id) = agent_scope.strip_prefix("routine:") {
@@ -543,6 +593,59 @@ pub async fn delete_asset(
                 StatusCode::NOT_FOUND
             },
             Json(serde_json::json!({"asset_id": asset_id, "deleted": deleted})),
+        )
+            .into_response(),
+        Err(error) => failure(error),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/memory-assertions/forget-source",
+    request_body = ForgetMemorySourceRequest,
+    responses(
+        (status = 200, description = "Memory assertions and evidence derived from the source event were hidden"),
+        (status = 400, description = "Conversation ID and positive event sequence are required"),
+        (status = 403, description = "Controller role required"),
+        (status = 404, description = "Source event not found")
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "memory"
+)]
+pub async fn forget_memory_source(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Json(request): Json<ForgetMemorySourceRequest>,
+) -> impl IntoResponse {
+    if let Err(response) = controller(&user) {
+        return response;
+    }
+    if request.conversation_id.trim().is_empty() || request.event_seq <= 0 {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"conversation_id and a positive event_seq are required"})),
+        )
+            .into_response();
+    }
+    match MemoryAssertionStore::new(&state.db).tombstone_source_event(
+        &request.conversation_id,
+        request.event_seq,
+        &user.user_id,
+        chrono::Utc::now().timestamp(),
+    ) {
+        Ok(report) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "conversation_id": request.conversation_id,
+                "event_seq": request.event_seq,
+                "assertions_hidden": report.assertions_hidden,
+                "evidence_hidden": report.evidence_hidden,
+            })),
+        )
+            .into_response(),
+        Err(MemoryAssertionError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"source event not found"})),
         )
             .into_response(),
         Err(error) => failure(error),
@@ -744,6 +847,18 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/memory-assets", get(list))
         .route(
+            "/api/admin/memory-assets/retrieval-config",
+            get(get_retrieval_config).put(put_retrieval_config),
+        )
+        .route(
+            "/api/admin/memory-assets/embeddings/rebuild",
+            axum::routing::post(rebuild_embeddings),
+        )
+        .route(
+            "/api/admin/memory-assertions/forget-source",
+            axum::routing::post(forget_memory_source),
+        )
+        .route(
             "/api/admin/memory-assets/{asset_id}",
             axum::routing::delete(delete_asset),
         )
@@ -763,6 +878,214 @@ pub fn router() -> Router<AppState> {
             "/api/admin/memory-assertions/{assertion_id}/correct",
             axum::routing::post(correct_assertion),
         )
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/memory-assets/retrieval-config",
+    responses((status = 200, description = "Local memory retrieval model identities", body = Option<MemoryRetrievalConfigView>)),
+    tag = "memory"
+)]
+pub async fn get_retrieval_config(
+    State(state): State<AppState>,
+    user: AuthedUser,
+) -> impl IntoResponse {
+    if let Err(response) = controller(&user) {
+        return response;
+    }
+    match MemoryAssetStore::new(&state.db).retrieval_config() {
+        Ok(config) => (
+            StatusCode::OK,
+            Json(serde_json::to_value(config).unwrap_or_default()),
+        )
+            .into_response(),
+        Err(error) => failure(error),
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/api/admin/memory-assets/retrieval-config",
+    request_body = MemoryRetrievalConfigRequest,
+    responses((status = 200, description = "Saved local retrieval model identities", body = MemoryRetrievalConfigView)),
+    tag = "memory"
+)]
+pub async fn put_retrieval_config(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Json(request): Json<MemoryRetrievalConfigRequest>,
+) -> impl IntoResponse {
+    if let Err(response) = controller(&user) {
+        return response;
+    }
+    let store = MemoryAssetStore::new(&state.db);
+    match store.set_retrieval_config(
+        &request.embedding_model_id,
+        &request.reranker_version,
+        chrono::Utc::now().timestamp(),
+    ) {
+        Ok(()) => match store.retrieval_config() {
+            Ok(Some(config)) => (StatusCode::OK, Json(serde_json::to_value(config).unwrap_or_default())).into_response(),
+            Ok(None) => failure("retrieval config disappeared after write"),
+            Err(error) => failure(error),
+        },
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"invalid memory retrieval configuration", "detail":error.to_string()})),
+        ).into_response(),
+    }
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/memory-assets/embeddings/rebuild",
+    request_body = EmbeddingRebuildRequest,
+    responses((status = 200, description = "Rebuilt a bounded batch of stale local embeddings", body = serde_json::Value)),
+    tag = "memory"
+)]
+pub async fn rebuild_embeddings(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Json(request): Json<EmbeddingRebuildRequest>,
+) -> impl IntoResponse {
+    if let Err(response) = controller(&user) {
+        return response;
+    }
+    let store = MemoryAssetStore::new(&state.db);
+    let config = match store.retrieval_config() {
+        Ok(Some(config)) => config,
+        Ok(None) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error":"configure a local embedding model first"})),
+            )
+                .into_response();
+        }
+        Err(error) => return failure(error),
+    };
+    let resolved = match state
+        .inference
+        .resolve(&state.db, execlaw_core::backends::BackendPurpose::Standard)
+    {
+        Some(resolved) => resolved.with_workload("background"),
+        None => return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"configured local inference backend is unavailable"})),
+        )
+            .into_response(),
+    };
+    let index_id = embedding_index_id(
+        &resolved.endpoint,
+        &resolved.model_id,
+        &config.embedding_model_id,
+        resolved.client.engine,
+    );
+    let batch_limit = request.limit.clamp(1, 128) as usize;
+    let candidates = match store.embedding_rebuild_candidates(&index_id, (batch_limit + 1) as u32) {
+        Ok(mut candidates) => {
+            candidates.truncate(batch_limit + 1);
+            candidates
+        }
+        Err(error) => return failure(error),
+    };
+    let has_more = candidates.len() > batch_limit;
+    let mut embedded = 0usize;
+    for candidate in candidates.iter().take(batch_limit) {
+        let vector = match resolved
+            .client
+            .embeddings(&config.embedding_model_id, &candidate.input_text)
+            .await
+        {
+            Ok(vector) => vector,
+            Err(error) => {
+                tracing::warn!(asset_id = %candidate.asset_id, error_class = error.safe_class(), "local memory embedding failed");
+                return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"local embedding request failed", "embedded":embedded}))).into_response();
+            }
+        };
+        if let Err(error) = store.upsert_embedding(
+            &candidate.asset_id,
+            &index_id,
+            &vector,
+            &candidate.source_hash,
+            chrono::Utc::now().timestamp(),
+        ) {
+            return failure(error);
+        }
+        embedded += 1;
+    }
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "embedding_model_id": config.embedding_model_id,
+            "index_id": index_id,
+            "embedded": embedded,
+            "has_more": has_more,
+            "effects_enabled": false
+        })),
+    )
+        .into_response()
+}
+
+pub(crate) fn embedding_index_id(
+    endpoint: &str,
+    chat_model_id: &str,
+    embedding_model_id: &str,
+    engine: execlaw_inference_api::InferenceEngine,
+) -> String {
+    use sha2::{Digest, Sha256};
+    let fingerprint = format!("{endpoint}\0{chat_model_id}\0{embedding_model_id}\0{engine:?}");
+    format!(
+        "{}:{}",
+        embedding_model_id,
+        hex::encode(Sha256::digest(fingerprint.as_bytes()))
+    )
+}
+
+pub(crate) async fn embed_memory_query(
+    state: &AppState,
+    query: &str,
+) -> Option<(String, Vec<f32>)> {
+    if query.trim().is_empty() {
+        return None;
+    }
+    let store = MemoryAssetStore::new(&state.db);
+    let config = match store.retrieval_config() {
+        Ok(Some(config)) => config,
+        Ok(None) => return None,
+        Err(error) => {
+            tracing::warn!(%error, "memory retrieval config lookup failed; using lexical search");
+            return None;
+        }
+    };
+    let resolved = match state
+        .inference
+        .resolve(&state.db, execlaw_core::backends::BackendPurpose::Standard)
+    {
+        Some(resolved) => resolved.with_workload("background"),
+        None => return None,
+    };
+    let index_id = embedding_index_id(
+        &resolved.endpoint,
+        &resolved.model_id,
+        &config.embedding_model_id,
+        resolved.client.engine,
+    );
+    match resolved
+        .client
+        .embeddings(&config.embedding_model_id, query)
+        .await
+    {
+        Ok(vector) => Some((index_id, vector)),
+        Err(error) => {
+            use sha2::Digest;
+            tracing::warn!(
+                query_sha256 = %hex::encode(sha2::Sha256::digest(query.as_bytes())),
+                error_class = error.safe_class(),
+                "local memory query embedding failed; using lexical search"
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1036,5 +1359,55 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn retrieval_model_configuration_is_controller_gated_and_rebuild_fails_closed() {
+        let state = crate::routes::test_app_state();
+        let missing = get_retrieval_config(State(state.clone()), user(UserRole::Controller))
+            .await
+            .into_response();
+        assert_eq!(missing.status(), StatusCode::OK);
+
+        let saved = put_retrieval_config(
+            State(state.clone()),
+            user(UserRole::Controller),
+            Json(MemoryRetrievalConfigRequest {
+                embedding_model_id: "local-embed-v1".into(),
+                reranker_version: "local-hybrid-rrf-v1".into(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(saved.status(), StatusCode::OK);
+        assert_eq!(
+            MemoryAssetStore::new(&state.db)
+                .retrieval_config()
+                .unwrap()
+                .unwrap()
+                .embedding_model_id,
+            "local-embed-v1"
+        );
+
+        let denied = put_retrieval_config(
+            State(state.clone()),
+            user(UserRole::Operator),
+            Json(MemoryRetrievalConfigRequest {
+                embedding_model_id: "untrusted-model".into(),
+                reranker_version: "local-hybrid-rrf-v1".into(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let unavailable = rebuild_embeddings(
+            State(state),
+            user(UserRole::Controller),
+            Json(EmbeddingRebuildRequest { limit: 8 }),
+        )
+        .await
+        .into_response();
+        assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

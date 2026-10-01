@@ -54,6 +54,7 @@ $TauriDir        = Join-Path $RepoRoot 'desktop-windows\src-tauri'
 $BundleBinDir    = Join-Path $TauriDir 'bin'
 $IconsDir        = Join-Path $TauriDir 'icons'
 $PluginStageDir  = Join-Path $TauriDir 'resources\plugins'
+$OpenSslStageDir = Join-Path $TauriDir 'resources\openssl'
 
 # -----------------------------------------------------------------
 # Pin the Rust HOST toolchain to MSVC for this script invocation.
@@ -204,6 +205,19 @@ if (-not (Test-Path -LiteralPath $ServerBin)) {
 # triple at bundle time).
 $ServerStaged = Join-Path $BundleBinDir "execlaw-$Target.exe"
 Copy-Item -LiteralPath $ServerBin -Destination $ServerStaged -Force -ErrorAction Stop
+
+# With OPENSSL_NO_VENDOR=1, SQLCipher links against the installed OpenSSL
+# import libraries. Bundle their runtime DLLs beside execlaw.exe so the
+# installer remains self-contained on machines without that SDK.
+New-Item -ItemType Directory -Force -Path $OpenSslStageDir -ErrorAction Stop | Out-Null
+if ($env:OPENSSL_NO_VENDOR -and $env:OPENSSL_NO_VENDOR -ne '0') {
+    if (-not $env:OPENSSL_DIR) { throw 'OPENSSL_DIR is required with OPENSSL_NO_VENDOR=1' }
+    foreach ($dll in @('libcrypto-3-x64.dll', 'libssl-3-x64.dll')) {
+        $source = Join-Path (Join-Path $env:OPENSSL_DIR 'bin') $dll
+        if (-not (Test-Path -LiteralPath $source)) { throw "missing OpenSSL runtime: $source" }
+        Copy-Item -LiteralPath $source -Destination (Join-Path $OpenSslStageDir $dll) -Force -ErrorAction Stop
+    }
+}
 
 Write-Host '==> Step 4: render icons from SVG sources'
 # Tauri's `generate_context!` macro + the execlaw-tray-win crate's

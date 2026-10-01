@@ -223,10 +223,21 @@ impl Default for MemoryExtractionPolicy {
 pub enum MemoryAssertionError {
     #[error(transparent)]
     Db(#[from] DbError),
+    #[error("memory source event not found: {0}")]
+    NotFound(String),
     #[error("invalid memory assertion: {0}")]
     Invalid(String),
     #[error("corrupt memory assertion: {0}")]
     Corrupt(String),
+}
+
+/// Counts the live assertion and evidence projections hidden by a memory
+/// source deletion. The append-only source event and its assertions remain in
+/// storage; tombstones make them unavailable to current memory APIs.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MemoryPrivacyDeletionReport {
+    pub assertions_hidden: usize,
+    pub evidence_hidden: usize,
 }
 
 pub struct MemoryAssertionStore<'db> {
@@ -238,6 +249,101 @@ impl<'db> MemoryAssertionStore<'db> {
         Self { db }
     }
 
+    /// Hide assertions derived from one event, all superseding descendants,
+    /// and their evidence references in one SQLite transaction.
+    pub fn tombstone_source_event(
+        &self,
+        conversation_id: &str,
+        event_seq: i64,
+        requested_by: &str,
+        requested_at: i64,
+    ) -> Result<MemoryPrivacyDeletionReport, MemoryAssertionError> {
+        if conversation_id.trim().is_empty() || event_seq <= 0 || requested_by.trim().is_empty() {
+            return Err(MemoryAssertionError::Invalid(
+                "source deletion requires a conversation, positive event sequence, and actor"
+                    .into(),
+            ));
+        }
+        let source_id = format!("{conversation_id}#{event_seq}");
+        let request_id = hex::encode(Sha256::digest(
+            format!("memory-source-deletion:{source_id}").as_bytes(),
+        ));
+        let exists = self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_events WHERE conversation_id = ?1 AND seq = ?2)",
+                    params![conversation_id, event_seq],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(DbError::from)
+        })?;
+        if !exists {
+            return Err(MemoryAssertionError::NotFound(source_id));
+        }
+        self.db
+            .transaction(|tx| {
+                tx.execute(
+                    "INSERT OR IGNORE INTO state_memory_privacy_tombstones \
+                     (target_kind, target_id, assertion_id, source_conversation_id, source_event_seq, \
+                      request_id, requested_by, requested_at) \
+                     VALUES ('source_event', ?1, NULL, ?2, ?3, ?4, ?5, ?6)",
+                    params![source_id, conversation_id, event_seq, request_id, requested_by, requested_at],
+                )?;
+
+                let assertion_ids = {
+                    let mut statement = tx.prepare(
+                        "WITH RECURSIVE affected(assertion_id) AS ( \
+                             SELECT assertion_id FROM memory_evidence \
+                             WHERE conversation_id = ?1 AND event_seq = ?2 \
+                             UNION SELECT child.assertion_id FROM memory_assertions child \
+                             JOIN affected parent ON child.supersedes_id = parent.assertion_id \
+                         ) SELECT assertion_id FROM affected ORDER BY assertion_id",
+                    )?;
+                    statement
+                        .query_map(params![conversation_id, event_seq], |row| row.get::<_, String>(0))?
+                        .collect::<Result<Vec<_>, _>>()?
+                };
+
+                let mut report = MemoryPrivacyDeletionReport::default();
+                for assertion_id in assertion_ids {
+                    let inserted = tx.execute(
+                        "INSERT OR IGNORE INTO state_memory_privacy_tombstones \
+                         (target_kind, target_id, assertion_id, source_conversation_id, source_event_seq, \
+                          request_id, requested_by, requested_at) \
+                         VALUES ('assertion', ?1, ?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![assertion_id, conversation_id, event_seq, request_id, requested_by, requested_at],
+                    )?;
+                    report.assertions_hidden += inserted as usize;
+
+                    tx.execute(
+                        "DELETE FROM memory_current_projection WHERE assertion_id = ?1",
+                        [&assertion_id],
+                    )?;
+
+                    let evidence_ids = {
+                        let mut statement = tx.prepare(
+                            "SELECT evidence_id FROM memory_evidence WHERE assertion_id = ?1 ORDER BY evidence_id",
+                        )?;
+                        statement
+                            .query_map([&assertion_id], |row| row.get::<_, String>(0))?
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                    for evidence_id in evidence_ids {
+                        let inserted = tx.execute(
+                            "INSERT OR IGNORE INTO state_memory_privacy_tombstones \
+                             (target_kind, target_id, assertion_id, source_conversation_id, source_event_seq, \
+                              request_id, requested_by, requested_at) \
+                             VALUES ('evidence', ?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![evidence_id, assertion_id, conversation_id, event_seq, request_id, requested_by, requested_at],
+                        )?;
+                        report.evidence_hidden += inserted as usize;
+                    }
+                }
+                Ok(report)
+            })
+            .map_err(MemoryAssertionError::from)
+    }
+
     /// Get a stored assertion by its stable identifier.
     pub fn get(&self, assertion_id: &str) -> Result<Option<MemoryAssertion>, MemoryAssertionError> {
         self.db
@@ -246,7 +352,9 @@ impl<'db> MemoryAssertionStore<'db> {
                     "SELECT assertion_id, scope, trust_class, kind, subject, predicate, object_json, \
                      confidence, status, observed_from, observed_to, valid_from, valid_to, supersedes_id, \
                      extraction_run_id, created_event_seq, created_at FROM memory_assertions \
-                     WHERE assertion_id = ?1",
+                     WHERE assertion_id = ?1 AND NOT EXISTS (\
+                       SELECT 1 FROM state_memory_privacy_tombstones \
+                       WHERE target_kind = 'assertion' AND target_id = ?1)",
                     [assertion_id],
                     row_to_assertion,
                 )
@@ -268,7 +376,12 @@ impl<'db> MemoryAssertionStore<'db> {
                 conn.query_row(
                     "SELECT evidence_id, assertion_id, conversation_id, event_seq, payload_path, \
                      quote_hash, evidence_kind, created_at FROM memory_evidence \
-                     WHERE assertion_id = ?1 ORDER BY conversation_id, event_seq, evidence_id LIMIT 1",
+                     WHERE assertion_id = ?1 \
+                       AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones \
+                           WHERE target_kind = 'assertion' AND target_id = ?1) \
+                       AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones \
+                           WHERE target_kind = 'evidence' AND target_id = evidence_id) \
+                     ORDER BY conversation_id, event_seq, evidence_id LIMIT 1",
                     [assertion_id],
                     |row| {
                         Ok(MemoryEvidenceRecord {
@@ -300,21 +413,29 @@ impl<'db> MemoryAssertionStore<'db> {
                 let mut statement = conn.prepare_cached(
                     "SELECT evidence_id, assertion_id, conversation_id, event_seq, payload_path, \
                      quote_hash, evidence_kind, created_at FROM memory_evidence \
-                     WHERE assertion_id = ?1 ORDER BY conversation_id, event_seq, evidence_id LIMIT ?2",
+                     WHERE assertion_id = ?1 \
+                       AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones \
+                           WHERE target_kind = 'assertion' AND target_id = ?1) \
+                       AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones \
+                           WHERE target_kind = 'evidence' AND target_id = evidence_id) \
+                     ORDER BY conversation_id, event_seq, evidence_id LIMIT ?2",
                 )?;
                 statement
-                    .query_map(rusqlite::params![assertion_id, limit.clamp(1, 501)], |row| {
-                        Ok(MemoryEvidenceRecord {
-                            evidence_id: row.get(0)?,
-                            assertion_id: row.get(1)?,
-                            conversation_id: row.get(2)?,
-                            event_seq: row.get(3)?,
-                            payload_path: row.get(4)?,
-                            quote_hash: row.get(5)?,
-                            evidence_kind: row.get(6)?,
-                            created_at: row.get(7)?,
-                        })
-                    })?
+                    .query_map(
+                        rusqlite::params![assertion_id, limit.clamp(1, 501)],
+                        |row| {
+                            Ok(MemoryEvidenceRecord {
+                                evidence_id: row.get(0)?,
+                                assertion_id: row.get(1)?,
+                                conversation_id: row.get(2)?,
+                                event_seq: row.get(3)?,
+                                payload_path: row.get(4)?,
+                                quote_hash: row.get(5)?,
+                                evidence_kind: row.get(6)?,
+                                created_at: row.get(7)?,
+                            })
+                        },
+                    )?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(DbError::from)
             })
@@ -332,7 +453,11 @@ impl<'db> MemoryAssertionStore<'db> {
                 conn.query_row(
                     "SELECT evidence_id, assertion_id, conversation_id, event_seq, payload_path, \
                      quote_hash, evidence_kind, created_at FROM memory_evidence \
-                     WHERE assertion_id = ?1 AND evidence_id = ?2",
+                     WHERE assertion_id = ?1 AND evidence_id = ?2 \
+                       AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones \
+                           WHERE target_kind = 'assertion' AND target_id = ?1) \
+                       AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones \
+                           WHERE target_kind = 'evidence' AND target_id = ?2)",
                     rusqlite::params![assertion_id, evidence_id],
                     |row| {
                         Ok(MemoryEvidenceRecord {
@@ -608,6 +733,17 @@ impl<'db> MemoryAssertionStore<'db> {
         let object_json = serde_json::to_string(&assertion.object)
             .map_err(|error| MemoryAssertionError::Invalid(error.to_string()))?;
         self.db.with_conn(|conn| {
+            let tombstoned: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_memory_privacy_tombstones \
+                 WHERE target_kind = 'assertion' AND target_id = ?1)",
+                [&assertion.assertion_id],
+                |row| row.get(0),
+            )?;
+            if tombstoned {
+                return Err(DbError::Invariant(
+                    "privacy-deleted memory assertion cannot be recreated".into(),
+                ));
+            }
             conn.execute(
                 "INSERT INTO memory_assertions(assertion_id, scope, trust_class, kind, subject, \
                  predicate, object_json, confidence, status, observed_from, observed_to, \
@@ -651,6 +787,23 @@ impl<'db> MemoryAssertionStore<'db> {
             ));
         }
         self.db.with_conn(|conn| {
+            let tombstoned: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_memory_privacy_tombstones \
+                 WHERE (target_kind = 'assertion' AND target_id = ?1) \
+                    OR (target_kind = 'evidence' AND target_id = ?2) \
+                    OR (target_kind = 'source_event' AND target_id = ?3))",
+                params![
+                    evidence.assertion_id,
+                    evidence.evidence_id,
+                    format!("{}#{}", evidence.conversation_id.as_str(), evidence.event_seq.0)
+                ],
+                |row| row.get(0),
+            )?;
+            if tombstoned {
+                return Err(DbError::Invariant(
+                    "privacy-deleted memory evidence cannot be recreated".into(),
+                ));
+            }
             conn.execute(
                 "INSERT INTO memory_evidence(evidence_id, assertion_id, conversation_id, event_seq, \
                  payload_path, quote_hash, evidence_kind, created_at) \
@@ -718,6 +871,17 @@ impl<'db> MemoryAssertionStore<'db> {
         let projection_key = format!("{}:{}", candidate.subject, candidate.predicate);
 
         self.db.transaction(|tx| {
+            let assertion_tombstoned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_memory_privacy_tombstones \
+                 WHERE target_kind = 'assertion' AND target_id = ?1)",
+                [&assertion_id],
+                |row| row.get(0),
+            )?;
+            if assertion_tombstoned {
+                return Err(DbError::Invariant(
+                    "privacy-deleted memory assertion cannot be recreated".into(),
+                ));
+            }
             if let Some(supersedes_id) = candidate.supersedes_id.as_deref() {
                 let matches_host: bool = tx
                     .query_row(
@@ -735,6 +899,18 @@ impl<'db> MemoryAssertionStore<'db> {
             }
 
             for item in &candidate.evidence {
+                let source_id = format!("{}#{}", job.conversation_id.as_str(), item.event_seq);
+                let source_deleted: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_memory_privacy_tombstones \
+                     WHERE target_kind = 'source_event' AND target_id = ?1)",
+                    [&source_id],
+                    |row| row.get(0),
+                )?;
+                if source_deleted {
+                    return Err(DbError::Invariant(
+                        "privacy-deleted source event cannot produce memory evidence".into(),
+                    ));
+                }
                 if item.event_seq < job.event_start_seq.0
                     || item.event_seq > job.event_end_seq.0
                     || item.quote_hash.len() != 64
@@ -851,6 +1027,8 @@ impl<'db> MemoryAssertionStore<'db> {
                     WHERE a.scope = ?1 AND a.valid_from <= ?2 \
                       AND (a.valid_to IS NULL OR a.valid_to > ?2) \
                       AND a.status = 'approved' AND a.trust_class IN ({placeholders}) \
+                      AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones p \
+                          WHERE p.target_kind = 'assertion' AND p.target_id = a.assertion_id) \
                       AND NOT EXISTS (SELECT 1 FROM retracted_lineage r WHERE r.assertion_id = a.assertion_id) \
                       AND EXISTS (SELECT 1 FROM memory_evidence e WHERE e.assertion_id = a.assertion_id)\
                  ) SELECT t.assertion_id, t.scope, t.trust_class, t.kind, t.subject, t.predicate, \
@@ -893,6 +1071,8 @@ impl<'db> MemoryAssertionStore<'db> {
                  confidence, status, observed_from, observed_to, valid_from, valid_to, supersedes_id, \
                  extraction_run_id, created_event_seq, created_at FROM memory_assertions \
                  WHERE scope = ?1 AND trust_class = ?2 AND subject = ?3 AND predicate = ?4 \
+                   AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones p \
+                       WHERE p.target_kind = 'assertion' AND p.target_id = memory_assertions.assertion_id) \
                  ORDER BY valid_from, created_at",
             )?;
             let raw = stmt
@@ -917,6 +1097,8 @@ impl<'db> MemoryAssertionStore<'db> {
                     "SELECT assertion_id, scope, trust_class, kind, subject, predicate, object_json, \
                      confidence, status, observed_from, observed_to, valid_from, valid_to, supersedes_id, \
                      extraction_run_id, created_event_seq, created_at FROM memory_assertions \
+                     WHERE NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones p \
+                         WHERE p.target_kind = 'assertion' AND p.target_id = memory_assertions.assertion_id) \
                      ORDER BY created_at DESC, assertion_id LIMIT ?1",
                 )?;
                 statement
@@ -927,7 +1109,10 @@ impl<'db> MemoryAssertionStore<'db> {
             let mut evidence_statement = conn.prepare_cached(
                 "SELECT evidence_id, assertion_id, conversation_id, event_seq, payload_path, \
                  quote_hash, evidence_kind, created_at FROM memory_evidence \
-                 WHERE assertion_id = ?1 ORDER BY conversation_id, event_seq, evidence_id LIMIT 20",
+                 WHERE assertion_id = ?1 \
+                   AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones p \
+                       WHERE p.target_kind = 'evidence' AND p.target_id = evidence_id) \
+                 ORDER BY conversation_id, event_seq, evidence_id LIMIT 20",
             )?;
             for raw in raw_assertions {
                 let mut assertion = parse_assertion(raw).map_err(|error| {
@@ -972,7 +1157,9 @@ impl<'db> MemoryAssertionStore<'db> {
                     })?
                     .collect::<Result<Vec<_>, _>>()?;
                 let evidence_total: usize = conn.query_row(
-                    "SELECT COUNT(*) FROM memory_evidence WHERE assertion_id = ?1",
+                    "SELECT COUNT(*) FROM memory_evidence e WHERE assertion_id = ?1 \
+                     AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones p \
+                         WHERE p.target_kind = 'evidence' AND p.target_id = e.evidence_id)",
                     [&assertion.assertion_id],
                     |row| row.get(0),
                 )?;
@@ -1456,6 +1643,106 @@ mod tests {
             })
             .unwrap();
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn privacy_tombstone_hides_assertion_lineage_and_fences_late_evidence() {
+        let db = fresh();
+        let conversation_id = ConversationId::from("privacy-source");
+        event(&db, &conversation_id, 1);
+        event(&db, &conversation_id, 2);
+        let store = MemoryAssertionStore::new(&db);
+        store
+            .append(&assertion("privacy-root", "Controller", "red", None, 10))
+            .unwrap();
+        store
+            .append(&assertion(
+                "privacy-child",
+                "Controller",
+                "blue",
+                Some("privacy-root"),
+                20,
+            ))
+            .unwrap();
+        store
+            .add_evidence(&evidence(
+                "privacy-root-evidence",
+                "privacy-root",
+                &conversation_id,
+            ))
+            .unwrap();
+        store
+            .add_evidence(&evidence(
+                "privacy-child-evidence",
+                "privacy-child",
+                &conversation_id,
+            ))
+            .unwrap();
+        store
+            .project_approved("privacy-root", "favorite_color", 10)
+            .unwrap();
+        store
+            .project_approved("privacy-child", "favorite_color", 20)
+            .unwrap();
+
+        let report = store
+            .tombstone_source_event(conversation_id.as_str(), 1, "controller-1", 30)
+            .unwrap();
+        assert_eq!(report.assertions_hidden, 2);
+        assert_eq!(report.evidence_hidden, 2);
+        assert!(store.get("privacy-root").unwrap().is_none());
+        assert!(store.get("privacy-child").unwrap().is_none());
+        assert!(
+            store
+                .evidence_by_id("privacy-root", "privacy-root-evidence")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .current_ranked("principal:p1", &["Controller"], 30, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .history("principal:p1", "Controller", "p1", "favorite_color")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .add_evidence(&evidence(
+                    "privacy-late-evidence",
+                    "privacy-child",
+                    &conversation_id
+                ))
+                .is_err()
+        );
+        assert!(
+            store
+                .persist_candidate(
+                    &extraction_job(&conversation_id),
+                    "principal:p1",
+                    "Controller",
+                    &candidate("evidence 1"),
+                    MemoryExtractionPolicy::default(),
+                    40,
+                )
+                .is_err()
+        );
+        let projections: i64 = db
+            .with_conn(|connection| {
+                connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM memory_current_projection",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .map_err(DbError::from)
+            })
+            .unwrap();
+        assert_eq!(projections, 0);
     }
 
     #[test]

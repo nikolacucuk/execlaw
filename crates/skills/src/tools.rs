@@ -946,10 +946,20 @@ mod tests {
             .await;
         let skill = store.get("a/lifecycle").unwrap().unwrap();
         let terms_json = "[\"answer\"]";
+        let expected_files = "{\"result.txt\":\"done\"}";
         let suite = serde_json::to_vec(&vec![(
             "heldout-1".to_owned(),
             "task".to_owned(),
             terms_json.to_owned(),
+            "[]".to_owned(),
+            0i64,
+            4000i64,
+            256i64,
+            "{}".to_owned(),
+            expected_files.to_owned(),
+            "{}".to_owned(),
+            "[]".to_owned(),
+            "[]".to_owned(),
         )])
         .unwrap();
         let suite_hash = hex::encode(Sha256::digest(suite));
@@ -957,12 +967,12 @@ mod tests {
             .db()
             .with_conn(|conn| {
                 conn.execute(
-                    "INSERT INTO state_skill_eval_cases (skill_name, case_id, prompt, required_terms_json) VALUES ('a/lifecycle', 'heldout-1', 'task', ?1)",
-                    [terms_json],
+                    "INSERT INTO state_skill_eval_cases (skill_name, case_id, prompt, required_terms_json, expected_workspace_files_json) VALUES ('a/lifecycle', 'heldout-1', 'task', ?1, ?2)",
+                    rusqlite::params![terms_json, expected_files],
                 )?;
                 conn.execute(
-                    "INSERT INTO state_skill_eval_runs (skill_name, version_id, body_sha256, evaluator_version, passed, score, results_json, created_at, suite_sha256, model_id, backend_fingerprint) VALUES ('a/lifecycle', ?1, ?2, 'skill-eval-v1', 1, 1.0, '[]', 1, ?3, 'local-test-model', 'test-backend')",
-                    rusqlite::params![skill.current_version.id.0, skill.current_version.body_sha256, suite_hash],
+                    "INSERT INTO state_skill_eval_runs (skill_name, version_id, body_sha256, evaluator_version, passed, score, results_json, created_at, suite_sha256, model_id, backend_fingerprint) VALUES ('a/lifecycle', ?1, ?2, ?3, 1, 1.0, '[]', 1, ?4, 'local-test-model', 'test-backend')",
+                    rusqlite::params![skill.current_version.id.0, skill.current_version.body_sha256, crate::SKILL_EVAL_VERSION, suite_hash],
                 )?;
                 Ok(())
             })

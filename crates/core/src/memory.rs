@@ -157,6 +157,8 @@ impl<'db> MemoryStore<'db> {
                      JOIN memory_assertions a ON a.assertion_id = p.assertion_id \
                      WHERE p.scope = ?1 AND p.trust_class = ?2 AND p.key = ?3 \
                        AND a.status = 'approved' \
+                       AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones pvt \
+                           WHERE pvt.target_kind = 'assertion' AND pvt.target_id = a.assertion_id) \
                        AND EXISTS (SELECT 1 FROM memory_evidence e \
                                                                      WHERE e.assertion_id = a.assertion_id) \
                                              AND NOT EXISTS (\
@@ -546,6 +548,8 @@ fn projected_entries(
          JOIN memory_assertions a ON a.assertion_id = p.assertion_id \
          WHERE p.scope = ?1 AND p.trust_class IN ({placeholders}) \
            AND p.tier <> 'cold' AND a.status = 'approved' \
+           AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones pvt \
+               WHERE pvt.target_kind = 'assertion' AND pvt.target_id = a.assertion_id) \
            AND EXISTS (SELECT 1 FROM memory_evidence e WHERE e.assertion_id = a.assertion_id)\
                      AND NOT EXISTS (SELECT 1 FROM memory_assertions newer \
                                                      WHERE newer.supersedes_id = a.assertion_id \

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "effects_enabled": false,
+  "provenance": {
+    "flagged_range_id": 2,
+    "source_conversation_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source_fingerprint_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "label": "synthetic-offline-tool-replay",
+    "tags": ["synthetic", "tool-pairing", "offline"],
+    "from_seq": 1,
+    "to_seq": 4,
+    "flagged_at": 2,
+    "exported_at": 2,
+    "incident_ref": "SYNTHETIC-INC-2",
+    "release_ref": "v0.0.0"
+  },
+  "redaction": {
+    "policy_version": "redaction-v1",
+    "redaction_map_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "replacements_applied": 0,
+    "synthetic_ids": []
+  },
+  "events": [
+    {"seq": 1, "kind": "user_msg", "actor": "controller", "committed_at": 1, "payload": {"text": "synthetic task", "sender_principal_id": "controller"}},
+    {"seq": 2, "kind": "tool_use", "actor": "agent", "committed_at": 2, "payload": {"ordinal": 0, "tool_name": "fixture.echo", "args_json": {"value": "safe"}}},
+    {"seq": 3, "kind": "tool_result", "actor": "system", "committed_at": 3, "payload": {"ordinal": 0, "outcome": {"Ok": {"value": "safe"}}}},
+    {"seq": 4, "kind": "model_turn", "actor": "agent", "committed_at": 4, "payload": {"model":"fixture-model", "finish_reason":"stop", "text":"safe", "prompt_tokens":0, "completion_tokens":0}}
+  ],
+  "expected_transitions": [
+    {"seq": 1, "transition": "user_msg"},
+    {"seq": 2, "transition": "tool_use"},
+    {"seq": 3, "transition": "tool_result"},
+    {"seq": 4, "transition": "model_turn"}
+  ],
+  "mock_tool_responses": [
+    {"turn_seq": 1, "ordinal": 0, "payload": {"ordinal": 0, "outcome": {"Ok": {"value": "safe"}}}}
+  ]
+}

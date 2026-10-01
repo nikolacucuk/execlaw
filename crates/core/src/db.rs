@@ -99,6 +99,7 @@ pub enum DbError {
 pub struct Database {
     inner: Arc<std::sync::Mutex<Connection>>,
     path: PathBuf,
+    event_hmac_key: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
 }
 
 impl Database {
@@ -128,6 +129,7 @@ impl Database {
         Ok(Self {
             inner: Arc::new(std::sync::Mutex::new(conn)),
             path: config.path.clone(),
+            event_hmac_key: Arc::new(std::sync::RwLock::new(None)),
         })
     }
 
@@ -190,6 +192,29 @@ impl Database {
     /// Path the DB was opened at (for log/display purposes).
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Attach the process's event signing key to all event-log views of this
+    /// database, including background subsystems holding only a DB clone.
+    pub fn set_event_hmac_key(&self, key: Vec<u8>) -> Result<(), DbError> {
+        if key.is_empty() {
+            return Err(DbError::Config("event HMAC key is empty".into()));
+        }
+        let mut slot = self
+            .event_hmac_key
+            .write()
+            .map_err(|_| DbError::Config("event HMAC key lock poisoned".into()))?;
+        if slot.as_ref().is_some_and(|existing| existing != &key) {
+            return Err(DbError::Config(
+                "cannot replace the event HMAC key in a running database".into(),
+            ));
+        }
+        *slot = Some(key);
+        Ok(())
+    }
+
+    pub(crate) fn event_hmac_key(&self) -> Option<Vec<u8>> {
+        self.event_hmac_key.read().ok()?.clone()
     }
 
     /// Execute a closure holding the connection lock.

@@ -1,0 +1,65 @@
+{
+  "name": "execlaw-periodic-real-tasks",
+  "version": "2",
+  "tasks": [
+    {
+      "id": "coding-checked-add",
+      "category": "coding",
+      "prompt": "Implement checked integer addition. Return None on overflow. Preserve this function signature: pub fn checked_add(left: i32, right: i32) -> Option<i32>.",
+      "verifier": "coding",
+      "fixture_workspace": "evals/benchmark/fixtures/coding-add.test",
+      "output_file": "src/lib.rs",
+      "fixture_response": "pub fn checked_add(left: i32, right: i32) -> Option<i32> {\n    left.checked_add(right)\n}"
+    },
+    {
+      "id": "research-service-port",
+      "category": "research",
+      "prompt": "Using the supplied evidence, report the service port and bind address.",
+      "verifier": "research",
+      "sources": [{"id": "service", "text": "The service binds to 127.0.0.1:3031 by default."}],
+      "required_terms": ["3031", "127.0.0.1"],
+      "fixture_response": "The service binds to 127.0.0.1:3031 by default [service]."
+    },
+    {
+      "id": "research-recovery-policy",
+      "category": "research",
+      "prompt": "Using the supplied evidence, identify the required service state during database key rotation.",
+      "verifier": "research",
+      "sources": [{"id": "runbook", "text": "Key rotation requires the execlaw service to be stopped."}],
+      "required_terms": ["stopped", "rotation"],
+      "fixture_response": "Key rotation requires the execlaw service to be stopped [runbook]."
+    },
+    {
+      "id": "memory-recall",
+      "category": "memory",
+      "prompt": "Incident note: recovery phrase is amber-orbit; verification was Tuesday. Return both facts.",
+      "verifier": "memory",
+      "required_terms": ["amber-orbit", "Tuesday"],
+      "fixture_response": "The phrase was amber-orbit and verification was Tuesday."
+    },
+    {
+      "id": "memory-principal-recall",
+      "category": "memory",
+      "prompt": "Remember: operator review is assigned to Mira and the follow-up date is October 4. Who and when?",
+      "verifier": "memory",
+      "required_terms": ["Mira", "October 4"],
+      "fixture_response": "Mira owns the review, with follow-up on October 4."
+    },
+    {
+      "id": "automation-mock-sink",
+      "category": "automation",
+      "prompt": "Return the requested reminder effect as JSON. Do not contact a service.",
+      "verifier": "automation",
+      "expected_effects": [{"kind": "reminder.create", "title": "check backup", "when": "2026-10-01T09:00:00Z"}],
+      "fixture_response": "[{\"kind\":\"reminder.create\",\"title\":\"check backup\",\"when\":\"2026-10-01T09:00:00Z\"}]"
+    },
+    {
+      "id": "automation-mock-sink-no-send",
+      "category": "automation",
+      "prompt": "Return a local note creation effect as JSON. Do not send or publish anything.",
+      "verifier": "automation",
+      "expected_effects": [{"kind": "note.create", "title": "rotation reviewed"}],
+      "fixture_response": "[{\"kind\":\"note.create\",\"title\":\"rotation reviewed\"}]"
+    }
+  ]
+}

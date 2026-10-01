@@ -24,7 +24,6 @@
 
 use execlaw_core::conversation::ConversationStore;
 use execlaw_core::ids::ConversationId;
-use execlaw_core::memory::MemoryStore;
 use execlaw_core::memory_assets::{
     InjectionMode, MemoryAssetStore, TurnAssetLoadoutEntry, TurnAssetLoadoutReceipt,
     TurnAssetRetrievalEntry,
@@ -581,6 +580,28 @@ pub(crate) fn assemble_system_prompt_for_asset_scope_with_loadout(
     agent_scope: &str,
     retrieval_query: Option<&str>,
 ) -> (String, Option<TurnAssetLoadoutReceipt>) {
+    assemble_system_prompt_for_asset_scope_with_embedding(
+        db,
+        conversation_id,
+        static_base,
+        routing_prose,
+        turn_context,
+        agent_scope,
+        retrieval_query,
+        None,
+    )
+}
+
+pub(crate) fn assemble_system_prompt_for_asset_scope_with_embedding(
+    db: &execlaw_core::Database,
+    conversation_id: Option<&str>,
+    static_base: &str,
+    routing_prose: &str,
+    turn_context: &str,
+    agent_scope: &str,
+    retrieval_query: Option<&str>,
+    retrieval_embedding: Option<(&[f32], &str)>,
+) -> (String, Option<TurnAssetLoadoutReceipt>) {
     const LOADOUT_BUDGET_BYTES: usize = 2048;
     let store = execlaw_core::personality::PersonalityStore::new(db);
     let personality_chunk =
@@ -589,7 +610,6 @@ pub(crate) fn assemble_system_prompt_for_asset_scope_with_loadout(
     let p = personality_chunk.trim();
     let b = static_base.trim();
     let r = routing_prose.trim();
-    let hot = build_hot_memory_snapshot_block(db, conversation_id);
     let mut asset_loadout = None;
     let mut retrieved_block = None;
     let mut receipt = None;
@@ -631,8 +651,8 @@ pub(crate) fn assemble_system_prompt_for_asset_scope_with_loadout(
             let hits = asset_store
                 .search_eligible(
                     query,
-                    None,
-                    None,
+                    retrieval_embedding.map(|(vector, _)| vector),
+                    retrieval_embedding.map(|(_, model_id)| model_id),
                     agent_scope,
                     &readable,
                     &owner_refs,
@@ -706,6 +726,8 @@ pub(crate) fn assemble_system_prompt_for_asset_scope_with_loadout(
                     score_micros: (hit.score * 1_000_000.0) as i64,
                     lexical_rank: hit.lexical_rank,
                     vector_rank: hit.vector_rank,
+                    reranker_version: execlaw_core::memory_assets::MEMORY_RERANKER_VERSION
+                        .to_owned(),
                     injected_chars: value.chars().count(),
                     admission_reasons: vec![
                         "trust_floor_readable".into(),
@@ -747,10 +769,6 @@ pub(crate) fn assemble_system_prompt_for_asset_scope_with_loadout(
     if !r.is_empty() {
         sep(&mut out);
         out.push_str(r);
-    }
-    if let Some(h) = hot {
-        sep(&mut out);
-        out.push_str(&h);
     }
     if let Some(loadout) = asset_loadout {
         sep(&mut out);
@@ -797,63 +815,13 @@ fn readable_classes(caller: &str) -> Vec<&'static str> {
         .collect()
 }
 
-fn build_hot_memory_snapshot_block(
-    db: &execlaw_core::Database,
-    conversation_id: Option<&str>,
-) -> Option<String> {
-    let cid = conversation_id?;
-    let conv = ConversationStore::new(db)
-        .get(&ConversationId::from(cid))
-        .ok()??;
-    let readable = readable_classes(&conv.trust_class);
-    if readable.is_empty() {
-        return None;
-    }
-    let store = MemoryStore::new(db);
-    let hot_rows = store
-        .list_hot("global", &readable, 16)
-        .ok()
-        .unwrap_or_default();
-    if hot_rows.is_empty() {
-        return None;
-    }
-
-    // Keep the always-loaded block bounded so it doesn't crowd out
-    // turn context on long-running conversations.
-    const HOT_SLOT_BUDGET_CHARS: usize = 2048;
-    let mut lines: Vec<String> = Vec::new();
-    let mut used = 0usize;
-    for row in hot_rows {
-        let value = String::from_utf8_lossy(&row.value_blob)
-            .replace('\n', " ")
-            .trim()
-            .to_owned();
-        if value.is_empty() {
-            continue;
-        }
-        let line = format!("- {}: {}", row.key, value);
-        let projected = used + line.chars().count() + 1;
-        if projected > HOT_SLOT_BUDGET_CHARS {
-            break;
-        }
-        used = projected;
-        lines.push(line);
-    }
-    if lines.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "HOT MEMORY SNAPSHOT (auto-loaded working set; read-only context)\n{}",
-        lines.join("\n")
-    ))
-}
-
-pub(crate) fn build_governed_asset_loadout_block(
+pub(crate) fn build_governed_asset_loadout(
     db: &execlaw_core::Database,
     conversation_id: Option<&str>,
     agent_scope: &str,
-) -> Option<String> {
+    retrieval_query: &str,
+    retrieval_embedding: Option<(&[f32], &str)>,
+) -> Option<(String, execlaw_core::memory_assets::TurnAssetLoadoutReceipt)> {
     let conversation = ConversationStore::new(db)
         .get(&ConversationId::from(conversation_id?))
         .ok()??;
@@ -866,15 +834,139 @@ pub(crate) fn build_governed_asset_loadout_block(
         owner_scopes.push("controller".to_owned());
     }
     let owner_refs = owner_scopes.iter().map(String::as_str).collect::<Vec<_>>();
-    resolve_governed_hot_loadout(
+    let now = chrono::Utc::now().timestamp();
+    let (hot_block, assets) = resolve_governed_hot_loadout(
         &MemoryAssetStore::new(db),
         agent_scope,
         &readable,
         &owner_refs,
-        chrono::Utc::now().timestamp(),
+        now,
         2048,
-    )
-    .0
+    );
+    let asset_store = MemoryAssetStore::new(db);
+    let mut used_sources = assets
+        .iter()
+        .filter_map(|entry| entry.source_hash.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut retrieved_assets = Vec::new();
+    let mut retrieved_lines = Vec::new();
+    let mut used_bytes = hot_block.as_ref().map_or(0, String::len);
+    let query_hash = (!retrieval_query.trim().is_empty()).then(|| {
+        use sha2::Digest;
+        hex::encode(sha2::Sha256::digest(retrieval_query.trim().as_bytes()))
+    });
+    if let Some(query) = (!retrieval_query.trim().is_empty()).then_some(retrieval_query.trim()) {
+        if let Ok(hits) = asset_store.search_eligible(
+            query,
+            retrieval_embedding.map(|(vector, _)| vector),
+            retrieval_embedding.map(|(_, model_id)| model_id),
+            agent_scope,
+            &readable,
+            &owner_refs,
+            &[InjectionMode::Discoverable],
+            now,
+            16,
+        ) {
+            let bindings = asset_store
+                .list_loadout(agent_scope, 64)
+                .unwrap_or_default();
+            for hit in hits {
+                if hit
+                    .asset
+                    .source_hash
+                    .as_ref()
+                    .is_some_and(|hash| used_sources.contains(hash))
+                {
+                    continue;
+                }
+                let Some(binding) = bindings.iter().find(|binding| {
+                    binding.asset_id == hit.asset.asset_id
+                        && binding.injection_mode == InjectionMode::Discoverable
+                }) else {
+                    continue;
+                };
+                let Some(content) = hit.asset.content_ref.as_deref() else {
+                    continue;
+                };
+                let prefix = format!(
+                    "- {} [asset={}, version={}]: ",
+                    hit.asset.name, hit.asset.asset_id, hit.asset.version
+                );
+                let remaining = 2048usize.saturating_sub(used_bytes + prefix.len() + 2);
+                if remaining == 0 {
+                    break;
+                }
+                let mut text = String::new();
+                for character in content
+                    .trim()
+                    .chars()
+                    .take(usize::try_from(binding.max_chars).unwrap_or(0))
+                {
+                    if text.len() + character.len_utf8() > remaining {
+                        break;
+                    }
+                    text.push(character);
+                }
+                if text.is_empty() {
+                    continue;
+                }
+                if let Some(hash) = hit.asset.source_hash.as_ref() {
+                    used_sources.insert(hash.clone());
+                }
+                used_bytes += prefix.len() + text.len() + 1;
+                retrieved_lines.push(format!("{prefix}{text}"));
+                retrieved_assets.push(TurnAssetRetrievalEntry {
+                    asset_id: hit.asset.asset_id,
+                    name: hit.asset.name,
+                    asset_type: hit.asset.asset_type,
+                    version: hit.asset.version,
+                    source_hash: hit.asset.source_hash,
+                    owner_scope: hit.asset.owner_scope,
+                    visibility: hit.asset.visibility,
+                    trust_floor: hit.asset.trust_floor,
+                    expires_at: hit.asset.expires_at,
+                    score_micros: (hit.score * 1_000_000.0) as i64,
+                    lexical_rank: hit.lexical_rank,
+                    vector_rank: hit.vector_rank,
+                    reranker_version: execlaw_core::memory_assets::MEMORY_RERANKER_VERSION
+                        .to_owned(),
+                    injected_chars: text.chars().count(),
+                    admission_reasons: vec![
+                        "trust_floor_readable".into(),
+                        "owner_scope_readable".into(),
+                        "discoverable_binding".into(),
+                    ],
+                });
+            }
+        }
+    }
+    let retrieved_block = (!retrieved_lines.is_empty()).then(|| {
+        format!(
+            "RETRIEVED GOVERNED ASSETS (untrusted source context)\n{}",
+            retrieved_lines.join("\n")
+        )
+    });
+    let block = [hot_block, retrieved_block]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if block.is_empty() {
+        return None;
+    }
+    Some((
+        block,
+        execlaw_core::memory_assets::TurnAssetLoadoutReceipt {
+            agent_scope: agent_scope.to_owned(),
+            conversation_trust_class: conversation.trust_class,
+            readable_trust_classes: readable.iter().map(|value| (*value).to_owned()).collect(),
+            readable_owner_scopes: owner_scopes,
+            resolved_at: now,
+            retrieval_query_sha256: query_hash,
+            assets,
+            retrieved_assets,
+        },
+    ))
 }
 
 fn resolve_governed_hot_loadout(

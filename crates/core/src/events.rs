@@ -410,7 +410,10 @@ impl KeyRing {
 
 impl<'db> EventLog<'db> {
     pub fn new(db: &'db Database) -> Self {
-        Self { db, key_ring: None }
+        Self {
+            db,
+            key_ring: db.event_hmac_key().map(|key| KeyRing::single(0, key)),
+        }
     }
 
     /// Attach a single HMAC key — convenience wrapper that builds a
@@ -1055,8 +1058,13 @@ impl<'db> EventLog<'db> {
     /// the primary key — returns an error if the caller passed a stale seq.
     pub fn append(&self, ev: &EventRecord) -> Result<(), DbError> {
         if self.key_ring.is_none() {
-            return self.db.with_conn(|conn| {
-                conn.execute(
+            return self.db.transaction(|tx| {
+                if Self::load_integrity_head(tx, &ev.conversation_id)?.is_some() {
+                    return Err(DbError::Config(
+                        "a v2 conversation requires an event HMAC key for append".into(),
+                    ));
+                }
+                tx.execute(
                     "INSERT INTO state_events \
                      (conversation_id, seq, kind, payload, committed_at, actor, tag, key_id) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 0)",
@@ -1226,6 +1234,11 @@ impl<'db> EventLog<'db> {
             }
 
             if self.key_ring.is_none() {
+                if Self::load_integrity_head(tx, conversation_id)?.is_some() {
+                    return Err(DbError::Config(
+                        "a v2 conversation requires an event HMAC key for commit".into(),
+                    ));
+                }
                 for ev in materialized.iter() {
                     tx.execute(
                         "INSERT INTO state_events \
@@ -1605,6 +1618,102 @@ mod tests {
         let log = EventLog::new(&db);
         let cid = ConversationId::new();
         assert_eq!(log.last_seq(&cid).unwrap(), EventSeq(0));
+    }
+
+    #[test]
+    fn unsigned_writer_cannot_extend_an_existing_v2_chain() {
+        let db = fresh_db();
+        let cid = ConversationId::from("signed-then-unsigned");
+        let signed = EventLog::new(&db).with_hmac_key(vec![0x42; 32]);
+        signed
+            .append(
+                &EventRecord::new(
+                    cid.clone(),
+                    EventSeq(1),
+                    EventKind::UserMsg,
+                    &json!({"text":"start"}),
+                    Some("controller".into()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        let unsigned = EventLog::new(&db);
+        let second = EventRecord::new(
+            cid.clone(),
+            EventSeq(2),
+            EventKind::ModelTurn,
+            &json!({"text":"unsafe"}),
+            Some("agent".into()),
+        )
+        .unwrap();
+        assert!(matches!(unsigned.append(&second), Err(DbError::Config(_))));
+        assert!(matches!(
+            unsigned.commit_turn(
+                &cid,
+                EventSeq(1),
+                vec![
+                    PendingEvent::encode(
+                        EventKind::CardOpened,
+                        &json!({"card_id":"unsafe"}),
+                        Some("system".into()),
+                    )
+                    .unwrap()
+                ]
+            ),
+            Err(DbError::Config(_))
+        ));
+        assert_eq!(signed.replay_since(&cid, EventSeq(0)).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn database_event_key_signs_background_log_views() {
+        let db = fresh_db();
+        db.set_event_hmac_key(vec![0x41; 32]).unwrap();
+        let cid = ConversationId::from("background-card-chain");
+        EventLog::new(&db)
+            .append(
+                &EventRecord::new(
+                    cid.clone(),
+                    EventSeq(1),
+                    EventKind::UserMsg,
+                    &json!({"text":"start"}),
+                    Some("controller".into()),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        EventLog::new(&db)
+            .commit_turn(
+                &cid,
+                EventSeq(1),
+                vec![
+                    PendingEvent::encode(
+                        EventKind::CardOpened,
+                        &json!({"card_id":"one"}),
+                        Some("system".into()),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        assert_eq!(
+            EventLog::new(&db)
+                .replay_since(&cid, EventSeq(0))
+                .unwrap()
+                .len(),
+            2
+        );
+        let versions: Vec<i64> = db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare(
+                "SELECT integrity_version FROM state_events WHERE conversation_id=?1 ORDER BY seq",
+            )?;
+                Ok(statement
+                    .query_map([cid.as_str()], |row| row.get(0))?
+                    .collect::<Result<Vec<_>, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(versions, [2, 2]);
     }
 
     #[test]

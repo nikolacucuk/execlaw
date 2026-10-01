@@ -22,6 +22,29 @@ fn has_named_reference(value: &serde_json::Value, key: &str, expected: &str, dep
     }
 }
 
+fn has_research_job_reference(value: &serde_json::Value, expected: &str, depth: u8) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    match value {
+        serde_json::Value::Object(fields) => {
+            fields.get("job_id").and_then(serde_json::Value::as_str) == Some(expected)
+                || fields
+                    .get("job")
+                    .and_then(|job| job.get("id"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(expected)
+                || fields
+                    .values()
+                    .any(|value| has_research_job_reference(value, expected, depth - 1))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .any(|value| has_research_job_reference(value, expected, depth - 1)),
+        _ => false,
+    }
+}
+
 fn artifact_has_run_producer(
     connection: &Connection,
     run_id: &str,
@@ -150,7 +173,7 @@ fn artifact_has_run_producer(
             if kind == "research_pdf"
                 && research_job_id
                     .as_deref()
-                    .is_some_and(|job_id| has_named_reference(&value, "job_id", job_id, 8))
+                    .is_some_and(|job_id| has_research_job_reference(&value, job_id, 8))
             {
                 return Ok(true);
             }

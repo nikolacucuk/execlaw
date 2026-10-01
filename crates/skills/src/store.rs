@@ -699,17 +699,34 @@ impl SkillStore {
                         params![name],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )?;
-                    let suite_cases: Vec<(String, String, String)> = {
+                    let suite_cases: Vec<(String, String, String, String, i64, i64, i64, String, String, String, String, String)> = {
                         let mut stmt = tx.prepare(
-                            "SELECT case_id, prompt, required_terms_json FROM state_skill_eval_cases \
+                            "SELECT case_id, prompt, required_terms_json, forbidden_terms_json, \
+                                    min_output_chars, max_output_chars, max_output_tokens, \
+                                    workspace_files_json, expected_workspace_files_json, \
+                                    mock_integrations_json, expected_integration_calls_json, \
+                                    forbidden_actions_json \
+                             FROM state_skill_eval_cases \
                              WHERE skill_name = ?1 ORDER BY case_id",
                         )?;
-                        stmt.query_map(params![name], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                        stmt.query_map(params![name], |row| Ok((
+                            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+                            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+                            row.get(9)?, row.get(10)?, row.get(11)?,
+                        )))?
                             .collect::<Result<Vec<_>, _>>()?
                     };
                     if suite_cases.is_empty() {
                         return Err(DbError::Invariant(format!(
                             "skill {name} has no held-out evaluation suite"
+                        )));
+                    }
+                    if suite_cases
+                        .iter()
+                        .any(|case| case.8 == "{}" && case.10 == "[]")
+                    {
+                        return Err(DbError::Invariant(format!(
+                            "skill {name} evaluation suite has no workspace or mock integration assertions"
                         )));
                     }
                     let suite_bytes = serde_json::to_vec(&suite_cases)
@@ -1887,11 +1904,17 @@ mod tests {
             .unwrap();
         let skill = s.get("a/p").unwrap().unwrap();
         let terms = "[\"answer\"]";
+        let expected_files = "{\"result.txt\":\"done\"}";
         s.db.with_conn(|conn| {
-            conn.execute("INSERT INTO state_skill_eval_cases (skill_name, case_id, prompt, required_terms_json) VALUES ('a/p', 'heldout-1', 'task', ?1)", params![terms])?;
-            let suite = serde_json::to_vec(&vec![("heldout-1".to_owned(), "task".to_owned(), terms.to_owned())]).unwrap();
+            conn.execute("INSERT INTO state_skill_eval_cases (skill_name, case_id, prompt, required_terms_json, expected_workspace_files_json) VALUES ('a/p', 'heldout-1', 'task', ?1, ?2)", params![terms, expected_files])?;
+            let suite = serde_json::to_vec(&vec![(
+                "heldout-1".to_owned(), "task".to_owned(), terms.to_owned(),
+                "[]".to_owned(), 0i64, 4000i64, 256i64,
+                "{}".to_owned(), expected_files.to_owned(), "{}".to_owned(),
+                "[]".to_owned(), "[]".to_owned(),
+            )]).unwrap();
             let suite_hash = hex::encode(Sha256::digest(suite));
-            conn.execute("INSERT INTO state_skill_eval_runs (skill_name, version_id, body_sha256, evaluator_version, passed, score, results_json, created_at, suite_sha256, model_id, backend_fingerprint) VALUES ('a/p', ?1, ?2, 'skill-eval-v1', 1, 1.0, '[]', 1, ?3, 'local-test-model', 'test-backend')", params![skill.current_version.id.0, skill.current_version.body_sha256, suite_hash])?;
+            conn.execute("INSERT INTO state_skill_eval_runs (skill_name, version_id, body_sha256, evaluator_version, passed, score, results_json, created_at, suite_sha256, model_id, backend_fingerprint) VALUES ('a/p', ?1, ?2, ?3, 1, 1.0, '[]', 1, ?4, 'local-test-model', 'test-backend')", params![skill.current_version.id.0, skill.current_version.body_sha256, crate::SKILL_EVAL_VERSION, suite_hash])?;
             Ok(())
         }).unwrap();
         s.promote("a/p", Some("looks good".into()), 2).unwrap();
@@ -1920,22 +1943,32 @@ mod tests {
             .unwrap();
         let skill = s.get("a/stale-suite").unwrap().unwrap();
         let terms = "[\"answer\"]";
+        let expected_files = "{\"result.txt\":\"done\"}";
         s.db
             .with_conn(|conn| {
                 conn.execute(
-                    "INSERT INTO state_skill_eval_cases (skill_name, case_id, prompt, required_terms_json) VALUES ('a/stale-suite', 'heldout-1', 'original task', ?1)",
-                    params![terms],
+                    "INSERT INTO state_skill_eval_cases (skill_name, case_id, prompt, required_terms_json, expected_workspace_files_json) VALUES ('a/stale-suite', 'heldout-1', 'original task', ?1, ?2)",
+                    params![terms, expected_files],
                 )?;
                 let suite = serde_json::to_vec(&vec![(
                     "heldout-1".to_owned(),
                     "original task".to_owned(),
                     terms.to_owned(),
+                    "[]".to_owned(),
+                    0i64,
+                    4000i64,
+                    256i64,
+                    "{}".to_owned(),
+                    expected_files.to_owned(),
+                    "{}".to_owned(),
+                    "[]".to_owned(),
+                    "[]".to_owned(),
                 )])
                 .map_err(|error| DbError::Serde(error.to_string()))?;
                 let suite_hash = hex::encode(Sha256::digest(suite));
                 conn.execute(
-                    "INSERT INTO state_skill_eval_runs (skill_name, version_id, body_sha256, evaluator_version, passed, score, results_json, created_at, suite_sha256, model_id, backend_fingerprint) VALUES ('a/stale-suite', ?1, ?2, 'skill-eval-v1', 1, 1.0, '[]', 1, ?3, 'local-test-model', 'test-backend')",
-                    params![skill.current_version.id.0, skill.current_version.body_sha256, suite_hash],
+                    "INSERT INTO state_skill_eval_runs (skill_name, version_id, body_sha256, evaluator_version, passed, score, results_json, created_at, suite_sha256, model_id, backend_fingerprint) VALUES ('a/stale-suite', ?1, ?2, ?3, 1, 1.0, '[]', 1, ?4, 'local-test-model', 'test-backend')",
+                    params![skill.current_version.id.0, skill.current_version.body_sha256, crate::SKILL_EVAL_VERSION, suite_hash],
                 )?;
                 conn.execute(
                     "UPDATE state_skill_eval_cases SET prompt = 'changed task' WHERE skill_name = 'a/stale-suite' AND case_id = 'heldout-1'",

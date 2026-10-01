@@ -29,7 +29,10 @@
 use crate::events::{EventBus, UiEvent};
 use crate::voice_clients::{InterruptHandle, KokoroClient, WhisperClient};
 use crate::voice_session::OrderedAudioChunk;
+use execlaw_voice_pipeline::chunk_at_sentence_boundaries;
 use execlaw_voice_pipeline::traits::{AudioChunk, SttClient, SttEvent, TtsClient};
+use futures::Stream;
+use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -375,6 +378,22 @@ impl VoiceRuntime {
         F: FnOnce(String, CancellationToken) -> Fut + Send,
         Fut: std::future::Future<Output = String> + Send,
     {
+        self.finalize_utterance_streaming(session_id, move |transcript, cancel| async move {
+            let reply = agent_reply(transcript, cancel).await;
+            futures::stream::iter(chunk_at_sentence_boundaries(&reply))
+        })
+        .await;
+    }
+
+    /// Finalize a voice turn and consume sentence-sized reply chunks while the
+    /// chat path is still running. This lets local TTS begin before the full
+    /// assistant response has completed.
+    pub async fn finalize_utterance_streaming<F, Fut, S>(&self, session_id: &str, agent_reply: F)
+    where
+        F: FnOnce(String, CancellationToken) -> Fut + Send,
+        Fut: std::future::Future<Output = S> + Send,
+        S: Stream<Item = String> + Send + Unpin,
+    {
         // The session state lock protects only this session. The shared map
         // lock is released before network-backed STT flush/reset awaits.
         let final_text: String;
@@ -440,10 +459,11 @@ impl VoiceRuntime {
             .wrapping_add(1);
         let agent_cancel = CancellationToken::new();
         *session.active_turn_cancel.lock().await = Some((turn_generation, agent_cancel.clone()));
-        let reply = tokio::select! {
-            _ = agent_cancel.cancelled() => String::new(),
+        let reply_stream = tokio::select! {
+            _ = agent_cancel.cancelled() => return,
             reply = agent_reply(final_text, agent_cancel.clone()) => reply,
         };
+        tokio::pin!(reply_stream);
         {
             let mut active = session.active_turn_cancel.lock().await;
             if active
@@ -460,10 +480,6 @@ impl VoiceRuntime {
             );
             return;
         }
-        if reply.trim().is_empty() {
-            return;
-        }
-
         // Bail if interrupted while the agent was thinking.
         if let Some(h) = &cancel_handle {
             if h.epoch_value() != cancel_epoch_before {
@@ -481,55 +497,68 @@ impl VoiceRuntime {
             Some(t) => t,
             None => return, // session dropped while we waited
         };
-        let synth_result = tts.synthesize(&reply).await;
-        // Always return the client, even on error.
-        self.put_tts(session_id, tts).await;
-
-        let audio = match synth_result {
-            Ok(a) => a,
-            Err(e) => {
-                warn!("TTS synthesize failed: {e}");
-                return;
+        loop {
+            if cancel_handle
+                .as_ref()
+                .is_some_and(|handle| handle.epoch_value() != cancel_epoch_before)
+            {
+                debug!(
+                    session = session_id,
+                    "finalize_utterance interrupted before sentence synthesis"
+                );
+                break;
             }
-        };
-        if audio.samples.is_empty() {
-            debug!("TTS returned empty audio (likely interrupted)");
-            return;
-        }
-
-        // Final cancel check before fanning out the audio. A bump
-        // that landed during synthesize means the operator barged
-        // in mid-reply and the SPA already flushed its playback
-        // queue.
-        if let Some(h) = &cancel_handle {
-            if h.epoch_value() != cancel_epoch_before {
-                debug!("finalize_utterance: interrupted before audio publish");
-                return;
-            }
-        }
-
-        // Recheck cancellation on every chunk and hold the per-session
-        // state lock only while minting its outbound sequence number.
-        for chunk in audio.samples.chunks(OUTBOUND_CHUNK_SAMPLES) {
-            if let Some(h) = &cancel_handle {
-                if h.epoch_value() != cancel_epoch_before {
-                    debug!("finalize_utterance: interrupted mid-broadcast");
-                    return;
-                }
-            }
-            let seq = {
-                let mut state = session.state.lock().await;
-                state.outbound_seq = state.outbound_seq.wrapping_add(1);
-                state.outbound_seq
+            let sentence = tokio::select! {
+                _ = agent_cancel.cancelled() => break,
+                sentence = reply_stream.next() => match sentence {
+                    Some(sentence) => sentence,
+                    None => break,
+                },
             };
-            let payload = encode_pcm16_le(chunk);
-            self.events.publish(UiEvent::VoiceAudioOutbound {
-                session: session_id.to_owned(),
-                seq,
-                codec: TTS_CODEC.to_owned(),
-                audio_b64: base64_encode(&payload),
-            });
+            if sentence.trim().is_empty() {
+                continue;
+            }
+            let audio = match tts.synthesize(&sentence).await {
+                Ok(audio) => audio,
+                Err(error) => {
+                    warn!(session = session_id, %error, "TTS sentence synthesis failed");
+                    break;
+                }
+            };
+            if audio.samples.is_empty() {
+                continue;
+            }
+
+            // Publish one sentence as soon as it is ready. The SPA can start
+            // playback while the next local TTS request is being synthesized.
+            for chunk in audio.samples.chunks(OUTBOUND_CHUNK_SAMPLES) {
+                if cancel_handle
+                    .as_ref()
+                    .is_some_and(|handle| handle.epoch_value() != cancel_epoch_before)
+                {
+                    debug!(
+                        session = session_id,
+                        "finalize_utterance interrupted mid-broadcast"
+                    );
+                    break;
+                }
+                let seq = {
+                    let mut state = session.state.lock().await;
+                    state.outbound_seq = state.outbound_seq.wrapping_add(1);
+                    state.outbound_seq
+                };
+                let payload = encode_pcm16_le(chunk);
+                self.events.publish(UiEvent::VoiceAudioOutbound {
+                    session: session_id.to_owned(),
+                    seq,
+                    codec: TTS_CODEC.to_owned(),
+                    audio_b64: base64_encode(&payload),
+                });
+            }
         }
+        // Always return the client, including when a sentence fails or
+        // cancellation interrupts the stream.
+        self.put_tts(session_id, tts).await;
     }
 
     /// Take ownership of a session's TTS client so synthesize can
@@ -653,7 +682,7 @@ fn base64_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use execlaw_voice_pipeline::traits::{MockStt, MockTts};
+    use execlaw_voice_pipeline::traits::{MockStt, MockTts, TtsAudio};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -782,6 +811,187 @@ mod tests {
         }
         assert!(saw_final, "VoiceTranscript final must publish");
         assert!(saw_audio, "VoiceAudioOutbound must publish from TTS");
+    }
+
+    #[tokio::test]
+    async fn finalize_utterance_synthesizes_and_publishes_sentence_chunks() {
+        use std::sync::Mutex as StdMutex;
+
+        struct RecordingTts(Arc<StdMutex<Vec<String>>>);
+        #[async_trait::async_trait]
+        impl TtsClient for RecordingTts {
+            async fn synthesize(&mut self, text: &str) -> Result<TtsAudio, String> {
+                self.0.lock().unwrap().push(text.to_owned());
+                Ok(TtsAudio {
+                    text: text.to_owned(),
+                    samples: vec![1; 32],
+                    duration_ms: 2,
+                })
+            }
+
+            async fn cancel(&mut self) {}
+        }
+
+        let bus = EventBus::new();
+        let partials = Arc::new(StdMutex::new(Some(Vec::new())));
+        let stt_final = Arc::new(StdMutex::new(Some("question".to_owned())));
+        let stt_factory: SttFactory = Arc::new({
+            let partials = partials.clone();
+            let stt_final = stt_final.clone();
+            move || {
+                Box::new(MockStt::new(
+                    partials.lock().unwrap().take().unwrap_or_default(),
+                    stt_final.lock().unwrap().take().unwrap_or_default(),
+                ))
+            }
+        });
+        let synthesized = Arc::new(StdMutex::new(Vec::new()));
+        let tts_factory: TtsFactory = Arc::new({
+            let synthesized = synthesized.clone();
+            move || {
+                (
+                    Box::new(RecordingTts(synthesized.clone())) as Box<dyn TtsClient>,
+                    None,
+                )
+            }
+        });
+        let rt = VoiceRuntime::new(bus, stt_factory, tts_factory);
+        rt.ingest_chunks(&[pcm_chunk("sentences", 0, &[1; 320])])
+            .await;
+
+        rt.finalize_utterance("sentences", |_| async {
+            "First sentence. Second sentence!".to_owned()
+        })
+        .await;
+
+        assert_eq!(
+            *synthesized.lock().unwrap(),
+            vec!["First sentence.".to_owned(), "Second sentence!".to_owned()]
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_reply_publishes_first_sentence_before_stream_completion() {
+        let (rt, bus) = make_runtime_with_mocks(Vec::new(), "question".into());
+        let mut events = bus.subscribe();
+        rt.ingest_chunks(&[pcm_chunk("streamed", 0, &[1; 320])])
+            .await;
+        let (sentence_sender, sentence_receiver) = tokio::sync::mpsc::channel(2);
+        let (second_waiting_sender, second_waiting_receiver) = tokio::sync::oneshot::channel();
+        let (release_second_sender, release_second_receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            sentence_sender
+                .send("First sentence.".to_owned())
+                .await
+                .unwrap();
+            let _ = second_waiting_sender.send(());
+            let _ = release_second_receiver.await;
+            sentence_sender
+                .send("Second sentence.".to_owned())
+                .await
+                .unwrap();
+        });
+
+        let runtime = rt.clone();
+        let finish = tokio::spawn(async move {
+            runtime
+                .finalize_utterance_streaming("streamed", move |_, _| async move {
+                    Box::pin(futures::stream::unfold(
+                        sentence_receiver,
+                        |mut receiver| async move {
+                            receiver.recv().await.map(|sentence| (sentence, receiver))
+                        },
+                    )) as futures::stream::BoxStream<'static, String>
+                })
+                .await;
+        });
+
+        let mut saw_first_audio = false;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while let Ok(event) = events.recv().await {
+                if matches!(event, UiEvent::VoiceAudioOutbound { session, .. } if session == "streamed") {
+                    saw_first_audio = true;
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("first sentence audio should arrive before the reply stream closes");
+        assert!(saw_first_audio);
+        second_waiting_receiver
+            .await
+            .expect("producer should remain open after its first sentence");
+        release_second_sender.send(()).unwrap();
+        finish.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stalled_stt_flush_does_not_block_another_sessions_interrupt() {
+        use execlaw_voice_pipeline::traits::AudioChunk;
+        use tokio::sync::{Notify, Semaphore};
+
+        struct HeldFlushStt {
+            entered: Arc<Notify>,
+            release: Arc<Semaphore>,
+        }
+
+        #[async_trait::async_trait]
+        impl SttClient for HeldFlushStt {
+            async fn push(&mut self, _chunk: &AudioChunk) {}
+
+            async fn flush(&mut self) -> SttEvent {
+                self.entered.notify_one();
+                let permit = self.release.acquire().await.expect("test semaphore open");
+                permit.forget();
+                SttEvent::Final {
+                    text: "hello".to_owned(),
+                }
+            }
+
+            async fn peek_partial(&self) -> Option<String> {
+                None
+            }
+
+            async fn reset(&mut self) {}
+        }
+
+        let bus = EventBus::new();
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Semaphore::new(0));
+        let stt_factory: SttFactory = Arc::new({
+            let entered = entered.clone();
+            let release = release.clone();
+            move || {
+                Box::new(HeldFlushStt {
+                    entered: entered.clone(),
+                    release: release.clone(),
+                })
+            }
+        });
+        let tts_factory: TtsFactory =
+            Arc::new(|| (Box::new(MockTts::default()) as Box<dyn TtsClient>, None));
+        let runtime = VoiceRuntime::new(bus, stt_factory, tts_factory);
+        runtime
+            .ingest_chunks(&[pcm_chunk("slow-stt", 0, &[1; 320])])
+            .await;
+        runtime
+            .ingest_chunks(&[pcm_chunk("interrupt-target", 0, &[1; 320])])
+            .await;
+
+        let flushing_runtime = runtime.clone();
+        let flush_task = tokio::spawn(async move {
+            flushing_runtime
+                .finalize_utterance("slow-stt", |_| async { "reply".to_owned() })
+                .await;
+        });
+        entered.notified().await;
+
+        let started = std::time::Instant::now();
+        assert!(runtime.interrupt("interrupt-target", "test_barge_in").await);
+        assert!(started.elapsed() < Duration::from_millis(500));
+
+        release.add_permits(1);
+        flush_task.await.unwrap();
     }
 
     #[tokio::test]

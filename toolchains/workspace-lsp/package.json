@@ -1,0 +1,11 @@
+{
+  "name": "execlaw-workspace-lsp",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned TypeScript language server for the offline workspace toolchain",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "typescript": "5.8.3",
+    "typescript-language-server": "4.3.3"
+  }
+}

@@ -8,7 +8,7 @@
     "label": "synthetic-offline-smoke",
     "tags": ["synthetic", "offline"],
     "from_seq": 1,
-    "to_seq": 1,
+    "to_seq": 2,
     "flagged_at": 1,
     "exported_at": 1,
     "incident_ref": "SYNTHETIC-INC-1",
@@ -26,11 +26,19 @@
       "kind": "user_msg",
       "actor": "controller",
       "committed_at": 1,
-      "payload": {"text": "synthetic task"}
+      "payload": {"text": "synthetic task", "sender_principal_id": "controller"}
+    },
+    {
+      "seq": 2,
+      "kind": "model_turn",
+      "actor": "agent",
+      "committed_at": 2,
+      "payload": {"model": "fixture-model", "finish_reason": "stop", "text": "synthetic task", "prompt_tokens": 0, "completion_tokens": 0}
     }
   ],
   "expected_transitions": [
-    {"seq": 1, "transition": "user_msg"}
+    {"seq": 1, "transition": "user_msg"},
+    {"seq": 2, "transition": "model_turn"}
   ],
   "mock_tool_responses": []
 }

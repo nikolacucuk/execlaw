@@ -656,6 +656,60 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn read_http_request(stream: &mut tokio::net::TcpStream) -> (String, Value) {
+        let mut bytes = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0u8; 1024];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0, "fixture peer closed before request headers");
+            bytes.extend_from_slice(&chunk[..count]);
+            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        while bytes.len() < header_end + content_length {
+            let mut chunk = vec![0u8; header_end + content_length - bytes.len()];
+            let count = stream.read(&mut chunk).await.unwrap();
+            assert_ne!(count, 0, "fixture peer closed before request body");
+            bytes.extend_from_slice(&chunk[..count]);
+        }
+        let body = serde_json::from_slice(&bytes[header_end..header_end + content_length]).unwrap();
+        (headers, body)
+    }
+
+    async fn write_response(
+        stream: &mut tokio::net::TcpStream,
+        status: &str,
+        headers: &str,
+        body: &[u8],
+    ) {
+        let response = format!(
+            "HTTP/1.1 {status}\r\n{headers}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.write_all(body).await.unwrap();
+        stream.flush().await.unwrap();
+    }
+
+    async fn accept_request(
+        listener: &tokio::net::TcpListener,
+    ) -> (tokio::net::TcpStream, String, Value) {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let (headers, body) = read_http_request(&mut stream).await;
+        (stream, headers, body)
+    }
 
     #[test]
     fn rpc_to_result_returns_err_on_rpc_error() {
@@ -683,6 +737,177 @@ mod tests {
         };
         let v = rpc_to_result("ping", 0, resp).unwrap();
         assert_eq!(v["ok"], true);
+    }
+
+    #[test]
+    fn rpc_to_result_rejects_wrong_id_and_invalid_jsonrpc_version() {
+        let wrong_id = RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(serde_json::json!(7)),
+            result: Some(serde_json::json!({"ok": true})),
+            error: None,
+        };
+        assert!(rpc_to_result("tools/list", 8, wrong_id).is_err());
+        let wrong_version = RpcResponse {
+            jsonrpc: "1.0".into(),
+            id: Some(serde_json::json!(8)),
+            result: Some(serde_json::json!({"ok": true})),
+            error: None,
+        };
+        assert!(rpc_to_result("tools/list", 8, wrong_version).is_err());
+    }
+
+    #[tokio::test]
+    async fn streamable_http_returns_matching_sse_response_before_stream_closes() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _, initialize) = accept_request(&listener).await;
+            assert_eq!(initialize["method"], "initialize");
+            let id = initialize["id"].as_u64().unwrap();
+            let body = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc":"2.0", "id":id,
+                "result":{"protocolVersion":PROTOCOL_VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}
+            })).unwrap();
+            write_response(
+                &mut stream,
+                "200 OK",
+                &format!("Content-Type: application/json\r\nMCP-Session-Id: fixture-session\r\nMCP-Protocol-Version: {PROTOCOL_VERSION}\r\n"),
+                &body,
+            ).await;
+
+            let (mut stream, _, initialized) = accept_request(&listener).await;
+            assert_eq!(initialized["method"], "notifications/initialized");
+            write_response(&mut stream, "202 Accepted", "", b"").await;
+
+            let (mut stream, headers, list) = accept_request(&listener).await;
+            assert_eq!(list["method"], "tools/list");
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("mcp-session-id: fixture-session")
+            );
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("mcp-protocol-version: 2025-06-18")
+            );
+            let id = list["id"].as_u64().unwrap();
+            let wrong = serde_json::json!({"jsonrpc":"2.0","id":id+100,"result":{"tools":[]}});
+            let matching = serde_json::json!({"jsonrpc":"2.0","id":id,"result":{"tools":[]}});
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nMCP-Session-Id: fixture-session\r\nConnection: close\r\n\r\n").await.unwrap();
+            stream
+                .write_all(format!("data: {wrong}\n\n").as_bytes())
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            stream
+                .write_all(format!("data: {matching}\n\n").as_bytes())
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        });
+
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client =
+            HttpMcpClient::connect_with_client(&format!("http://{address}/mcp"), None, http)
+                .await
+                .unwrap();
+        assert!(client.list_tools().await.unwrap().is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn expired_http_session_reinitializes_without_replaying_tool_call() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut tool_calls = 0;
+            let mut initialize_calls = 0;
+            for _ in 0..5 {
+                let (mut stream, _, request) = accept_request(&listener).await;
+                match request["method"].as_str().unwrap() {
+                    "initialize" => {
+                        initialize_calls += 1;
+                        let id = request["id"].as_u64().unwrap();
+                        let body = serde_json::to_vec(&serde_json::json!({
+                            "jsonrpc":"2.0", "id":id,
+                            "result":{"protocolVersion":PROTOCOL_VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}
+                        })).unwrap();
+                        write_response(&mut stream,"200 OK",&format!("Content-Type: application/json\r\nMCP-Session-Id: session-{initialize_calls}\r\nMCP-Protocol-Version: {PROTOCOL_VERSION}\r\n"),&body).await;
+                    }
+                    "notifications/initialized" => {
+                        write_response(&mut stream, "202 Accepted", "", b"").await
+                    }
+                    "tools/call" => {
+                        tool_calls += 1;
+                        write_response(&mut stream, "404 Not Found", "", b"").await;
+                    }
+                    method => panic!("unexpected MCP method: {method}"),
+                }
+            }
+            (initialize_calls, tool_calls)
+        });
+
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client =
+            HttpMcpClient::connect_with_client(&format!("http://{address}/mcp"), None, http)
+                .await
+                .unwrap();
+        let error = client
+            .call_tool("write_file", serde_json::json!({"path":"x"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, McpError::SessionExpired));
+        let (initialize_calls, tool_calls) = server.await.unwrap();
+        assert_eq!(initialize_calls, 2);
+        assert_eq!(
+            tool_calls, 1,
+            "tool effects must not replay after session expiry"
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_http_response_is_rejected_from_content_length() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _, initialize) = accept_request(&listener).await;
+            let id = initialize["id"].as_u64().unwrap();
+            let body = serde_json::to_vec(&serde_json::json!({
+                "jsonrpc":"2.0", "id":id,
+                "result":{"protocolVersion":PROTOCOL_VERSION,"capabilities":{"tools":{}},"serverInfo":{"name":"fixture","version":"1"}}
+            })).unwrap();
+            write_response(
+                &mut stream,
+                "200 OK",
+                &format!(
+                    "Content-Type: application/json\r\nMCP-Protocol-Version: {PROTOCOL_VERSION}\r\n"
+                ),
+                &body,
+            )
+            .await;
+            let (mut stream, _, _) = accept_request(&listener).await;
+            write_response(&mut stream, "202 Accepted", "", b"").await;
+            let (mut stream, _, list) = accept_request(&listener).await;
+            assert_eq!(list["method"], "tools/list");
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                MAX_RESPONSE_BYTES + 1,
+            ).as_bytes()).await.unwrap();
+            stream.flush().await.unwrap();
+        });
+
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client =
+            HttpMcpClient::connect_with_client(&format!("http://{address}/mcp"), None, http)
+                .await
+                .unwrap();
+        let error = client.list_tools().await.unwrap_err();
+        assert!(format!("{error}").contains("exceeds byte limit"));
+        server.await.unwrap();
     }
 
     #[test]

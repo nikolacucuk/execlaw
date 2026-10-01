@@ -67,13 +67,14 @@ H036 flagged event ranges can be exported locally with
 The map is read on the host and is not included in the fixture. Run
 `eval-harness replay-fixture --fixture <fixture.json> --report <validation.json>`
 to check event ordering, expected transitions, tool-call pairing, and mock
-responses without opening an inference client or dispatching effects. Export
-may attach bounded `--incident-ref` and `--release-ref` identifiers; both are
-preserved in the offline validation report. A core unit test validates the
-checked-in synthetic fixture, and CI invokes the `eval-harness` command on it.
-The validator checks fixture structure but does not yet
-replay the production executor or gate a release on a fixed fixture, so H036
-remains partial.
+responses. This also replays supported user/tool/model turns through the
+production `TurnExecutor` using loopback scripted completions and fixture-only
+tool dispatch; it never enables external effects. Export may attach bounded
+`--incident-ref` and `--release-ref` identifiers. The CI catalog command
+replays every regular JSON fixture and requires both references for each
+catalog entry. Catalog/policy-only trajectories, attached media, unsupported
+event kinds, and raw inference-stream framing are not yet replayed by the
+production executor path, so H036 remains partial.
 
 The entry point is:
 
@@ -121,23 +122,27 @@ must not omit either default tier.
 | Web Scraper | Install/admin integration test | Approved sidecar image and bounded dynamic-page fetch |
 | Research and tool chains | Core/server integration tests | Bounded research job and approval halt/resume |
 | Agents, routines, automations | Core/server/SPA tests | Scheduled and event-only runs across restart |
-| MCP | Client/server tests | Reviewed stdio and HTTP server discovery/call |
+| MCP (H045/F13) | Pinned stdio and Streamable HTTP fixtures; bounded responses, wrong IDs, session expiry without tool replay, matching open-SSE response, and stdio handshake/tool-call correlation | Installed reference servers and cross-platform process/session qualification |
 | Graphify and Graphiti | Server/API and SPA tests | Local graph build and Graphiti health/test-call |
 | Durable runs and steps | Core transition/reopen coverage; SPA and headless Controller client can explicitly resume a safe non-transport run from saved input/checkpoints | Automatic runner dispatch recovery, routine/child parity, and process-kill matrix (H023; F06-F08) |
 | Streaming protocol | SSE/NDJSON byte framing; multilingual SSE/tool payload every-split fixture; typed incomplete-stream failure carries visible partial output; no model checkpoint/tool call before terminal marker | Process-kill framing, provider-specific/tool-delta split fixtures, and MCP response-before-EOF qualification (H029) |
 | Inference admission | Shared global/per-model permits, foreground reserve, bounded queue, background aging, workload labels, and a two-child-per-parent scope; durable parent/child token/time/retry/effect quotas and resource-capped runner admission are implemented | Run the restart/cancellation budget suite and measure queue delay on each supported hardware tier (H030) |
 | Context budget (H031) | Every in-process, container-runner, and direct-streaming model call sizes the serialized request, tools, and output reserve against the qualified context ceiling; both tool paths have scoped artifact offload | Held-out Unicode/JSON/vision/tool-round suite against exact model/template identities; token-estimate calibration and artifact lifecycle/replay (H031/F12) |
 | Task completion contracts | Core acceptance/artifact/delivery verifier tests; SPA, CLI, and editor adapter submit required/optional criteria, artifacts, and delivery requirements | Other task producers, restart binding, broad real-task coverage, and deterministic production verifier wiring (H022) |
-| Skill evaluation and rollback | Immutable version rollback creates a fresh trial; held-out suite identity is recorded and current promotion gates recheck the current version | Replace substring scoring with isolated workspace/mock execution, behavioral and forbidden-action assertions, resource budgets, and paired candidate/parent acceptance (H039) |
+| Skill evaluation and rollback | Disposable workspace/mock tool execution, exact expected files and call order, forbidden output/actions, per-case output/token limits, identical parent/candidate cases, and current-suite promotion hash checks | Complete live-model held-out qualification and record governed promotion evidence (H039) |
 | Compaction provenance (H032) | Receipt fingerprint/reopen coverage and Controller source-event endpoint | HMAC-verified paged original evidence, stale receipt invalidation, trust-retention attacks, and multi-compaction acceptance-criteria quality suite |
 | Chat request idempotency and effects | Core reopen/replay/stale-outcome/conflicting-body tests; dispatcher safety declarations; unknown outcomes park until a Controller resolves them with evidence | Production transport sink integration, broad sink reconciliation, and process-kill qualification across real adapters (H024) |
-| Durable turn controls | SQLite control transitions and acknowledgements, atomic queue-next-turn event application, startup reconciliation of unapplied queued messages, Controller chat controls, and conversation-scoped request keys | Reconciliation of delivered-but-unacknowledged runner controls, same-key replay/body-conflict behavior, and stop/steer latency through stalled inference and tool waits (H043) |
+| Workspace checkpoints and forks (H041) | Core checkpoint/apply receipt reopen tests; server isolated-run, conflict preview, owned-change restore, hardlink/path-denial, and interrupted-replace recovery tests | Installed process-kill matrix; run symlink-escape test with Windows symlink privilege enabled |
+| Child-agent run tree (H042) | Child join replay, killed inference recovery, nested-parent cancellation, fresh fork lineage, and a Criterion durable child-reservation benchmark | Stable runner/release timing and supported-hardware delegation qualification |
+| Durable turn controls (H043) | SQLite transition/idempotency tests; queued-event recovery without duplicate append; authenticated stop under 500 ms while local inference is held open | Direct in-process steer/pause/resume and installed runner delivered-but-unacknowledged control reconnect |
+| Terminal/editor contract (H044) | Contract schema compatibility, older-client minimum-version handling, editor command allowlist mapping, and same-key chat replay/body conflict | Installed SPA-to-client handoff and WebAuthn-assisted client login qualification |
 | Tool contracts and failures | Core, plugin-host, MCP, runner-local tests | Container-runner typed-failure parity after protocol migration |
 | Local endpoint policy | Policy crate adversarial tests and server adapter tests | Exercise each configured LAN/VPN endpoint and inspect persisted resolution |
 | Public and plugin egress (H025) | Existing URL guards and local endpoint policy coverage | Prove mixed DNS answers, IPv4-mapped IPv6, redirect-to-private, proxy bypass, approved private integrations, and registered-sidecar pinning issue zero prohibited requests |
 | Memory assertions/jobs | Core evidence/trust/reopen tests and skills capture tests | Exercise the startup-wired extraction worker through durable completion and restart |
-| Memory evidence review | Controller can inspect assertion revisions, validity, status, hash-verified source spans, and review history; CLI export requires consent/redaction; chat traces show metadata-only per-turn HOT-loadout decisions | Agent-run receipt coverage and runtime ancestor/projection invalidation qualification across every retrieval path (H037) |
-| Trust-first memory retrieval | Chat, in-process, and runner prompts apply scope/trust/lifecycle/time/mode eligibility before ranking, exclude TOOL_ONLY assets, deduplicate source hashes, and record query/source/rank receipts | Versioned local embeddings/reranking and rebuild, research/agent context consumers, held-out quality and latency qualification (H038) |
+| Memory evidence review | Controller can inspect assertion revisions, validity, status, hash-verified source spans, and review history; CLI export requires consent/redaction; chat and agent traces show metadata-only governed loadout receipts; unreceipted legacy HOT prompt injection is disabled | Agent-run restart and runtime ancestor/projection invalidation qualification (H037) |
+| Trust-first memory retrieval | Chat, in-process, runner, agent, and research prompts apply scope/trust/lifecycle/time/mode eligibility before ranking, exclude TOOL_ONLY assets, deduplicate source hashes, and record query/source/rank receipts; local embeddings and rebuild are versioned | Held-out recall/answer accuracy and fixed-budget hardware latency qualification (H038) |
+| Workspace coding (H040) | Root-confined read/search and isolated run checkouts; durable manifest host tools for SHA-checked patching; path, secret, link, hardlink, and idempotency checks | Terminal jobs, language-server diagnostics, approved sandbox toolchain, and multi-file repair benchmark under H023-H029 write-authority prerequisites |
 | Artifact provenance | Core/host/container tests plus packaging checks | Verify detached release bundles through bundled install on every platform |
 | Plugin upgrade transaction and panel authority (H027) | Manifest/path and ZIP bounds, rollback and provenance checks; browser test verifies panel credential isolation and denied unrelated RPC routes | Platform release qualification and lifecycle/process-kill rollback matrix |
 | Voice | Pipeline/server/SPA tests | Runtime locking and cancellation are per-session, but the production path remains push-to-talk with non-streaming STT/TTS and an echo callback; H047 endpointing, queue limits, sentence streaming, real agent integration, and hardware qualification remain |

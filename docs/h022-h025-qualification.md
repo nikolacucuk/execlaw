@@ -61,10 +61,10 @@ the isolated API probe did not verify the logged-in SPA.
 
 | Item | Demonstrated on 2026-09-30 | Required before Complete |
 |---|---|---|
-| H022 | Real local-model chat traversed Incomplete, Partial, VerifiedComplete, missing-artifact Blocked, and unconfirmed-delivery Incomplete. A fabricated attachment now reads Blocked and resubmission returns HTTP 400. | Real tasks through headless, editor, routine, and agent entries; plugin and research artifact producer links; deterministic verifier and delivery evidence for each relevant path. |
-| H023 | A killed isolated Windows debug executable resumed held inference on the original run with one user event and one model reply. A child-inference process-kill regression reclaimed one model attempt and published one artifact. | Shared fixtures across streaming, in-process, runner, routine, and child paths; full process-kill matrix including paired tool events and no repeated completed effects. |
-| H024 | Same-key retry returned the original run. A copied installed debug executable killed after a disposable subprocess sink accepted a send, before ack, restarted to Unknown with one attempt and one sink effect. | Release-installed binary and real transport/sink kill matrix, including a sink with supported idempotency or status lookup; review reconciliation decisions after restart. |
-| H025 | Exact-model TrueNAS inference passed through a scoped approval; removing it returned HTTP 503, and another capability's grant did not authorize it. A sidecar redirect test sent zero requests to the destination listener. | Live supported endpoints across public web, research, automation, plugin HTTP, MCP, OAuth, and sidecar paths, with DNS rebinding, mixed answers, redirects, proxies, and zero prohibited requests. |
+| H022 | Disposable real-model headless and editor-style API requests, routine fire, and agent runs reached VerifiedComplete. A real plugin tool and research job each produced a run-owned attachment that passed artifact and Controller review checks. Fabricated attachments are rejected. | Prove the actual headless CLI and editor adapter processes, rather than API-emulated requests, and rerun the full acceptance matrix on a settled source build. The editor-style request did not exercise VS Code. |
+| H023 | An isolated debug host kill resumed held inference; a child kill regression reclaimed one model attempt. An expired-budget startup loop was fixed and a disposable restart terminalized the run once. Runner namespace isolation, admission accounting, prompt replay identity, and per-group spawn gates were changed; a real runner turn passed before the kill attempt. | Resume a runner turn successfully after a process kill on the final binary, then cover streaming, routine, tool effects, paired commits, and child joins with effect counts. The held runner kill was observed, but the run expired during subsequent builds before successful replay. The latest spawn-gate change has not been live-qualified. |
+| H024 | Same-key retry returned the original run. An installed debug copy killed after a disposable sink accepted a send restarted to Unknown with one attempt and one sink effect. | Build and install a release, repeat the transport/sink kill matrix with supported idempotency or status lookup, and review reconciliation decisions. Windows Application Control error 4551 blocked Cargo-generated release build executables; the alternative Docker SQLCipher release build was paused before producing an image when host memory became scarce. |
+| H025 | TrueNAS inference passed scoped approval and revocation checks. Live public OpenMeteo plugin and research fetch succeeded. MCP private approval, denial, and redirect probes showed no requests to the forbidden listener. Focused public automation and Google OAuth policy checks passed. | Run the complete live cross-adapter adversarial matrix, including DNS rebinding, mixed answers, mapped addresses, proxies, and redirects on supported endpoints. The full script was not rerun on the final source. No authenticated external OAuth/MCP service or authenticated SPA/browser result was available. |
 
 H022 proof must point to a run-owned artifact whose file still matches its
 recorded hash, a run-scoped delivered outbox event, or a Controller audit
@@ -81,20 +81,19 @@ transitions, count user/model/tool events, verify every `tool_use` has one
 paired `tool_result`, and count actual external effects. The focused child
 regression is
 `cargo test -p execlaw-server killed_child_inference_reclaims_once_and_publishes_one_artifact`.
-It covers one cut, not the entire matrix. A runner-enabled isolated server
-must use a separate Docker daemon/context until `boot_orphan_sweep` is scoped
-to its own installation: the current sweep can remove another installation's
-runner volumes on a shared daemon. Verify PID, command line, database, and
-Docker context before any process kill.
+It covers one cut, not the entire matrix. Runner containers and volumes now
+include a database-scoped installation identifier so disposable qualification
+does not sweep the live installation's runner resources. Still verify PID,
+command line, database, container name, and Docker context before any kill.
 
-When the disposable port-3032 server was stopped, its log showed repeated
-startup recovery attempts for `turn:qa-real-h022-review-1790791531633:1`.
-Inference first timed out, then the run exceeded its wall-clock budget, yet
-startup recovery kept returning HTTP 500 and retrying. This is an observed
-unresolved H023 case. A future fix should make the exhausted run terminal or
-Controller-reviewable without a hot retry loop, and add a restart regression
-using the same durable run. Preserve the disposable database for diagnosis;
-do not copy it over an operator database.
+The earlier repeated startup recovery for
+`turn:qa-real-h022-review-1790791531633:1` exposed a budget check gap.
+Startup now atomically terminalizes expired runs before dispatch; focused
+core/server regressions and a disposable restart showed one terminalization
+instead of a hot retry loop. A separate held runner process kill reached
+persisted attempt 1, but its wall-clock budget expired during rebuilds before
+the final replay fix could be qualified. Preserve disposable databases for
+diagnosis; do not copy them over operator data.
 
 For H024, an accepted send followed by a lost acknowledgement is ambiguous
 when the sink has no deduplication or lookup. The expected state is **Unknown**,
@@ -121,9 +120,13 @@ pass. Docker and RAM allocation changes did not by themselves prove that gate;
 the configured `.wslconfig` memory and swap values require a full WSL restart
 and were not observed as applied while shared sidecars were running. Do not
 restart the shared Docker/WSL services solely to satisfy this runbook. The
-Windows Application Control policy also blocked a fresh Cargo build-script
-process with code 4551; a standard-library-only disposable relay fixture
-compiled directly with `rustc` was used for the debug process-kill test.
+Windows Application Control policy blocked Cargo-generated build-script
+executables with code 4551 in the release target; installing OpenSSL tooling
+did not remove this policy block. A standard-library-only disposable relay
+fixture compiled directly with `rustc` was used for the debug kill test. A
+Docker SQLCipher control-plane release build got past the earlier WSL failure
+and into Rust dependency compilation, but was stopped before image completion
+when concurrent host builds left less than 1 GiB free RAM. Its cache remains.
 Use a separate Cargo target directory for qualification to avoid disturbing
 the active development build. Record environment failures separately from
 product failures and rerun release and SQLCipher gates when the environment
@@ -136,8 +139,9 @@ ignored **before the final child-process regression changes**, and 537 SPA
 tests with `--maxWorkers=2`; focused child, outbox, evidence, inference,
 runner, sidecar, and endpoint tests passed later. A full server/workspace run
 on the final source and release-installed qualification were not recorded.
-`cargo check -p execlaw-server -p execlaw-runner` passed on the final source
-with three server dead-code warnings; a workspace format check still found
-differences in `server/src/lib.rs` and `server/src/runner_spawn.rs` in the
-shared working tree. The scoped documentation whitespace check passed.
+Those suite counts predate subsequent source edits. The final isolated Windows
+build and full adversarial script were stopped before completion; neither is
+acceptance evidence for the final tree. Source files were also changing in a
+second coding session during qualification. Retest from a settled tree before
+changing any status to Complete.
 Keep the ledger at Partial until the specified acceptance evidence exists.

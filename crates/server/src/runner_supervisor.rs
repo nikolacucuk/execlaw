@@ -299,6 +299,10 @@ struct SupervisorInner {
     /// expected secret + notify; populated by `ensure()`, consumed
     /// by the WS register handler.
     pending_spawns: DashMap<String, PendingSpawn>,
+    /// Serialize registration for the same group. Prewarm and startup
+    /// recovery may otherwise replace each other's pending secret and kill
+    /// both containers before either can register.
+    spawn_gates: DashMap<String, Arc<Mutex<()>>>,
     /// Monotonic counter for `turn_id`s minted server-side.
     next_turn_seq: AtomicU64,
     /// Event bus for translating runner frames into SPA WS events.
@@ -314,6 +318,7 @@ impl RunnerSupervisor {
             inner: Arc::new(SupervisorInner {
                 runners: DashMap::new(),
                 pending_spawns: DashMap::new(),
+                spawn_gates: DashMap::new(),
                 next_turn_seq: AtomicU64::new(1),
                 events,
                 db,
@@ -425,6 +430,13 @@ impl RunnerSupervisor {
         spec: RunnerSpec,
         timeout: Duration,
     ) -> Result<RunnerHandle, EnsureError> {
+        let gate = self
+            .inner
+            .spawn_gates
+            .entry(group_id.to_owned())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone();
+        let _spawn_guard = gate.lock().await;
         if let Some(h) = self.get(group_id) {
             // Same stale-handle guard as `ensure_for_group`:
             // Stopping/Dead entries are tombstones, not live
@@ -1241,6 +1253,7 @@ impl RunnerSupervisor {
                 self.inner.events.publish(UiEvent::ChatTokenDelta {
                     conversation_id: conversation_id.clone(),
                     text: text.clone(),
+                    request_id: None,
                 });
                 if let Some(tx) = handle.turn_streams.get(&turn_id) {
                     let _ = tx.send(TurnEvent::TokenDelta { text });
@@ -1801,6 +1814,7 @@ mod tests {
             UiEvent::ChatTokenDelta {
                 conversation_id,
                 text,
+                request_id: None,
             } => {
                 assert_eq!(conversation_id, "conv-x");
                 assert_eq!(text, "hello");
@@ -1916,6 +1930,53 @@ mod tests {
                 .any(|v| v == &format!("execlaw-runner-{}", known.group_id))
         );
         assert!(!after.iter().any(|v| v == "execlaw-runner-orphan-1"));
+    }
+
+    #[tokio::test]
+    async fn concurrent_ensure_runner_calls_share_one_pending_secret() {
+        use crate::runner_spawn::{MockRunnerLauncher, RunnerSpec};
+
+        let supervisor = fresh_supervisor();
+        let launcher = Arc::new(MockRunnerLauncher::new());
+        let spec = RunnerSpec {
+            group_id: "g-concurrent".into(),
+            image: "qual-runner".into(),
+            spawn_secret_hex: String::new(),
+            rpc_url: "ws://localhost:3032".into(),
+            inference_url: "http://localhost:30069/v1".into(),
+            memory_bytes: Some(1024 * 1024 * 1024),
+            network: None,
+            env: vec![],
+        };
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let supervisor = supervisor.clone();
+            let launcher = launcher.clone();
+            let spec = spec.clone();
+            tasks.push(tokio::spawn(async move {
+                supervisor
+                    .ensure_runner(&*launcher, "g-concurrent", spec, Duration::from_secs(3))
+                    .await
+            }));
+        }
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !supervisor.inner.pending_spawns.contains_key("g-concurrent") {
+            assert!(tokio::time::Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let secret = supervisor
+            .inner
+            .pending_spawns
+            .get("g-concurrent")
+            .unwrap()
+            .secret;
+        supervisor
+            .accept_registration("g-concurrent", &secret, false)
+            .unwrap();
+        for task in tasks {
+            assert!(task.await.unwrap().is_ok());
+        }
+        assert_eq!(launcher.spawn_count().await, 1);
     }
 
     #[tokio::test]

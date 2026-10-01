@@ -63,12 +63,38 @@ pub struct WorkspaceApplyReceipt {
     pub updated_at: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspacePatchClaim {
+    Claimed,
+    Succeeded(String),
+    Failed(String),
+    Busy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceExecutionConfig {
+    pub image_reference: Option<String>,
+    pub language_servers: std::collections::BTreeMap<String, Vec<String>>,
+    pub updated_at: i64,
+    pub updated_by: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WorkspaceExecutionJobClaim {
+    Claimed,
+    Succeeded(String),
+    Failed(String),
+    Busy,
+}
+
 #[derive(Debug, Error)]
 pub enum WorkspaceStoreError {
     #[error(transparent)]
     Db(#[from] DbError),
     #[error("invalid workspace checkpoint: {0}")]
     Invalid(String),
+    #[error("workspace operation conflict: {0}")]
+    Conflict(String),
 }
 
 /// Store for registered workspace roots and immutable checkpoint content.
@@ -79,6 +105,346 @@ pub struct WorkspaceStore<'db> {
 impl<'db> WorkspaceStore<'db> {
     pub fn new(db: &'db Database) -> Self {
         Self { db }
+    }
+
+    /// Read the Controller-configured, locally verified workspace toolchain.
+    pub fn execution_config(&self) -> Result<WorkspaceExecutionConfig, WorkspaceStoreError> {
+        self.db
+            .with_conn(|connection| {
+                let (image_reference, language_servers_json, updated_at, updated_by): (
+                    Option<String>,
+                    String,
+                    i64,
+                    String,
+                ) = connection.query_row(
+                    "SELECT image_reference, language_servers_json, updated_at, updated_by \
+                     FROM config_workspace_execution WHERE singleton_id = 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )?;
+                let language_servers =
+                    serde_json::from_str(&language_servers_json).map_err(|_| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(std::io::Error::other(
+                                "invalid workspace language-server configuration",
+                            )),
+                        )
+                    })?;
+                Ok(WorkspaceExecutionConfig {
+                    image_reference,
+                    language_servers,
+                    updated_at,
+                    updated_by,
+                })
+            })
+            .map_err(WorkspaceStoreError::from)
+    }
+
+    /// Persist a Controller-approved toolchain image and generic LSP command map.
+    pub fn set_execution_config(
+        &self,
+        actor: &str,
+        image_reference: &str,
+        language_servers: &std::collections::BTreeMap<String, Vec<String>>,
+        now: i64,
+    ) -> Result<WorkspaceExecutionConfig, WorkspaceStoreError> {
+        if actor.trim().is_empty()
+            || actor.len() > 128
+            || image_reference.trim().is_empty()
+            || image_reference.len() > 512
+            || language_servers.len() > 32
+            || language_servers.iter().any(|(language, argv)| {
+                language.is_empty()
+                    || language.len() > 64
+                    || !language.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+                    })
+                    || argv.is_empty()
+                    || argv.len() > 32
+                    || argv
+                        .iter()
+                        .any(|arg| arg.is_empty() || arg.len() > 1024 || arg.contains('\0'))
+            })
+        {
+            return Err(WorkspaceStoreError::Invalid(
+                "workspace toolchain identity or language-server map exceeds its bounds".into(),
+            ));
+        }
+        let language_servers_json = serde_json::to_string(language_servers)
+            .map_err(|error| WorkspaceStoreError::Invalid(error.to_string()))?;
+        if language_servers_json.len() > 32 * 1024 {
+            return Err(WorkspaceStoreError::Invalid(
+                "workspace language-server configuration exceeds 32 KiB".into(),
+            ));
+        }
+        self.db.with_conn(|connection| {
+            connection.execute(
+                "UPDATE config_workspace_execution SET image_reference = ?1, \
+                 language_servers_json = ?2, updated_at = ?3, updated_by = ?4 \
+                 WHERE singleton_id = 1",
+                params![image_reference, language_servers_json, now, actor],
+            )?;
+            Ok(())
+        })?;
+        self.execution_config()
+    }
+
+    /// Claim or reclaim a durable process/diagnostics job for one run and tool ordinal.
+    pub fn begin_execution_job(
+        &self,
+        run_id: &str,
+        job_id: &str,
+        request_hash: &str,
+        operation: &str,
+        lease_owner: &str,
+        lease_seconds: i64,
+        now: i64,
+    ) -> Result<WorkspaceExecutionJobClaim, WorkspaceStoreError> {
+        if run_id.is_empty()
+            || run_id.len() > 128
+            || job_id.is_empty()
+            || job_id.len() > 128
+            || !job_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            || request_hash.len() != 64
+            || !request_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !matches!(operation, "terminal" | "diagnostics")
+            || lease_owner.is_empty()
+            || lease_owner.len() > 128
+            || !(1..=7_200).contains(&lease_seconds)
+        {
+            return Err(WorkspaceStoreError::Invalid(
+                "workspace execution job identity or lease is invalid".into(),
+            ));
+        }
+        let claim = self.db.transaction(|tx| {
+            let existing: Option<(String, String, String, Option<String>, Option<String>, Option<i64>)> = tx
+                .query_row(
+                    "SELECT request_hash, operation, status, result_json, error_code, lease_expires_at \
+                     FROM state_workspace_execution_jobs WHERE run_id = ?1 AND job_id = ?2",
+                    params![run_id, job_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                )
+                .optional()?;
+            if let Some((saved_hash, saved_operation, status, result, error, expires)) = existing {
+                if saved_hash != request_hash || saved_operation != operation {
+                    return Err(DbError::Invariant(
+                        "workspace execution idempotency key was reused with different content".into(),
+                    ));
+                }
+                match status.as_str() {
+                    "succeeded" => return Ok(WorkspaceExecutionJobClaim::Succeeded(result.unwrap_or_else(|| "{}".into()))),
+                    "failed" => return Ok(WorkspaceExecutionJobClaim::Failed(error.unwrap_or_else(|| "workspace_job_failed".into()))),
+                    "running" if expires.is_some_and(|value| value > now) => return Ok(WorkspaceExecutionJobClaim::Busy),
+                    "running" => {
+                        tx.execute(
+                            "UPDATE state_workspace_execution_jobs SET lease_owner = ?3, lease_expires_at = ?4, updated_at = ?5 \
+                             WHERE run_id = ?1 AND job_id = ?2 AND status = 'running'",
+                            params![run_id, job_id, lease_owner, now.saturating_add(lease_seconds), now],
+                        )?;
+                        return Ok(WorkspaceExecutionJobClaim::Claimed);
+                    }
+                    _ => return Err(DbError::Invariant("unknown workspace execution job status".into())),
+                }
+            }
+            tx.execute(
+                "INSERT INTO state_workspace_execution_jobs \
+                 (run_id, job_id, request_hash, operation, status, lease_owner, lease_expires_at, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, ?4, 'running', ?5, ?6, ?7, ?7)",
+                params![run_id, job_id, request_hash, operation, lease_owner, now.saturating_add(lease_seconds), now],
+            )?;
+            Ok(WorkspaceExecutionJobClaim::Claimed)
+        });
+        claim.map_err(|error| match error {
+            DbError::Invariant(message)
+                if message.contains("workspace execution idempotency key was reused") =>
+            {
+                WorkspaceStoreError::Conflict(message)
+            }
+            other => WorkspaceStoreError::Db(other),
+        })
+    }
+
+    /// Persist a bounded terminal result and release its durable job lease.
+    pub fn finish_execution_job(
+        &self,
+        run_id: &str,
+        job_id: &str,
+        lease_owner: &str,
+        result_json: Option<&str>,
+        error_code: Option<&str>,
+        now: i64,
+    ) -> Result<(), WorkspaceStoreError> {
+        if result_json.is_some_and(|value| value.len() > 256 * 1024)
+            || error_code.is_some_and(|value| value.is_empty() || value.len() > 128)
+            || result_json.is_some() == error_code.is_some()
+        {
+            return Err(WorkspaceStoreError::Invalid(
+                "workspace execution result must contain exactly one bounded result or error"
+                    .into(),
+            ));
+        }
+        let status = if error_code.is_some() {
+            "failed"
+        } else {
+            "succeeded"
+        };
+        self.db.transaction(|tx| {
+            let changed = tx.execute(
+                "UPDATE state_workspace_execution_jobs SET status = ?4, result_json = ?5, \
+                 error_code = ?6, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?7 \
+                 WHERE run_id = ?1 AND job_id = ?2 AND lease_owner = ?3 AND status = 'running'",
+                params![
+                    run_id,
+                    job_id,
+                    lease_owner,
+                    status,
+                    result_json,
+                    error_code,
+                    now
+                ],
+            )?;
+            if changed != 1 {
+                return Err(DbError::Invariant(
+                    "workspace execution job lease was lost before completion".into(),
+                ));
+            }
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Claim a retry-safe isolated-checkout patch operation before touching files.
+    pub fn begin_patch_job(
+        &self,
+        run_id: &str,
+        request_id: &str,
+        request_hash: &str,
+        lease_owner: &str,
+        now: i64,
+    ) -> Result<WorkspacePatchClaim, WorkspaceStoreError> {
+        if run_id.is_empty()
+            || run_id.len() > 128
+            || request_id.is_empty()
+            || request_id.len() > 128
+            || !request_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+            || request_hash.len() != 64
+            || !request_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || lease_owner.is_empty()
+            || lease_owner.len() > 128
+        {
+            return Err(WorkspaceStoreError::Invalid(
+                "workspace patch identity is invalid or exceeds its bound".into(),
+            ));
+        }
+        self.db.transaction(|tx| {
+            let existing: Option<(String, String, Option<String>, Option<String>, Option<String>, Option<i64>)> = tx
+                .query_row(
+                    "SELECT request_hash, status, result_json, error_code, lease_owner, lease_expires_at \
+                     FROM state_workspace_patch_jobs WHERE run_id = ?1 AND request_id = ?2",
+                    params![run_id, request_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+                )
+                .optional()?;
+            if let Some((saved_hash, status, result_json, error_code, existing_owner, lease_expires_at)) = existing {
+                if saved_hash != request_hash {
+                    return Err(DbError::Invariant("workspace patch request id was reused with different content".into()));
+                }
+                match status.as_str() {
+                    "succeeded" => {
+                        return Ok(WorkspacePatchClaim::Succeeded(
+                            result_json.unwrap_or_else(|| "{}".into()),
+                        ));
+                    }
+                    "failed" => {
+                        return Ok(WorkspacePatchClaim::Failed(
+                            error_code.unwrap_or_else(|| "workspace_patch_failed".into()),
+                        ));
+                    }
+                    "running" if existing_owner.as_deref() == Some(lease_owner) => {
+                        tx.execute(
+                            "UPDATE state_workspace_patch_jobs SET lease_expires_at = ?3, updated_at = ?4 \
+                             WHERE run_id = ?1 AND request_id = ?2 AND status = 'running'",
+                            params![run_id, request_id, now.saturating_add(600), now],
+                        )?;
+                        return Ok(WorkspacePatchClaim::Claimed);
+                    }
+                    "running" if lease_expires_at.is_some_and(|expires| expires > now) => {
+                        return Ok(WorkspacePatchClaim::Busy);
+                    }
+                    "running" => {
+                        tx.execute(
+                            "UPDATE state_workspace_patch_jobs SET lease_owner = ?3, \
+                             lease_expires_at = ?4, updated_at = ?5 \
+                             WHERE run_id = ?1 AND request_id = ?2 AND status = 'running'",
+                            params![run_id, request_id, lease_owner, now.saturating_add(600), now],
+                        )?;
+                        return Ok(WorkspacePatchClaim::Claimed);
+                    }
+                    _ => return Err(DbError::Invariant("unknown workspace patch status".into())),
+                }
+            }
+            tx.execute(
+                "INSERT INTO state_workspace_patch_jobs \
+                 (run_id, request_id, request_hash, status, lease_owner, lease_expires_at, created_at, updated_at) \
+                 VALUES (?1, ?2, ?3, 'running', ?4, ?5, ?6, ?6)",
+                params![run_id, request_id, request_hash, lease_owner, now.saturating_add(600), now],
+            )?;
+            Ok(WorkspacePatchClaim::Claimed)
+        })
+        .map_err(|error| match error {
+            DbError::Invariant(message)
+                if message.contains("workspace patch request id was reused") =>
+            {
+                WorkspaceStoreError::Conflict(message)
+            }
+            other => WorkspaceStoreError::Db(other),
+        })
+    }
+
+    /// Finalize a claimed isolated-checkout patch operation.
+    pub fn finish_patch_job(
+        &self,
+        run_id: &str,
+        request_id: &str,
+        lease_owner: &str,
+        result_json: Option<&str>,
+        error_code: Option<&str>,
+        now: i64,
+    ) -> Result<(), WorkspaceStoreError> {
+        let status = if error_code.is_some() {
+            "failed"
+        } else {
+            "succeeded"
+        };
+        self.db.transaction(|tx| {
+            let updated = tx.execute(
+                "UPDATE state_workspace_patch_jobs SET status = ?4, result_json = ?5, \
+                 error_code = ?6, lease_owner = NULL, lease_expires_at = NULL, updated_at = ?7 \
+                 WHERE run_id = ?1 AND request_id = ?2 AND lease_owner = ?3 AND status = 'running'",
+                params![
+                    run_id,
+                    request_id,
+                    lease_owner,
+                    status,
+                    result_json,
+                    error_code,
+                    now
+                ],
+            )?;
+            if updated != 1 {
+                return Err(DbError::Invariant(
+                    "workspace patch lease was lost before completion".into(),
+                ));
+            }
+            Ok(())
+        })?;
+        Ok(())
     }
 
     /// Register an already-canonicalized Controller-selected workspace root.
@@ -418,5 +784,391 @@ impl<'db> WorkspaceStore<'db> {
             }
         }
         Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        db::{Database, DbConfig},
+        ids::{ConversationId, EventSeq},
+        migrations::MigrationRunner,
+        runs::{NewRun, RunStore},
+    };
+
+    fn fresh_db(path: &std::path::Path) -> Database {
+        let db = Database::open(&DbConfig {
+            path: path.to_path_buf(),
+            key: None,
+        })
+        .unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_conversations (conversation_id,kind,phase,trust_class,modality) VALUES ('workspace-test','ControllerDM','idle','Controller','Text')",
+                [],
+            )?;
+            connection.execute(
+                "INSERT INTO state_events (conversation_id,seq,kind,payload,committed_at,actor) VALUES ('workspace-test',1,'user_msg',X'00',1,'operator')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let runs = RunStore::new(&db);
+        runs.create_run(&NewRun {
+            conversation_id: ConversationId::from("workspace-test"),
+            parent_run_id: None,
+            input_event_seq: EventSeq(1),
+            started_at: 1,
+            deadline_at: None,
+        })
+        .unwrap();
+        db
+    }
+
+    #[test]
+    fn patch_jobs_are_idempotent_durable_and_reclaim_expired_leases() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = fresh_db(&temp.path().join("patch-jobs.db"));
+        let run_id = RunStore::new(&db).list_recent(None, None, 1).unwrap()[0]
+            .run_id
+            .clone();
+        let store = WorkspaceStore::new(&db);
+        let hash = "a".repeat(64);
+        assert_eq!(
+            store
+                .begin_patch_job(&run_id, "request-1", &hash, "worker-1", 10)
+                .unwrap(),
+            WorkspacePatchClaim::Claimed
+        );
+        assert_eq!(
+            store
+                .begin_patch_job(&run_id, "request-1", &hash, "worker-2", 11)
+                .unwrap(),
+            WorkspacePatchClaim::Busy
+        );
+        assert!(matches!(
+            store.begin_patch_job(&run_id, "request-1", &"b".repeat(64), "worker-2", 11),
+            Err(WorkspaceStoreError::Conflict(_))
+        ));
+        store
+            .finish_patch_job(
+                &run_id,
+                "request-1",
+                "worker-1",
+                Some(r#"{"run_id":"done"}"#),
+                None,
+                12,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .begin_patch_job(&run_id, "request-1", &hash, "worker-2", 13)
+                .unwrap(),
+            WorkspacePatchClaim::Succeeded(r#"{"run_id":"done"}"#.into())
+        );
+        assert_eq!(
+            store
+                .begin_patch_job(&run_id, "request-2", &hash, "worker-1", 20)
+                .unwrap(),
+            WorkspacePatchClaim::Claimed
+        );
+        assert_eq!(
+            store
+                .begin_patch_job(&run_id, "request-2", &hash, "worker-2", 621)
+                .unwrap(),
+            WorkspacePatchClaim::Claimed
+        );
+    }
+
+    #[test]
+    fn execution_configuration_and_jobs_are_controller_owned_and_replayable() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("execution-jobs.db");
+        let db = fresh_db(&path);
+        let run_id = RunStore::new(&db).list_recent(None, None, 1).unwrap()[0]
+            .run_id
+            .clone();
+        let store = WorkspaceStore::new(&db);
+        assert_eq!(store.execution_config().unwrap().image_reference, None);
+        let languages = std::collections::BTreeMap::from([(
+            "rust".to_owned(),
+            vec!["rust-analyzer".to_owned()],
+        )]);
+        let config = store
+            .set_execution_config(
+                "controller",
+                &format!("execlaw/workspace-toolchain@sha256:{}", "a".repeat(64)),
+                &languages,
+                100,
+            )
+            .unwrap();
+        assert_eq!(config.language_servers, languages);
+
+        let hash = "b".repeat(64);
+        assert_eq!(
+            store
+                .begin_execution_job(&run_id, "tool-0", &hash, "terminal", "owner-1", 120, 101)
+                .unwrap(),
+            WorkspaceExecutionJobClaim::Claimed
+        );
+        assert_eq!(
+            store
+                .begin_execution_job(&run_id, "tool-0", &hash, "terminal", "owner-2", 120, 102)
+                .unwrap(),
+            WorkspaceExecutionJobClaim::Busy
+        );
+        assert!(matches!(
+            store.begin_execution_job(
+                &run_id,
+                "tool-0",
+                &"c".repeat(64),
+                "terminal",
+                "owner-2",
+                120,
+                102
+            ),
+            Err(WorkspaceStoreError::Conflict(_))
+        ));
+        store
+            .finish_execution_job(
+                &run_id,
+                "tool-0",
+                "owner-1",
+                Some(r#"{"exit_code":0}"#),
+                None,
+                103,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .begin_execution_job(&run_id, "tool-0", &hash, "terminal", "owner-3", 120, 104)
+                .unwrap(),
+            WorkspaceExecutionJobClaim::Succeeded(r#"{"exit_code":0}"#.into())
+        );
+
+        assert_eq!(
+            store
+                .begin_execution_job(&run_id, "tool-1", &hash, "diagnostics", "owner-4", 120, 200)
+                .unwrap(),
+            WorkspaceExecutionJobClaim::Claimed
+        );
+        assert_eq!(
+            store
+                .begin_execution_job(&run_id, "tool-1", &hash, "diagnostics", "owner-5", 120, 321)
+                .unwrap(),
+            WorkspaceExecutionJobClaim::Claimed
+        );
+        assert!(
+            store
+                .finish_execution_job(
+                    &run_id,
+                    "tool-1",
+                    "owner-4",
+                    Some(r#"{"diagnostics":[]}"#),
+                    None,
+                    322,
+                )
+                .is_err()
+        );
+        store
+            .finish_execution_job(
+                &run_id,
+                "tool-1",
+                "owner-5",
+                None,
+                Some("workspace_execution_failed"),
+                323,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .begin_execution_job(&run_id, "tool-1", &hash, "diagnostics", "owner-6", 120, 324)
+                .unwrap(),
+            WorkspaceExecutionJobClaim::Failed("workspace_execution_failed".into())
+        );
+
+        drop(store);
+        drop(db);
+        let reopened = Database::open(&DbConfig { path, key: None }).unwrap();
+        let store = WorkspaceStore::new(&reopened);
+        assert_eq!(
+            store.execution_config().unwrap().language_servers,
+            languages
+        );
+        assert_eq!(
+            store
+                .begin_execution_job(&run_id, "tool-0", &hash, "terminal", "owner-7", 120, 500)
+                .unwrap(),
+            WorkspaceExecutionJobClaim::Succeeded(r#"{"exit_code":0}"#.into())
+        );
+    }
+
+    #[test]
+    fn checkpoint_is_sorted_content_addressed_and_survives_database_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("workspace.db");
+        let db = fresh_db(&path);
+        let store = WorkspaceStore::new(&db);
+        let root = store
+            .register_root("C:/workspace", "controller", 2)
+            .unwrap();
+        let checkpoint = store
+            .create_checkpoint(
+                &root.workspace_id,
+                &RunStore::new(&db).list_recent(None, None, 1).unwrap()[0].run_id,
+                None,
+                &[
+                    ("z.txt".into(), b"shared".to_vec()),
+                    ("a.txt".into(), b"shared".to_vec()),
+                ],
+                3,
+            )
+            .unwrap();
+        assert_eq!(checkpoint.manifest[0].path, "a.txt");
+        assert_eq!(checkpoint.manifest[1].path, "z.txt");
+        assert_eq!(checkpoint.manifest[0].sha256, checkpoint.manifest[1].sha256);
+        assert_eq!(checkpoint.total_bytes, 12);
+
+        drop(store);
+        drop(db);
+        let reopened = Database::open(&DbConfig { path, key: None }).unwrap();
+        let store = WorkspaceStore::new(&reopened);
+        let restored = store
+            .get_checkpoint(&checkpoint.checkpoint_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored, checkpoint);
+        assert_eq!(
+            store.read_blob(&restored.manifest[0].sha256).unwrap(),
+            Some(b"shared".to_vec())
+        );
+    }
+
+    #[test]
+    fn checkpoint_rejects_traversal_before_writing_blobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = fresh_db(&temp.path().join("workspace.db"));
+        let store = WorkspaceStore::new(&db);
+        let root = store
+            .register_root("C:/workspace", "controller", 2)
+            .unwrap();
+        let run_id = RunStore::new(&db).list_recent(None, None, 1).unwrap()[0]
+            .run_id
+            .clone();
+        let error = store
+            .create_checkpoint(
+                &root.workspace_id,
+                &run_id,
+                None,
+                &[("../outside".into(), b"secret".to_vec())],
+                3,
+            )
+            .unwrap_err();
+        assert!(matches!(error, WorkspaceStoreError::Invalid(_)));
+        let blobs: i64 = db
+            .with_conn(|connection| {
+                connection
+                    .query_row("SELECT COUNT(*) FROM state_workspace_blobs", [], |row| {
+                        row.get(0)
+                    })
+                    .map_err(DbError::from)
+            })
+            .unwrap();
+        assert_eq!(blobs, 0);
+    }
+
+    #[test]
+    fn apply_receipt_and_per_file_progress_resume_after_database_reopen() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("workspace.db");
+        let db = fresh_db(&path);
+        let store = WorkspaceStore::new(&db);
+        let root = store
+            .register_root("C:/workspace", "controller", 2)
+            .unwrap();
+        let run_id = RunStore::new(&db).list_recent(None, None, 1).unwrap()[0]
+            .run_id
+            .clone();
+        let checkpoint = store
+            .create_checkpoint(
+                &root.workspace_id,
+                &run_id,
+                None,
+                &[("src.rs".into(), b"base".to_vec())],
+                3,
+            )
+            .unwrap();
+        let change = WorkspaceApplyFile {
+            path: "src.rs".into(),
+            base_sha256: Some(hex::encode(Sha256::digest(b"base"))),
+            proposed_sha256: Some(hex::encode(Sha256::digest(b"proposed"))),
+            status: "pending".into(),
+            error: None,
+        };
+        let (receipt, created) = store
+            .begin_apply(
+                &run_id,
+                &root.workspace_id,
+                &checkpoint.checkpoint_id,
+                &"a".repeat(64),
+                "apply-request-1",
+                std::slice::from_ref(&change),
+                4,
+            )
+            .unwrap();
+        assert!(created);
+        assert!(
+            store
+                .claim_apply(&receipt.apply_id, "worker-before-restart", 5, 1)
+                .unwrap()
+        );
+        store
+            .update_apply_file(
+                &receipt.apply_id,
+                "worker-before-restart",
+                "src.rs",
+                "applied",
+                None,
+                "applying",
+                6,
+            )
+            .unwrap();
+        drop(store);
+        drop(db);
+
+        let reopened = Database::open(&DbConfig { path, key: None }).unwrap();
+        MigrationRunner::new(&reopened).apply_all().unwrap();
+        let store = WorkspaceStore::new(&reopened);
+        let recovered = store
+            .get_apply_by_request(&run_id, "apply-request-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(recovered.apply_id, receipt.apply_id);
+        assert_eq!(recovered.status, "applying");
+        assert_eq!(
+            store.list_apply_files(&receipt.apply_id).unwrap()[0].status,
+            "applied"
+        );
+        assert!(
+            store
+                .claim_apply(&receipt.apply_id, "worker-after-restart", 67, 30)
+                .unwrap()
+        );
+        let (retry, created) = store
+            .begin_apply(
+                &run_id,
+                &root.workspace_id,
+                &checkpoint.checkpoint_id,
+                &"a".repeat(64),
+                "apply-request-1",
+                std::slice::from_ref(&change),
+                68,
+            )
+            .unwrap();
+        assert!(!created);
+        assert_eq!(retry.apply_id, receipt.apply_id);
     }
 }

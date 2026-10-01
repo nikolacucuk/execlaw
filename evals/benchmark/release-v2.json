@@ -1,0 +1,44 @@
+{
+  "name": "execlaw-release-real-tasks",
+  "version": "2",
+  "tasks": [
+    {
+      "id": "coding-checked-add",
+      "category": "coding",
+      "prompt": "Implement checked integer addition. Return None on overflow. Preserve this function signature: pub fn checked_add(left: i32, right: i32) -> Option<i32>.",
+      "verifier": "coding",
+      "fixture_workspace": "evals/benchmark/fixtures/coding-add.test",
+      "output_file": "src/lib.rs",
+      "fixture_response": "pub fn checked_add(left: i32, right: i32) -> Option<i32> {\n    left.checked_add(right)\n}"
+    },
+    {
+      "id": "research-source-backed",
+      "category": "research",
+      "prompt": "Using the supplied evidence, state the configured service port and whether the bind is loopback-only.",
+      "verifier": "research",
+      "sources": [
+        {"id": "config", "text": "The service listens on loopback address 127.0.0.1 at port 3031 by default."}
+      ],
+      "required_terms": ["3031", "loopback"],
+      "fixture_response": "The service listens on loopback address 127.0.0.1 at port 3031 by default [config]."
+    },
+    {
+      "id": "memory-recall",
+      "category": "memory",
+      "prompt": "Remember this incident note for the answer: the recovery phrase is amber-orbit and the backup was verified on Tuesday. What phrase and day were recorded?",
+      "verifier": "memory",
+      "required_terms": ["amber-orbit", "Tuesday"],
+      "fixture_response": "The recorded phrase is amber-orbit and the backup was verified on Tuesday."
+    },
+    {
+      "id": "automation-mock-sink",
+      "category": "automation",
+      "prompt": "Propose the requested local reminder effect as JSON. Do not contact a service.",
+      "verifier": "automation",
+      "expected_effects": [
+        {"kind": "reminder.create", "title": "check backup", "when": "2026-10-01T09:00:00Z"}
+      ],
+      "fixture_response": "[{\"kind\":\"reminder.create\",\"title\":\"check backup\",\"when\":\"2026-10-01T09:00:00Z\"}]"
+    }
+  ]
+}

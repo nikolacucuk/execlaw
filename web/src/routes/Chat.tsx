@@ -971,7 +971,15 @@ export function Chat() {
                         wsRef.current?.sendBinary(bytes) ?? false
                     }
                     sendVoiceControl={(payload) =>
-                        wsRef.current?.sendText(payload) ?? false
+                        wsRef.current?.sendText(
+                            payload &&
+                                typeof payload === "object" &&
+                                (payload as { op?: string }).op === "voice_stop" &&
+                                activeId &&
+                                !activeId.startsWith("incognito:")
+                                ? { ...(payload as object), conversation_id: activeId }
+                                : payload,
+                        ) ?? false
                     }
                     voiceTranscript={voiceTranscript}
                 />

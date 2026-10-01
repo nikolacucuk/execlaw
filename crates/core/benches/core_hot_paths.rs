@@ -32,6 +32,7 @@ use execlaw_core::research::{
     PhaseGates, PlanStep, ResearchConfigStore, ResearchConfigUpdate, ResearchJobStore,
     ResearchNote, ResearchPlan, ResearchSource, SubQueryState,
 };
+use execlaw_core::runs::{ChildExecutionBudget, NewRun, RunStore};
 use execlaw_core::tool_access::{ToolAccessSeed, ToolAccessStore, ToolSource};
 use execlaw_core::transport_conversations::{ConversationResolver, ResolveInput};
 use execlaw_core::webauthn::{WebauthnCredentialRow, WebauthnStore};
@@ -90,6 +91,84 @@ fn bench_idempotency_key(c: &mut Criterion) {
     let cid = ConversationId::from("conv-abc123");
     c.bench_function("idempotency_key_mint", |b| {
         b.iter(|| IdempotencyKey::mint(black_box(&cid), black_box(TurnSeq(47)), black_box(3)))
+    });
+}
+
+// ---------------------------------------------------------------------------
+// H042 durable child admission overhead, excluding local model inference.
+// ---------------------------------------------------------------------------
+
+fn bench_child_task_reservation(c: &mut Criterion) {
+    c.bench_function("child_agent/durable_spawn_reservation", |b| {
+        b.iter_batched(
+            || {
+                let db = fresh_db();
+                db.with_conn(|connection| {
+                    connection.execute(
+                        "INSERT INTO state_conversations (conversation_id,kind,phase,trust_class,modality) VALUES ('child-bench','ControllerDM','idle','Controller','Text')",
+                        [],
+                    )?;
+                    connection.execute(
+                        "INSERT INTO state_events (conversation_id,seq,kind,payload,committed_at,actor) VALUES ('child-bench',1,'user_msg',X'00',1,'operator')",
+                        [],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+                let store = RunStore::new(&db);
+                let parent = store
+                    .create_run(&NewRun {
+                        conversation_id: ConversationId::from("child-bench"),
+                        parent_run_id: None,
+                        input_event_seq: EventSeq(1),
+                        started_at: 1,
+                        deadline_at: None,
+                    })
+                    .unwrap();
+                let child = store
+                    .create_run(&NewRun {
+                        conversation_id: ConversationId::from("child-bench"),
+                        parent_run_id: Some(parent.clone()),
+                        input_event_seq: EventSeq(1),
+                        started_at: 1,
+                        deadline_at: None,
+                    })
+                    .unwrap();
+                (db, parent, child)
+            },
+            |(db, parent, child)| {
+                black_box(
+                    RunStore::new(&db)
+                        .reserve_child_task_with_budgets(
+                            &parent,
+                            &child,
+                            &serde_json::json!({
+                                "version": 1,
+                                "task": "summarize one bounded source",
+                                "result": {"type": "text", "max_bytes": 4096}
+                            }),
+                            &"a".repeat(64),
+                            &serde_json::json!({"trust_ceiling":"KnownTrusted"}),
+                            ChildExecutionBudget {
+                                tokens: 512,
+                                time_ms: 30_000,
+                                retries: 0,
+                                effects: 0,
+                            },
+                            ChildExecutionBudget {
+                                tokens: 8192,
+                                time_ms: 3_600_000,
+                                retries: 64,
+                                effects: 0,
+                            },
+                            &[],
+                            2,
+                        )
+                        .unwrap(),
+                )
+            },
+            criterion::BatchSize::SmallInput,
+        )
     });
 }
 
@@ -1757,6 +1836,7 @@ criterion_group!(
     bench_automation_suggestions,
     bench_hmac,
     bench_idempotency_key,
+    bench_child_task_reservation,
     bench_event_record_encode_decode,
     bench_commit_turn,
     bench_replay_since,

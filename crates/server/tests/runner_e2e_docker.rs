@@ -132,15 +132,15 @@ async fn ensure_runner_spawns_real_docker_container_and_handshakes() {
 
     let launch_db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
     MigrationRunner::new(&launch_db).apply_all().unwrap();
-    let provenance = execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(
-        launch_db.clone(),
-    );
+    let provenance =
+        execlaw_core::artifact_provenance::ArtifactProvenanceStore::new(launch_db.clone());
     let mut policy = provenance.policy().unwrap();
     policy.allow_unsigned_local_development = true;
-    provenance.configure("Controller", "runner-e2e", &policy).unwrap();
-    let launcher = Arc::new(
-        BollardRunnerLauncher::new_with_provenance(launch_db).expect("docker reachable"),
-    );
+    provenance
+        .configure("Controller", "runner-e2e", &policy)
+        .unwrap();
+    let launcher =
+        Arc::new(BollardRunnerLauncher::new_with_provenance(launch_db).expect("docker reachable"));
 
     let group_id = format!("e2e-{}", uuid::Uuid::new_v4());
     eprintln!("[e2e] spawning runner for group {group_id}");

@@ -273,10 +273,26 @@ async fn run_agent(
     } else {
         None
     };
-    let loadout = crate::chats::build_governed_asset_loadout_block(&db, conversation_id, &agent.id);
-    let system_prompt = match loadout {
-        Some(loadout) => format!("{}\n\n---\n\n{}", agent.role_prompt, loadout),
-        None => agent.role_prompt.clone(),
+    let retrieval_embedding = if let Some(state) = app_state.as_ref() {
+        crate::memory_assets_admin::embed_memory_query(state, &prompt).await
+    } else {
+        None
+    };
+    let loadout = crate::chats::build_governed_asset_loadout(
+        &db,
+        conversation_id,
+        &agent.id,
+        &prompt,
+        retrieval_embedding
+            .as_ref()
+            .map(|(index_id, vector)| (vector.as_slice(), index_id.as_str())),
+    );
+    let (system_prompt, loadout_receipt) = match loadout {
+        Some((loadout, receipt)) => (
+            format!("{}\n\n---\n\n{}", agent.role_prompt, loadout),
+            Some(receipt),
+        ),
+        None => (agent.role_prompt.clone(), None),
     };
     let resolved = inference
         .resolve(&db, parse_purpose(&agent.backend_purpose))
@@ -314,6 +330,7 @@ async fn run_agent(
         "conversation_id": inbound.as_ref().and_then(|value| value.get("conversation_id")),
         "group_name": inbound.as_ref().and_then(|value| value.get("group_name")),
         "inbound_text": inbound.as_ref().and_then(|value| value.get("text")),
+        "memory_loadout": loadout_receipt,
     });
     let run_id = store
         .insert_run_for_mailbox(

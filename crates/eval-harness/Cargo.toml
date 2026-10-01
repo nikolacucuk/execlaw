@@ -13,16 +13,19 @@ path = "src/main.rs"
 [dependencies]
 execlaw-inference-api = { path = "../inference-api" }
 execlaw-core = { path = "../core" }
+execlaw-runner-local = { path = "../runner-local" }
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync"] }
 clap.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 chrono.workspace = true
 sha2.workspace = true
 hex.workspace = true
 tempfile.workspace = true
+rmp-serde.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "sync"] }

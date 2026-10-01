@@ -749,6 +749,44 @@ cargo test --workspace --no-default-features -F execlaw-core/sqlcipher
 cargo run -p execlaw -- replay <conversation_id> --at <seq>
 ```
 
+## Headless and editor clients
+
+The versioned client contract is published at `/api/client-contract`; the
+matching OpenAPI document is available at `/api/openapi.json`. The terminal
+client checks the server's minimum client version before issuing requests and
+uses the same durable conversations, event cursors, approvals, artifacts, and
+turn controls as the SPA.
+
+Authenticate once to store a rotating refresh token in the operating system
+keyring, then send tasks with a stable request key so an uncertain retry cannot
+create a second turn:
+
+```powershell
+execlaw client login --username <controller> --server http://127.0.0.1:3031
+execlaw client send --conversation-id <conversation-id> --text "Review the patch" --request-id review-001
+execlaw client messages --conversation-id <conversation-id> --after 0
+execlaw client control --conversation-id <conversation-id> --kind steer --text "Check the tests" --request-id steer-001
+```
+
+`execlaw client approvals`, `respond-approval`, `download-artifact`, and the
+`workspace-*` operations expose the corresponding Controller APIs. For an
+editor integration, configure its LSP client to launch
+`execlaw client editor-adapter`; the adapter exposes an allowlisted command
+set and routes each operation through the same authenticated server contract.
+When WebAuthn is required, complete that login in the SPA and import the
+resulting refresh token with `execlaw client import-refresh-token`.
+
+## MCP servers
+
+Controller-managed MCP servers are configured under **Settings → MCP servers**.
+execlaw supports stdio child processes and Streamable HTTP, pinned to MCP
+protocol version `2025-06-18`. Tool and resource discovery follows the
+capabilities negotiated during initialization; unsupported prompts, tasks, and
+elicitation are not enabled. Frames, pages, and HTTP response bodies are
+bounded, and an expired HTTP session is reinitialized without replaying the
+tool call that discovered the expiry. Treat returned content as untrusted and
+run each server with only the local permissions it needs.
+
 Requires Rust 1.85+ (edition 2024). Bare-metal targets:
 `x86_64-unknown-linux-gnu`, `x86_64-pc-windows-msvc`,
 `aarch64-apple-darwin`. Intel Macs (`x86_64-apple-darwin`) are

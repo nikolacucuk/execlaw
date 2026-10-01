@@ -37,6 +37,7 @@ import { InferencePage } from "./InferencePage";
 import { MemoryAssetsPage } from "./MemoryAssetsPage";
 import { RunInspectorPage } from "./RunInspectorPage";
 import { NetworkAccessPage } from "./NetworkAccessPage";
+import { WorkspaceExecutionPage } from "./WorkspaceExecutionPage";
 
 const TABS: ReadonlyArray<{ to: string; icon: string; label: string }> = [
     // General first (Phase 14 bare-metal pivot) — host-service knobs
@@ -85,6 +86,7 @@ const TABS: ReadonlyArray<{ to: string; icon: string; label: string }> = [
     },
     { to: "/settings/network", icon: "bi-shield-lock", label: "Network access" },
     { to: "/settings/runs", icon: "bi-diagram-3", label: "Runs" },
+    { to: "/settings/workspace-execution", icon: "bi-terminal", label: "Workspace execution" },
     { to: "/settings/runners", icon: "bi-fire", label: "Runners" },
     // Sidecars — companion containers the sidecar supervisor manages
     // (signal-cli, WhatsApp bridges, future OCR / ffmpeg helpers).
@@ -231,6 +233,7 @@ export function Settings() {
                         <Route path="inference" element={<InferencePage />} />
                         <Route path="network" element={<NetworkAccessPage />} />
                         <Route path="runs" element={<RunInspectorPage />} />
+                        <Route path="workspace-execution" element={<WorkspaceExecutionPage />} />
                         <Route path="runners" element={<RunnersPage />} />
                         <Route path="sidecars" element={<SidecarsPage />} />
                         <Route path="contacts" element={<ContactsPage />} />

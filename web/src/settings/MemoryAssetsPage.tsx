@@ -5,14 +5,19 @@ import {
     bindAdminMemoryAsset,
     correctAdminMemoryAssertion,
     deleteAdminMemoryAsset,
+    forgetAdminMemorySourceEvent,
+    getAdminMemoryRetrievalConfig,
     getAdminMemoryEvidenceSource,
     getAdminMemoryAssets,
+    putAdminMemoryRetrievalConfig,
+    rebuildAdminMemoryEmbeddings,
     retractAdminMemoryAssertion,
     unbindAdminMemoryAsset,
     type AdminMemoryAsset,
     type AdminMemoryAssetBinding,
     type AdminMemoryAssertion,
     type AdminMemoryEvidenceSource,
+    type AdminMemoryRetrievalConfig,
 } from "../api/endpoints";
 import { useAuth } from "../auth/AuthContext";
 import { ErrorBanner } from "../components/ErrorBanner";
@@ -23,6 +28,10 @@ export function MemoryAssetsPage() {
     const [bindings, setBindings] = useState<AdminMemoryAssetBinding[]>([]);
     const [assertions, setAssertions] = useState<AdminMemoryAssertion[]>([]);
     const [agentScopes, setAgentScopes] = useState<Array<{ id: string; name: string }>>([]);
+    const [retrievalConfig, setRetrievalConfig] = useState<AdminMemoryRetrievalConfig | null>(null);
+    const [embeddingModelId, setEmbeddingModelId] = useState("");
+    const [rebuildStatus, setRebuildStatus] = useState<string | null>(null);
+    const [privacyStatus, setPrivacyStatus] = useState<string | null>(null);
     const [agentScope, setAgentScope] = useState("default");
     const [selectedAsset, setSelectedAsset] = useState("");
     const [mode, setMode] = useState<AdminMemoryAssetBinding["injection_mode"]>("hot");
@@ -39,10 +48,13 @@ export function MemoryAssetsPage() {
     const refresh = useCallback(async () => {
         try {
             const result = await getAdminMemoryAssets(getAccessToken, agentScope);
+            const retrieval = await getAdminMemoryRetrievalConfig(getAccessToken);
             setAssets(result.assets);
             setBindings(result.bindings);
             setAssertions(result.assertions ?? []);
             setAgentScopes(result.agent_scopes ?? []);
+            setRetrievalConfig(retrieval);
+            setEmbeddingModelId(retrieval?.embedding_model_id ?? "");
             setSelectedAsset((current) =>
                 result.assets.some((asset) => asset.asset_id === current)
                     ? current
@@ -84,6 +96,37 @@ export function MemoryAssetsPage() {
             await refresh();
         } catch (reason) {
             setError(reason instanceof Error ? reason.message : String(reason));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const saveRetrievalConfig = async (event: FormEvent<HTMLFormElement>) => {
+        event.preventDefault();
+        setBusy(true);
+        setError(null);
+        try {
+            const saved = await putAdminMemoryRetrievalConfig({
+                embedding_model_id: embeddingModelId.trim(),
+                reranker_version: "local-hybrid-rrf-v1",
+            }, getAccessToken);
+            setRetrievalConfig(saved);
+            setRebuildStatus("Saved. Rebuild embeddings for assets that do not match this local model.");
+        } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const rebuildEmbeddings = async () => {
+        setBusy(true);
+        setError(null);
+        try {
+            const result = await rebuildAdminMemoryEmbeddings(getAccessToken);
+            setRebuildStatus(`Embedded ${result.embedded} assets with ${result.embedding_model_id}.${result.has_more ? " More assets remain; run rebuild again." : " Index is current."}`);
+        } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause));
         } finally {
             setBusy(false);
         }
@@ -144,6 +187,29 @@ export function MemoryAssetsPage() {
         }
     };
 
+    const forgetSourceEvent = async (source: AdminMemoryAssertion["evidence"][number]) => {
+        if (!window.confirm(
+            `Forget memory derived from conversation event #${source.event_seq}? Its assertions, superseding revisions, and evidence references will be hidden from memory retrieval. The original conversation event and backups are retained.`,
+        )) return;
+        setBusy(true);
+        setError(null);
+        try {
+            const report = await forgetAdminMemorySourceEvent(
+                source.conversation_id,
+                source.event_seq,
+                getAccessToken,
+            );
+            setPrivacyStatus(
+                `Forgot memory from event ${report.event_seq}: hid ${report.assertions_hidden} assertions and ${report.evidence_hidden} evidence references. The source event remains in conversation history and backups.`,
+            );
+            await refresh();
+        } catch (cause) {
+            setError(cause instanceof Error ? cause.message : String(cause));
+        } finally {
+            setBusy(false);
+        }
+    };
+
     const inspectEvidence = async (assertionId: string, evidenceId: string) => {
         if (visibleSourceId === evidenceId) {
             setVisibleSourceId(null);
@@ -173,6 +239,30 @@ export function MemoryAssetsPage() {
                 Assign governed assets to the default agent. HOT assets are injected only when their trust floor, lifecycle status, expiry, and turn byte budget permit.
             </p>
             <ErrorBanner message={error} onDismiss={() => setError(null)} className="mb-3" />
+
+            <section className="border rounded p-3 mb-4" aria-labelledby="memory-retrieval-heading">
+                <h4 id="memory-retrieval-heading" className="h6">Local hybrid retrieval</h4>
+                <p className="execlaw-muted small">
+                    Configure an embedding model served by the approved local Standard backend. Embeddings stay in SQLite and are rebuilt from active, source-versioned assets.
+                </p>
+                <form onSubmit={(event) => void saveRetrievalConfig(event)} className="row g-3 align-items-end">
+                    <Form.Group className="col-12 col-lg-5">
+                        <Form.Label htmlFor="memory-embedding-model">Embedding model ID</Form.Label>
+                        <Form.Control id="memory-embedding-model" value={embeddingModelId} onChange={(event) => setEmbeddingModelId(event.target.value)} maxLength={256} required disabled={busy} placeholder="local embedding model and revision" />
+                    </Form.Group>
+                    <Form.Group className="col-12 col-lg-4">
+                        <Form.Label htmlFor="memory-reranker-version">Reranker</Form.Label>
+                        <Form.Control id="memory-reranker-version" value="local-hybrid-rrf-v1" readOnly aria-readonly="true" />
+                    </Form.Group>
+                    <div className="col-6 col-lg-2">
+                        <Button type="submit" variant="primary" disabled={busy || !embeddingModelId.trim()}>Save retrieval config</Button>
+                    </div>
+                    <div className="col-6 col-lg-1">
+                        <Button type="button" variant="outline-primary" disabled={busy || !retrievalConfig} onClick={() => void rebuildEmbeddings()}>Rebuild</Button>
+                    </div>
+                </form>
+                {rebuildStatus && <p className="small mt-2 mb-0" role="status">{rebuildStatus}</p>}
+            </section>
 
             <form onSubmit={(event) => void submitBinding(event)} className="row g-3 align-items-end mb-4">
                 <Form.Group className="col-12 col-lg-3">
@@ -232,6 +322,7 @@ export function MemoryAssetsPage() {
             )}
             <hr className="my-4" />
             <h4 className="h6">Memory assertion evidence</h4>
+            {privacyStatus && <p className="small mt-2" role="status">{privacyStatus}</p>}
             <p className="execlaw-muted small">Assertions are append-only. Review status, validity, revision lineage, and the event/path/hash references that support each fact.</p>
             {assertions.length === 0 ? <p className="execlaw-muted small">No memory assertions have been recorded.</p> : (
                 <div className="d-flex flex-column gap-2">
@@ -247,6 +338,7 @@ export function MemoryAssetsPage() {
                             <span className="badge text-bg-light me-2">{source.evidence_kind}</span>
                             <a href={`/chat/${encodeURIComponent(source.conversation_id)}`}>Conversation event #{source.event_seq}</a>
                             <Button size="sm" variant="link" className="p-0 ms-2" aria-expanded={visibleSourceId === source.evidence_id} onClick={() => void inspectEvidence(item.assertion_id, source.evidence_id)}>{visibleSourceId === source.evidence_id ? "Hide source span" : "Show source span"}</Button>
+                            <Button size="sm" variant="outline-danger" className="ms-2" disabled={busy} onClick={() => void forgetSourceEvent(source)} aria-label={`Forget memory from conversation event ${source.event_seq}`}>Forget memory source</Button>
                             {visibleSourceId === source.evidence_id && (sourceLoadingId === source.evidence_id ? <div className="small text-muted">Verifying source event…</div> : sourceQuotes[source.evidence_id] && <div className="mt-2"><span className={`badge ${sourceQuotes[source.evidence_id].integrity_verified ? "text-bg-success" : "text-bg-warning"}`}>{sourceQuotes[source.evidence_id].integrity_verified ? "Event integrity verified" : "Event integrity unavailable"}</span><div className="small text-muted mt-1">Original source content is untrusted evidence. {sourceQuotes[source.evidence_id].truncated && `Showing the first ${sourceQuotes[source.evidence_id].source_quote.length} characters of ${sourceQuotes[source.evidence_id].source_quote_bytes} bytes.`}</div><pre className="small text-break p-2 bg-body-tertiary rounded mt-1">{sourceQuotes[source.evidence_id].source_quote}</pre></div>)}
                             <span className="d-block text-muted">Path <code>{source.payload_path}</code> · SHA-256 <code>{source.quote_hash}</code></span>
                         </div>)}</>}</div>

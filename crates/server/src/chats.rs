@@ -167,7 +167,7 @@ pub use nexus::{
 // resolving them at `crate::chats::X`. The persisted-payload
 // structs stay crate-private; they're the chats module's contract
 // with the event log, not part of the public surface.
-pub(crate) use prompt::build_governed_asset_loadout_block;
+pub(crate) use prompt::build_governed_asset_loadout;
 pub use prompt::{GroupTurnContext, build_turn_context_prose, resolve_group_turn_context};
 pub use types::{
     CompletionContractInput, CompletionCriterionInput, IncognitoTurnMessage,
@@ -642,6 +642,7 @@ pub async fn send_message(
         },
         None => None,
     };
+    let voice_stream_request_id = client_request_id.clone();
     if req.incognito && client_request_id.is_some() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1475,6 +1476,7 @@ pub async fn send_message(
                     persisted_attachments.clone(),
                     applied_skill_names.clone(),
                     "default",
+                    voice_stream_request_id.clone(),
                 )
                 .await
                 {
@@ -1845,6 +1847,7 @@ async fn run_real_turn(
     attachment_ids: Vec<String>,
     applied_skill_names: Vec<String>,
     asset_scope: &str,
+    stream_request_id: Option<String>,
 ) -> Result<(i64, String, i64), String> {
     // 2026-05-13 — `resolved` carries the InferenceClient + the
     // model_id paired from the SAME `config_backends` row read.
@@ -1922,7 +1925,7 @@ async fn run_real_turn(
     // Turn context still helps — even a no-tool answer benefits
     // from "what time is it" awareness.
     let mut turn_context = build_turn_context_prose(
-        chrono::Utc::now(),
+        prompt_time_for_user_event(&history, user_seq),
         cid.as_str(),
         sender_principal_id.as_deref(),
         sender_trust.as_str(),
@@ -1949,8 +1952,13 @@ async fn run_real_turn(
         turn_context.push_str("\n\n");
         turn_context.push_str(&block);
     }
+    let retrieval_embedding = if planner_executor {
+        None
+    } else {
+        crate::memory_assets_admin::embed_memory_query(state, user_text).await
+    };
     let (composed_system, asset_loadout_receipt) =
-        prompt::assemble_system_prompt_for_asset_scope_with_loadout(
+        prompt::assemble_system_prompt_for_asset_scope_with_embedding(
             &state.db,
             Some(cid.as_str()),
             &state.config.system_prompt,
@@ -1958,6 +1966,9 @@ async fn run_real_turn(
             &turn_context,
             asset_scope,
             Some(user_text),
+            retrieval_embedding
+                .as_ref()
+                .map(|(index_id, vector)| (vector.as_slice(), index_id.as_str())),
         );
     if let Some(receipt) = asset_loadout_receipt {
         execlaw_core::memory_assets::MemoryAssetStore::new(&state.db)
@@ -2374,6 +2385,7 @@ async fn run_real_turn(
                         state.events.publish(UiEvent::ChatTokenDelta {
                             conversation_id: cid.as_str().to_owned(),
                             text: visible,
+                            request_id: stream_request_id.clone(),
                         });
                     }
                 }
@@ -2414,6 +2426,7 @@ async fn run_real_turn(
         state.events.publish(UiEvent::ChatTokenDelta {
             conversation_id: cid.as_str().to_owned(),
             text: tail,
+            request_id: stream_request_id.clone(),
         });
     }
     // Ensure the user never sees an empty reply — a model that
@@ -2898,6 +2911,41 @@ pub(crate) fn build_runner_tool_catalog(
     caller_caps: &[String],
     planner_executor: bool,
 ) -> RunnerToolView {
+    build_runner_tool_catalog_with_workspace(
+        db,
+        plugin_host,
+        caller_trust,
+        caller_caps,
+        planner_executor,
+        false,
+    )
+}
+
+pub(crate) fn build_runner_tool_catalog_for_durable_run(
+    db: &execlaw_core::Database,
+    plugin_host: &execlaw_plugin_host::PluginHost,
+    caller_trust: TrustLevel,
+    caller_caps: &[String],
+    planner_executor: bool,
+) -> RunnerToolView {
+    build_runner_tool_catalog_with_workspace(
+        db,
+        plugin_host,
+        caller_trust,
+        caller_caps,
+        planner_executor,
+        true,
+    )
+}
+
+fn build_runner_tool_catalog_with_workspace(
+    db: &execlaw_core::Database,
+    plugin_host: &execlaw_plugin_host::PluginHost,
+    caller_trust: TrustLevel,
+    caller_caps: &[String],
+    planner_executor: bool,
+    include_workspace_tools: bool,
+) -> RunnerToolView {
     use execlaw_core::tool_access::ToolAccessStore;
     use execlaw_inference_api::ToolDeclaration;
 
@@ -2973,6 +3021,9 @@ pub(crate) fn build_runner_tool_catalog(
         }
     }
     for t in plugin_host.registry().agent_callable_tools().iter() {
+        if plugin_host.registry().host_tool(&t.tool_name).is_some() && !include_workspace_tools {
+            continue;
+        }
         if !access_allows(&t.tool_name) {
             continue;
         }
@@ -3289,6 +3340,17 @@ fn build_runner_history_messages_with_seq(
         }
     }
     (messages, source_seqs)
+}
+
+fn prompt_time_for_user_event(
+    history: &[EventRecord],
+    user_seq: EventSeq,
+) -> chrono::DateTime<chrono::Utc> {
+    history
+        .iter()
+        .find(|event| event.seq == user_seq && event.kind == EventKind::UserMsg)
+        .and_then(|event| chrono::DateTime::<chrono::Utc>::from_timestamp(event.committed_at, 0))
+        .unwrap_or_else(chrono::Utc::now)
 }
 
 fn find_recoverable_runner_input(
@@ -4010,7 +4072,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     // catalog was filtered, so the model's system prompt routed it
     // to tool names the catalog had stripped — confusing for the
     // model, wasteful of prompt tokens, and a policy hygiene gap.
-    let tool_view = build_runner_tool_catalog(
+    let tool_view = build_runner_tool_catalog_for_durable_run(
         &state.db,
         &state.plugin_host,
         caller_trust,
@@ -4030,7 +4092,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     // would otherwise have to ask a tool for. Always emitted; cost
     // is negligible vs. the LLM round-trip (delta #3).
     let mut turn_context = build_turn_context_prose(
-        chrono::Utc::now(),
+        prompt_time_for_user_event(&history, user_seq),
         cid.as_str(),
         sender_principal_id.as_deref(),
         caller_trust.as_str(),
@@ -4056,8 +4118,13 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
         turn_context.push_str("\n\n");
         turn_context.push_str(&block);
     }
+    let retrieval_embedding = if planner_executor {
+        None
+    } else {
+        crate::memory_assets_admin::embed_memory_query(state, user_text).await
+    };
     let (composed_system, asset_loadout_receipt) =
-        prompt::assemble_system_prompt_for_asset_scope_with_loadout(
+        prompt::assemble_system_prompt_for_asset_scope_with_embedding(
             &state.db,
             Some(cid.as_str()),
             &state.config.system_prompt,
@@ -4065,6 +4132,9 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
             &turn_context,
             asset_scope,
             Some(user_text),
+            retrieval_embedding
+                .as_ref()
+                .map(|(index_id, vector)| (vector.as_slice(), index_id.as_str())),
         );
     if let Some(receipt) = asset_loadout_receipt {
         execlaw_core::memory_assets::MemoryAssetStore::new(&state.db)
@@ -4498,26 +4568,52 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
             chrono::Utc::now().timestamp(),
         )
         .map_err(|error| format!("record turn input manifest: {error}"))?;
-    let initial_checkpoint = match durable
-        .begin::<execlaw_runner_protocol::ModelRoundCheckpoint>(
+    let run_store = execlaw_core::runs::RunStore::new(&state.db);
+    let initial_step_exists = run_store
+        .get_step(&durable_run_id, "model:0")
+        .map_err(|error| format!("inspect initial model checkpoint: {error}"))?
+        .is_some();
+    let initial_decision = if initial_step_exists {
+        // The manifest above proved the effective prompt, model settings,
+        // and tool catalog are unchanged. A fresh transport turn_id must not
+        // redefine the model checkpoint when reclaiming a killed runner.
+        durable.resume_existing::<execlaw_runner_protocol::ModelRoundCheckpoint>(
             "model:0",
             0,
             RunStepKind::ModelRequest,
-            &req,
+            chrono::Utc::now().timestamp(),
+        )
+    } else {
+        let manifest = run_store
+            .input_manifest(&durable_run_id)
+            .map_err(|error| format!("read initial input manifest: {error}"))?
+            .ok_or_else(|| "initial input manifest disappeared".to_owned())?;
+        let stable_input = serde_json::json!({
+            "input_version": manifest.input_version,
+            "prompt_hash": manifest.prompt_hash,
+            "model_settings_hash": manifest.model_settings_hash,
+            "tool_catalog_hash": manifest.tool_catalog_hash,
+        });
+        durable.begin::<execlaw_runner_protocol::ModelRoundCheckpoint>(
+            "model:0",
+            0,
+            RunStepKind::ModelRequest,
+            &stable_input,
             None,
             None,
             chrono::Utc::now().timestamp(),
         )
-        .map_err(|error| format!("claim initial model request: {error}"))?
-    {
-        StepDecision::Execute(_) => None,
-        StepDecision::Replay(checkpoint) => Some(checkpoint),
-        decision => {
-            return Err(format!(
-                "durable turn did not yield its initial model request: {decision:?}"
-            ));
-        }
     };
+    let initial_checkpoint =
+        match initial_decision.map_err(|error| format!("claim initial model request: {error}"))? {
+            StepDecision::Execute(_) => None,
+            StepDecision::Replay(checkpoint) => Some(checkpoint),
+            decision => {
+                return Err(format!(
+                    "durable turn did not yield its initial model request: {decision:?}"
+                ));
+            }
+        };
 
     // Build the tool dispatcher we'll use to honour the runner's
     // `ToolCallRequest` frames. Same shape as `run_tool_capable_turn`
@@ -4546,6 +4642,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
             resolved_model_id.clone(),
         )
         .with_parent_run(durable_run_id.clone())
+        .with_workspace_checkout_root(state.data_dir.join("workspace-checkouts"))
         .with_artifact_root(state.data_dir.join("tool-results"))
         .with_cancel_flag(cancel_flag.clone())
         .with_events(state.events.clone())
@@ -5335,8 +5432,14 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     //      log keeps the prior SPA contract.
     let abnormal_end = !got_complete && error_message.is_some();
     if abnormal_end && pending.is_empty() && assistant_text.is_empty() && !was_cancelled {
-        let _ = execlaw_core::runs::RunStore::new(&state.db)
-            .fail_run(&durable_run_id, chrono::Utc::now().timestamp());
+        // A killed runner can disconnect while its first model checkpoint is
+        // still leased. Keep that run recoverable; the next worker must wait
+        // for lease expiry before recording an interrupted attempt. Ordinary
+        // inference errors still terminalize here.
+        if runner_failure_kind.as_deref() != Some("runner_disconnected") {
+            let _ = execlaw_core::runs::RunStore::new(&state.db)
+                .fail_run(&durable_run_id, chrono::Utc::now().timestamp());
+        }
         return Err(error_message.unwrap_or_else(|| "runner error".into()));
     }
     if abnormal_end {
@@ -5995,8 +6098,13 @@ async fn run_tool_capable_turn(
         turn_context.push_str("\n\n");
         turn_context.push_str(&block);
     }
+    let retrieval_embedding = if planner_executor {
+        None
+    } else {
+        crate::memory_assets_admin::embed_memory_query(state, user_text).await
+    };
     let (composed_system_prompt, asset_loadout_receipt) =
-        prompt::assemble_system_prompt_for_asset_scope_with_loadout(
+        prompt::assemble_system_prompt_for_asset_scope_with_embedding(
             &state.db,
             Some(cid.as_str()),
             &state.config.system_prompt,
@@ -6004,6 +6112,9 @@ async fn run_tool_capable_turn(
             &turn_context,
             asset_scope,
             Some(user_text),
+            retrieval_embedding
+                .as_ref()
+                .map(|(index_id, vector)| (vector.as_slice(), index_id.as_str())),
         );
     let exec = exec.with_asset_loadout(asset_loadout_receipt);
     let prompt_ms = prompt_started_at.elapsed().as_millis() as u64;
@@ -6571,6 +6682,7 @@ async fn dispatch_routine_turn_inner(
                 Vec::new(),
                 Vec::new(),
                 &routine_asset_scope,
+                None,
             )
             .await;
             drop(cancel_guard);
@@ -7002,6 +7114,7 @@ pub async fn dispatch_external_turn(
                 attachment_ids.clone(),
                 Vec::new(),
                 "default",
+                None,
             )
             .await;
             drop(cancel_guard);
@@ -7593,6 +7706,7 @@ pub async fn dispatch_clarification_turn(
                 Vec::new(),
                 Vec::new(),
                 "default",
+                None,
             )
             .await;
             drop(cancel_guard);
@@ -9370,6 +9484,7 @@ async fn run_incognito_send(
                         state.events.publish(UiEvent::ChatTokenDelta {
                             conversation_id: cid.as_str().to_owned(),
                             text: visible,
+                            request_id: None,
                         });
                     }
                 }
@@ -9386,6 +9501,7 @@ async fn run_incognito_send(
         state.events.publish(UiEvent::ChatTokenDelta {
             conversation_id: cid.as_str().to_owned(),
             text: tail,
+            request_id: None,
         });
     }
     if was_cancelled {
@@ -9811,14 +9927,32 @@ mod tests {
                 .unwrap();
         }
 
-        let (prompt, receipt) = prompt::assemble_system_prompt_for_asset_scope_with_loadout(
+        for asset_id in [
+            "asset-retrieved-1",
+            "asset-tool-only-1",
+            "asset-retrieved-duplicate",
+        ] {
+            let source_hash = store.get(asset_id).unwrap().unwrap().source_hash.unwrap();
+            store
+                .upsert_embedding(
+                    asset_id,
+                    "fixture-embedding-index-v1",
+                    &[1.0, 0.0],
+                    &source_hash,
+                    1,
+                )
+                .unwrap();
+        }
+
+        let (prompt, receipt) = prompt::assemble_system_prompt_for_asset_scope_with_embedding(
             &state.db,
             Some(cid.as_str()),
             "base instructions",
             "",
             "task context",
             "default",
-            Some("Helios launch details"),
+            Some("no lexical terms match"),
+            Some((&[1.0, 0.0], "fixture-embedding-index-v1")),
         );
         assert!(prompt.contains("Synthetic release context"));
         assert!(prompt.contains("Helios launch details for the controller"));
@@ -9835,6 +9969,11 @@ mod tests {
         assert_eq!(
             receipt.retrieved_assets[0].source_hash.as_deref(),
             Some("sha256:retrieved")
+        );
+        assert_eq!(receipt.retrieved_assets[0].vector_rank, Some(1));
+        assert_eq!(
+            receipt.retrieved_assets[0].reranker_version,
+            execlaw_core::memory_assets::MEMORY_RERANKER_VERSION
         );
         assert!(
             !receipt
@@ -12384,7 +12523,7 @@ mod tests {
     }
 
     #[test]
-    fn assemble_system_prompt_injects_hot_memory_between_routing_and_context() {
+    fn assemble_system_prompt_does_not_inject_legacy_memory_without_a_receipt() {
         let state = test_app_state();
         let cid = ConversationId::from("conv-hot-memory");
         super::ensure_conversation_for(&state.db, &cid);
@@ -12413,15 +12552,8 @@ mod tests {
             "TURN_CONTEXT",
         );
 
-        assert!(prompt.contains("HOT MEMORY SNAPSHOT"));
-        assert!(prompt.contains("operator_timezone: America/Los_Angeles"));
-        let routing_at = prompt.find("ROUTING").unwrap();
-        let hot_at = prompt.find("HOT MEMORY SNAPSHOT").unwrap();
-        let ctx_at = prompt.find("TURN_CONTEXT").unwrap();
-        assert!(
-            routing_at < hot_at && hot_at < ctx_at,
-            "prompt ordering incorrect: {prompt}"
-        );
+        assert!(!prompt.contains("HOT MEMORY SNAPSHOT"));
+        assert!(!prompt.contains("operator_timezone: America/Los_Angeles"));
     }
 
     #[test]
@@ -12471,6 +12603,25 @@ mod tests {
         assert!(prompt.contains("Keep responses concise"));
         assert!(prompt.contains("version=1"));
         assert!(prompt.contains("source_hash=sha256:asset-v1"));
+    }
+
+    #[test]
+    fn resumed_turn_context_uses_the_persisted_user_event_time() {
+        let cid = ConversationId::from("clock-recovery");
+        let mut user = EventRecord::new(
+            cid,
+            EventSeq(1),
+            EventKind::UserMsg,
+            &serde_json::json!({"text":"hello"}),
+            Some("controller".into()),
+        )
+        .unwrap();
+        user.committed_at = 1_700_000_000;
+        let expected = chrono::DateTime::<chrono::Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        assert_eq!(
+            super::prompt_time_for_user_event(&[user], EventSeq(1)),
+            expected
+        );
     }
 
     #[test]
@@ -15051,10 +15202,99 @@ required_capabilities = []
             .body(Body::empty())
             .unwrap();
 
+        let started = std::time::Instant::now();
         let resp = app.oneshot(req).await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "stop acknowledgement exceeded the 500 ms in-process control budget"
+        );
         assert_eq!(resp.status(), StatusCode::OK);
         let body: serde_json::Value = json_body(resp.into_body()).await;
         assert_eq!(body["conversation_id"], "conv-stop-active");
         assert_eq!(body["cancelled"], true);
+    }
+
+    #[tokio::test]
+    async fn stop_turn_acknowledges_while_model_response_is_stalled() {
+        use execlaw_core::backends::{BackendMode, BackendPurpose, BackendStore, BackendUpsert};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let state = test_app_state();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+        let release_response = std::sync::Arc::new(tokio::sync::Notify::new());
+        let server_release = release_response.clone();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 8192];
+            let _ = socket.read(&mut request).await;
+            let _ = accepted_tx.send(());
+            server_release.notified().await;
+            let stream = "data: [DONE]\n\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                stream.len(),
+                stream,
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+        });
+        BackendStore::new(&state.db)
+            .upsert(
+                &BackendUpsert {
+                    purpose: BackendPurpose::Standard,
+                    inference_backend: "service-vllm".into(),
+                    model_spec_json: serde_json::json!({"model":"stop-test-model"}),
+                    gpu_id: None,
+                    endpoint: Some(endpoint),
+                    notes: None,
+                    reasoning_enabled: false,
+                    mode: BackendMode::External,
+                },
+                1,
+            )
+            .unwrap();
+
+        let app = crate::routes::build_router(state);
+        let token = setup_and_get_token(&app).await;
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/chats/conv-stop-stalled/messages")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"text":"wait for the local model"}"#))
+            .unwrap();
+        let send_app = app.clone();
+        let send = tokio::spawn(async move {
+            let response = send_app.oneshot(request).await.unwrap();
+            let _ = axum::body::to_bytes(response.into_body(), usize::MAX).await;
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), accepted_rx)
+            .await
+            .expect("chat reached the stalled local inference request")
+            .expect("the mock inference listener accepted the request");
+
+        let stop = Request::builder()
+            .method(Method::POST)
+            .uri("/api/chats/conv-stop-stalled/stop")
+            .header(header::AUTHORIZATION, format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let started = std::time::Instant::now();
+        let response = app.oneshot(stop).await.unwrap();
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(500),
+            "stop acknowledgement exceeded 500 ms while local inference was stalled"
+        );
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = json_body(response.into_body()).await;
+        assert_eq!(body["cancelled"], true);
+
+        release_response.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), send)
+            .await
+            .expect("cancelled chat request finished")
+            .unwrap();
+        server.await.unwrap();
     }
 }
