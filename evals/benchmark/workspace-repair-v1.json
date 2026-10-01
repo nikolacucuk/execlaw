@@ -1,0 +1,40 @@
+{
+    "name":  "execlaw-h040-multi-file-workspace-repair",
+    "version":  "1",
+    "tasks":  [
+                  {
+                      "id":  "checked-sum-multi-file-overflow",
+                      "category":  "coding",
+                      "prompt":  "Repair checked_sum so valid totals are preserved and integer overflow returns None. Inspect the library and test files, use Rust diagnostics if useful, patch the minimal set of files, then run the configured tests.",
+                      "verifier":  "workspace_coding",
+                      "fixture_workspace":  "evals/benchmark/fixtures/workspace-multi-file-v1",
+                      "expected_workspace_files":  {
+                                                       "Cargo.toml":  "[package]\nname = \"multi-file-repair\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+                                                       "Cargo.lock":  "version = 4\n\n[[package]]\nname = \"multi-file-repair\"\nversion = \"0.1.0\"\n",
+                                                       "src/lib.rs":  "mod math;\n\npub fn checked_sum(values: \u0026[i32]) -\u003e Option\u003ci32\u003e {\n    math::sum(values)\n}\n",
+                                                       "src/math.rs":  "pub fn sum(values: \u0026[i32]) -\u003e Option\u003ci32\u003e {\n    values\n        .iter()\n        .try_fold(0i32, |total, value| total.checked_add(*value))\n}\n",
+                                                       "tests/overflow.rs":  "use multi_file_repair::checked_sum;\n\n#[test]\nfn checked_sum_preserves_valid_values() {\n    assert_eq!(checked_sum(\u0026[4, -2, 9]), Some(11));\n}\n\n#[test]\nfn checked_sum_rejects_overflow() {\n    assert_eq!(checked_sum(\u0026[i32::MAX, 1]), None);\n}\n"
+                                                   },
+                      "test_argv":  [
+                                        "cargo",
+                                        "test",
+                                        "--offline",
+                                        "--locked",
+                                        "--quiet"
+                                    ],
+                      "language_servers":  {
+                                               "rust":  [
+                                                            "rust-analyzer"
+                                                        ]
+                                           },
+                      "required_tools":  [
+                                             "workspace.read_file",
+                                             "workspace.search",
+                                             "workspace.apply_patch",
+                                             "workspace.diagnostics",
+                                             "workspace.run"
+                                         ],
+                      "fixture_response":  "[{\"tool\":\"workspace.read_file\",\"arguments\":{\"path\":\"src/lib.rs\"}},{\"tool\":\"workspace.read_file\",\"arguments\":{\"path\":\"src/math.rs\"}},{\"tool\":\"workspace.search\",\"arguments\":{\"query\":\"checked_add\",\"glob\":\"*.rs\"}},{\"tool\":\"workspace.diagnostics\",\"arguments\":{\"path\":\"src/math.rs\",\"language_id\":\"rust\"}},{\"tool\":\"workspace.run\",\"arguments\":{\"argv\":[\"cargo\",\"test\",\"--offline\",\"--locked\",\"--quiet\"],\"timeout_ms\":60000}},{\"tool\":\"workspace.apply_patch\",\"arguments\":{\"edits\":[{\"path\":\"src/lib.rs\",\"expected_sha256\":\"259988cc57fb25303d33d670ef71916ba2fa9629487daba0d838b5be1f531d81\",\"content\":\"mod math;\\n\\npub fn checked_sum(values: \\u0026[i32]) -\\u003e Option\\u003ci32\\u003e {\\n    math::sum(values)\\n}\\n\"},{\"path\":\"src/math.rs\",\"expected_sha256\":\"ee34ea59deda778a120960d8086c9d89afa0f453ed5aa70ebf231b1dcec7f0dc\",\"content\":\"pub fn sum(values: \\u0026[i32]) -\\u003e Option\\u003ci32\\u003e {\\n    values\\n        .iter()\\n        .try_fold(0i32, |total, value| total.checked_add(*value))\\n}\\n\"}]}},{\"tool\":\"workspace.run\",\"arguments\":{\"argv\":[\"cargo\",\"test\",\"--offline\",\"--locked\",\"--quiet\"],\"timeout_ms\":60000}}]"
+                  }
+              ]
+}

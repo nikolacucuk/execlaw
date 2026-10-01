@@ -1950,6 +1950,29 @@ mod tests {
         (status, v)
     }
 
+    async fn post_forget(
+        app: axum::Router,
+        bearer: &str,
+        name: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let encoded_name = name.replace('/', "%2F");
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/admin/skills/{encoded_name}/forget"))
+            .header(
+                header::AUTHORIZATION,
+                HeaderValue::from_str(bearer).unwrap(),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+        let status = response.status();
+        let bytes = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or_default())
+    }
+
     #[tokio::test]
     async fn controller_creates_skill_returns_detail() {
         let (app, bearer) = seed_user_and_token(UserRole::Controller).await;
@@ -1996,6 +2019,42 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(body["error"]["code"], "controller_required");
+    }
+
+    #[tokio::test]
+    async fn controller_can_forget_skill_content_and_reimport_is_fenced() {
+        let (app, bearer) = seed_user_and_token(UserRole::Controller).await;
+        let name = "test/forget";
+        let (created, _) = post_create(
+            app.clone(),
+            &bearer,
+            serde_json::json!({
+                "name": name,
+                "description": "private description",
+                "body_md": "private skill body",
+            }),
+        )
+        .await;
+        assert_eq!(created, StatusCode::OK);
+
+        let (forgotten, report) = post_forget(app.clone(), &bearer, name).await;
+        assert_eq!(forgotten, StatusCode::OK, "report={report}");
+        assert_eq!(report["forgotten"], true);
+        assert_eq!(report["versions_scrubbed"], 1);
+        assert_eq!(report["backups_retained"], true);
+
+        let (recreate, error) = post_create(
+            app,
+            &bearer,
+            serde_json::json!({
+                "name": name,
+                "description": "try to restore private skill",
+                "body_md": "another copy",
+            }),
+        )
+        .await;
+        assert_eq!(recreate, StatusCode::GONE, "error={error}");
+        assert_eq!(error["error"]["code"], "skill_privacy_deleted");
     }
 
     #[tokio::test]

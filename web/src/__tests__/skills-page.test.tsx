@@ -321,3 +321,53 @@ describe("SkillsPage — new-skill modal", () => {
         expect(sent.frontmatter_json).toBe('{"category":"web"}');
     });
 });
+
+describe("SkillsPage privacy deletion", () => {
+    it("confirms skill forgetting and reports that backups are retained", async () => {
+        const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+        let listCalls = 0;
+        fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url === "/api/admin/me") return meResponse("controller");
+            if (url === "/api/admin/skills/config") return configResponse();
+            if (url.startsWith("/api/admin/skills/proposals")) return proposalsResponse();
+            if (url === "/api/admin/skills" && (init?.method ?? "GET") === "GET") {
+                listCalls += 1;
+                return listResponse(listCalls === 1 ? [{
+                    name: "private/skill",
+                    description: "secret workflow",
+                    state: "stable",
+                    version: 1,
+                    registration_kind: "authored",
+                    source: "admin:u-1",
+                    owning_plugin_id: null,
+                    updated_at: 0,
+                }] : []);
+            }
+            if (url.endsWith("/forget")) return new Response(JSON.stringify({
+                forgotten: true,
+                already_forgotten: false,
+                versions_scrubbed: 2,
+                proposals_scrubbed: 1,
+                invocations_scrubbed: 3,
+                evaluation_runs_scrubbed: 1,
+                evaluation_cases_removed: 2,
+                resources_removed: 1,
+                unshared_blobs_removed: 1,
+                backups_retained: true,
+            }), { status: 200 });
+            if (url.startsWith("/api/admin/skills/")) return detailResponseFor("private/skill");
+            return new Response("{}", { status: 200 });
+        });
+        mountPage();
+        await screen.findByTestId("skills-detail");
+        fireEvent.click(await screen.findByTestId("skills-forget-btn"));
+
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+            "/api/admin/skills/private%2Fskill/forget",
+            expect.objectContaining({ method: "POST" }),
+        ));
+        expect(await screen.findByTestId("skill-forget-status")).toHaveTextContent("Source chat history and backups remain retained.");
+        expect(confirm).toHaveBeenCalled();
+        confirm.mockRestore();
+    });
+});

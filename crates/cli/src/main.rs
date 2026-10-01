@@ -1368,67 +1368,78 @@ fn encrypt_plaintext_database(
         let source = execlaw_core::Database::open(&execlaw_core::DbConfig {
             path: db_path.to_path_buf(),
             key: None,
-        })?;
+        })
+        .map_err(|error| anyhow::anyhow!("open plaintext source: {error}"))?;
 
-        let source_schema_count = source.with_conn(|connection| {
-            let integrity: String =
-                connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
-            if integrity != "ok" {
-                return Err(execlaw_core::DbError::Config(format!(
-                    "source integrity_check failed: {integrity}"
-                )));
-            }
-            let schema_count = connection.query_row(
-                "SELECT COUNT(*) FROM sqlite_master \
+        let source_schema_count = source
+            .with_conn(|connection| {
+                let integrity: String =
+                    connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
+                if integrity != "ok" {
+                    return Err(execlaw_core::DbError::Config(format!(
+                        "source integrity_check failed: {integrity}"
+                    )));
+                }
+                let schema_count = connection.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
                  WHERE type IN ('table', 'index', 'view', 'trigger') \
                    AND name NOT LIKE 'sqlite_%'",
-                [],
-                |row| row.get::<_, i64>(0),
-            )?;
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?;
 
-            // VACUUM INTO captures committed pages, including any WAL content,
-            // into a standalone recovery copy before replacing the source.
-            connection.execute(
-                &format!(
-                    "VACUUM INTO {}",
-                    sql_literal(&backup_path.to_string_lossy())
-                ),
-                [],
-            )?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(backup_path, std::fs::Permissions::from_mode(0o600))
-                    .map_err(execlaw_core::DbError::from)?;
-            }
+                // VACUUM INTO captures committed pages, including any WAL content,
+                // into a standalone recovery copy before replacing the source.
+                connection.execute(
+                    &format!(
+                        "VACUUM INTO {}",
+                        sql_literal(&backup_path.to_string_lossy())
+                    ),
+                    [],
+                )?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(backup_path, std::fs::Permissions::from_mode(0o600))
+                        .map_err(execlaw_core::DbError::from)?;
+                }
 
-            let target = sql_literal(&encrypted_path.to_string_lossy());
-            let key_hex = hex::encode(key);
-            connection.execute_batch(&format!(
-                "ATTACH DATABASE {target} AS encrypted KEY \"x'{key_hex}'\";"
-            ))?;
-            connection.execute_batch("SELECT sqlcipher_export('encrypted');")?;
-            connection.execute_batch("DETACH DATABASE encrypted;")?;
-            Ok(schema_count)
-        })?;
+                let target = sql_literal(&encrypted_path.to_string_lossy());
+                let key_hex = hex::encode(key);
+                connection.execute_batch(&format!(
+                    "ATTACH DATABASE {target} AS encrypted KEY \"x'{key_hex}'\";"
+                ))?;
+                connection.execute_batch("SELECT sqlcipher_export('encrypted');")?;
+                connection.execute_batch("DETACH DATABASE encrypted;")?;
+                Ok(schema_count)
+            })
+            .map_err(|error| anyhow::anyhow!("snapshot and SQLCipher export: {error}"))?;
         drop(source);
 
         let plaintext_backup = execlaw_core::Database::open(&execlaw_core::DbConfig {
             path: backup_path.to_path_buf(),
             key: None,
-        })?;
+        })
+        .map_err(|error| anyhow::anyhow!("open plaintext recovery snapshot: {error}"))?;
         let backup_schema_count = integrity_and_schema_count(&plaintext_backup)?;
         drop(plaintext_backup);
         anyhow::ensure!(
             backup_schema_count == source_schema_count,
             "plaintext backup schema differs from source ({backup_schema_count} vs {source_schema_count})"
         );
-        std::fs::File::open(backup_path)?.sync_all()?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(backup_path)
+            .map_err(|error| anyhow::anyhow!("open recovery snapshot for sync: {error}"))?
+            .sync_all()
+            .map_err(|error| anyhow::anyhow!("sync recovery snapshot: {error}"))?;
 
         let encrypted = execlaw_core::Database::open(&execlaw_core::DbConfig {
             path: encrypted_path.clone(),
             key: Some(SqlCipherKey::RawBytes(key.to_vec())),
-        })?;
+        })
+        .map_err(|error| anyhow::anyhow!("open encrypted staging database: {error}"))?;
         let encrypted_schema_count = integrity_and_schema_count(&encrypted)?;
         anyhow::ensure!(
             encrypted_schema_count == source_schema_count,
@@ -1446,8 +1457,15 @@ fn encrypt_plaintext_database(
             &encrypted_header != b"SQLite format 3\0",
             "encrypted output has a plaintext SQLite header"
         );
-        std::fs::set_permissions(&encrypted_path, original_permissions)?;
-        std::fs::File::open(&encrypted_path)?.sync_all()?;
+        std::fs::set_permissions(&encrypted_path, original_permissions)
+            .map_err(|error| anyhow::anyhow!("preserve database permissions: {error}"))?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&encrypted_path)
+            .map_err(|error| anyhow::anyhow!("open encrypted staging file for sync: {error}"))?
+            .sync_all()
+            .map_err(|error| anyhow::anyhow!("sync encrypted staging file: {error}"))?;
 
         // WAL and shared-memory files belong to the plaintext source and
         // staging DBs; none may be replayed beside the replacement file.
@@ -1459,7 +1477,12 @@ fn encrypt_plaintext_database(
                 match std::fs::remove_file(&sidecar) {
                     Ok(()) => {}
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
+                    Err(error) => {
+                        return Err(anyhow::anyhow!(
+                            "remove stale SQLite sidecar {}: {error}",
+                            sidecar.display()
+                        ));
+                    }
                 }
             }
         }

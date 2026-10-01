@@ -10,6 +10,14 @@ retained as historical datasets with their original term-only verifier.
 Expected outputs and verifier definitions stay in the suite, outside coding
 task workspaces.
 
+The H040 multi-file repair suite is
+[`workspace-repair-v1.json`](workspace-repair-v1.json). It runs the workspace
+read/search/patch, terminal, and LSP tools against a digest-pinned sandbox
+image. Its offline fixture response is a deterministic tool-call trace for
+validating the verifier; it is not model capability evidence. A live run asks
+the local model to inspect the same fixture and produce a repair through those
+tools.
+
 Run the scorer offline to validate the installed harness and suite format:
 
 ```powershell
@@ -30,6 +38,27 @@ output in a temporary workspace. The subprocess drops environment variables
 whose names indicate keys, tokens, secrets, passwords, credentials, or
 endpoints. This temporary directory is not an OS security sandbox, so use a
 trusted local model and reviewed suite.
+
+The H040 workspace suite uses the approved container toolchain instead of the
+legacy host subprocess verifier. To replay its deterministic multi-file repair
+fixture through the terminal and diagnostics tools:
+
+```powershell
+cargo run --offline -p execlaw-eval-harness -- benchmark `
+  --suite evals/benchmark/workspace-repair-v1.json `
+  --output target/eval/workspace-repair-fixture.json `
+  --workspace-image sha256:<local-image-id> `
+  --approve-workspace-image --offline-fixture `
+  --runs 1 --seed 1 --allow-executing-generated-code
+```
+
+`--approve-workspace-image` records Controller approval of that exact image
+digest in the temporary benchmark database; it does not change the
+installation-wide artifact policy. A live model run omits
+`--offline-fixture` and uses the configured loopback inference endpoint. Its
+result record includes final workspace hash, successful test-output hash and
+exit evidence, LSP diagnostic count, tool-call names, and cumulative completion
+tokens; it does not store source text or generated output.
 The endpoint request uses temperature zero; the OpenAI-compatible request
 schema currently has no seed field, so the recorded per-trial seed is also
 included in the prompt and does not promise bit-for-bit model sampling.

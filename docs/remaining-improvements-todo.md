@@ -481,9 +481,9 @@ implemented or cannot be qualified on this Windows host.
 | H045 | Server `mcp_http_client::tests`; full `execlaw-mcp-client` suite | 7 HTTP tests and 15 stdio client/integration tests passed: pinned version negotiation, session expiry without effect replay, wrong IDs, oversized responses/frames, cancellation, and matching SSE response before EOF. | Installed MCP endpoint and cross-platform process/session qualification |
 | H046 | Core source-evidence persistence and claim-gate tests; server report evidence tests; evaluator research verifier; sidecar evidence tests | Fetched snapshots survive notes persistence; fabricated/unrelated citations fail; stale/hash-changed, failed, truncated, and conflicting snapshots are exposed; web-scraper results carry bounded IDs/times/hashes/excerpts; offline release-v2 4/4 and periodic-v2 7/7 | Lexical support remains conservative rather than semantic entailment; broader browser-action qualification and held-out local-model scoring remain |
 | H047 | Voice-runtime suite (18); voice-control suite (7); active-thread chat adapter integration; SPA capture tests and TypeScript check | Frame parser enforces 256 KiB payload maximum; Whisper caps utterances at 30 seconds; first sentence is spoken before reply completion; request-correlated chat deltas stream through normal Controller routing; Welcome voice capture mints its conversation before recording; incognito remains a draft; stalled-STT cross-session interrupt stays under 500 ms | Push-to-talk transport, non-streaming Whisper, no continuous server VAD, supported-hardware noise/silence/reconnect/barge-in suite |
-| H048 | Full core/server libraries; Memory Assets source-forget UI | Core 744/744 and server 1,224 passed, 7 ignored. Source lineage/evidence disappeared from review, retrieval, and projections; late writes were rejected; Viewer got 403. Full SPA suite passed 541 tests, including deletion confirmation, request payload, and retained-source copy | Skills, exports/diagnostics, plugin storage, backup restore reapplication, and full seeded-projection qualification remain open |
+| H048 | Core source-event tombstone; full `execlaw-skills` suite; server source-forget and skill-forget routes; Memory Assets and Skills UI tests | Core 744/744, skills 158/158, server 1,224 passed/7 ignored, and the Controller skill-forget route test passed. Source lineage/evidence and skill versions, evaluation prompts/results, proposals, invocation notes, FTS entries, and unshared blobs are hidden or scrubbed; name reuse is fenced. Full SPA suite passed 542 and TypeScript check passed. | Exports/diagnostics, plugin storage, backup restore reapplication, late restore-writer fencing for skills, and full seeded-projection qualification remain open |
 | H049 | `scripts/tests/test_performance_gate.py` | 3 tests passed: a deliberate confidence-bound regression fails the gate, an in-tolerance result passes, and runner identity mismatch is rejected. No stable-runner Criterion samples ran locally. | Self-hosted baseline, repeated hardware measurements, and quality/policy-equivalent optimization trials |
-| H050 | Full server library suite; full SPA suite and `tsc --noEmit` | Server 1,224 passed, 7 ignored; SPA 541/541 passed; TypeScript check passed. Scrubbed bundle reports local protocol capability counts without model identity/profile JSON; UI labels hardware class as an estimate | Real-browser onboarding/recovery, keyboard/screen-reader, per-OS first-task timing, measured model/hardware suitability, and accessibility regression gates |
+| H050 | Full server library suite; full SPA suite and `tsc --noEmit` | Server 1,224 passed, 7 ignored; SPA 542/542 passed; TypeScript check passed. Scrubbed bundle reports local protocol capability counts without model identity/profile JSON; UI labels hardware class as an estimate | Real-browser onboarding/recovery, keyboard/screen-reader, per-OS first-task timing, measured model/hardware suitability, and accessibility regression gates |
 
 Additional workspace checks:
 
@@ -590,6 +590,15 @@ the asset cascade. The Memory Assets page requires confirmation and tells the
 operator that original source files and backups remain. Replaying a delayed
 asset create with the same ID is rejected.
 
+Controller skill forgetting now appends a hashed-name tombstone, archives and
+renames the skill to a non-identifying placeholder, removes its FTS postings,
+scrubs every skill version and held-out evaluation result, redacts proposal
+bodies and invocation notes, and deletes resource/blob rows when no other
+skill references them. Create, plugin import, and proposal writes reject a
+tombstoned name. The Skills page requires confirmation and says source chat
+history and backups remain. The full skills library suite (158), seven Skills
+page tests, TypeScript check, and Controller endpoint test pass.
+
 The follow-up adds `state_memory_privacy_tombstones` for Controller deletion
 of memory derived from a selected conversation event. It hides the source
 assertion, superseding descendants, and their evidence references from
@@ -599,8 +608,9 @@ extraction/evidence writes. The Memory Assets UI requires confirmation and
 states that the append-only source event and backups remain. Backup restore
 reapplication and the other H048 projection families remain open.
 
-H048 remains partial: skills, exports and diagnostics, plugin storage, backup
-restore reapplication, and full seeded-projection qualification remain open.
+H048 remains partial: exports and diagnostics, plugin storage, backup restore
+reapplication, late restore-writer fencing for skills, and full seeded
+projection qualification remain open.
 
 ## Delivered implementation slice: H047 per-session voice cancellation (2026-09-28)
 

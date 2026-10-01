@@ -1946,6 +1946,30 @@ export async function archiveSkill(
     );
 }
 
+export interface SkillPrivacyDeletionReport {
+    forgotten: boolean;
+    already_forgotten: boolean;
+    versions_scrubbed: number;
+    proposals_scrubbed: number;
+    invocations_scrubbed: number;
+    evaluation_runs_scrubbed: number;
+    evaluation_cases_removed: number;
+    resources_removed: number;
+    unshared_blobs_removed: number;
+    backups_retained: boolean;
+}
+
+export async function forgetSkill(
+    name: string,
+    tokenAccessor: () => string | null,
+): Promise<SkillPrivacyDeletionReport> {
+    return apiFetch<SkillPrivacyDeletionReport>(
+        `/api/admin/skills/${encodeURIComponent(name)}/forget`,
+        { method: "POST" },
+        tokenAccessor,
+    );
+}
+
 // ---- /api/admin/skills/config (Phase C — auto-capture worker) ----
 
 export interface SkillsConfigView {

@@ -191,6 +191,16 @@ async fn replay_with_production_executor(
         EventKind, EventLog, EventRecord, ToolResultPayload, ToolUsePayload,
     };
 
+    if !fixture
+        .events
+        .iter()
+        .any(|event| event.kind == EventKind::UserMsg.as_str())
+    {
+        // Catalog and policy incidents can consist entirely of state events.
+        // They still pass event-log replay, but have no user turn for the
+        // production executor to run.
+        return Ok(0);
+    }
     let turns = fixture_turns(fixture)?;
     let mut responses = Vec::new();
     for turn in &turns {

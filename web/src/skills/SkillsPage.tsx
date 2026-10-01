@@ -15,6 +15,7 @@ import {
     approveSkillProposal,
     archiveSkill,
     createSkill,
+    forgetSkill,
     getSkill,
     getSkillsConfig,
     listSkillProposals,
@@ -29,6 +30,7 @@ import {
     type ProposalStateFilter,
     type SkillDetail,
     type SkillListEntry,
+    type SkillPrivacyDeletionReport,
     type SkillProposalView,
     type SkillState,
     type SkillVersionView,
@@ -127,6 +129,7 @@ function SkillsTab({
     const [includeArchived, setIncludeArchived] = useState(false);
     const [selectedName, setSelectedName] = useState<string | null>(null);
     const [createOpen, setCreateOpen] = useState(false);
+    const [privacyNotice, setPrivacyNotice] = useState<string | null>(null);
 
     const refresh = useCallback(async () => {
         try {
@@ -197,6 +200,9 @@ function SkillsTab({
                     <span className="form-check-label">Show archived</span>
                 </label>
             </div>
+            {privacyNotice && <div className="alert alert-info py-2 small" role="status" data-testid="skill-forget-status">
+                {privacyNotice} <button type="button" className="btn btn-sm btn-link p-0 ms-2" onClick={() => setPrivacyNotice(null)}>Dismiss</button>
+            </div>}
             {skills === null ? (
                 <div className="m-3 execlaw-muted small">Loading…</div>
             ) : skills.length === 0 ? (
@@ -219,6 +225,11 @@ function SkillsTab({
                         name={selectedName}
                         isController={isController}
                         onMutated={() => {
+                            void refresh();
+                        }}
+                        onForgotten={(report) => {
+                            setPrivacyNotice(`Forgot skill content: scrubbed ${report.versions_scrubbed} versions, ${report.proposals_scrubbed} proposals, ${report.resources_removed} resources, and ${report.unshared_blobs_removed} unshared blobs. Source chat history and backups remain retained.`);
+                            setSelectedName(null);
                             void refresh();
                         }}
                     />
@@ -344,17 +355,19 @@ function SkillsDetail({
     name,
     isController,
     onMutated,
+    onForgotten,
 }: {
     name: string | null;
     isController: boolean;
     onMutated: () => void;
+    onForgotten: (report: SkillPrivacyDeletionReport) => void;
 }) {
     const auth = useAuth();
     const getToken = auth.getAccessToken;
     const [detail, setDetail] = useState<SkillDetail | null>(null);
     const [loading, setLoading] = useState(false);
     const [actionError, setActionError] = useState<string | null>(null);
-    const [busy, setBusy] = useState<"promote" | "archive" | "save" | null>(
+    const [busy, setBusy] = useState<"promote" | "archive" | "forget" | "save" | null>(
         null,
     );
     const [editing, setEditing] = useState(false);
@@ -422,6 +435,25 @@ function SkillsDetail({
             setBusy(null);
         }
     }, [detail, getToken, onMutated]);
+
+    const onForget = useCallback(async () => {
+        if (!detail) return;
+        if (!window.confirm(
+            `Permanently forget "${detail.name}"? All stored versions, evaluation prompts/results, proposals, invocation notes, and bundled resources will be scrubbed from live storage and search. The skill name is tombstoned against re-import. Source chat history and backups are retained.`,
+        )) return;
+        setBusy("forget");
+        setActionError(null);
+        try {
+            const report = await forgetSkill(detail.name, getToken);
+            setDetail(null);
+            setEditing(false);
+            onForgotten(report);
+        } catch (e) {
+            setActionError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setBusy(null);
+        }
+    }, [detail, getToken, onForgotten]);
 
     const onStartEdit = useCallback(() => {
         if (!detail) return;
@@ -505,6 +537,7 @@ function SkillsDetail({
 
     const canPromote = isController && detail.state === "trial" && !editing;
     const canArchive = isController && detail.state !== "archived" && !editing;
+    const canForget = isController && !editing;
     const canEdit = isController && detail.state !== "archived";
 
     return (
@@ -562,6 +595,17 @@ function SkillsDetail({
                                 data-testid="skills-archive-btn"
                             >
                                 {busy === "archive" ? "Archiving…" : "Archive"}
+                            </button>
+                        )}
+                        {canForget && (
+                            <button
+                                type="button"
+                                className="btn btn-sm btn-danger"
+                                onClick={onForget}
+                                disabled={busy !== null}
+                                data-testid="skills-forget-btn"
+                            >
+                                {busy === "forget" ? "Forgettingâ€¦" : "Forget content"}
                             </button>
                         )}
                     </div>

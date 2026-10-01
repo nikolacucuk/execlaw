@@ -1186,7 +1186,7 @@ mod tests {
         bytes.extend_from_slice(&a);
         bytes.extend_from_slice(format!("Content-Length: {}\r\n\r\n", b.len()).as_bytes());
         bytes.extend_from_slice(&b);
-        let midpoint = bytes.len() / 2;
+        let midpoint = 8;
         decoder.push(&bytes[..midpoint]).unwrap();
         assert!(decoder.pop().unwrap().is_none());
         decoder.push(&bytes[midpoint..]).unwrap();

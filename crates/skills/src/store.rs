@@ -2258,6 +2258,88 @@ mod tests {
     }
 
     #[test]
+    fn privacy_forget_scrubs_skill_versions_search_resources_and_descendant_notes() {
+        let store = fresh_store();
+        let name = "private/forget-me";
+        let mut new = sample_new(name, "distinctive-private-workflow-needle");
+        new.resources.push(ResourceBlob {
+            path: "private.txt".into(),
+            mime: "text/plain".into(),
+            bytes: b"private-resource-needle".to_vec(),
+        });
+        let skill_id = store.create(new, Strictness::Strict, 10).unwrap();
+        let skill = store.get(name).unwrap().unwrap();
+        let version_id = skill.current_version.id.0;
+        store
+            .db
+            .transaction(|tx| {
+                tx.execute(
+                    "INSERT INTO state_skill_invocations(skill_id, skill_version_id, conversation_id, \
+                     loaded_at, outcome, outcome_at, tool_calls_made, notes) \
+                     VALUES (?1, ?2, 'conversation-1', 10, 'success', 11, 2, 'private invocation note')",
+                    params![skill_id.0, version_id],
+                )?;
+                tx.execute(
+                    "INSERT INTO state_skill_proposals(proposal_kind, target_skill_id, proposed_name, \
+                     description, body_md, frontmatter_json, source_run_id, trajectory_summary, \
+                     tool_calls_observed, state, created_at) \
+                     VALUES ('version_fork', ?1, ?2, 'private proposal description', 'private proposal body', \
+                     '{}', 'private-run-id', 'private trajectory summary', 2, 'pending', 12)",
+                    params![skill_id.0, name],
+                )?;
+                tx.execute(
+                    "INSERT INTO state_skill_eval_cases(skill_name, case_id, prompt, required_terms_json, \
+                     forbidden_terms_json, min_output_chars, max_output_chars, max_output_tokens, \
+                     workspace_files_json, expected_workspace_files_json, mock_integrations_json, \
+                     expected_integration_calls_json, forbidden_actions_json) \
+                     VALUES (?1, 'private-case', 'private prompt', '[]', '[]', 0, 1000, 64, '{}', '{}', '{}', '[]', '[]')",
+                    [name],
+                )?;
+                tx.execute(
+                    "INSERT INTO state_skill_eval_runs(skill_name, version_id, body_sha256, evaluator_version, \
+                     passed, score, before_score, results_json, created_at) \
+                     VALUES (?1, ?2, ?3, 'fixture', 0, 0.0, NULL, 'private evaluation output', 13)",
+                    params![name, version_id, skill.current_version.body_sha256],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            store
+                .search("distinctive-private-workflow-needle", 10)
+                .unwrap()
+                .len(),
+            1
+        );
+        let report = store.forget(name, "controller-1", 20).unwrap();
+
+        assert_eq!(report.versions_scrubbed, 1);
+        assert_eq!(report.proposals_scrubbed, 1);
+        assert_eq!(report.invocations_scrubbed, 1);
+        assert_eq!(report.evaluation_runs_scrubbed, 1);
+        assert_eq!(report.evaluation_cases_removed, 1);
+        assert_eq!(report.resources_removed, 1);
+        assert_eq!(report.blobs_removed, 1);
+        assert!(store.get(name).unwrap().is_none());
+        assert!(store.view(name).unwrap().is_none());
+        assert!(
+            store
+                .search("distinctive-private-workflow-needle", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(store.resource(name, "private.txt").unwrap().is_none());
+        assert!(matches!(
+            store.create(sample_new(name, "recreated"), Strictness::Strict, 30),
+            Err(SkillError::Db(DbError::Invariant(message))) if message.contains("privacy-deleted")
+        ));
+        let repeated = store.forget(name, "controller-1", 40).unwrap();
+        assert!(repeated.already_forgotten);
+        assert_eq!(repeated.versions_scrubbed, 0);
+    }
+
+    #[test]
     fn binary_resource_returns_base64() {
         let s = fresh_store();
         let mut n = sample_new("a/bin", "see image");

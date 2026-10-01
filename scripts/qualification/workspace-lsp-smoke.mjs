@@ -162,13 +162,11 @@ async function main() {
   }
 
   const diagnosticsDeadline = Date.now() + 45_000;
-  let emptyPushAt = 0;
   for (;;) {
     let message;
     try {
-      message = await nextMessage(emptyPushAt ? Math.min(diagnosticsDeadline, emptyPushAt + 5000) : diagnosticsDeadline);
+      message = await nextMessage(diagnosticsDeadline);
     } catch (error) {
-      if (emptyPushAt && Date.now() >= emptyPushAt + 5000) break;
       throw error;
     }
     if (message.method === "textDocument/publishDiagnostics" && message.params?.uri === uri) {
@@ -178,7 +176,6 @@ async function main() {
         process.stdout.write(`workspace_lsp_smoke_ok diagnostics=${items.length}\n`);
         break;
       }
-      emptyPushAt = Date.now();
     } else if (message.id === 2 && !message.method) {
       if (message.error) throw new Error(`diagnostics request failed: ${JSON.stringify(message.error)}`);
       const items = message.result?.items ?? [];
@@ -186,7 +183,6 @@ async function main() {
         process.stdout.write(`workspace_lsp_smoke_ok diagnostics=${items.length}\n`);
         break;
       }
-      emptyPushAt = Date.now();
     } else if (message.method && Object.hasOwn(message, "id")) {
       await replyToServerRequest(message);
     }
