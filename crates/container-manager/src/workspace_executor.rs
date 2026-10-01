@@ -385,8 +385,10 @@ impl BollardWorkspaceJobExecutor {
             "jsonrpc":"2.0","id":1,"method":"initialize","params":{
                 "processId":null,"rootUri":root_uri.clone(),"workspaceFolders":[{"uri":root_uri,"name":"workspace"}],
                 "capabilities":{"general":{"positionEncodings":["utf-16"]},
-                    "textDocument":{"publishDiagnostics":{"relatedInformation":true}}},
-                "clientInfo":{"name":"execlaw","version":env!("CARGO_PKG_VERSION")}
+                    "workspace":{"configuration":true,"workspaceFolders":true},
+                    "textDocument":{"synchronization":{"didSave":true},"publishDiagnostics":{"relatedInformation":true}}},
+                "clientInfo":{"name":"execlaw","version":env!("CARGO_PKG_VERSION")},
+                "initializationOptions":{"diagnostics":{"enable":true},"checkOnSave":true,"cargo":{"allTargets":true}}
             }
         });
         send_lsp_message(&mut attached.input, &initialize).await?;
@@ -421,9 +423,37 @@ impl BollardWorkspaceJobExecutor {
         send_lsp_message(
             &mut attached.input,
             &serde_json::json!({
+                "jsonrpc":"2.0","method":"workspace/didChangeConfiguration","params":{
+                    "settings":{"rust-analyzer":{"diagnostics":{"enable":true},"checkOnSave":true,"cargo":{"allTargets":true}}}
+                }
+            }),
+        )
+        .await?;
+        send_lsp_message(
+            &mut attached.input,
+            &serde_json::json!({
                 "jsonrpc":"2.0","method":"textDocument/didOpen","params":{
                     "textDocument":{"uri":document_uri.clone(),"languageId":request.language_id,
                         "version":1,"text":request.text}
+                }
+            }),
+        )
+        .await?;
+        send_lsp_message(
+            &mut attached.input,
+            &serde_json::json!({
+                "jsonrpc":"2.0","method":"textDocument/didChange","params":{
+                    "textDocument":{"uri":document_uri.clone(),"version":2},
+                    "contentChanges":[{"text":request.text.clone()}]
+                }
+            }),
+        )
+        .await?;
+        send_lsp_message(
+            &mut attached.input,
+            &serde_json::json!({
+                "jsonrpc":"2.0","method":"textDocument/didSave","params":{
+                    "textDocument":{"uri":document_uri.clone()},"text":request.text.clone()
                 }
             }),
         )

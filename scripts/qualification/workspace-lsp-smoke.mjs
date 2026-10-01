@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { spawn, spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +14,6 @@ const workspace = mkdtempSync(join(tmpdir(), "execlaw-lsp-smoke-"));
 mkdirSync(join(workspace, "src"));
 writeFileSync(join(workspace, "Cargo.toml"), "[package]\nname = \"lsp-smoke\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
 writeFileSync(join(workspace, "Cargo.lock"), "version = 4\n\n[[package]]\nname = \"lsp-smoke\"\nversion = \"0.1.0\"\n");
-writeFileSync(join(workspace, "Cargo.lock"), "version = 4\n\n[[package]]\nname = \"lsp-smoke\"\nversion = \"0.1.0\"\n");
 writeFileSync(join(workspace, "src/lib.rs"), "pub mod broken;\n");
 const source = "pub fn broken( -> i32 {\n";
 writeFileSync(join(workspace, "src/broken.rs"), source);
@@ -27,7 +26,7 @@ const args = [
   "--mount", `type=bind,source=${workspace},target=/workspace,readonly`,
   "--workdir", "/workspace", "-e", "HOME=/tmp", "-e", "CARGO_NET_OFFLINE=true",
   "-e", "CARGO_TARGET_DIR=/tmp/target",
-  "-e", "CARGO_TARGET_DIR=/tmp/target", "--entrypoint", "/usr/bin/timeout",
+  "--entrypoint", "/usr/bin/timeout",
   image, "--signal=TERM", "--kill-after=2s", "90s", "rust-analyzer",
 ];
 const fileProbe = spawn("docker", [
@@ -41,20 +40,6 @@ const probeCode = await new Promise((resolve) => fileProbe.once("close", resolve
 if (probeCode !== 0 || !probedSource.includes("pub mod broken")) {
   throw new Error(`container could not read the workspace fixture: ${probedSource}`);
 }
-const cargoProbe = spawnSync("docker", [
-  "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=128m,mode=1777",
-  "--mount", `type=bind,source=${workspace},target=/workspace,readonly`, "--workdir", "/workspace",
-  "-e", "HOME=/tmp", "-e", "CARGO_NET_OFFLINE=true", "-e", "CARGO_TARGET_DIR=/tmp/target",
-  "--entrypoint", "/usr/bin/timeout", image, "10s", "cargo", "check", "--offline", "--locked",
-], { encoding: "utf8" });
-process.stderr.write(`cargo probe exit=${cargoProbe.status}\n${cargoProbe.stdout ?? ""}${cargoProbe.stderr ?? ""}`);
-const analysisProbe = spawnSync("docker", [
-  "run", "--rm", "--network", "none", "--read-only", "--tmpfs", "/tmp:rw,exec,nosuid,nodev,size=128m,mode=1777",
-  "--mount", `type=bind,source=${workspace},target=/workspace,readonly`, "--workdir", "/workspace",
-  "-e", "HOME=/tmp", "-e", "CARGO_NET_OFFLINE=true", "-e", "CARGO_TARGET_DIR=/tmp/target",
-  "--entrypoint", "/usr/bin/timeout", image, "20s", "rust-analyzer", "analysis-stats", "/workspace",
-], { encoding: "utf8" });
-process.stderr.write(`analysis probe exit=${analysisProbe.status}\n${analysisProbe.stdout ?? ""}${analysisProbe.stderr ?? ""}`);
 const child = spawn("docker", args, { stdio: ["pipe", "pipe", "pipe"] });
 
 let buffer = Buffer.alloc(0);
@@ -151,12 +136,9 @@ async function main() {
     if (message.id === 1 && !message.method) {
       if (message.error) throw new Error(`initialize failed: ${JSON.stringify(message.error)}`);
       pullDiagnostics = Boolean(message.result?.capabilities?.diagnosticProvider);
-      process.stderr.write(`rust-analyzer diagnosticProvider=${JSON.stringify(message.result?.capabilities?.diagnosticProvider ?? null)}\n`);
       initialized = true;
     } else if (message.method && Object.hasOwn(message, "id")) {
       await replyToServerRequest(message);
-    } else if (message.method) {
-      process.stderr.write(`lsp notification ${message.method}\n`);
     }
   }
   send({ jsonrpc: "2.0", method: "initialized", params: {} });
@@ -164,7 +146,6 @@ async function main() {
   send({ jsonrpc: "2.0", method: "textDocument/didOpen", params: { textDocument: { uri, languageId: "rust", version: 1, text: source } } });
   send({ jsonrpc: "2.0", method: "textDocument/didChange", params: { textDocument: { uri, version: 2 }, contentChanges: [{ text: source }] } });
   send({ jsonrpc: "2.0", method: "textDocument/didSave", params: { textDocument: { uri }, text: source } });
-  send({ jsonrpc: "2.0", id: 4, method: "workspace/executeCommand", params: { command: "rust-analyzer.analyzerStatus", arguments: [] } });
   if (pullDiagnostics) {
     send({ jsonrpc: "2.0", id: 2, method: "textDocument/diagnostic", params: { textDocument: { uri }, identifier: null, previousResultId: null } });
   }
@@ -181,7 +162,6 @@ async function main() {
     }
     if (message.method === "textDocument/publishDiagnostics" && message.params?.uri === uri) {
       const items = message.params.diagnostics ?? [];
-      process.stderr.write(`push diagnostics ${items.length}\n`);
       if (items.length) {
         if (!items.some((item) => item.severity === 1)) throw new Error(`expected error diagnostic, got ${JSON.stringify(items)}`);
         process.stdout.write(`workspace_lsp_smoke_ok diagnostics=${items.length}\n`);
@@ -191,18 +171,13 @@ async function main() {
     } else if (message.id === 2 && !message.method) {
       if (message.error) throw new Error(`diagnostics request failed: ${JSON.stringify(message.error)}`);
       const items = message.result?.items ?? [];
-      process.stderr.write(`pull diagnostics ${JSON.stringify(message.result)}\n`);
       if (items.some((item) => item.severity === 1)) {
         process.stdout.write(`workspace_lsp_smoke_ok diagnostics=${items.length}\n`);
         break;
       }
       emptyPushAt = Date.now();
-    } else if (message.id === 4 && !message.method) {
-      process.stderr.write(`analyzer status ${JSON.stringify(message.result)}\n`);
     } else if (message.method && Object.hasOwn(message, "id")) {
       await replyToServerRequest(message);
-    } else if (message.method) {
-      process.stderr.write(`lsp notification ${message.method}\n`);
     }
     if (Date.now() >= diagnosticsDeadline) throw new Error("diagnostics deadline exceeded");
   }

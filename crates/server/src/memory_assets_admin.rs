@@ -1168,6 +1168,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forget_memory_source_is_controller_only_and_hides_evidence_lineage() {
+        let state = crate::routes::test_app_state();
+        seed_assertion(&state);
+        let request = ForgetMemorySourceRequest {
+            conversation_id: "memory-review-fixture".into(),
+            event_seq: 1,
+        };
+        let denied = forget_memory_source(
+            State(state.clone()),
+            user(UserRole::Viewer),
+            Json(ForgetMemorySourceRequest {
+                conversation_id: request.conversation_id.clone(),
+                event_seq: request.event_seq,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let response = forget_memory_source(
+            State(state.clone()),
+            user(UserRole::Controller),
+            Json(request),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            MemoryAssertionStore::new(&state.db)
+                .get("assertion-1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            MemoryAssertionStore::new(&state.db)
+                .evidence_by_id("assertion-1", "evidence-1")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn source_reveal_checks_event_and_quote_hash_before_returning_text() {
         let state = crate::routes::test_app_state();
         seed_assertion(&state);

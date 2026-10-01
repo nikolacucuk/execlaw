@@ -481,7 +481,7 @@ implemented or cannot be qualified on this Windows host.
 | H045 | Server `mcp_http_client::tests`; full `execlaw-mcp-client` suite | 7 HTTP tests and 15 stdio client/integration tests passed: pinned version negotiation, session expiry without effect replay, wrong IDs, oversized responses/frames, cancellation, and matching SSE response before EOF. | Installed MCP endpoint and cross-platform process/session qualification |
 | H046 | Core source-evidence persistence and claim-gate tests; server report evidence tests; evaluator research verifier; sidecar evidence tests | Fetched snapshots survive notes persistence; fabricated/unrelated citations fail; stale/hash-changed, failed, truncated, and conflicting snapshots are exposed; web-scraper results carry bounded IDs/times/hashes/excerpts; offline release-v2 4/4 and periodic-v2 7/7 | Lexical support remains conservative rather than semantic entailment; broader browser-action qualification and held-out local-model scoring remain |
 | H047 | Voice frame cap, Whisper buffer cap, per-session stalled-STT interrupt, token-to-sentence TTS tests | Frame parser enforces 256 KiB payload maximum; Whisper caps utterances at 30 seconds; active-thread voice input is committed through the normal Controller chat path and ChatTokenDelta text is spoken sentence-by-sentence; per-session lock/cancellation regression passed | Push-to-talk transport, non-streaming Whisper, no automatic first-turn routing from Welcome, no continuous server VAD, supported-hardware noise/silence/reconnect/barging suite |
-| H048 | Full core and server library suites | Unit suites passed; deletion tombstone paths compile and existing projections run | Descendant deletion, backup restore reapplication, and full seeded projection qualification remain open |
+| H048 | Core memory assertion tombstone test; server source-forget route and Memory Assets UI tests (pending) | New source-event tombstones remove assertion lineage from admin/history/retrieval projections, hide evidence references, remove current projection rows, and reject late extraction evidence; append-only source events/backups remain retained | Skills, exports/diagnostics, plugin storage, backup restore reapplication, and full seeded-projection qualification remain open |
 | H049 | No stable-runner Criterion workflow or benchmark execution was available in this local verification | No baseline or optimization result produced | Self-hosted baseline, repeated hardware measurements, and quality/policy equivalence |
 | H050 | Full SPA suite and focused Memory Assets/Skills/panel tests | Follow-up full SPA run passed 531 tests; TypeScript lint passed | Real-browser onboarding/recovery, keyboard/screen-reader, per-OS, and accessibility regression gates |
 
@@ -590,9 +590,17 @@ the asset cascade. The Memory Assets page requires confirmation and tells the
 operator that original source files and backups remain. Replaying a delayed
 asset create with the same ID is rejected.
 
-H048 remains partial: memory assertion/event-evidence descendants, skills,
-exports and diagnostics, plugin storage, backup restore reapplication, and full
-projection qualification remain open.
+The follow-up adds `state_memory_privacy_tombstones` for Controller deletion
+of memory derived from a selected conversation event. It hides the source
+assertion, superseding descendants, and their evidence references from
+assertion review, source inspection, current projection, and trust-filtered
+retrieval; it removes projection rows in the same transaction and fences late
+extraction/evidence writes. The Memory Assets UI requires confirmation and
+states that the append-only source event and backups remain. Backup restore
+reapplication and the other H048 projection families remain open.
+
+H048 remains partial: skills, exports and diagnostics, plugin storage, backup
+restore reapplication, and full seeded-projection qualification remain open.
 
 ## Delivered implementation slice: H047 per-session voice cancellation (2026-09-28)
 

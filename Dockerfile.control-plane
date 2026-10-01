@@ -46,7 +46,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
 
 FROM debian:bookworm-slim
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl libfontconfig1 \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        libfontconfig1 \
+        python3 \
+        python3-venv \
+    && python3 -m venv /opt/graphify \
+    && /opt/graphify/bin/pip install --no-cache-dir "graphifyy[sql]" openai \
+    && ln -s /opt/graphify/bin/graphify /usr/local/bin/graphify \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root runtime user.
