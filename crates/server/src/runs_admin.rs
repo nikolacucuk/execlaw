@@ -916,6 +916,7 @@ mod tests {
                 binding_priority: 80,
                 binding_max_chars: 240,
                 injected_chars: 128,
+                assertion_ids: vec!["assertion-1".into()],
                 admission_reasons: vec!["trust_floor_readable".into()],
             }],
             retrieved_assets: Vec::new(),

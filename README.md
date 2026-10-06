@@ -738,6 +738,9 @@ Get-Process -Name execlaw,node -ErrorAction SilentlyContinue |
 
 ### Rust dev cheatsheet
 
+For a staged Rust edit loop and reproducible build/test timing comparisons, see
+[`docs/testing.md`](docs/testing.md#fast-local-feedback).
+
 ```bash
 # Plaintext SQLite path (fast; skips OpenSSL vendoring).
 cargo test --workspace

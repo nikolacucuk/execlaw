@@ -674,7 +674,7 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     distinguish model delay, a stalled tool, and uncertain delivery. No
     prompt, credential, or raw tool-output content enters default logs.
 
-36. [ ] <a id="enhancement-036"></a> **Turn failures into consented, replayable regression fixtures.**
+36. [x] <a id="enhancement-036"></a> **Turn failures into consented, replayable regression fixtures.**
     **P1 / M.** Connect `core/src/eval.rs` flagged ranges to the evaluation
     harness. Export selected trajectories with source provenance, redaction,
     expected state transitions, and mock tool responses; default to effects
@@ -694,13 +694,38 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     result, and the Rust CI job uses this catalog command. Fixture replay now
     drives the production `TurnExecutor` against a loopback scripted local
     OpenAI-compatible endpoint, dispatches only fixture mocks, and compares
-    emitted transitions and payloads with the recorded trajectory. Catalog
-    replay requires incident and release references. Unsupported event kinds,
-    attached media, catalog/policy-only trajectories, and raw streaming-frame
-    replay are still outside the production-executor fixture contract; the
-    broader offline replay and release qualification gate remains open.
+    emitted transitions and payloads with the recorded trajectory. Durable run
+    manifests now retain the exact policy-filtered and discoverable tool
+    declarations; consented export redacts and carries that snapshot, and
+    `--tool-catalog-snapshots` supplies a hash-checked local fallback for older
+    runs. Replay fails if a recorded tool call is absent from its catalog.
+    Catalog replay requires incident and release references. Trust-change-only state
+    fixtures pass HMAC-verified event replay without fabricating a user turn;
+    local `--policy-cases` sidecars now also rerun trust/Rule-of-Two decisions
+    through the production policy evaluator. Fixtures can carry bounded raw
+    SSE network chunks and expected decoded frames; the catalog CI
+    replay runs those chunks through the production inference SSE decoder and
+    includes them in the replay hash. Tool-call fixtures also force an inference
+    interruption after the durable tool checkpoint, reopen SQLite, reclaim the
+    same run, and verify the final event sequence without duplicating tool
+    events. User image events can use redaction-map-linked synthetic media
+    replacements for fully local replay; the exporter never copies source image
+    bytes. The latest catalog run replays three fixtures with HMAC verification,
+    three policy cases, one raw stream capture, one synthetic image, and one
+    recovered tool turn.
+    **Session progress (2026-10-01):** fixture replay now preserves previously
+    unknown event kinds and payloads in HMAC-verified `Other` events while
+    retaining the source kind in the replay digest. Synthetic audio, video, and
+    PDF replacements are validated and included in offline replay hashes;
+    non-image attachments do not enter the image-only inference API. Core
+    fixture validation tests (11), harness replay tests (11), and the checked-in
+    CI fixture catalog replay pass. A fresh CI-command run now writes a report
+    for all three fixtures: HMAC verified, effects disabled, and incident/
+    release references present; it replays policy, raw framing, synthetic media,
+    exact tool catalogs, executor turns, and recovery. Consent, redaction, and
+    these incident/release-linked offline cases have regression coverage.
 
-37. [ ] <a id="enhancement-037"></a> **Make memory evidence inspectable and correctable.** **P1 / M.**
+37. [x] <a id="enhancement-037"></a> **Make memory evidence inspectable and correctable.** **P1 / M.**
     Extend `core/src/memory_assertions.rs`, `memory_assets.rs`, and the memory
     admin UI rather than creating another store. Show source events/spans,
     direct versus inferred assertions, validity windows, revisions, approval,
@@ -717,7 +742,31 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     checkpoint. The legacy unreceipted HOT key/value prompt block is no longer
     injected; governed asset loadouts remain trust filtered and receipted.
     Agent-run restart/invalidation coverage and full retraction qualification
-    across every derived projection remain open.
+    across every derived projection remain open. A Controller retraction
+    regression now also asserts the assertion disappears from the current
+    ranked memory view, and the metadata-only per-turn loadout receipt survives
+    a database reopen. An asset deletion regression now verifies its tombstone
+    removes future HOT loadouts, lexical and hybrid results, and embedding
+    rebuild candidates, and prevents reuse of the deleted ID. An agent
+    supervisor regression persists a governed receipt in a run checkpoint,
+    reopens SQLite, reconciles the interrupted run, and confirms the next
+    loadout omits a tombstoned asset. Retraction now also invalidates derived
+    Summary assertions supported by the same source event; the server regression
+    verifies the derived summary disappears from current ranking.
+    **Session progress (2026-10-01):** migration 0071 records Controller-owned
+    assertion-to-memory-asset links. The Controller UI can link only approved,
+    scope/trust-matched assertions whose evidence events pass the event-log
+    integrity check; the asset list and per-turn receipts expose linked
+    assertion IDs. Unlinked, retracted, corrected, or evidence-hidden memory
+    assets fail closed in HOT and eligible retrieval. Retraction, correction,
+    and source-forget archive linked derived assets and remove their FTS rows in
+    the same SQLite transaction as the assertion review/tombstone. The review
+    page exports its loaded assertion values and evidence references to a local
+    JSON download, without inspected source quote text or a network request.
+    Focused core memory-asset tests (9), core assertion tests (8), and server
+    memory-admin tests (5) pass; the memory-assets SPA test (4) and TypeScript
+    lint pass. Held-out end-to-end retrieval and release qualification are
+    tracked under H038 and remain open.
 
 38. [ ] <a id="enhancement-038"></a> **Qualify trust-first hybrid and temporal retrieval end to end.**
     **P1 / L.** `core/src/memory_assets.rs` already implements lexical/vector
@@ -744,9 +793,23 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     qualify-memory-retrieval` command now builds a held-out versioned index,
     compares lexical/hybrid recall and local answers, tests forbidden/expired/
     archived/stale-vector candidates, and records build time plus retrieval
-    p50/p95 against a fixed budget. Its current report records `http_connect`
-    because the configured local inference service is unavailable; H038 remains
-    unqualified.
+    p50/p95 against a fixed budget. The latest report records `http_connect`
+    because the configured local inference service at `127.0.0.1:8000` is
+    unavailable. The latest report records lexical results for all four queries
+    (recall 0.75, p95 2 ms) and zero forbidden hits, but no hybrid/answer
+    results. An offline regression verifies lexical measurements and expiry,
+    archive, and stale-source filtering when embeddings are unavailable. H038
+    remains unqualified. **2026-10-01 follow-up:** H037 now requires approved,
+    event-backed assertion links for memory assets, so the H038 evaluator seeds
+    each synthetic fixture with an approved direct assertion, committed source
+    event, evidence hash, and asset link before retrieval. The unavailable-
+    embedding regression passes again; the refreshed report records lexical
+    recall 0.75, p95 3 ms, and zero forbidden hits. Hybrid and answer scores
+    remain absent because 127.0.0.1:8000 is unavailable. The running local
+    control plane is an older `--no-encrypt` instance: its database reports 24
+    applied migrations, and the current Standard resolver cannot query its
+    pre-`scope` `config_local_endpoint_approvals` schema. No migration or restart
+    was run against that active service.
 
 39. [ ] <a id="enhancement-039"></a> **Evaluate learned skills by execution and support safe rollback.**
     **P1 / L.** Extend item 15 and `server/src/skills_admin.rs` beyond
@@ -764,8 +827,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     bounded local tool loop in a temporary workspace with deterministic mock
     integrations, exact workspace/call assertions, forbidden-action checks,
     and paired parent/candidate results. Denied actions and cumulative output
-    tokens fail a case. Full live-model held-out qualification and promotion
-    evidence remain open.
+    tokens fail a case. The bounded workspace/mock-integration server tests
+    pass locally; full live-model held-out qualification and promotion evidence
+    remain open because no local inference backend is reachable.
+    **2026-10-01 follow-up:** the full server library rerun passes both
+    `skill_eval` workspace/mock-integration tests; H039 remains unqualified
+    until the candidate/parent held-out suite and governed promotion run use a
+    reachable local Standard model.
 
 40. [ ] <a id="enhancement-040"></a> **Ship a complete workspace coding plugin.** **P1 / L.**
     Implement the existing strategy's coding-workspace proposal through
@@ -787,14 +855,20 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     networking, drop capabilities, and enforce CPU/memory/PID/output/time
     limits. A digest-pinned Rust/TypeScript toolchain image is built locally;
     Controller config requires verified provenance or explicit approval of the
-    exact image digest. A disposable Rust crate passed `cargo test --offline`
-    through the manager. The Docker smoke confirmed blocked networking, a
-    read-only workspace mount, and Rust Analyzer diagnostics. The Rust-side LSP
-    late-push regression and server route tests compile but have not executed
-    because the Windows test binary is blocked by Application Control 4551 and
-    WSL terminates during builds. The held-out multi-file model-repair benchmark
-    and H023-H029 write-authority prerequisites remain open, so H040 is not
-    complete.
+    exact image digest. The offline multi-file repair fixture passes with exact
+    final file-map and successful `cargo test` evidence. Focused Windows tests
+    pass for the container manager (4), core workspace persistence (8), plugin
+    manifest (2), eval harness (1), and server workspace/skill paths (49). The
+    SPA page test and TypeScript lint pass. A live Docker smoke confirms blocked
+    networking, a read-only workspace mount, and seven Rust Analyzer diagnostics.
+    The held-out local-model repair benchmark and H023-H029 write-authority
+    prerequisites remain open, so H040 is not complete.
+    **2026-10-01 follow-up:** the 10 `workspace_coding` regressions passed,
+    including traversal, secret-file, hardlink, symlink escape, run-checkout,
+    idempotency, and concurrent-edit checks. The pinned-image Docker smoke
+    again denied network access, rejected a write to the read-only workspace,
+    and returned seven Rust Analyzer diagnostics. H040 remains open pending
+    H023-H029 qualification and the held-out local-model benchmark.
 
 41. [x] <a id="enhancement-041"></a> **Add workspace checkpoints, run forks, and safe diff application.**
     **P1 / L.** Extend the coding plugin and run store with isolated working

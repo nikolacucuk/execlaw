@@ -34,5 +34,18 @@
   ],
   "mock_tool_responses": [
     {"turn_seq": 1, "ordinal": 0, "payload": {"ordinal": 0, "outcome": {"Ok": {"value": "safe"}}}}
+  ],
+  "tool_catalogs": [
+    {
+      "turn_seq": 1,
+      "source_catalog_hash": "ab6ac6b2cc5a4878b8a288904da3f65ff935fa0e2fc79089541a9d9151025c31",
+      "snapshot_sha256": "abe8a9003f6efb5fd2ab11a038112395ea62d5a5eac1523d63eed10fa4eee1d5",
+      "tools": [
+        {"type":"function","function":{"name":"fixture.echo","description":"Offline fixture replay tool; all effects are disabled.","parameters":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}}}
+      ],
+      "discoverable_tools": [
+        {"type":"function","function":{"name":"fixture.echo","description":"Offline fixture replay tool; all effects are disabled.","parameters":{"type":"object","properties":{"value":{"type":"string"}},"required":["value"],"additionalProperties":false}}}
+      ]
+    }
   ]
 }

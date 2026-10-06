@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::{
     Router,
-    routing::{get, put},
+    routing::{get, post, put},
 };
 use execlaw_core::memory_assertions::{
     MemoryAssertionError, MemoryAssertionEvidenceView, MemoryAssertionReviewRecord,
@@ -101,6 +101,7 @@ pub struct MemoryAssetAdminView {
     pub version: i64,
     pub source_hash: Option<String>,
     pub expires_at: Option<i64>,
+    pub assertion_ids: Vec<String>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -256,6 +257,7 @@ impl From<MemoryAsset> for MemoryAssetAdminView {
             version: asset.version,
             source_hash: asset.source_hash,
             expires_at: asset.expires_at,
+            assertion_ids: Vec::new(),
         }
     }
 }
@@ -322,7 +324,18 @@ pub async fn list(
     }
     let store = MemoryAssetStore::new(&state.db);
     let assets = match store.list(200) {
-        Ok(assets) => assets.into_iter().map(MemoryAssetAdminView::from).collect(),
+        Ok(assets) => {
+            let mut views = Vec::with_capacity(assets.len());
+            for asset in assets {
+                let mut view = MemoryAssetAdminView::from(asset);
+                view.assertion_ids = match store.linked_assertions(&view.asset_id) {
+                    Ok(ids) => ids,
+                    Err(error) => return failure(error),
+                };
+                views.push(view);
+            }
+            views
+        }
         Err(error) => return failure(error),
     };
     let bindings = match store.list_loadout(agent_scope, 200) {
@@ -368,6 +381,88 @@ pub async fn list(
         }),
     )
         .into_response()
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct LinkMemoryAssertionRequest {
+    pub assertion_id: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/memory-assets/{asset_id}/assertions",
+    params(("asset_id" = String, Path, description = "Derived memory asset")),
+    request_body = LinkMemoryAssertionRequest,
+    responses((status = 200, description = "Approved evidence-backed assertion linked"), (status = 400, description = "Assertion does not match this asset scope and trust"), (status = 403, description = "Controller role required"), (status = 404, description = "Asset not found")),
+    security(("bearer_jwt" = [])),
+    tag = "memory"
+)]
+pub async fn link_assertion(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(asset_id): Path<String>,
+    Json(request): Json<LinkMemoryAssertionRequest>,
+) -> impl IntoResponse {
+    if let Err(response) = controller(&user) {
+        return response;
+    }
+    let assertion_store = MemoryAssertionStore::new(&state.db);
+    match assertion_store.get(&request.assertion_id) {
+        Ok(Some(assertion))
+            if assertion.status == execlaw_core::memory_assertions::AssertionStatus::Approved => {}
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"only current approved assertions can be linked"})),
+            )
+                .into_response();
+        }
+        Err(error) => return failure(error),
+    }
+    let evidence = match assertion_store.evidence_for(&request.assertion_id, 500) {
+        Ok(evidence) if !evidence.is_empty() => evidence,
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error":"assertion has no source evidence"})),
+            )
+                .into_response();
+        }
+        Err(error) => return failure(error),
+    };
+    if evidence.len() > 500 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error":"assertion evidence exceeds the link verification limit"}))).into_response();
+    }
+    for source in &evidence {
+        match evidence_source_quote(&state, source) {
+            Ok((_, true)) => {}
+            Ok((_, false)) => {
+                return (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({"error":"event integrity key is unavailable"})),
+                )
+                    .into_response();
+            }
+            Err(response) => return response,
+        }
+    }
+    match MemoryAssetStore::new(&state.db).link_assertion(
+        &asset_id,
+        &request.assertion_id,
+        &user.user_id,
+        chrono::Utc::now().timestamp(),
+    ) {
+        Ok(linked) => (StatusCode::OK, Json(serde_json::json!({"linked":true,"created":linked}))).into_response(),
+        Err(execlaw_core::memory_assets::MemoryAssetError::NotFound(_)) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error":"memory asset not found"})),
+        ).into_response(),
+        Err(execlaw_core::memory_assets::MemoryAssetError::InvalidAssertionLink) => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error":"assertion must be approved, evidence-backed, and match the asset scope and trust"})),
+        ).into_response(),
+        Err(error) => failure(error),
+    }
 }
 
 #[utoipa::path(
@@ -847,6 +942,10 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/memory-assets", get(list))
         .route(
+            "/api/admin/memory-assets/{asset_id}/assertions",
+            post(link_assertion),
+        )
+        .route(
             "/api/admin/memory-assets/retrieval-config",
             get(get_retrieval_config).put(put_retrieval_config),
         )
@@ -1171,6 +1270,25 @@ mod tests {
     async fn forget_memory_source_is_controller_only_and_hides_evidence_lineage() {
         let state = crate::routes::test_app_state();
         seed_assertion(&state);
+        let linked_asset = MemoryAssetStore::new(&state.db);
+        linked_asset
+            .create(NewMemoryAsset {
+                asset_id: "forgotten-source-asset",
+                asset_type: AssetType::Memory,
+                name: "Source-derived memory",
+                description: "must be invalidated when its source is forgotten",
+                owner_scope: "global",
+                visibility: execlaw_core::memory_assets::AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: None,
+                content_ref: Some("source-derived value"),
+                source_hash: Some("source-derived-hash"),
+                now_unix: 1,
+            })
+            .unwrap();
+        linked_asset
+            .link_assertion("forgotten-source-asset", "assertion-1", "user-1", 2)
+            .unwrap();
         let request = ForgetMemorySourceRequest {
             conversation_id: "memory-review-fixture".into(),
             event_seq: 1,
@@ -1195,6 +1313,18 @@ mod tests {
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            linked_asset
+                .get("forgotten-source-asset")
+                .unwrap()
+                .unwrap()
+                .status,
+            "archived"
+        );
+        assert!(matches!(
+            linked_asset.link_assertion("forgotten-source-asset", "assertion-1", "user-1", 3),
+            Err(execlaw_core::memory_assets::MemoryAssetError::InvalidAssertionLink)
+        ));
         assert!(
             MemoryAssertionStore::new(&state.db)
                 .get("assertion-1")
@@ -1275,6 +1405,95 @@ mod tests {
     async fn reviews_append_signed_event_with_projection_in_one_commit() {
         let state = crate::routes::test_app_state();
         seed_assertion(&state);
+        let memory_assets = MemoryAssetStore::new(&state.db);
+        memory_assets
+            .create(NewMemoryAsset {
+                asset_id: "assertion-backed-asset",
+                asset_type: AssetType::Memory,
+                name: "Evidence-backed preference",
+                description: "Linked to a reviewed assertion",
+                owner_scope: "global",
+                visibility: execlaw_core::memory_assets::AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: None,
+                content_ref: Some("The reviewed preference"),
+                source_hash: Some("assertion-backed-source"),
+                now_unix: 1,
+            })
+            .unwrap();
+        let denied_link = link_assertion(
+            State(state.clone()),
+            user(UserRole::Operator),
+            Path("assertion-backed-asset".into()),
+            Json(LinkMemoryAssertionRequest {
+                assertion_id: "assertion-1".into(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(denied_link.status(), StatusCode::FORBIDDEN);
+        let link_response = link_assertion(
+            State(state.clone()),
+            user(UserRole::Controller),
+            Path("assertion-backed-asset".into()),
+            Json(LinkMemoryAssertionRequest {
+                assertion_id: "assertion-1".into(),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(link_response.status(), StatusCode::OK);
+        memory_assets
+            .bind(
+                "assertion-backed-asset",
+                "default",
+                InjectionMode::Hot,
+                1,
+                256,
+                1,
+            )
+            .unwrap();
+        let admitted = memory_assets
+            .resolve_hot_loadout("default", &["Controller"], &["global"], 2, 1024, 10)
+            .unwrap();
+        assert_eq!(admitted.len(), 1);
+        assert_eq!(admitted[0].assertion_ids, vec!["assertion-1"]);
+
+        let source_conversation = ConversationId::from("memory-review-fixture");
+        let assertions = MemoryAssertionStore::new(&state.db);
+        assertions
+            .append(&NewMemoryAssertion {
+                assertion_id: "derived-summary-1".into(),
+                scope: "global".into(),
+                trust_class: "Controller".into(),
+                kind: MemoryKind::Summary,
+                subject: "project".into(),
+                predicate: "summary".into(),
+                object: serde_json::json!("ready project summary"),
+                confidence: 0.8,
+                status: AssertionStatus::Approved,
+                observed_from: 1,
+                observed_to: None,
+                valid_from: 1,
+                valid_to: None,
+                supersedes_id: None,
+                extraction_run_id: "summary-fixture".into(),
+                created_event_seq: EventSeq(1),
+                created_at: 2,
+            })
+            .unwrap();
+        assertions
+            .add_evidence(&NewMemoryEvidence {
+                evidence_id: "derived-summary-evidence-1".into(),
+                assertion_id: "derived-summary-1".into(),
+                conversation_id: source_conversation,
+                event_seq: EventSeq(1),
+                payload_path: "$.source".into(),
+                quote_hash: hex::encode(Sha256::digest(b"derived summary of memo")),
+                evidence_kind: EvidenceKind::Derived,
+                created_at: 2,
+            })
+            .unwrap();
         let response = retract_assertion(
             State(state.clone()),
             user(UserRole::Controller),
@@ -1286,10 +1505,43 @@ mod tests {
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            memory_assets
+                .get("assertion-backed-asset")
+                .unwrap()
+                .unwrap()
+                .status,
+            "archived"
+        );
+        assert!(
+            memory_assets
+                .resolve_hot_loadout(
+                    "default",
+                    &["Controller"],
+                    &["global"],
+                    chrono::Utc::now().timestamp(),
+                    1024,
+                    10
+                )
+                .unwrap()
+                .is_empty()
+        );
         assert!(
             MemoryAssertionStore::new(&state.db)
                 .is_retracted("assertion-1")
                 .unwrap()
+        );
+        assert!(
+            MemoryAssertionStore::new(&state.db)
+                .current_ranked(
+                    "global",
+                    &["Controller"],
+                    chrono::Utc::now().timestamp(),
+                    10
+                )
+                .unwrap()
+                .is_empty(),
+            "retracted evidence must not remain in the current memory projection"
         );
         let conversation = ConversationId::from("memory-review-fixture");
         let key = state.event_log_hmac_key.as_ref().unwrap();
@@ -1304,6 +1556,25 @@ mod tests {
 
         let correction_state = crate::routes::test_app_state();
         seed_assertion(&correction_state);
+        let corrected_asset = MemoryAssetStore::new(&correction_state.db);
+        corrected_asset
+            .create(NewMemoryAsset {
+                asset_id: "corrected-assertion-asset",
+                asset_type: AssetType::Memory,
+                name: "Old assertion projection",
+                description: "must be invalidated on correction",
+                owner_scope: "global",
+                visibility: execlaw_core::memory_assets::AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: None,
+                content_ref: Some("old assertion value"),
+                source_hash: Some("old-assertion-source"),
+                now_unix: 1,
+            })
+            .unwrap();
+        corrected_asset
+            .link_assertion("corrected-assertion-asset", "assertion-1", "user-1", 2)
+            .unwrap();
         let response = correct_assertion(
             State(correction_state.clone()),
             user(UserRole::Controller),
@@ -1316,6 +1587,14 @@ mod tests {
         .await
         .into_response();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            corrected_asset
+                .get("corrected-assertion-asset")
+                .unwrap()
+                .unwrap()
+                .status,
+            "archived"
+        );
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();

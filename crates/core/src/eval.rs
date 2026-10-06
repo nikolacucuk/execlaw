@@ -41,6 +41,18 @@ pub struct RegressionFixture {
     pub events: Vec<RegressionFixtureEvent>,
     pub expected_transitions: Vec<ExpectedStateTransition>,
     pub mock_tool_responses: Vec<MockToolResponse>,
+    /// Optional local wire captures for failures in the incremental SSE frame decoder.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub raw_stream_fixtures: Vec<RawStreamFixture>,
+    /// Synthetic image bytes used to replay multimodal turns without source media.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub synthetic_media: Vec<SyntheticMediaFixture>,
+    /// Local inputs and expected outputs for the production pure turn-policy evaluator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub policy_cases: Vec<PolicyEvaluationFixture>,
+    /// Per-turn tool declarations captured from the durable run input manifest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_catalogs: Vec<ToolCatalogFixture>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,6 +100,59 @@ pub struct MockToolResponse {
     pub turn_seq: i64,
     pub ordinal: u32,
     pub payload: Value,
+}
+
+/// A redacted raw byte stream split at the original network chunk boundaries.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RawStreamFixture {
+    pub fixture_id: String,
+    /// Hex-encoded network chunks; keeping chunk boundaries reproduces framing bugs.
+    pub chunks_hex: Vec<String>,
+    /// Expected decoded `data:` payload for each SSE event.
+    pub expected_data: Vec<String>,
+}
+
+/// Synthetic, non-source media content referenced by event `attachment_ids`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SyntheticMediaFixture {
+    pub attachment_id: String,
+    pub mime_type: String,
+    /// Hex-encoded synthetic image bytes; source attachment bytes must never be copied here.
+    pub content_hex: String,
+    pub synthetic: bool,
+}
+
+/// One pure policy-engine regression case with no external effects.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PolicyEvaluationFixture {
+    pub case_id: String,
+    pub sender_trust: String,
+    pub effective_trust: String,
+    pub voice: bool,
+    pub accesses_sensitive_data: bool,
+    pub produces_external_effect: bool,
+    pub expected: ExpectedPolicyDecision,
+}
+
+/// Expected response from `execlaw_policy::trust::evaluate_turn`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExpectedPolicyDecision {
+    pub drop_turn: bool,
+    pub require_approval: bool,
+    pub planner_executor: bool,
+    pub spotlighting: bool,
+    pub latency_band: String,
+    pub capability_set: Vec<String>,
+}
+
+/// Exact policy-filtered and discoverable tool declarations shown for one user turn.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolCatalogFixture {
+    pub turn_seq: i64,
+    pub source_catalog_hash: String,
+    pub snapshot_sha256: String,
+    pub tools: Vec<Value>,
+    pub discoverable_tools: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +311,239 @@ pub fn validate_regression_fixture(
         .any(|id| id.trim().is_empty() || id.contains('@'))
     {
         return Err("fixture contains an invalid synthetic identity".into());
+    }
+    if fixture.raw_stream_fixtures.len() > 128 {
+        return Err("fixture contains more than 128 raw stream captures".into());
+    }
+    let mut raw_stream_ids = std::collections::HashSet::new();
+    for raw in &fixture.raw_stream_fixtures {
+        if raw.fixture_id.trim().is_empty()
+            || raw.fixture_id.len() > 128
+            || !raw_stream_ids.insert(raw.fixture_id.as_str())
+            || raw.chunks_hex.is_empty()
+            || raw.chunks_hex.len() > 4096
+            || raw.expected_data.len() > 4096
+            || raw
+                .expected_data
+                .iter()
+                .any(|data| data.len() > 1024 * 1024)
+        {
+            return Err("raw stream fixture metadata is invalid".into());
+        }
+        let mut total_bytes = 0usize;
+        for chunk in &raw.chunks_hex {
+            if chunk.is_empty() || chunk.len() % 2 != 0 || chunk.len() > 2 * 1024 * 1024 {
+                return Err("raw stream fixture contains an invalid hex chunk".into());
+            }
+            let bytes = hex::decode(chunk)
+                .map_err(|_| "raw stream fixture contains invalid hexadecimal data")?;
+            total_bytes = total_bytes.saturating_add(bytes.len());
+            if total_bytes > 4 * 1024 * 1024 {
+                return Err("raw stream fixture exceeds the 4 MiB wire limit".into());
+            }
+        }
+    }
+    if fixture.synthetic_media.len() > 32 {
+        return Err("fixture contains more than 32 synthetic media items".into());
+    }
+    let mut media_ids = std::collections::HashSet::new();
+    let mut media_bytes = 0usize;
+    for media in &fixture.synthetic_media {
+        if !media.synthetic
+            || media.attachment_id.trim().is_empty()
+            || media.attachment_id.len() > 128
+            || media.attachment_id.contains('@')
+            || !media_ids.insert(media.attachment_id.as_str())
+            || !matches!(
+                media.mime_type.as_str(),
+                "image/png"
+                    | "image/jpeg"
+                    | "image/webp"
+                    | "image/gif"
+                    | "audio/wav"
+                    | "audio/mpeg"
+                    | "audio/ogg"
+                    | "audio/mp4"
+                    | "video/mp4"
+                    | "video/webm"
+                    | "application/pdf"
+            )
+            || media.content_hex.is_empty()
+            || media.content_hex.len() % 2 != 0
+            || media.content_hex.len() > 2 * 2 * 1024 * 1024
+        {
+            return Err("synthetic media fixture metadata is invalid".into());
+        }
+        let decoded = hex::decode(&media.content_hex)
+            .map_err(|_| "synthetic media fixture contains invalid hexadecimal data")?;
+        media_bytes = media_bytes.saturating_add(decoded.len());
+        if media_bytes > 4 * 1024 * 1024 {
+            return Err("synthetic media fixtures exceed the 4 MiB total limit".into());
+        }
+    }
+    let mut referenced_media_ids = std::collections::HashSet::new();
+    for event in fixture
+        .events
+        .iter()
+        .filter(|event| event.kind == "user_msg")
+    {
+        if let Some(ids) = event
+            .payload
+            .get("attachment_ids")
+            .and_then(Value::as_array)
+        {
+            for id in ids {
+                let id = id
+                    .as_str()
+                    .ok_or_else(|| "fixture attachment ID is not a string".to_owned())?;
+                if !media_ids.contains(id) {
+                    return Err(format!(
+                        "fixture attachment {id} is missing a synthetic media replacement"
+                    ));
+                }
+                referenced_media_ids.insert(id);
+            }
+        }
+    }
+    if referenced_media_ids.len() != media_ids.len() {
+        return Err("fixture contains an unreferenced synthetic media replacement".into());
+    }
+    if fixture.policy_cases.len() > 128 {
+        return Err("fixture contains more than 128 policy evaluation cases".into());
+    }
+    let mut policy_case_ids = std::collections::HashSet::new();
+    let known_trust_levels = [
+        "Controller",
+        "Delegated",
+        "KnownTrusted",
+        "KnownLimited",
+        "UnknownPending",
+        "Blocked",
+    ];
+    for case in &fixture.policy_cases {
+        if case.case_id.trim().is_empty()
+            || case.case_id.len() > 128
+            || !policy_case_ids.insert(case.case_id.as_str())
+            || !fixture
+                .redaction
+                .synthetic_ids
+                .iter()
+                .any(|id| id == &case.case_id)
+            || !known_trust_levels.contains(&case.sender_trust.as_str())
+            || !known_trust_levels.contains(&case.effective_trust.as_str())
+            || !matches!(case.expected.latency_band.as_str(), "any" | "low_only")
+            || case.expected.capability_set.len() > 32
+            || case
+                .expected
+                .capability_set
+                .iter()
+                .any(|capability| capability.trim().is_empty() || capability.len() > 128)
+        {
+            return Err("policy evaluation fixture metadata is invalid".into());
+        }
+        let unique_capabilities: std::collections::HashSet<_> =
+            case.expected.capability_set.iter().collect();
+        if unique_capabilities.len() != case.expected.capability_set.len() {
+            return Err("policy evaluation fixture has duplicate capabilities".into());
+        }
+    }
+    if fixture.tool_catalogs.len() > 4096 {
+        return Err("fixture contains more than 4096 tool catalog snapshots".into());
+    }
+    let mut tool_catalog_sequences = std::collections::HashSet::new();
+    for catalog in &fixture.tool_catalogs {
+        if catalog.turn_seq < provenance.from_seq
+            || catalog.turn_seq > provenance.to_seq
+            || !tool_catalog_sequences.insert(catalog.turn_seq)
+            || [
+                catalog.source_catalog_hash.as_str(),
+                catalog.snapshot_sha256.as_str(),
+            ]
+            .iter()
+            .any(|digest| {
+                digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+            || catalog.tools.len() > 512
+            || catalog.discoverable_tools.len() > 512
+        {
+            return Err("tool catalog snapshot metadata is invalid".into());
+        }
+        let snapshot = serde_json::json!({
+            "tools":catalog.tools,
+            "discoverable_tools":catalog.discoverable_tools,
+        });
+        let snapshot_hash = crate::harness::HarnessStore::fingerprint(&snapshot)
+            .map_err(|error| format!("tool catalog snapshot cannot be hashed: {error}"))?;
+        if snapshot_hash != catalog.snapshot_sha256 {
+            return Err("tool catalog snapshot hash does not match its declarations".into());
+        }
+        if snapshot.to_string().len() > 1024 * 1024 {
+            return Err("tool catalog snapshot exceeds the 1 MiB limit".into());
+        }
+        for declarations in [&catalog.tools, &catalog.discoverable_tools] {
+            let mut names = std::collections::HashSet::new();
+            for declaration in declarations {
+                let function = declaration.get("function");
+                let name = function
+                    .and_then(|value| value.get("name"))
+                    .and_then(Value::as_str);
+                if declaration.get("type").and_then(Value::as_str) != Some("function")
+                    || name.is_none_or(str::is_empty)
+                    || !names.insert(name.unwrap_or_default())
+                    || function
+                        .and_then(|value| value.get("description"))
+                        .and_then(Value::as_str)
+                        .is_none()
+                    || function
+                        .and_then(|value| value.get("parameters"))
+                        .and_then(Value::as_object)
+                        .is_none()
+                {
+                    return Err(
+                        "tool catalog snapshot contains an invalid or duplicate declaration".into(),
+                    );
+                }
+            }
+        }
+    }
+    let mut active_turn = None;
+    for event in &fixture.events {
+        if event.kind == "user_msg" {
+            active_turn = Some(event.seq);
+        } else if event.kind == "tool_use" {
+            let turn_seq =
+                active_turn.ok_or_else(|| "tool_use event has no user turn".to_owned())?;
+            let tool_name = event
+                .payload
+                .get("tool_name")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "tool_use event has no tool name".to_owned())?;
+            let catalog = fixture
+                .tool_catalogs
+                .iter()
+                .find(|catalog| catalog.turn_seq == turn_seq)
+                .ok_or_else(|| format!("tool turn {turn_seq} has no captured catalog snapshot"))?;
+            if !catalog
+                .tools
+                .iter()
+                .chain(&catalog.discoverable_tools)
+                .any(|entry| {
+                    entry.pointer("/function/name").and_then(Value::as_str) == Some(tool_name)
+                })
+            {
+                return Err(format!(
+                    "tool '{tool_name}' is absent from turn {turn_seq}'s catalog"
+                ));
+            }
+        }
+    }
+    if fixture.tool_catalogs.iter().any(|catalog| {
+        !fixture
+            .events
+            .iter()
+            .any(|event| event.kind == "user_msg" && event.seq == catalog.turn_seq)
+    }) {
+        return Err("tool catalog snapshot does not refer to a user event".into());
     }
     Ok(RegressionFixtureValidation {
         fixture_id: provenance.flagged_range_id,
@@ -459,6 +757,10 @@ mod tests {
                 transition: "user_msg".into(),
             }],
             mock_tool_responses: Vec::new(),
+            raw_stream_fixtures: Vec::new(),
+            synthetic_media: Vec::new(),
+            policy_cases: Vec::new(),
+            tool_catalogs: Vec::new(),
         };
         let validation = validate_regression_fixture(&fixture).unwrap();
         assert_eq!(validation.incident_ref.as_deref(), Some("INC-42"));
@@ -477,6 +779,69 @@ mod tests {
         assert_eq!(validation.incident_ref.as_deref(), Some("SYNTHETIC-INC-1"));
         assert_eq!(validation.release_ref.as_deref(), Some("v0.0.0"));
         assert!(!validation.effects_enabled);
+        assert_eq!(fixture.policy_cases.len(), 3);
+        assert_eq!(fixture.raw_stream_fixtures.len(), 1);
+        let first = hex::decode(&fixture.raw_stream_fixtures[0].chunks_hex[0]).unwrap();
+        let second = hex::decode(&fixture.raw_stream_fixtures[0].chunks_hex[1]).unwrap();
+        assert!(
+            first.last() == Some(&0xC3) && second.first() == Some(&0xA9),
+            "fixture chunk boundaries must split the UTF-8 code point"
+        );
+    }
+
+    #[test]
+    fn raw_stream_fixture_validation_rejects_malformed_hex() {
+        let mut fixture: RegressionFixture = serde_json::from_str(include_str!(
+            "../../../evals/fixtures/synthetic-offline-regression.json"
+        ))
+        .unwrap();
+        fixture.raw_stream_fixtures[0].chunks_hex[0] = "xyz".into();
+        assert!(validate_regression_fixture(&fixture).is_err());
+    }
+
+    #[test]
+    fn attached_media_requires_a_synthetic_replacement_and_known_mime_type() {
+        let fixture: RegressionFixture = serde_json::from_str(include_str!(
+            "../../../evals/fixtures/synthetic-image-regression.json"
+        ))
+        .unwrap();
+        assert!(validate_regression_fixture(&fixture).unwrap().valid);
+
+        let mut missing_replacement = fixture.clone();
+        missing_replacement.synthetic_media.clear();
+        assert!(validate_regression_fixture(&missing_replacement).is_err());
+
+        let mut source_bytes = fixture;
+        source_bytes.synthetic_media[0].synthetic = false;
+        assert!(validate_regression_fixture(&source_bytes).is_err());
+
+        let mut audio = serde_json::from_str::<RegressionFixture>(include_str!(
+            "../../../evals/fixtures/synthetic-image-regression.json"
+        ))
+        .unwrap();
+        audio.synthetic_media[0].mime_type = "audio/wav".into();
+        audio.synthetic_media[0].content_hex =
+            "524946462400000057415645666d74201000000001000100401f0000401f0000010008006461746100000000".into();
+        assert!(validate_regression_fixture(&audio).unwrap().valid);
+        audio.synthetic_media[0].mime_type = "application/octet-stream".into();
+        assert!(validate_regression_fixture(&audio).is_err());
+    }
+
+    #[test]
+    fn policy_fixture_validation_rejects_duplicate_case_ids_and_unknown_trust() {
+        let mut fixture: RegressionFixture = serde_json::from_str(include_str!(
+            "../../../evals/fixtures/synthetic-offline-regression.json"
+        ))
+        .unwrap();
+        fixture.policy_cases[1].case_id = fixture.policy_cases[0].case_id.clone();
+        assert!(validate_regression_fixture(&fixture).is_err());
+
+        let mut fixture: RegressionFixture = serde_json::from_str(include_str!(
+            "../../../evals/fixtures/synthetic-offline-regression.json"
+        ))
+        .unwrap();
+        fixture.policy_cases[0].sender_trust = "UntrustedTypo".into();
+        assert!(validate_regression_fixture(&fixture).is_err());
     }
 
     fn mk_row(label: &str) -> EvalFlagRow {

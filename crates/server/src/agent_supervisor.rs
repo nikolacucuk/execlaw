@@ -836,6 +836,7 @@ fn run_scoped_read_tool(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use execlaw_core::agents::{AgentStore, AgentUpsert};
     use execlaw_core::{DbConfig, MigrationRunner};
 
     #[test]
@@ -952,6 +953,193 @@ mod tests {
                 .unwrap()
                 .model_seq,
             Some(seq)
+        );
+    }
+
+    #[test]
+    fn agent_loadout_checkpoint_survives_restart_and_deleted_asset_is_not_reloaded() {
+        use execlaw_core::events::{EventKind, EventLog, EventRecord};
+        use execlaw_core::ids::EventSeq;
+        use execlaw_core::memory_assertions::{
+            AssertionStatus, EvidenceKind, MemoryAssertionStore, MemoryKind, NewMemoryAssertion,
+            NewMemoryEvidence,
+        };
+        use execlaw_core::memory_assets::{
+            AssetType, AssetVisibility, InjectionMode, MemoryAssetStore, NewMemoryAsset,
+        };
+        use sha2::{Digest, Sha256};
+
+        let dir = tempfile::tempdir().unwrap();
+        let config = DbConfig {
+            path: dir.path().join("agent-memory-restart.db"),
+            key: None,
+        };
+        let conversation_id = execlaw_core::ids::ConversationId::from("agent-memory-restart");
+        let db = Database::open(&config).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        crate::chats::ensure_conversation_for(&db, &conversation_id);
+        let source_text = "Use the synthetic local fixture.";
+        let source_payload = serde_json::json!({"text":source_text});
+        let source_event = EventRecord::new(
+            conversation_id.clone(),
+            EventSeq(1),
+            EventKind::UserMsg,
+            &source_payload,
+            Some("controller".into()),
+        )
+        .unwrap();
+        EventLog::new(&db)
+            .with_hmac_key(b"agent-memory-restart-hmac-key-v1".to_vec())
+            .append(&source_event)
+            .unwrap();
+        let assertion_id = "agent-restart-assertion";
+        let assertion_store = MemoryAssertionStore::new(&db);
+        assertion_store
+            .append(&NewMemoryAssertion {
+                assertion_id: assertion_id.into(),
+                scope: "global".into(),
+                trust_class: "Controller".into(),
+                kind: MemoryKind::Semantic,
+                subject: "agent-restart-memory".into(),
+                predicate: "agent_fixture_preference".into(),
+                object: serde_json::json!(source_text),
+                confidence: 1.0,
+                status: AssertionStatus::Approved,
+                observed_from: 1,
+                observed_to: None,
+                valid_from: 1,
+                valid_to: None,
+                supersedes_id: None,
+                extraction_run_id: "agent-restart-fixture".into(),
+                created_event_seq: EventSeq(1),
+                created_at: 1,
+            })
+            .unwrap();
+        assertion_store
+            .add_evidence(&NewMemoryEvidence {
+                evidence_id: hex::encode(Sha256::digest(assertion_id.as_bytes())),
+                assertion_id: assertion_id.into(),
+                conversation_id: conversation_id.clone(),
+                event_seq: EventSeq(1),
+                payload_path: "$.text".into(),
+                quote_hash: hex::encode(Sha256::digest(source_text.as_bytes())),
+                evidence_kind: EvidenceKind::DirectQuote,
+                created_at: 1,
+            })
+            .unwrap();
+
+        let assets = MemoryAssetStore::new(&db);
+        assets
+            .create(NewMemoryAsset {
+                asset_id: "agent-restart-memory",
+                asset_type: AssetType::Memory,
+                name: "Synthetic agent preference",
+                description: "Restart invalidation fixture",
+                owner_scope: "global",
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: Some("synthetic-fixture"),
+                content_ref: Some("Use the synthetic local fixture."),
+                source_hash: Some("synthetic-agent-memory-v1"),
+                now_unix: 1,
+            })
+            .unwrap();
+        assets
+            .link_assertion("agent-restart-memory", assertion_id, "controller", 1)
+            .unwrap();
+        assets
+            .bind(
+                "agent-restart-memory",
+                "memory-agent",
+                InjectionMode::Hot,
+                10,
+                512,
+                1,
+            )
+            .unwrap();
+        let (_, receipt) = crate::chats::build_governed_asset_loadout(
+            &db,
+            Some(conversation_id.as_str()),
+            "memory-agent",
+            "synthetic local fixture",
+            None,
+        )
+        .expect("active governed asset should be loaded");
+        assert_eq!(receipt.assets[0].asset_id, "agent-restart-memory");
+
+        let original_run = {
+            let store = AgentStore::new(&db);
+            store.upsert(
+                &AgentUpsert {
+                    id: Some("memory-agent".into()),
+                    name: "memory-agent".into(),
+                    role_prompt: "Synthetic fixture".into(),
+                    model: None,
+                    backend_purpose: "standard".into(),
+                    tools: Vec::new(),
+                    trust_policy: serde_json::json!({}),
+                    interval_secs: 60,
+                    token_budget: 100,
+                    max_runtime_secs: 30,
+                    concurrency_limit: 1,
+                    enabled: true,
+                    trigger: serde_json::json!({"schedule":{"cron":"0 8 * * *","timezone":"UTC","overlap":"skip","catchup_secs":3600}}),
+                    reply_mode: "draft".into(),
+                },
+                1,
+            )
+            .unwrap();
+            store
+                .insert_run(
+                    "memory-agent",
+                    2,
+                    &serde_json::json!({"memory_loadout":receipt}),
+                )
+                .unwrap()
+        };
+        drop(db);
+
+        let reopened = Database::open(&config).unwrap();
+        MigrationRunner::new(&reopened).apply_all().unwrap();
+        let runs = AgentStore::new(&reopened);
+        let recovered_run = runs
+            .runs("memory-agent", 10)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.id == original_run)
+            .unwrap();
+        assert_eq!(
+            recovered_run.checkpoint["memory_loadout"]["assets"][0]["asset_id"],
+            "agent-restart-memory"
+        );
+        assert_eq!(runs.reconcile_interrupted_runs(3).unwrap(), 1);
+
+        MemoryAssetStore::new(&reopened)
+            .delete("agent-restart-memory", "controller", 4)
+            .unwrap();
+        let next_loadout = crate::chats::build_governed_asset_loadout(
+            &reopened,
+            Some(conversation_id.as_str()),
+            "memory-agent",
+            "synthetic local fixture",
+            None,
+        );
+        assert!(next_loadout.is_none());
+        let next_run = runs
+            .insert_run(
+                "memory-agent",
+                5,
+                &serde_json::json!({"memory_loadout":next_loadout.map(|(_, receipt)| receipt)}),
+            )
+            .unwrap();
+        assert_eq!(
+            runs.runs("memory-agent", 10)
+                .unwrap()
+                .into_iter()
+                .find(|run| run.id == next_run)
+                .unwrap()
+                .checkpoint["memory_loadout"],
+            serde_json::Value::Null
         );
     }
 

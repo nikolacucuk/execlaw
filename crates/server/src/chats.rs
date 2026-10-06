@@ -4544,6 +4544,8 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
             .set_completion_contract(contract, chrono::Utc::now().timestamp())
             .map_err(|error| format!("persist task completion contract: {error}"))?;
     }
+    let mut pinned_tool_catalog = tool_view.discoverable.clone();
+    pinned_tool_catalog.extend(tool_view.declarations.iter().cloned());
     durable
         .record_input_manifest(
             &serde_json::json!({
@@ -4564,7 +4566,11 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
                 "max_tool_rounds": req.max_tool_rounds,
                 "progressive_tool_catalog_version": 1,
             }),
-            &tool_view.discoverable,
+            &pinned_tool_catalog,
+            &serde_json::json!({
+                "tools": &tool_view.declarations,
+                "discoverable_tools": &tool_view.discoverable,
+            }),
             chrono::Utc::now().timestamp(),
         )
         .map_err(|error| format!("record turn input manifest: {error}"))?;
@@ -9838,6 +9844,79 @@ mod tests {
     use super::*;
     use crate::runner_supervisor::TurnEvent;
 
+    fn link_synthetic_memory_evidence(
+        state: &AppState,
+        conversation_id: &ConversationId,
+        event_seq: i64,
+        asset_id: &str,
+        owner_scope: &str,
+        trust_class: &str,
+        content: &str,
+    ) {
+        use execlaw_core::events::{EventLog, EventRecord};
+        use execlaw_core::memory_assertions::{
+            AssertionStatus, EvidenceKind, MemoryAssertionStore, MemoryKind, NewMemoryAssertion,
+            NewMemoryEvidence,
+        };
+        use sha2::{Digest, Sha256};
+
+        let payload = serde_json::json!({"text":content});
+        let event = EventRecord::new(
+            conversation_id.clone(),
+            EventSeq(event_seq),
+            EventKind::UserMsg,
+            &payload,
+            Some("controller".into()),
+        )
+        .unwrap();
+        let mut log = EventLog::new(&state.db);
+        if let Some(key) = state.event_log_hmac_key.as_ref() {
+            log = log.with_hmac_key((**key).clone());
+        }
+        log.append(&event).unwrap();
+
+        let assertion_id = format!("synthetic-evidence-{asset_id}");
+        let assertions = MemoryAssertionStore::new(&state.db);
+        assertions
+            .append(&NewMemoryAssertion {
+                assertion_id: assertion_id.clone(),
+                scope: owner_scope.into(),
+                trust_class: trust_class.into(),
+                kind: MemoryKind::Semantic,
+                subject: asset_id.into(),
+                predicate: "synthetic_memory_content".into(),
+                object: serde_json::json!(content),
+                confidence: 1.0,
+                status: AssertionStatus::Approved,
+                observed_from: event_seq,
+                observed_to: None,
+                valid_from: event_seq,
+                valid_to: None,
+                supersedes_id: None,
+                extraction_run_id: "synthetic-memory-fixture".into(),
+                created_event_seq: EventSeq(event_seq),
+                created_at: event_seq,
+            })
+            .unwrap();
+        assertions
+            .add_evidence(&NewMemoryEvidence {
+                evidence_id: hex::encode(Sha256::digest(
+                    [assertion_id.as_bytes(), event_seq.to_le_bytes().as_slice()].concat(),
+                )),
+                assertion_id: assertion_id.clone(),
+                conversation_id: conversation_id.clone(),
+                event_seq: EventSeq(event_seq),
+                payload_path: "$.text".into(),
+                quote_hash: hex::encode(Sha256::digest(content.as_bytes())),
+                evidence_kind: EvidenceKind::DirectQuote,
+                created_at: event_seq,
+            })
+            .unwrap();
+        execlaw_core::memory_assets::MemoryAssetStore::new(&state.db)
+            .link_assertion(asset_id, &assertion_id, "controller-fixture", event_seq)
+            .unwrap();
+    }
+
     #[test]
     fn qualified_output_budget_preserves_prompt_room_on_small_context_models() {
         assert_eq!(qualified_output_reserve(Some(4_096)), 1_024);
@@ -9867,6 +9946,15 @@ mod tests {
                 now_unix: chrono::Utc::now().timestamp(),
             })
             .unwrap();
+        link_synthetic_memory_evidence(
+            &state,
+            &cid,
+            1,
+            "asset-receipt-1",
+            "controller",
+            "Controller",
+            "Synthetic release context",
+        );
         store
             .bind(
                 "asset-receipt-1",
@@ -9877,6 +9965,7 @@ mod tests {
                 chrono::Utc::now().timestamp(),
             )
             .unwrap();
+        let mut evidence_seq = 2;
         for (asset_id, name, content, source_hash, mode) in [
             (
                 "asset-retrieved-1",
@@ -9915,6 +10004,16 @@ mod tests {
                     now_unix: chrono::Utc::now().timestamp(),
                 })
                 .unwrap();
+            link_synthetic_memory_evidence(
+                &state,
+                &cid,
+                evidence_seq,
+                asset_id,
+                "controller",
+                "Controller",
+                content,
+            );
+            evidence_seq += 1;
             store
                 .bind(
                     asset_id,
@@ -12581,6 +12680,15 @@ mod tests {
                 now_unix: 1,
             })
             .unwrap();
+        link_synthetic_memory_evidence(
+            &state,
+            &cid,
+            1,
+            "asset-controller-preference",
+            "global",
+            "Controller",
+            "Keep responses concise",
+        );
         assets
             .bind(
                 "asset-controller-preference",

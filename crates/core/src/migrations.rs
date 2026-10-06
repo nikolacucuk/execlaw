@@ -371,6 +371,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "skill_privacy_tombstones",
         sql: include_str!("../migrations/0069_skill_privacy_tombstones.sql"),
     },
+    Migration {
+        id: 70,
+        name: "run_tool_catalog_snapshots",
+        sql: include_str!("../migrations/0070_run_tool_catalog_snapshots.sql"),
+    },
+    Migration {
+        id: 71,
+        name: "memory_asset_assertion_links",
+        sql: include_str!("../migrations/0071_memory_asset_assertion_links.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

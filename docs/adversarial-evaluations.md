@@ -49,6 +49,54 @@ The fixtures cover these trust boundaries:
 | SSRF | `server::tool_apis_http` has scheme and selected literal-address rejection fixtures. F03 remains open: DNS, mapped-address, and redirect checks do not enforce the full connection boundary. |
 | Cross-conversation/trust memory leakage | `server::chats::nexus::search_is_conversation_scoped_and_fails_closed_on_hmac_tampering`; trust-policy tests also check the planner/executor split for untrusted principals. |
 
+## H036 consented regression fixtures
+
+Export a flagged range only after reviewing a local redaction map. The exporter
+keeps effects disabled, records the source event hashes, and refuses attached
+images unless every attachment ID is mapped to a synthetic replacement. Source
+image bytes are never copied into the fixture. A local synthetic-media sidecar
+contains entries shaped like:
+
+```json
+[
+  {
+    "attachment_id": "SYNTHETIC_IMAGE_1",
+    "mime_type": "image/png",
+    "content_hex": "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d49444154789c636000020000050001a5f645400000000049454e44ae426082",
+    "synthetic": true
+  }
+]
+```
+
+Pass that file with `--synthetic-media` to `execlaw eval export-flagged`; each
+`attachment_id` must match a replacement ID from the redaction map. Fixtures may
+also carry `raw_stream_fixtures` with hex-encoded network chunks and expected
+SSE data frames. Raw captures are not copied by the event exporter; author
+those fixtures from synthetic or locally redacted frames. `eval-harness
+replay-fixtures --directory evals/fixtures`
+decodes those chunks through the production SSE parser and replays tool-call
+fixtures with the exact tool/discovery catalog persisted in the durable input
+manifest. It rejects a catalog snapshot that omits a recorded tool call, then
+forces a post-checkpoint interruption, SQLite reopen, and durable-run resume.
+The catalog command is the CI gate; release closure still requires
+incident/release-linked artifacts for the target incidents. Fixture tests also
+prove that a missing declaration or changed tool argument schema fails replay.
+Legacy turns without a durable catalog snapshot require a local
+`--tool-catalog-snapshots` sidecar; if a run manifest exists, its original hash
+must match the supplied snapshot before export redaction. New durable runs
+store both the tool-catalog hash and its policy-filtered/discoverable snapshot;
+the fixture exporter checks that snapshot against the immutable hash before
+applying the local redaction map. The sidecar is a JSON array using the
+`tool_catalogs` entry shape (`turn_seq`, `source_catalog_hash`, `snapshot_sha256`,
+`tools`, and `discoverable_tools`); the snapshot hash is computed over the two
+declaration arrays before redaction.
+
+Use `--policy-cases` to attach local policy inputs and expected decisions to
+the exported fixture. Each entry is checked against the production
+`execlaw_policy::trust::evaluate_turn` implementation during replay; a changed
+approval, spotlighting, planner/executor, latency, or capability decision fails
+the catalog.
+
 These tests assert deterministic enforcement properties; they do not use an LLM
 judge. New attack cases should be added next to the enforcement code and included
 in the command above. For optional model-quality evaluation, use the existing

@@ -280,19 +280,23 @@ pub(super) async fn run(
         let task_seed = seed.wrapping_add(u64::from(trial));
         for task in &suite.tasks {
             if let Verifier::WorkspaceCoding { .. } = &task.verifier {
+                let executor = workspace_executor
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("workspace executor is not configured"))?;
+                let image_reference = workspace_image
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("workspace image is not configured"))?;
                 let result = run_workspace_coding_task(
                     &client,
                     &model,
                     task,
-                    task_seed,
-                    max_tokens,
-                    offline_fixture,
-                    workspace_executor
-                        .as_ref()
-                        .ok_or_else(|| anyhow::anyhow!("workspace executor is not configured"))?,
-                    workspace_image
-                        .as_deref()
-                        .ok_or_else(|| anyhow::anyhow!("workspace image is not configured"))?,
+                    WorkspaceCodingContext {
+                        seed: task_seed,
+                        max_tokens,
+                        offline_fixture,
+                        executor,
+                        image_reference,
+                    },
                 )
                 .await;
                 let (success, evidence, failure) = match result {
@@ -688,16 +692,40 @@ const WORKSPACE_EVAL_MAX_CALLS: usize = 32;
 const WORKSPACE_EVAL_MAX_FILE_BYTES: usize = 1_048_576;
 const WORKSPACE_EVAL_MAX_TOTAL_BYTES: usize = 100 * 1024 * 1024;
 
+struct WorkspaceCodingContext<'a> {
+    seed: u64,
+    max_tokens: u32,
+    offline_fixture: bool,
+    executor: &'a Arc<dyn WorkspaceJobExecutor>,
+    image_reference: &'a str,
+}
+
+struct WorkspaceToolContext<'a> {
+    executor: &'a Arc<dyn WorkspaceJobExecutor>,
+    image_reference: &'a str,
+    workspace: &'a Path,
+    task_id: &'a str,
+    test_argv: &'a [String],
+    language_servers: &'a BTreeMap<String, Vec<String>>,
+    calls: &'a mut Vec<String>,
+    patched: &'a mut BTreeSet<String>,
+    diagnostics_count: &'a mut usize,
+    successful_test: &'a mut Option<(String, String)>,
+}
+
 async fn run_workspace_coding_task(
     client: &InferenceClient,
     model: &str,
     task: &Task,
-    seed: u64,
-    max_tokens: u32,
-    offline_fixture: bool,
-    executor: &Arc<dyn WorkspaceJobExecutor>,
-    image_reference: &str,
+    context: WorkspaceCodingContext<'_>,
 ) -> anyhow::Result<Value> {
+    let WorkspaceCodingContext {
+        seed,
+        max_tokens,
+        offline_fixture,
+        executor,
+        image_reference,
+    } = context;
     let Verifier::WorkspaceCoding {
         fixture_workspace,
         expected_workspace_files,
@@ -725,21 +753,19 @@ async fn run_workspace_coding_task(
             if calls.len() >= WORKSPACE_EVAL_MAX_CALLS {
                 bail!("workspace benchmark action budget exceeded");
             }
-            execute_workspace_tool(
+            let mut tool_context = WorkspaceToolContext {
                 executor,
                 image_reference,
-                workspace.path(),
-                &task.id,
-                &action.tool,
-                &action.arguments,
+                workspace: workspace.path(),
+                task_id: &task.id,
                 test_argv,
                 language_servers,
-                &mut calls,
-                &mut patched,
-                &mut diagnostics_count,
-                &mut successful_test,
-            )
-            .await?;
+                calls: &mut calls,
+                patched: &mut patched,
+                diagnostics_count: &mut diagnostics_count,
+                successful_test: &mut successful_test,
+            };
+            execute_workspace_tool(&mut tool_context, &action.tool, &action.arguments).await?;
         }
     } else {
         let tools = workspace_tool_declarations();
@@ -809,21 +835,21 @@ async fn run_workspace_coding_task(
                 }
                 let arguments = serde_json::from_str::<Value>(&call.function.arguments)
                     .map_err(|_| anyhow::anyhow!("workspace tool arguments were invalid JSON"))?;
-                let tool_result = execute_workspace_tool(
-                    executor,
-                    image_reference,
-                    workspace.path(),
-                    &task.id,
-                    &call.function.name,
-                    &arguments,
-                    test_argv,
-                    language_servers,
-                    &mut calls,
-                    &mut patched,
-                    &mut diagnostics_count,
-                    &mut successful_test,
-                )
-                .await;
+                let tool_result = {
+                    let mut tool_context = WorkspaceToolContext {
+                        executor,
+                        image_reference,
+                        workspace: workspace.path(),
+                        task_id: &task.id,
+                        test_argv,
+                        language_servers,
+                        calls: &mut calls,
+                        patched: &mut patched,
+                        diagnostics_count: &mut diagnostics_count,
+                        successful_test: &mut successful_test,
+                    };
+                    execute_workspace_tool(&mut tool_context, &call.function.name, &arguments).await
+                };
                 let response_body = match tool_result {
                     Ok(value) => serde_json::json!({"ok":true,"result":value}),
                     Err(error) => serde_json::json!({"ok":false,"error":error.to_string()}),
@@ -896,27 +922,18 @@ fn workspace_tool_declarations() -> Vec<ToolDeclaration> {
 }
 
 async fn execute_workspace_tool(
-    executor: &Arc<dyn WorkspaceJobExecutor>,
-    image_reference: &str,
-    workspace: &Path,
-    task_id: &str,
+    context: &mut WorkspaceToolContext<'_>,
     tool_name: &str,
     args: &Value,
-    test_argv: &[String],
-    language_servers: &BTreeMap<String, Vec<String>>,
-    calls: &mut Vec<String>,
-    patched: &mut BTreeSet<String>,
-    diagnostics_count: &mut usize,
-    successful_test: &mut Option<(String, String)>,
 ) -> anyhow::Result<Value> {
-    calls.push(tool_name.to_owned());
+    context.calls.push(tool_name.to_owned());
     match tool_name {
         "workspace.read_file" => {
             let path = args
                 .get("path")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("read_file requires path"))?;
-            let (content, sha256) = read_workspace_file(workspace, path)?;
+            let (content, sha256) = read_workspace_file(context.workspace, path)?;
             Ok(serde_json::json!({"path":path,"text":content,"sha256":sha256}))
         }
         "workspace.search" => {
@@ -926,7 +943,7 @@ async fn execute_workspace_tool(
                 .filter(|value| !value.is_empty() && value.len() <= 1024)
                 .ok_or_else(|| anyhow::anyhow!("search query must be 1..=1024 bytes"))?;
             let mut matches = Vec::new();
-            for (path, text) in read_workspace_files(workspace)? {
+            for (path, text) in read_workspace_files(context.workspace)? {
                 for (line, value) in text.lines().enumerate() {
                     if value.contains(query) {
                         matches.push(serde_json::json!({
@@ -962,7 +979,7 @@ async fn execute_workspace_tool(
                 {
                     bail!("apply_patch path, duplicate, or content budget is invalid");
                 }
-                let current = read_workspace_file_optional(workspace, &edit.path)?;
+                let current = read_workspace_file_optional(context.workspace, &edit.path)?;
                 let current_hash = current.as_ref().map(|(_, digest)| digest.as_str());
                 let next_hash = hex::encode(Sha256::digest(edit.content.as_bytes()));
                 if current_hash == Some(next_hash.as_str()) {
@@ -974,20 +991,20 @@ async fn execute_workspace_tool(
                 if current_hash != edit.expected_sha256.as_deref() {
                     bail!("apply_patch SHA-256 precondition failed for {}", edit.path);
                 }
-                let target = workspace.join(&edit.path);
+                let target = context.workspace.join(&edit.path);
                 let parent = target
                     .parent()
                     .ok_or_else(|| anyhow::anyhow!("patch target has no parent"))?;
                 std::fs::create_dir_all(parent)?;
-                ensure_workspace_parent(workspace, parent)?;
+                ensure_workspace_parent(context.workspace, parent)?;
                 std::fs::write(&target, edit.content.as_bytes())?;
-                patched.insert(edit.path.clone());
-                *successful_test = None;
+                context.patched.insert(edit.path.clone());
+                *context.successful_test = None;
                 results.push(
                     serde_json::json!({"path":edit.path,"sha256":next_hash,"unchanged":false}),
                 );
             }
-            let total_bytes = read_workspace_files(workspace)?
+            let total_bytes = read_workspace_files(context.workspace)?
                 .values()
                 .map(String::len)
                 .sum::<usize>();
@@ -1005,27 +1022,28 @@ async fn execute_workspace_tool(
             if !(1_000..=180_000).contains(&timeout_ms) {
                 bail!("workspace job timeout must be 1000..=180000 ms");
             }
-            let snapshot = copy_workspace_for_container(workspace)?;
-            let job_name = workspace_job_name(task_id, calls.len());
-            let result = executor
+            let snapshot = copy_workspace_for_container(context.workspace)?;
+            let job_name = workspace_job_name(context.task_id, context.calls.len());
+            let result = context
+                .executor
                 .run(WorkspaceRunRequest {
-                    image_reference: image_reference.to_owned(),
+                    image_reference: context.image_reference.to_owned(),
                     checkout_path: snapshot.path().to_owned(),
                     job_name,
                     argv: argv.clone(),
                     timeout_ms,
                 })
                 .await?;
-            if argv == test_argv && result.exit_code == Some(0) && !result.timed_out {
-                *successful_test = Some((
-                    workspace_map_sha256(&read_workspace_files(workspace)?)?,
+            if argv == context.test_argv && result.exit_code == Some(0) && !result.timed_out {
+                *context.successful_test = Some((
+                    workspace_map_sha256(&read_workspace_files(context.workspace)?)?,
                     hex::encode(Sha256::digest(result.output.as_bytes())),
                 ));
             }
             Ok(serde_json::json!({
                 "exit_code":result.exit_code,"timed_out":result.timed_out,
                 "output_truncated":result.output_truncated,"output":result.output,
-                "elapsed_ms":result.elapsed_ms,"was_configured_test":argv==test_argv
+                "elapsed_ms":result.elapsed_ms,"was_configured_test":argv==context.test_argv
             }))
         }
         "workspace.diagnostics" => {
@@ -1037,16 +1055,17 @@ async fn execute_workspace_tool(
                 .get("language_id")
                 .and_then(Value::as_str)
                 .ok_or_else(|| anyhow::anyhow!("diagnostics requires language_id"))?;
-            let server_argv = language_servers.get(language_id).ok_or_else(|| {
+            let server_argv = context.language_servers.get(language_id).ok_or_else(|| {
                 anyhow::anyhow!("no configured language server for {language_id}")
             })?;
-            let (text, _) = read_workspace_file(workspace, path)?;
-            let snapshot = copy_workspace_for_container(workspace)?;
-            let result = executor
+            let (text, _) = read_workspace_file(context.workspace, path)?;
+            let snapshot = copy_workspace_for_container(context.workspace)?;
+            let result = context
+                .executor
                 .diagnostics(WorkspaceDiagnosticsRequest {
-                    image_reference: image_reference.to_owned(),
+                    image_reference: context.image_reference.to_owned(),
                     checkout_path: snapshot.path().to_owned(),
-                    job_name: workspace_job_name(task_id, calls.len()),
+                    job_name: workspace_job_name(context.task_id, context.calls.len()),
                     server_argv: server_argv.clone(),
                     path: path.to_owned(),
                     language_id: language_id.to_owned(),
@@ -1057,7 +1076,7 @@ async fn execute_workspace_tool(
                         .unwrap_or(30_000),
                 })
                 .await?;
-            *diagnostics_count += result.diagnostics.len();
+            *context.diagnostics_count += result.diagnostics.len();
             Ok(
                 serde_json::json!({"language_id":result.language_id,"path":result.path,"diagnostics":result.diagnostics,"elapsed_ms":result.elapsed_ms}),
             )
@@ -1634,22 +1653,21 @@ mod tests {
         let mut diagnostics_count = 0;
         let mut successful_test = None;
         for action in actions {
-            execute_workspace_tool(
-                &executor,
-                "sha256:fixture",
-                workspace.path(),
-                &task.id,
-                &action.tool,
-                &action.arguments,
+            let mut tool_context = WorkspaceToolContext {
+                executor: &executor,
+                image_reference: "sha256:fixture",
+                workspace: workspace.path(),
+                task_id: &task.id,
                 test_argv,
                 language_servers,
-                &mut calls,
-                &mut patched,
-                &mut diagnostics_count,
-                &mut successful_test,
-            )
-            .await
-            .unwrap();
+                calls: &mut calls,
+                patched: &mut patched,
+                diagnostics_count: &mut diagnostics_count,
+                successful_test: &mut successful_test,
+            };
+            execute_workspace_tool(&mut tool_context, &action.tool, &action.arguments)
+                .await
+                .unwrap();
         }
         for tool in required_tools {
             assert!(
@@ -1708,7 +1726,7 @@ mod tests {
             "fixture_response":"The service listens on loopback address 127.0.0.1 at port 3031 by default [config]."
         })).unwrap();
         assert!(
-            verify_task(&task, &task_fixture_response(&task))
+            verify_task(&task, task_fixture_response(&task))
                 .await
                 .is_ok()
         );

@@ -1,6 +1,12 @@
 //! Held-out local-only retrieval and answer-quality qualification for H038.
 
 use anyhow::{Context, bail};
+use execlaw_core::events::{EventKind, EventLog, EventRecord};
+use execlaw_core::ids::{ConversationId, EventSeq};
+use execlaw_core::memory_assertions::{
+    AssertionStatus, EvidenceKind, MemoryAssertionStore, MemoryKind, NewMemoryAssertion,
+    NewMemoryEvidence,
+};
 use execlaw_core::memory_assets::{
     AssetType, AssetVisibility, InjectionMode, MEMORY_RERANKER_VERSION, MemoryAssetStore,
     NewMemoryAsset,
@@ -85,6 +91,8 @@ pub struct RetrievalQualificationReport {
     top_k: u32,
     index_build_ms: u64,
     latency_budget_ms: u64,
+    lexical_retrieval_p50_ms: u64,
+    lexical_retrieval_p95_ms: u64,
     lexical_recall_at_k: f64,
     hybrid_recall_at_k: f64,
     lexical_answer_accuracy: f64,
@@ -187,17 +195,65 @@ pub(super) async fn run(
             source_hash: Some(&content_hash),
             now_unix: now,
         })?;
+        let assertion_id = hex::encode(Sha256::digest(asset.asset_id.as_bytes()));
+        let conversation_id = ConversationId::from(format!("h038-evidence-{}", assertion_id));
+        let evidence_payload = serde_json::json!({"text":asset.content});
+        let event = EventRecord::new(
+            conversation_id.clone(),
+            EventSeq(1),
+            EventKind::UserMsg,
+            &evidence_payload,
+            Some("h038-heldout-fixture".into()),
+        )?;
+        EventLog::new(&database)
+            .with_hmac_key(Sha256::digest(b"h038-heldout-fixture-event-key-v1").to_vec())
+            .append(&event)?;
+        let assertions = MemoryAssertionStore::new(&database);
+        assertions.append(&NewMemoryAssertion {
+            assertion_id: assertion_id.clone(),
+            scope: asset.owner_scope.clone(),
+            trust_class: asset.trust_floor.clone(),
+            kind: MemoryKind::Semantic,
+            subject: asset.asset_id.clone(),
+            predicate: "heldout_memory_content".into(),
+            object: serde_json::json!(asset.content),
+            confidence: 1.0,
+            status: AssertionStatus::Approved,
+            observed_from: now,
+            observed_to: None,
+            valid_from: now,
+            valid_to: None,
+            supersedes_id: None,
+            extraction_run_id: "h038-heldout-synthetic-evidence".into(),
+            created_event_seq: EventSeq(1),
+            created_at: now,
+        })?;
+        assertions.add_evidence(&NewMemoryEvidence {
+            evidence_id: hex::encode(Sha256::digest(
+                [assertion_id.as_bytes(), asset.asset_id.as_bytes()].concat(),
+            )),
+            assertion_id: assertion_id.clone(),
+            conversation_id,
+            event_seq: EventSeq(1),
+            payload_path: "$.text".into(),
+            quote_hash: content_hash.clone(),
+            evidence_kind: EvidenceKind::DirectQuote,
+            created_at: now,
+        })?;
+        store.link_assertion(&asset.asset_id, &assertion_id, "h038-heldout-fixture", now)?;
         store.bind(&asset.asset_id, &asset.agent_scope, mode, 0, 8_000, now)?;
         let embedding_started = Instant::now();
         let vector = match client.embeddings(&embedding_model, &asset.content).await {
             Ok(vector) => vector,
             Err(error) => {
-                blocker = Some(error.safe_class().to_owned());
-                break;
+                blocker.get_or_insert_with(|| error.safe_class().to_owned());
+                Vec::new()
             }
         };
-        store.upsert_embedding(&asset.asset_id, &index_id, &vector, &content_hash, now)?;
-        embedding_build_ms.push(elapsed_ms(embedding_started));
+        if !vector.is_empty() {
+            store.upsert_embedding(&asset.asset_id, &index_id, &vector, &content_hash, now)?;
+            embedding_build_ms.push(elapsed_ms(embedding_started));
+        }
         if asset.status != "active"
             || asset.expires_at_offset_seconds.is_some()
             || asset.revised_content_after_embedding.is_some()
@@ -227,9 +283,6 @@ pub(super) async fn run(
     let mut lexical_latencies = Vec::new();
     let mut hybrid_latencies = Vec::new();
     for case in &dataset.cases {
-        if blocker.is_some() {
-            break;
-        }
         let readable = readable_trust_classes(&case.trust_class)?;
         let trust_refs = readable.iter().map(String::as_str).collect::<Vec<_>>();
         let owner_refs = case
@@ -269,12 +322,32 @@ pub(super) async fn run(
         let lexical_ms = elapsed_ms(lexical_started);
         lexical_latencies.push(lexical_ms);
 
+        let forbidden = case.forbidden_asset_ids.iter().collect::<BTreeSet<_>>();
+        let lexical_forbidden_hits = lexical
+            .iter()
+            .filter(|hit| forbidden.contains(&hit.asset.asset_id))
+            .count();
+        let lexical_recall = recall_at_k(&lexical, &case.relevant_asset_ids);
+
         let embedding_started = Instant::now();
         let query_vector = match client.embeddings(&embedding_model, &case.query).await {
             Ok(vector) => vector,
             Err(error) => {
-                blocker = Some(error.safe_class().to_owned());
-                break;
+                let error_class = error.safe_class().to_owned();
+                blocker.get_or_insert_with(|| error_class.clone());
+                let hybrid_ms = elapsed_ms(embedding_started);
+                queries.push(RetrievalQueryResult {
+                    case_id: case.case_id.clone(),
+                    lexical_recall_at_k: lexical_recall,
+                    hybrid_recall_at_k: 0.0,
+                    lexical_answer_correct: false,
+                    hybrid_answer_correct: false,
+                    forbidden_hits: lexical_forbidden_hits,
+                    lexical_search_ms: lexical_ms,
+                    hybrid_search_ms: hybrid_ms,
+                    error_class: Some(error_class),
+                });
+                continue;
             }
         };
         let hybrid = store.search_eligible(
@@ -291,13 +364,11 @@ pub(super) async fn run(
         let hybrid_ms = elapsed_ms(embedding_started);
         hybrid_latencies.push(hybrid_ms);
 
-        let forbidden = case.forbidden_asset_ids.iter().collect::<BTreeSet<_>>();
         let forbidden_hits = lexical
             .iter()
             .chain(hybrid.iter())
             .filter(|hit| forbidden.contains(&hit.asset.asset_id))
             .count();
-        let lexical_recall = recall_at_k(&lexical, &case.relevant_asset_ids);
         let hybrid_recall = recall_at_k(&hybrid, &case.relevant_asset_ids);
         let lexical_answer = answer_from_hits(&client, &model, &case.query, &lexical).await;
         let hybrid_answer = answer_from_hits(&client, &model, &case.query, &hybrid).await;
@@ -370,6 +441,8 @@ pub(super) async fn run(
         top_k: dataset.top_k,
         index_build_ms: embedding_build_ms.iter().sum(),
         latency_budget_ms,
+        lexical_retrieval_p50_ms: percentile(&lexical_latencies, 0.50).unwrap_or(0),
+        lexical_retrieval_p95_ms: percentile(&lexical_latencies, 0.95).unwrap_or(0),
         lexical_recall_at_k: lexical_recall,
         hybrid_recall_at_k: hybrid_recall,
         lexical_answer_accuracy: lexical_accuracy,
@@ -389,13 +462,14 @@ pub(super) async fn run(
     }
     std::fs::write(&output_path, serde_json::to_vec_pretty(&report)?)?;
     println!(
-        "memory retrieval report: {} qualified={} lexical_recall={:.3} hybrid_recall={:.3} lexical_accuracy={:.3} hybrid_accuracy={:.3} p95_ms={} budget_ms={} forbidden_hits={}",
+        "memory retrieval report: {} qualified={} lexical_recall={:.3} hybrid_recall={:.3} lexical_accuracy={:.3} hybrid_accuracy={:.3} lexical_p95_ms={} hybrid_p95_ms={} budget_ms={} forbidden_hits={}",
         output_path.display(),
         report.qualified,
         report.lexical_recall_at_k,
         report.hybrid_recall_at_k,
         report.lexical_answer_accuracy,
         report.hybrid_answer_accuracy,
+        report.lexical_retrieval_p95_ms,
         report.hybrid_retrieval_p95_ms,
         report.latency_budget_ms,
         report.forbidden_hits
@@ -609,5 +683,110 @@ mod tests {
         assert!(readable_trust_classes("unknown-class").is_err());
         assert_eq!(percentile(&[12, 1, 8, 4], 0.50), Some(4));
         assert_eq!(percentile(&[12, 1, 8, 4], 0.95), Some(12));
+    }
+
+    #[tokio::test]
+    async fn unavailable_embedding_service_still_records_heldout_lexical_metrics() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let dataset_path = dir.path().join("heldout.json");
+        let report_path = dir.path().join("report.json");
+        let dataset = serde_json::json!({
+            "name":"synthetic-h038-lexical-fallback",
+            "version":"test",
+            "top_k":1,
+            "assets":[{
+                "asset_id":"orbital-note",
+                "name":"Orbital station display preference",
+                "description":"synthetic fixture",
+                "content":"For orbital station schedules, show local launch time.",
+                "owner_scope":"global",
+                "trust_floor":"Controller",
+                "visibility":"private"
+            },{
+                "asset_id":"expired-orbital",
+                "name":"Expired orbital display note",
+                "description":"expired filter fixture",
+                "content":"For orbital station schedules, show local launch time.",
+                "owner_scope":"global",
+                "trust_floor":"Controller",
+                "visibility":"private",
+                "expires_at_offset_seconds":-60
+            },{
+                "asset_id":"archived-orbital",
+                "name":"Archived orbital display note",
+                "description":"lifecycle filter fixture",
+                "content":"For orbital station schedules, show local launch time.",
+                "owner_scope":"global",
+                "trust_floor":"Controller",
+                "visibility":"private",
+                "status":"archived"
+            },{
+                "asset_id":"stale-orbital",
+                "name":"Superseded orbital display note",
+                "description":"stale source index fixture",
+                "content":"For orbital station schedules, show local launch time.",
+                "owner_scope":"global",
+                "trust_floor":"Controller",
+                "visibility":"private",
+                "revised_content_after_embedding":"This note was replaced with an unrelated closure update."
+            }],
+            "cases":[{
+                "case_id":"orbital-display",
+                "query":"orbital station display preference",
+                "trust_class":"Controller",
+                "owner_scopes":["global"],
+                "relevant_asset_ids":["orbital-note"],
+                "forbidden_asset_ids":["expired-orbital","archived-orbital","stale-orbital"],
+                "required_terms":["local launch time"]
+            }]
+        });
+        std::fs::write(&dataset_path, serde_json::to_vec(&dataset).unwrap()).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..5 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = [0u8; 8192];
+                let _ = socket.read(&mut request).await.unwrap();
+                let body = br#"{"error":"synthetic embeddings unavailable"}"#;
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                socket.write_all(body).await.unwrap();
+            }
+        });
+
+        let result = run(
+            dataset_path,
+            report_path.clone(),
+            format!("http://{address}/v1"),
+            "fixture-model".into(),
+            "fixture-embedding".into(),
+            "openai".into(),
+            5_000,
+        )
+        .await;
+        assert!(result.is_err());
+        server.await.unwrap();
+
+        let report: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
+        assert_eq!(report["qualified"], false);
+        assert_eq!(report["queries"].as_array().unwrap().len(), 1);
+        assert_eq!(report["queries"][0]["lexical_recall_at_k"], 1.0);
+        assert_eq!(report["lexical_recall_at_k"], 1.0);
+        assert_eq!(report["forbidden_hits"], 0);
+        assert_eq!(report["hybrid_retrieval_p95_ms"], 0);
+        assert!(report["blocker"].is_string());
     }
 }

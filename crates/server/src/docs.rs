@@ -211,6 +211,7 @@ impl Modify for SecurityAddon {
         crate::approvals::list_principals_handler,
         crate::approvals::list_pending_approvals_handler,
         crate::memory_assets_admin::list,
+        crate::memory_assets_admin::link_assertion,
         crate::memory_assets_admin::get_retrieval_config,
         crate::memory_assets_admin::put_retrieval_config,
         crate::memory_assets_admin::rebuild_embeddings,
@@ -690,6 +691,7 @@ mod tests {
                 &["post"],
             ),
             ("/api/admin/memory-assets", &["get"]),
+            ("/api/admin/memory-assets/{asset_id}/assertions", &["post"]),
             (
                 "/api/admin/memory-assets/{asset_id}/binding",
                 &["put", "delete"],

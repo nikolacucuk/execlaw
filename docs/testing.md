@@ -199,6 +199,43 @@ before adoption.
 
 ## Test layers
 
+### Fast local feedback
+
+Use the smallest check that covers the current edit, then run the full required
+suite before opening a pull request:
+
+```bash
+# Compile one Rust crate without linking or running its tests.
+cargo check -p <crate>
+
+# Run one matching test in a crate. Add --lib for unit tests only.
+cargo test -p <crate> <test_filter>
+cargo test -p <crate> --lib <test_filter>
+
+# SPA edit loop.
+npm --prefix web test -- <test_filter>
+```
+
+Keep the target directory, profile, and feature selection consistent across
+repeated runs. Cargo keeps separate artifacts for different targets, profiles,
+and feature sets; switching between a package-only test, the workspace suite,
+and SQLCipher can trigger another compile. A first focused run can therefore be
+much slower than a later run of the same command. A warm no-op `cargo build`
+measures cache startup, not the cost of recompiling a changed crate.
+
+To locate build time, run `cargo build --workspace --timings`; Cargo saves an
+HTML report under `target/cargo-timings/`. For comparisons, use the same source
+revision and command, keep other Cargo jobs idle, and record cold compilation
+separately from warm reruns and test execution. Do not remove the target
+directory between paired runs.
+
+The full workspace suite remains the regression gate. Focused checks shorten
+edit feedback but do not replace it:
+
+```bash
+cargo test --workspace --no-fail-fast
+```
+
 ### Offline deterministic
 
 These tests must run without Docker, a GPU, provider credentials, or Internet
@@ -242,11 +279,14 @@ targets in the package. Those targets may correctly report `0 tests` (or
 `1 filtered out`) even when all migration tests pass, which can make the
 focused result look misleading.
 
-On this Windows host, Application Control may block execution of locally built
-Rust test binaries. It can also block the PowerShell harness itself; a
-`PSSecurityException` is an environment limitation, not a passing test. Run the
-same focused tests on an allowed Windows developer shell or CI runner and record
-the result. The existence of the tests does not substitute for executing them.
+On Windows, Application Control may block execution of locally built Rust test
+binaries. Cargo reports OS error 4551 when this happens; the affected test
+executable never started, so this is a blocked check rather than a test
+assertion failure or a pass. Application Control can also block the PowerShell
+harness itself; a `PSSecurityException` is an environment limitation, not a
+passing test. Run the same focused tests on an allowed Windows developer shell
+or CI runner and record the result. The existence of the tests does not
+substitute for executing them.
 
 ### SQLCipher
 

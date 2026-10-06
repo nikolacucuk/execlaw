@@ -32,6 +32,7 @@ const assets = {
         status: "active",
         version: 2,
         source_hash: "sha256-example",
+        assertion_ids: [],
         expires_at: null,
     }],
     bindings: [{
@@ -45,7 +46,7 @@ const assets = {
     agent_scopes: [{ id: "default", name: "Default chat agent" }],
     assertions: [{
         assertion_id: "assertion-language",
-        scope: "principal:ctrl-1",
+        scope: "global",
         trust_class: "Controller",
         kind: "profile",
         subject: "controller",
@@ -109,7 +110,7 @@ describe("MemoryAssetsPage", () => {
     it("shows bindings and saves/removes them through the controller API", async () => {
         render(<AuthProvider><MemoryAssetsPage /></AuthProvider>);
         await waitFor(() => expect(screen.getByTestId("memory-binding-row")).toBeInTheDocument());
-        expect(screen.getByText("Preferred language")).toBeInTheDocument();
+        expect(screen.getAllByText("Preferred language")).toHaveLength(2);
 
         fireEvent.click(screen.getByRole("button", { name: "Bind asset" }));
         await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
@@ -172,5 +173,21 @@ describe("MemoryAssetsPage", () => {
         expect(await screen.findByRole("status")).toHaveTextContent("The source event remains in conversation history and backups.");
         expect(confirm).toHaveBeenCalled();
         confirm.mockRestore();
+    });
+
+    it("offers evidence linking and a local review export", async () => {
+        render(<AuthProvider><MemoryAssetsPage /></AuthProvider>);
+        await screen.findByTestId("memory-assertion-row");
+        expect(screen.getByRole("button", { name: "Export loaded memory review data" })).toBeEnabled();
+        fireEvent.change(screen.getByLabelText("Memory asset for assertion assertion-language"), {
+            target: { value: "asset-language" },
+        });
+        fireEvent.click(screen.getByRole("button", { name: "Link evidence" }));
+        await waitFor(() => expect(fetchMock).toHaveBeenCalledWith(
+            "/api/admin/memory-assets/asset-language/assertions",
+            expect.objectContaining({ method: "POST" }),
+        ));
+        const call = fetchMock.mock.calls.find(([url]) => url === "/api/admin/memory-assets/asset-language/assertions");
+        expect(JSON.parse((call?.[1] as RequestInit).body as string)).toEqual({ assertion_id: "assertion-language" });
     });
 });

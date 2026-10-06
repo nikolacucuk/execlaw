@@ -223,14 +223,15 @@ pub struct RunExecutionBudget {
     pub effects_used: u32,
 }
 
-/// Versioned hashes of the effective prompt, model settings, and tool catalog
-/// used by a turn. The source values remain in the event/configuration stores.
+/// Versioned hashes of the effective prompt and model settings plus the
+/// tool catalog snapshot used by a turn for consented offline replay.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunInputManifest {
     pub input_version: u32,
     pub prompt_hash: String,
     pub model_settings_hash: String,
     pub tool_catalog_hash: String,
+    pub tool_catalog_snapshot_json: Option<String>,
     pub recorded_at: i64,
 }
 
@@ -831,6 +832,29 @@ impl<'db> RunStore<'db> {
             .map_err(RunStoreError::from)
     }
 
+    /// Find the durable run created from one conversation input event.
+    pub fn for_input_event(
+        &self,
+        conversation_id: &ConversationId,
+        input_event_seq: EventSeq,
+    ) -> Result<Option<RunRecord>, RunStoreError> {
+        self.db
+            .with_conn(|connection| {
+                connection
+                    .query_row(
+                        "SELECT run_id, conversation_id, parent_run_id, status, cursor, \
+                                input_event_seq, started_at, updated_at, deadline_at \
+                         FROM state_runs WHERE conversation_id = ?1 AND input_event_seq = ?2 \
+                         ORDER BY started_at DESC, run_id DESC LIMIT 1",
+                        params![conversation_id.as_str(), input_event_seq.0],
+                        row_to_run,
+                    )
+                    .optional()
+                    .map_err(DbError::from)
+            })
+            .map_err(RunStoreError::from)
+    }
+
     /// Create or load immutable run-wide time, retry, and effect limits.
     pub fn ensure_execution_budget(
         &self,
@@ -977,12 +1001,46 @@ impl<'db> RunStore<'db> {
         run_id: &str,
         manifest: &RunInputManifest,
     ) -> Result<(), RunStoreError> {
+        if let Some(snapshot_json) = manifest.tool_catalog_snapshot_json.as_deref() {
+            if snapshot_json.len() > 1024 * 1024 {
+                return Err(RunStoreError::Conflict(
+                    "tool catalog snapshot exceeds the 1 MiB storage limit".into(),
+                ));
+            }
+            let snapshot: serde_json::Value =
+                serde_json::from_str(snapshot_json).map_err(|error| {
+                    RunStoreError::Conflict(format!("invalid tool catalog snapshot: {error}"))
+                })?;
+            let tools = snapshot
+                .get("tools")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    RunStoreError::Conflict("tool catalog snapshot omitted tools".into())
+                })?;
+            let discoverable_tools = snapshot
+                .get("discoverable_tools")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    RunStoreError::Conflict(
+                        "tool catalog snapshot omitted discoverable tools".into(),
+                    )
+                })?;
+            let mut pinned = discoverable_tools.clone();
+            pinned.extend(tools.iter().cloned());
+            if crate::tool::tool_schema_hash(&serde_json::Value::Array(pinned))
+                != manifest.tool_catalog_hash
+            {
+                return Err(RunStoreError::Conflict(
+                    "tool catalog snapshot does not match its recorded hash".into(),
+                ));
+            }
+        }
         self.db.transaction(|tx| {
             tx.execute(
                 "INSERT OR IGNORE INTO state_run_input_manifests
                  (run_id, input_version, prompt_hash, model_settings_hash,
-                  tool_catalog_hash, recorded_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                  tool_catalog_hash, recorded_at, tool_catalog_snapshot_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     run_id,
                     i64::from(manifest.input_version),
@@ -990,13 +1048,15 @@ impl<'db> RunStore<'db> {
                     manifest.model_settings_hash,
                     manifest.tool_catalog_hash,
                     manifest.recorded_at,
+                    manifest.tool_catalog_snapshot_json,
                 ],
             )?;
-            let stored: (i64, String, String, String) = tx.query_row(
-                "SELECT input_version, prompt_hash, model_settings_hash, tool_catalog_hash
+            let stored: (i64, String, String, String, Option<String>) = tx.query_row(
+                "SELECT input_version, prompt_hash, model_settings_hash, tool_catalog_hash,
+                        tool_catalog_snapshot_json
                  FROM state_run_input_manifests WHERE run_id = ?1",
                 [run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
             )?;
             if stored.0 != i64::from(manifest.input_version)
                 || stored.1 != manifest.prompt_hash
@@ -1011,6 +1071,30 @@ impl<'db> RunStore<'db> {
                     stored.3 != manifest.tool_catalog_hash,
                 )));
             }
+            match (
+                stored.4.as_deref(),
+                manifest.tool_catalog_snapshot_json.as_deref(),
+            ) {
+                (Some(stored_json), Some(new_json)) => {
+                    let stored_value: serde_json::Value = serde_json::from_str(stored_json)
+                        .map_err(|error| DbError::Serde(format!("stored tool catalog snapshot: {error}")))?;
+                    let new_value: serde_json::Value = serde_json::from_str(new_json)
+                        .map_err(|error| DbError::Serde(format!("new tool catalog snapshot: {error}")))?;
+                    if stored_value != new_value {
+                        return Err(DbError::Invariant(format!(
+                            "run '{run_id}' was reopened with a different tool catalog snapshot"
+                        )));
+                    }
+                }
+                (None, Some(snapshot_json)) => {
+                    tx.execute(
+                        "UPDATE state_run_input_manifests SET tool_catalog_snapshot_json = ?1 \
+                         WHERE run_id = ?2 AND tool_catalog_snapshot_json IS NULL",
+                        params![snapshot_json, run_id],
+                    )?;
+                }
+                _ => {}
+            }
             Ok(())
         })?;
         Ok(())
@@ -1022,7 +1106,7 @@ impl<'db> RunStore<'db> {
             .with_conn(|conn| {
                 conn.query_row(
                     "SELECT input_version, prompt_hash, model_settings_hash,
-                            tool_catalog_hash, recorded_at
+                            tool_catalog_hash, recorded_at, tool_catalog_snapshot_json
                      FROM state_run_input_manifests WHERE run_id = ?1",
                     [run_id],
                     |row| {
@@ -1033,6 +1117,7 @@ impl<'db> RunStore<'db> {
                             model_settings_hash: row.get(2)?,
                             tool_catalog_hash: row.get(3)?,
                             recorded_at: row.get(4)?,
+                            tool_catalog_snapshot_json: row.get(5)?,
                         })
                     },
                 )
@@ -2998,11 +3083,21 @@ mod tests {
         let db = fresh_db();
         let store = RunStore::new(&db);
         let run_id = create_run(&store, None);
+        let run = store.get_run(&run_id).unwrap().unwrap();
+        assert_eq!(
+            store
+                .for_input_event(&run.conversation_id, run.input_event_seq)
+                .unwrap()
+                .unwrap()
+                .run_id,
+            run_id
+        );
         let original = RunInputManifest {
             input_version: 1,
             prompt_hash: "prompt-a".into(),
             model_settings_hash: "model-a".into(),
             tool_catalog_hash: "catalog-a".into(),
+            tool_catalog_snapshot_json: None,
             recorded_at: 100,
         };
         store.record_input_manifest(&run_id, &original).unwrap();
@@ -3016,6 +3111,44 @@ mod tests {
         assert!(matches!(
             store.record_input_manifest(&run_id, &drifted),
             Err(RunStoreError::Db(DbError::Invariant(_)))
+        ));
+    }
+
+    #[test]
+    fn input_manifest_persists_the_catalog_snapshot_for_local_replay() {
+        let db = fresh_db();
+        let store = RunStore::new(&db);
+        let run_id = create_run(&store, None);
+        let tool = serde_json::json!({
+            "type":"function",
+            "function":{
+                "name":"fixture.echo",
+                "description":"Synthetic fixture tool",
+                "parameters":{"type":"object","properties":{}}
+            }
+        });
+        let snapshot = serde_json::json!({
+            "tools":[tool.clone()],
+            "discoverable_tools":[]
+        });
+        let catalog_hash = crate::tool::tool_schema_hash(&serde_json::Value::Array(vec![tool]));
+        let manifest = RunInputManifest {
+            input_version: 1,
+            prompt_hash: "prompt-fixture".into(),
+            model_settings_hash: "model-fixture".into(),
+            tool_catalog_hash: catalog_hash,
+            tool_catalog_snapshot_json: Some(serde_json::to_string(&snapshot).unwrap()),
+            recorded_at: 101,
+        };
+        store.record_input_manifest(&run_id, &manifest).unwrap();
+        assert_eq!(store.input_manifest(&run_id).unwrap(), Some(manifest));
+
+        let mut mismatched = store.input_manifest(&run_id).unwrap().unwrap();
+        mismatched.tool_catalog_snapshot_json =
+            Some(serde_json::json!({"tools":[],"discoverable_tools":[]}).to_string());
+        assert!(matches!(
+            store.record_input_manifest(&run_id, &mismatched),
+            Err(RunStoreError::Conflict(_))
         ));
     }
 

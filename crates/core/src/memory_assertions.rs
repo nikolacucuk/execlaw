@@ -339,6 +339,30 @@ impl<'db> MemoryAssertionStore<'db> {
                         report.evidence_hidden += inserted as usize;
                     }
                 }
+                tx.execute(
+                    "WITH RECURSIVE affected(assertion_id) AS ( \
+                         SELECT assertion_id FROM memory_evidence \
+                         WHERE conversation_id=?1 AND event_seq=?2 \
+                         UNION SELECT child.assertion_id FROM memory_assertions child \
+                         JOIN affected parent ON child.supersedes_id=parent.assertion_id \
+                     ), affected_assets(asset_id) AS ( \
+                         SELECT DISTINCT asset_id FROM state_memory_asset_assertion_links \
+                         WHERE assertion_id IN (SELECT assertion_id FROM affected) \
+                     ) UPDATE memory_assets SET status='archived', updated_at=?3 \
+                       WHERE asset_id IN (SELECT asset_id FROM affected_assets)",
+                    params![conversation_id, event_seq, requested_at],
+                )?;
+                tx.execute(
+                    "WITH RECURSIVE affected(assertion_id) AS ( \
+                         SELECT assertion_id FROM memory_evidence \
+                         WHERE conversation_id=?1 AND event_seq=?2 \
+                         UNION SELECT child.assertion_id FROM memory_assertions child \
+                         JOIN affected parent ON child.supersedes_id=parent.assertion_id \
+                     ) DELETE FROM memory_asset_search WHERE asset_id IN ( \
+                         SELECT DISTINCT asset_id FROM state_memory_asset_assertion_links \
+                         WHERE assertion_id IN (SELECT assertion_id FROM affected))",
+                    params![conversation_id, event_seq],
+                )?;
                 Ok(report)
             })
             .map_err(MemoryAssertionError::from)
@@ -493,8 +517,8 @@ impl<'db> MemoryAssertionStore<'db> {
             .map_err(MemoryAssertionError::from)
     }
 
-    /// Append a retraction review in the same transaction as its state event and
-    /// remove the retracted assertion plus its superseded ancestors from projections.
+    /// Append a retraction review with its state event and invalidate superseded
+    /// ancestors plus derived summaries supported by the retracted evidence.
     pub fn insert_retraction_in_transaction(
         tx: &rusqlite::Transaction<'_>,
         assertion_id: &str,
@@ -562,9 +586,56 @@ impl<'db> MemoryAssertionStore<'db> {
                  SELECT ?1 UNION \
                  SELECT a.supersedes_id FROM memory_assertions a \
                  JOIN lineage l ON a.assertion_id = l.assertion_id \
-                 WHERE a.supersedes_id IS NOT NULL \
+                 WHERE a.supersedes_id IS NOT NULL UNION \
+                 SELECT d.assertion_id FROM memory_assertions d \
+                 JOIN memory_evidence derived ON derived.assertion_id = d.assertion_id \
+                   AND derived.evidence_kind = 'derived' \
+                 JOIN memory_evidence source ON source.conversation_id = derived.conversation_id \
+                   AND source.event_seq = derived.event_seq \
+                 JOIN lineage l ON l.assertion_id = source.assertion_id \
+                 WHERE d.kind = 'summary' \
              ) DELETE FROM memory_current_projection \
                WHERE assertion_id IN (SELECT assertion_id FROM lineage)",
+            [assertion_id],
+        )
+        .map_err(DbError::from)?;
+        tx.execute(
+            "WITH RECURSIVE lineage(assertion_id) AS ( \
+                 SELECT ?1 UNION \
+                 SELECT a.supersedes_id FROM memory_assertions a \
+                 JOIN lineage l ON a.assertion_id = l.assertion_id \
+                 WHERE a.supersedes_id IS NOT NULL UNION \
+                 SELECT d.assertion_id FROM memory_assertions d \
+                 JOIN memory_evidence derived ON derived.assertion_id = d.assertion_id \
+                   AND derived.evidence_kind = 'derived' \
+                 JOIN memory_evidence source ON source.conversation_id = derived.conversation_id \
+                   AND source.event_seq = derived.event_seq \
+                 JOIN lineage l ON l.assertion_id = source.assertion_id \
+                 WHERE d.kind = 'summary' \
+             ), affected_assets(asset_id) AS ( \
+                 SELECT DISTINCT asset_id FROM state_memory_asset_assertion_links \
+                 WHERE assertion_id IN (SELECT assertion_id FROM lineage) \
+             ) UPDATE memory_assets SET status='archived', updated_at=?2 \
+               WHERE asset_id IN (SELECT asset_id FROM affected_assets)",
+            rusqlite::params![assertion_id, created_at],
+        )
+        .map_err(DbError::from)?;
+        tx.execute(
+            "WITH RECURSIVE lineage(assertion_id) AS ( \
+                 SELECT ?1 UNION \
+                 SELECT a.supersedes_id FROM memory_assertions a \
+                 JOIN lineage l ON a.assertion_id = l.assertion_id \
+                 WHERE a.supersedes_id IS NOT NULL UNION \
+                 SELECT d.assertion_id FROM memory_assertions d \
+                 JOIN memory_evidence derived ON derived.assertion_id = d.assertion_id \
+                   AND derived.evidence_kind = 'derived' \
+                 JOIN memory_evidence source ON source.conversation_id = derived.conversation_id \
+                   AND source.event_seq = derived.event_seq \
+                 JOIN lineage l ON l.assertion_id = source.assertion_id \
+                 WHERE d.kind = 'summary' \
+             ) DELETE FROM memory_asset_search WHERE asset_id IN ( \
+                 SELECT DISTINCT asset_id FROM state_memory_asset_assertion_links \
+                 WHERE assertion_id IN (SELECT assertion_id FROM lineage))",
             [assertion_id],
         )
         .map_err(DbError::from)?;
@@ -712,6 +783,19 @@ impl<'db> MemoryAssertionStore<'db> {
                 assertion_id,
                 created_at,
             ],
+        )
+        .map_err(DbError::from)?;
+        tx.execute(
+            "UPDATE memory_assets SET status='archived', updated_at=?2 WHERE asset_id IN ( \
+                 SELECT asset_id FROM state_memory_asset_assertion_links WHERE assertion_id=?1) \
+               AND asset_type='memory'",
+            rusqlite::params![original.assertion_id, created_at],
+        )
+        .map_err(DbError::from)?;
+        tx.execute(
+            "DELETE FROM memory_asset_search WHERE asset_id IN ( \
+                 SELECT asset_id FROM state_memory_asset_assertion_links WHERE assertion_id=?1)",
+            [&original.assertion_id],
         )
         .map_err(DbError::from)?;
         Ok(assertion_id)
@@ -1022,6 +1106,13 @@ impl<'db> MemoryAssertionStore<'db> {
                     UNION SELECT a.supersedes_id FROM memory_assertions a \
                     JOIN retracted_lineage r ON a.assertion_id = r.assertion_id \
                     WHERE a.supersedes_id IS NOT NULL \
+                    UNION SELECT d.assertion_id FROM memory_assertions d \
+                    JOIN memory_evidence derived ON derived.assertion_id = d.assertion_id \
+                      AND derived.evidence_kind = 'derived' \
+                    JOIN memory_evidence source ON source.conversation_id = derived.conversation_id \
+                      AND source.event_seq = derived.event_seq \
+                    JOIN retracted_lineage r ON r.assertion_id = source.assertion_id \
+                    WHERE d.kind = 'summary' \
                  ), trusted AS MATERIALIZED (\
                     SELECT a.* FROM memory_assertions a \
                     WHERE a.scope = ?1 AND a.valid_from <= ?2 \

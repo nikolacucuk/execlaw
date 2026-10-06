@@ -9,6 +9,7 @@ import {
     getAdminMemoryRetrievalConfig,
     getAdminMemoryEvidenceSource,
     getAdminMemoryAssets,
+    linkAdminMemoryAssetAssertion,
     putAdminMemoryRetrievalConfig,
     rebuildAdminMemoryEmbeddings,
     retractAdminMemoryAssertion,
@@ -44,6 +45,7 @@ export function MemoryAssetsPage() {
     const [sourceQuotes, setSourceQuotes] = useState<Record<string, AdminMemoryEvidenceSource>>({});
     const [sourceLoadingId, setSourceLoadingId] = useState<string | null>(null);
     const [visibleSourceId, setVisibleSourceId] = useState<string | null>(null);
+    const [linkTargets, setLinkTargets] = useState<Record<string, string>>({});
 
     const refresh = useCallback(async () => {
         try {
@@ -99,6 +101,51 @@ export function MemoryAssetsPage() {
         } finally {
             setBusy(false);
         }
+    };
+
+    const linkAssertion = async (assertion: AdminMemoryAssertion) => {
+        const assetId = linkTargets[assertion.assertion_id];
+        if (!assetId) return;
+        setBusy(true);
+        try {
+            await linkAdminMemoryAssetAssertion(assetId, assertion.assertion_id, getAccessToken);
+            await refresh();
+        } catch (reason) {
+            setError(reason instanceof Error ? reason.message : String(reason));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const exportSafeMemory = () => {
+        const payload = {
+            format: "execlaw-memory-review-export-v1",
+            exported_at: new Date().toISOString(),
+            scope: agentScope,
+            assets: assets.map(({ asset_id, asset_type, name, description, owner_scope, visibility, trust_floor, status, version, source_hash, expires_at, assertion_ids }) => ({
+                asset_id, asset_type, name, description, owner_scope, visibility, trust_floor,
+                status, version, source_hash, expires_at, assertion_ids: assertion_ids ?? [],
+            })),
+            assertions: assertions.map(({ assertion_id, scope, trust_class, kind, subject, predicate, object, confidence, status, observed_from, observed_to, valid_from, valid_to, supersedes_id, extraction_run_id, created_event_seq, created_at, evidence, review }) => ({
+                assertion_id, scope, trust_class, kind, subject, predicate, object, confidence,
+                status, observed_from, observed_to, valid_from, valid_to, supersedes_id,
+                extraction_run_id, created_event_seq, created_at,
+                evidence: evidence.map(({ evidence_id, conversation_id, event_seq, payload_path, quote_hash, evidence_kind, created_at }) => ({
+                    evidence_id, conversation_id, event_seq, payload_path, quote_hash, evidence_kind, created_at,
+                })),
+                review,
+            })),
+        };
+        const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `execlaw-memory-review-${new Date().toISOString().slice(0, 10)}.json`;
+        link.style.display = "none";
+        document.body.append(link);
+        link.click();
+        link.remove();
+        window.setTimeout(() => URL.revokeObjectURL(url), 0);
     };
 
     const saveRetrievalConfig = async (event: FormEvent<HTMLFormElement>) => {
@@ -322,6 +369,7 @@ export function MemoryAssetsPage() {
             )}
             <hr className="my-4" />
             <h4 className="h6">Memory assertion evidence</h4>
+            <Button size="sm" variant="outline-secondary" className="mb-2" disabled={assertions.length === 0} onClick={exportSafeMemory}>Export loaded memory review data</Button>
             {privacyStatus && <p className="small mt-2" role="status">{privacyStatus}</p>}
             <p className="execlaw-muted small">Assertions are append-only. Review status, validity, revision lineage, and the event/path/hash references that support each fact.</p>
             {assertions.length === 0 ? <p className="execlaw-muted small">No memory assertions have been recorded.</p> : (
@@ -333,6 +381,17 @@ export function MemoryAssetsPage() {
                         <div className="execlaw-muted small">Observed {item.observed_from}{item.observed_to === null ? " onward" : `–${item.observed_to}`} · valid from {new Date(item.valid_from * 1000).toLocaleString()}{item.valid_to === null ? " onward" : ` until ${new Date(item.valid_to * 1000).toLocaleString()}`}</div>
                         {item.supersedes_id && <div className="small">Supersedes <code>{item.supersedes_id}</code></div>}
                         <div className="small">Assertion <code>{item.assertion_id}</code> · extraction run <code>{item.extraction_run_id}</code></div>
+                        <div className="small mt-1">Linked memory assets: {assets.filter((asset) => (asset.assertion_ids ?? []).includes(item.assertion_id)).map((asset) => asset.name).join(", ") || "none"}</div>
+                        {item.status === "approved" && item.evidence_total > 0 && (() => {
+                            const compatible = assets.filter((asset) => asset.asset_type === "memory" && asset.status === "active" && asset.owner_scope === item.scope && asset.trust_floor === item.trust_class && !(asset.assertion_ids ?? []).includes(item.assertion_id));
+                            return compatible.length > 0 && <div className="d-flex gap-2 mt-2">
+                                <Form.Select aria-label={`Memory asset for assertion ${item.assertion_id}`} value={linkTargets[item.assertion_id] ?? ""} onChange={(event) => setLinkTargets((current) => ({ ...current, [item.assertion_id]: event.target.value }))} disabled={busy}>
+                                    <option value="">Link to derived memory asset</option>
+                                    {compatible.map((asset) => <option key={asset.asset_id} value={asset.asset_id}>{asset.name}</option>)}
+                                </Form.Select>
+                                <Button size="sm" variant="outline-primary" disabled={busy || !linkTargets[item.assertion_id]} onClick={() => void linkAssertion(item)}>Link evidence</Button>
+                            </div>;
+                        })()}
                         {item.review && <div className="alert alert-secondary py-2 small mt-2 mb-0">{item.review.decision === "retracted" ? "Retracted" : "Corrected"} by <code>{item.review.reviewer_id}</code>: {item.review.reason} · <a href={`/chat/${encodeURIComponent(item.review.conversation_id)}`}>Review event #{item.review.event_seq}</a></div>}
                         <div className="mt-2">{item.evidence.length === 0 ? <span className="text-danger small">No evidence references are attached.</span> : <><div className="small text-muted">Showing {item.evidence.length} of {item.evidence_total} evidence references.</div>{item.evidence.map((source) => <div key={source.evidence_id} className="small border-top pt-2 mt-2">
                             <span className="badge text-bg-light me-2">{source.evidence_kind}</span>

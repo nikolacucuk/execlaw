@@ -18,7 +18,7 @@
     "policy_version": "redaction-v1",
     "redaction_map_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "replacements_applied": 0,
-    "synthetic_ids": []
+    "synthetic_ids": ["rule-of-two-known-limited", "blocked-sender", "controller-independent-approval"]
   },
   "events": [
     {
@@ -40,5 +40,69 @@
     {"seq": 1, "transition": "user_msg"},
     {"seq": 2, "transition": "model_turn"}
   ],
-  "mock_tool_responses": []
+  "mock_tool_responses": [],
+  "raw_stream_fixtures": [
+    {
+      "fixture_id": "utf8-crlf-single-byte-splits",
+      "chunks_hex": [
+        "646174613A207B2274657874223A22636166C3",
+        "A9",
+        "20F09F8C8D227D",
+        "0D0A0D0A646174",
+        "613A205B444F4E",
+        "455D0D0A0D0A"
+      ],
+      "expected_data": ["{\"text\":\"caf\u00e9 \ud83c\udf0d\"}", "[DONE]"]
+    }
+  ],
+  "policy_cases": [
+    {
+      "case_id": "rule-of-two-known-limited",
+      "sender_trust": "KnownLimited",
+      "effective_trust": "KnownLimited",
+      "voice": false,
+      "accesses_sensitive_data": true,
+      "produces_external_effect": true,
+      "expected": {
+        "drop_turn": false,
+        "require_approval": true,
+        "planner_executor": true,
+        "spotlighting": true,
+        "latency_band": "low_only",
+        "capability_set": ["messaging.reply_current_transport"]
+      }
+    },
+    {
+      "case_id": "blocked-sender",
+      "sender_trust": "Blocked",
+      "effective_trust": "Blocked",
+      "voice": false,
+      "accesses_sensitive_data": false,
+      "produces_external_effect": false,
+      "expected": {
+        "drop_turn": true,
+        "require_approval": false,
+        "planner_executor": false,
+        "spotlighting": false,
+        "latency_band": "low_only",
+        "capability_set": []
+      }
+    },
+    {
+      "case_id": "controller-independent-approval",
+      "sender_trust": "Controller",
+      "effective_trust": "Controller",
+      "voice": false,
+      "accesses_sensitive_data": true,
+      "produces_external_effect": true,
+      "expected": {
+        "drop_turn": false,
+        "require_approval": false,
+        "planner_executor": false,
+        "spotlighting": false,
+        "latency_band": "any",
+        "capability_set": ["*"]
+      }
+    }
+  ]
 }

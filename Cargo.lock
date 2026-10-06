@@ -1458,11 +1458,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "execlaw-container-manager",
  "execlaw-core",
  "execlaw-inference-api",
+ "execlaw-policy",
  "execlaw-runner-local",
  "hex",
  "rmp-serde",

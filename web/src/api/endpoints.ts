@@ -2421,7 +2421,9 @@ export interface AdminMemoryAsset {
     trust_floor: string;
     status: string;
     version: number;
+    source_hash: string | null;
     expires_at: number | null;
+    assertion_ids: string[];
 }
 
 export interface AdminMemoryAssetBinding {
@@ -2544,6 +2546,18 @@ export async function getAdminMemoryAssets(
 ): Promise<AdminMemoryAssetsResponse> {
     const query = agentScope === "default" ? "" : `?agent_scope=${encodeURIComponent(agentScope)}`;
     return apiFetch<AdminMemoryAssetsResponse>(`/api/admin/memory-assets${query}`, {}, tokenAccessor);
+}
+
+export async function linkAdminMemoryAssetAssertion(
+    assetId: string,
+    assertionId: string,
+    tokenAccessor: () => string | null,
+): Promise<{ linked: boolean; created: boolean }> {
+    return apiFetch(
+        `/api/admin/memory-assets/${encodeURIComponent(assetId)}/assertions`,
+        { method: "POST", body: { assertion_id: assertionId } },
+        tokenAccessor,
+    );
 }
 
 export async function deleteAdminMemoryAsset(

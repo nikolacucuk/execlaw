@@ -158,8 +158,13 @@ impl<'db> DurableRun<'db> {
         prompt: &impl Serialize,
         model_settings: &impl Serialize,
         tool_catalog: &impl Serialize,
+        tool_catalog_snapshot: &impl Serialize,
         recorded_at: i64,
     ) -> Result<(), RunStoreError> {
+        let tool_catalog_snapshot_json =
+            serde_json::to_string(tool_catalog_snapshot).map_err(|error| {
+                RunStoreError::Conflict(format!("serialize tool catalog snapshot: {error}"))
+            })?;
         self.store.record_input_manifest(
             &self.run_id,
             &RunInputManifest {
@@ -167,6 +172,7 @@ impl<'db> DurableRun<'db> {
                 prompt_hash: hash_serializable(prompt)?,
                 model_settings_hash: hash_serializable(model_settings)?,
                 tool_catalog_hash: hash_serializable(tool_catalog)?,
+                tool_catalog_snapshot_json: Some(tool_catalog_snapshot_json),
                 recorded_at,
             },
         )

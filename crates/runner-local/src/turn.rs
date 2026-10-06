@@ -1076,8 +1076,9 @@ impl TurnExecutor {
         let mut pinned_tool_catalog = cfg.discoverable_tools.clone();
         pinned_tool_catalog.extend(cfg.tools.iter().cloned());
 
-        // Store only hashes so replay can identify prompt, backend, and
-        // catalog drift without duplicating user content or tool schemas.
+        // Keep prompt/model values hashed, but preserve the policy-filtered
+        // catalog snapshot so an operator-consented fixture can replay catalog
+        // behavior without reconstructing declarations from tool calls.
         durable.record_input_manifest(
             &messages,
             &serde_json::json!({
@@ -1088,6 +1089,10 @@ impl TurnExecutor {
                 "context_window_policy": &cfg.context_window_policy,
             }),
             &pinned_tool_catalog,
+            &serde_json::json!({
+                "tools": &cfg.tools,
+                "discoverable_tools": &cfg.discoverable_tools,
+            }),
             chrono::Utc::now().timestamp(),
         )?;
 

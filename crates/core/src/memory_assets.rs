@@ -136,6 +136,7 @@ pub struct ResolvedLoadoutAsset {
     pub asset: MemoryAsset,
     pub binding: AssetBinding,
     pub max_chars: i64,
+    pub assertion_ids: Vec<String>,
 }
 
 /// Metadata-only proof of why a governed asset was injected into one turn.
@@ -169,6 +170,8 @@ pub struct TurnAssetLoadoutEntry {
     pub binding_priority: i64,
     pub binding_max_chars: i64,
     pub injected_chars: usize,
+    #[serde(default)]
+    pub assertion_ids: Vec<String>,
     pub admission_reasons: Vec<String>,
 }
 
@@ -189,6 +192,8 @@ pub struct TurnAssetRetrievalEntry {
     pub vector_rank: Option<i64>,
     pub reranker_version: String,
     pub injected_chars: usize,
+    #[serde(default)]
+    pub assertion_ids: Vec<String>,
     pub admission_reasons: Vec<String>,
 }
 
@@ -252,6 +257,8 @@ pub enum MemoryAssetError {
     InvalidRetrievalConfig,
     #[error("eligible memory candidate set exceeds the {limit}-asset search bound")]
     CandidateSetTooLarge { limit: usize },
+    #[error("asset/assertion link is not approved, evidence-backed, or trust-compatible")]
+    InvalidAssertionLink,
 }
 
 pub struct MemoryAssetStore<'db> {
@@ -454,6 +461,126 @@ impl<'db> MemoryAssetStore<'db> {
             .map_err(MemoryAssetError::from)
     }
 
+    /// Link a Controller-approved memory assertion to its derived asset.
+    pub fn link_assertion(
+        &self,
+        asset_id: &str,
+        assertion_id: &str,
+        linked_by: &str,
+        now_unix: i64,
+    ) -> Result<bool, MemoryAssetError> {
+        if asset_id.trim().is_empty()
+            || assertion_id.trim().is_empty()
+            || linked_by.trim().is_empty()
+            || linked_by.len() > 128
+        {
+            return Err(MemoryAssetError::InvalidAssertionLink);
+        }
+        if self.get(asset_id)?.is_none() {
+            return Err(MemoryAssetError::NotFound(asset_id.to_owned()));
+        }
+        let result = self.db.transaction(|tx| {
+            let asset: Option<(String, String, String)> = tx
+                .query_row(
+                    "SELECT asset_type, owner_scope, trust_floor FROM memory_assets WHERE asset_id=?1",
+                    params![asset_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((asset_type, owner_scope, trust_floor)) = asset else {
+                return Err(DbError::Invariant(
+                    "memory asset disappeared while linking assertion evidence".into(),
+                ));
+            };
+            let assertion_is_linkable: bool = tx.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM memory_assertions a
+                     WHERE a.assertion_id=?1 AND a.status='approved'
+                       AND a.scope=?2 AND a.trust_class=?3
+                       AND EXISTS(SELECT 1 FROM memory_evidence e WHERE e.assertion_id=a.assertion_id)
+                       AND NOT EXISTS(SELECT 1 FROM state_memory_privacy_tombstones p
+                           WHERE p.target_kind='assertion' AND p.target_id=a.assertion_id)
+                       AND EXISTS(SELECT 1 FROM memory_evidence e
+                           WHERE e.assertion_id=a.assertion_id
+                             AND NOT EXISTS(SELECT 1 FROM state_memory_privacy_tombstones p
+                                 WHERE p.target_kind='evidence' AND p.target_id=e.evidence_id)
+                             AND NOT EXISTS(SELECT 1 FROM state_memory_privacy_tombstones p
+                                 WHERE p.target_kind='source_event'
+                                   AND p.source_conversation_id=e.conversation_id
+                                   AND p.source_event_seq=e.event_seq))
+                       AND NOT EXISTS(SELECT 1 FROM state_memory_assertion_reviews r
+                           WHERE r.assertion_id=a.assertion_id AND r.decision IN ('retracted','corrected'))
+                 )",
+                params![assertion_id, owner_scope, trust_floor],
+                |row| row.get(0),
+            )?;
+            if asset_type != "memory" || !assertion_is_linkable {
+                return Ok(None);
+            }
+            Ok(Some(
+                tx.execute(
+                    "INSERT OR IGNORE INTO state_memory_asset_assertion_links
+                     (asset_id, assertion_id, linked_by, linked_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![asset_id, assertion_id, linked_by, now_unix],
+                )? > 0,
+            ))
+        })?;
+        result.ok_or(MemoryAssetError::InvalidAssertionLink)
+    }
+
+    /// List assertions that provide approved event-backed evidence for an asset.
+    pub fn linked_assertions(&self, asset_id: &str) -> Result<Vec<String>, MemoryAssetError> {
+        self.db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT assertion_id FROM state_memory_asset_assertion_links
+                     WHERE asset_id=?1 ORDER BY assertion_id",
+                )?;
+                statement
+                    .query_map(params![asset_id], |row| row.get(0))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)
+            })
+            .map_err(MemoryAssetError::from)
+    }
+
+    /// Return only still-approved, evidence-backed assertions linked to an asset.
+    pub fn linked_approved_assertions(
+        &self,
+        asset_id: &str,
+    ) -> Result<Vec<String>, MemoryAssetError> {
+        self.db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT l.assertion_id FROM state_memory_asset_assertion_links l \
+                 JOIN memory_assertions a ON a.assertion_id=l.assertion_id \
+                 WHERE l.asset_id=?1 AND a.status='approved' \
+                   AND a.scope=(SELECT owner_scope FROM memory_assets WHERE asset_id=l.asset_id) \
+                   AND a.trust_class=(SELECT trust_floor FROM memory_assets WHERE asset_id=l.asset_id) \
+                   AND EXISTS (SELECT 1 FROM memory_evidence e WHERE e.assertion_id=a.assertion_id) \
+                   AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones p \
+                     WHERE p.target_kind='assertion' AND p.target_id=a.assertion_id) \
+                   AND EXISTS (SELECT 1 FROM memory_evidence e \
+                     WHERE e.assertion_id=a.assertion_id \
+                       AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones p \
+                         WHERE p.target_kind='evidence' AND p.target_id=e.evidence_id) \
+                       AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones p \
+                         WHERE p.target_kind='source_event' \
+                           AND p.source_conversation_id=e.conversation_id \
+                           AND p.source_event_seq=e.event_seq)) \
+                   AND NOT EXISTS (SELECT 1 FROM state_memory_assertion_reviews r \
+                     WHERE r.assertion_id=a.assertion_id AND r.decision IN ('retracted','corrected')) \
+                 ORDER BY l.assertion_id",
+                )?;
+                statement
+                    .query_map(params![asset_id], |row| row.get(0))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)
+            })
+            .map_err(MemoryAssetError::from)
+    }
+
     pub fn get(&self, asset_id: &str) -> Result<Option<MemoryAsset>, MemoryAssetError> {
         Ok(self.db.with_conn(|c| {
             Ok(c.query_row(
@@ -585,6 +712,10 @@ impl<'db> MemoryAssetStore<'db> {
             {
                 continue;
             }
+            let assertion_ids = self.linked_approved_assertions(&asset.asset_id)?;
+            if asset.asset_type == AssetType::Memory && assertion_ids.is_empty() {
+                continue;
+            }
             let requested = usize::try_from(binding.max_chars).unwrap_or(usize::MAX);
             let available = char_budget.saturating_sub(used);
             if requested == 0 || requested > available {
@@ -596,6 +727,7 @@ impl<'db> MemoryAssetStore<'db> {
                 asset,
                 binding,
                 max_chars,
+                assertion_ids,
             });
         }
         Ok(resolved)
@@ -803,6 +935,25 @@ impl<'db> MemoryAssetStore<'db> {
                AND a.status = 'active' AND (a.expires_at IS NULL OR a.expires_at > ?2) \
                AND a.trust_floor IN ({trust_placeholders}) \
                AND a.owner_scope IN ({owner_placeholders}) \
+               AND (a.asset_type <> 'memory' OR EXISTS (\
+                   SELECT 1 FROM state_memory_asset_assertion_links l \
+                   JOIN memory_assertions ma ON ma.assertion_id=l.assertion_id \
+                   WHERE l.asset_id=a.asset_id AND ma.status='approved' \
+                     AND ma.scope=a.owner_scope AND ma.trust_class=a.trust_floor \
+                     AND EXISTS (SELECT 1 FROM memory_evidence me WHERE me.assertion_id=ma.assertion_id) \
+                     AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones mp \
+                       WHERE mp.target_kind='assertion' AND mp.target_id=ma.assertion_id) \
+                     AND EXISTS (SELECT 1 FROM memory_evidence me \
+                       WHERE me.assertion_id=ma.assertion_id \
+                         AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones mp \
+                           WHERE mp.target_kind='evidence' AND mp.target_id=me.evidence_id) \
+                         AND NOT EXISTS (SELECT 1 FROM state_memory_privacy_tombstones mp \
+                           WHERE mp.target_kind='source_event' \
+                             AND mp.source_conversation_id=me.conversation_id \
+                             AND mp.source_event_seq=me.event_seq)) \
+                     AND NOT EXISTS (SELECT 1 FROM state_memory_assertion_reviews mr \
+                         WHERE mr.assertion_id=ma.assertion_id AND mr.decision IN ('retracted','corrected'))\
+               )) \
                AND (a.visibility <> 'restricted' OR 'Controller' IN ({trust_placeholders})) \
              ORDER BY a.asset_id LIMIT ?{}",
             mode_start + eligible_injection_modes.len()
@@ -1247,10 +1398,13 @@ fn sanitize_fts_query(query: &str) -> String {
         .split_whitespace()
         .filter_map(|word| {
             let clean: String = word.chars().filter(|ch| ch.is_alphanumeric()).collect();
-            (!clean.is_empty()).then_some(clean)
+            (!clean.is_empty()).then(|| format!("\"{clean}\""))
         })
         .collect::<Vec<_>>()
-        .join(" ")
+        // User questions contain conversational filler absent from notes. An
+        // OR query preserves candidate recall; trust and lifecycle eligibility
+        // still run before lexical/vector ranks are assigned.
+        .join(" OR ")
 }
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
@@ -1374,6 +1528,114 @@ mod tests {
     }
 
     #[test]
+    fn unlinked_memory_assets_never_enter_hot_or_retrieved_context() {
+        let db = db();
+        let store = MemoryAssetStore::new(&db);
+        store
+            .create(NewMemoryAsset {
+                asset_id: "unlinked-memory",
+                asset_type: AssetType::Memory,
+                name: "Unlinked fact",
+                description: "synthetic fail-closed fixture",
+                owner_scope: "global",
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: None,
+                content_ref: Some("This fact has no authorized evidence."),
+                source_hash: Some("unlinked-source"),
+                now_unix: 1,
+            })
+            .unwrap();
+        store
+            .bind("unlinked-memory", "default", InjectionMode::Hot, 1, 256, 1)
+            .unwrap();
+        store
+            .bind(
+                "unlinked-memory",
+                "search",
+                InjectionMode::Discoverable,
+                1,
+                256,
+                1,
+            )
+            .unwrap();
+
+        assert!(
+            store
+                .resolve_hot_loadout("default", &["Controller"], &["global"], 2, 1024, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .search_eligible(
+                    "authorized evidence",
+                    None,
+                    None,
+                    "search",
+                    &["Controller"],
+                    &["global"],
+                    &[InjectionMode::Discoverable],
+                    2,
+                    10
+                )
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn lexical_search_retains_candidates_when_a_user_query_has_unshared_filler() {
+        let db = db();
+        let store = MemoryAssetStore::new(&db);
+        store
+            .create(NewMemoryAsset {
+                asset_id: "travel-clock",
+                asset_type: AssetType::Skill,
+                name: "Travel display preference",
+                description: "Synthetic fixture",
+                owner_scope: "global",
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: None,
+                content_ref: Some(
+                    "Display departure and arrival using each airport's local time zone.",
+                ),
+                source_hash: Some("travel-clock-source"),
+                now_unix: 1,
+            })
+            .unwrap();
+        store
+            .bind(
+                "travel-clock",
+                "h038-heldout",
+                InjectionMode::Discoverable,
+                10,
+                512,
+                1,
+            )
+            .unwrap();
+
+        let hits = store
+            .search_eligible(
+                "What departure and arrival display convention did I prefer on flight itineraries?",
+                None,
+                None,
+                "h038-heldout",
+                &["Controller"],
+                &["global"],
+                &[InjectionMode::Discoverable],
+                2,
+                5,
+            )
+            .unwrap();
+        assert_eq!(
+            hits.first().map(|hit| hit.asset.asset_id.as_str()),
+            Some("travel-clock")
+        );
+    }
+
+    #[test]
     fn retrieval_config_and_embedding_rebuild_candidates_track_source_versions() {
         let db = db();
         let store = MemoryAssetStore::new(&db);
@@ -1441,6 +1703,130 @@ mod tests {
     }
 
     #[test]
+    fn deletion_tombstone_invalidates_loadout_lexical_vector_and_rebuild_views() {
+        let db = db();
+        let store = MemoryAssetStore::new(&db);
+        store
+            .create(NewMemoryAsset {
+                asset_id: "retractable-asset",
+                asset_type: AssetType::Skill,
+                name: "Synthetic migration note",
+                description: "needle-for-deletion-regression",
+                owner_scope: "global",
+                visibility: AssetVisibility::Private,
+                trust_floor: "Controller",
+                source_ref: Some("fixture"),
+                content_ref: Some("synthetic source body"),
+                source_hash: Some("retractable-source-v1"),
+                now_unix: 1,
+            })
+            .unwrap();
+        store
+            .bind(
+                "retractable-asset",
+                "default",
+                InjectionMode::Hot,
+                10,
+                512,
+                1,
+            )
+            .unwrap();
+        store
+            .upsert_embedding(
+                "retractable-asset",
+                "fixture-embedding-v1",
+                &[1.0, 0.0],
+                "retractable-source-v1",
+                2,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .resolve_hot_loadout("default", &["Controller"], &["global"], 3, 512, 10,)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .search_eligible(
+                    "needle-for-deletion-regression",
+                    Some(&[1.0, 0.0]),
+                    Some("fixture-embedding-v1"),
+                    "default",
+                    &["Controller"],
+                    &["global"],
+                    &[InjectionMode::Hot],
+                    3,
+                    10,
+                )
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            store
+                .embedding_rebuild_candidates("fixture-embedding-v1", 10)
+                .unwrap()
+                .len(),
+            0
+        );
+
+        assert!(store.delete("retractable-asset", "controller", 4).unwrap());
+        assert!(
+            store
+                .resolve_hot_loadout("default", &["Controller"], &["global"], 5, 512, 10,)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .search_eligible(
+                    "needle-for-deletion-regression",
+                    Some(&[1.0, 0.0]),
+                    Some("fixture-embedding-v1"),
+                    "default",
+                    &["Controller"],
+                    &["global"],
+                    &[InjectionMode::Hot],
+                    5,
+                    10,
+                )
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .search("needle-for-deletion-regression", None, None, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .embedding_rebuild_candidates("fixture-embedding-v1", 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            store
+                .create(NewMemoryAsset {
+                    asset_id: "retractable-asset",
+                    asset_type: AssetType::Memory,
+                    name: "Recreated note",
+                    description: "must stay deleted",
+                    owner_scope: "global",
+                    visibility: AssetVisibility::Private,
+                    trust_floor: "Controller",
+                    source_ref: None,
+                    content_ref: Some("synthetic replacement"),
+                    source_hash: Some("retractable-source-v2"),
+                    now_unix: 6,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
     fn eligible_hybrid_search_filters_trust_before_vector_ranking() {
         let db = db();
         let store = MemoryAssetStore::new(&db);
@@ -1451,7 +1837,7 @@ mod tests {
             store
                 .create(NewMemoryAsset {
                     asset_id,
-                    asset_type: AssetType::Memory,
+                    asset_type: AssetType::Skill,
                     name: asset_id,
                     description: "synthetic retrieval fixture",
                     owner_scope: "global",
@@ -1554,7 +1940,7 @@ mod tests {
             store
                 .create(NewMemoryAsset {
                     asset_id: id,
-                    asset_type: AssetType::Memory,
+                    asset_type: AssetType::Skill,
                     name: id,
                     description: "fixture",
                     owner_scope,
@@ -1601,7 +1987,13 @@ mod tests {
 
     #[test]
     fn turn_loadout_receipt_is_immutable_and_metadata_only() {
-        let db = db();
+        let temp = tempfile::tempdir().unwrap();
+        let config = DbConfig {
+            path: temp.path().join("memory-loadout-receipt.db"),
+            key: None,
+        };
+        let db = Database::open(&config).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
         db.with_conn(|connection| {
             connection.execute(
                 "INSERT INTO state_conversations \
@@ -1635,6 +2027,7 @@ mod tests {
                 binding_priority: 80,
                 binding_max_chars: 240,
                 injected_chars: 129,
+                assertion_ids: vec!["assertion-release".into()],
                 admission_reasons: vec![
                     "active".into(),
                     "trust_readable".into(),
@@ -1663,12 +2056,23 @@ mod tests {
             Some(receipt.clone()),
             "retry preserves the original resolution timestamp"
         );
-        let mut changed = receipt;
+        let mut changed = receipt.clone();
         changed.assets[0].source_hash = Some("sha256:changed".into());
         assert!(
             store
                 .record_turn_loadout("loadout-conversation", 7, &changed)
                 .is_err()
+        );
+        drop(db);
+
+        let reopened = Database::open(&config).unwrap();
+        MigrationRunner::new(&reopened).apply_all().unwrap();
+        assert_eq!(
+            MemoryAssetStore::new(&reopened)
+                .turn_loadout("loadout-conversation", 7)
+                .unwrap(),
+            Some(receipt),
+            "the run inspector receipt must survive a process restart"
         );
     }
 

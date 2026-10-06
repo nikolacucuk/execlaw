@@ -714,7 +714,7 @@ pub(crate) fn assemble_system_prompt_for_asset_scope_with_embedding(
                 used_bytes += prefix.len() + value.len() + 1;
                 lines.push(format!("{prefix}{value}"));
                 retrieved_entries.push(TurnAssetRetrievalEntry {
-                    asset_id: hit.asset.asset_id,
+                    asset_id: hit.asset.asset_id.clone(),
                     name: hit.asset.name,
                     asset_type: hit.asset.asset_type,
                     version: hit.asset.version,
@@ -729,6 +729,9 @@ pub(crate) fn assemble_system_prompt_for_asset_scope_with_embedding(
                     reranker_version: execlaw_core::memory_assets::MEMORY_RERANKER_VERSION
                         .to_owned(),
                     injected_chars: value.chars().count(),
+                    assertion_ids: MemoryAssetStore::new(db)
+                        .linked_approved_assertions(&hit.asset.asset_id)
+                        .unwrap_or_default(),
                     admission_reasons: vec![
                         "trust_floor_readable".into(),
                         "owner_scope_readable".into(),
@@ -916,7 +919,7 @@ pub(crate) fn build_governed_asset_loadout(
                 used_bytes += prefix.len() + text.len() + 1;
                 retrieved_lines.push(format!("{prefix}{text}"));
                 retrieved_assets.push(TurnAssetRetrievalEntry {
-                    asset_id: hit.asset.asset_id,
+                    asset_id: hit.asset.asset_id.clone(),
                     name: hit.asset.name,
                     asset_type: hit.asset.asset_type,
                     version: hit.asset.version,
@@ -931,6 +934,9 @@ pub(crate) fn build_governed_asset_loadout(
                     reranker_version: execlaw_core::memory_assets::MEMORY_RERANKER_VERSION
                         .to_owned(),
                     injected_chars: text.chars().count(),
+                    assertion_ids: asset_store
+                        .linked_approved_assertions(&hit.asset.asset_id)
+                        .unwrap_or_default(),
                     admission_reasons: vec![
                         "trust_floor_readable".into(),
                         "owner_scope_readable".into(),
@@ -1035,6 +1041,7 @@ fn resolve_governed_hot_loadout(
             binding_priority: resolved.binding.priority,
             binding_max_chars: resolved.binding.max_chars,
             injected_chars: value.chars().count(),
+            assertion_ids: resolved.assertion_ids,
             admission_reasons: vec![
                 "trust_floor_readable".into(),
                 "owner_scope_readable".into(),

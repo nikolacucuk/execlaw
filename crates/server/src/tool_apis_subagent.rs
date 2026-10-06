@@ -239,6 +239,10 @@ impl InferenceSubagentApi {
                         "max_tokens": max_tokens,
                     }),
                     &Vec::<String>::new(),
+                    &serde_json::json!({
+                        "tools": [],
+                        "discoverable_tools": [],
+                    }),
                     now,
                 )
                 .map_err(|error| {

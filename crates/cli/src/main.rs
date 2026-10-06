@@ -580,6 +580,15 @@ enum EvalOp {
         /// Link the fixture to a bounded release tag, such as v2026.09.29.
         #[arg(long)]
         release_ref: Option<String>,
+        /// Local exact catalog snapshots for flagged turns created before manifests stored declarations.
+        #[arg(long)]
+        tool_catalog_snapshots: Option<PathBuf>,
+        /// Local JSON list of explicitly synthetic media replacements; source attachment bytes are never exported.
+        #[arg(long)]
+        synthetic_media: Option<PathBuf>,
+        /// Local JSON list of policy inputs and expected decisions to replay against the production evaluator.
+        #[arg(long)]
+        policy_cases: Option<PathBuf>,
         #[arg(long)]
         db: Option<PathBuf>,
         #[arg(long, default_value_t = false)]
@@ -1921,7 +1930,7 @@ impl EvalFixtureRedactor {
         text
     }
 
-    fn redact_value(&mut self, value: &mut serde_json::Value, field: Option<&str>) {
+    fn redact_value(&mut self, value: &mut serde_json::Value) {
         use serde_json::Value;
         match value {
             Value::Object(fields) => {
@@ -1963,13 +1972,13 @@ impl EvalFixtureRedactor {
                         let raw = nested.as_str().unwrap_or("unknown").to_owned();
                         *nested = Value::String(self.synthetic_id("PERSON", &raw));
                     } else {
-                        self.redact_value(nested, Some(name));
+                        self.redact_value(nested);
                     }
                 }
             }
             Value::Array(items) => {
                 for item in items {
-                    self.redact_value(item, field);
+                    self.redact_value(item);
                 }
             }
             Value::String(text) => *text = self.redact_text(text),
@@ -2133,7 +2142,7 @@ fn cmd_memory_export_assertion(
         },
         "privacy": "local_only",
     });
-    redactor.redact_value(&mut export, None);
+    redactor.redact_value(&mut export);
     let replacements_applied = redactor.applied;
     let synthetic_ids = redactor.synthetic_ids();
     export["redaction"]["replacements_applied"] = serde_json::json!(replacements_applied);
@@ -2157,19 +2166,36 @@ fn cmd_memory_export_assertion(
     Ok(())
 }
 
-fn cmd_eval_export_flagged(
-    id: i64,
+struct EvalExportOptions {
     output_path: PathBuf,
     redaction_map_path: PathBuf,
     consent: bool,
     incident_ref: Option<String>,
     release_ref: Option<String>,
+    tool_catalog_snapshots_path: Option<PathBuf>,
+    synthetic_media_path: Option<PathBuf>,
+    policy_cases_path: Option<PathBuf>,
     db_path: PathBuf,
     no_encrypt: bool,
-) -> anyhow::Result<()> {
+}
+
+fn cmd_eval_export_flagged(id: i64, options: EvalExportOptions) -> anyhow::Result<()> {
+    let EvalExportOptions {
+        output_path,
+        redaction_map_path,
+        consent,
+        incident_ref,
+        release_ref,
+        tool_catalog_snapshots_path,
+        synthetic_media_path,
+        policy_cases_path,
+        db_path,
+        no_encrypt,
+    } = options;
     use execlaw_core::eval::{
-        EvalFlaggedStore, ExpectedStateTransition, MockToolResponse, RegressionFixture,
-        RegressionFixtureEvent, RegressionFixtureProvenance, RegressionFixtureRedaction,
+        EvalFlaggedStore, ExpectedStateTransition, MockToolResponse, PolicyEvaluationFixture,
+        RegressionFixture, RegressionFixtureEvent, RegressionFixtureProvenance,
+        RegressionFixtureRedaction, SyntheticMediaFixture, ToolCatalogFixture,
         validate_regression_fixture,
     };
     use execlaw_core::events::{EventLog, KeyRing};
@@ -2197,6 +2223,36 @@ fn cmd_eval_export_flagged(
         .collect::<Vec<_>>();
     let redaction_map_sha256 = execlaw_core::harness::HarnessStore::fingerprint(&map_identity)?;
     let mut redactor = EvalFixtureRedactor::new(map)?;
+    let synthetic_media: Vec<SyntheticMediaFixture> = match synthetic_media_path {
+        Some(path) => {
+            let bytes = std::fs::read(&path)
+                .map_err(|error| anyhow::anyhow!("read synthetic media replacements: {error}"))?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| anyhow::anyhow!("parse synthetic media replacements: {error}"))?
+        }
+        None => Vec::new(),
+    };
+    let mut policy_cases: Vec<PolicyEvaluationFixture> = match policy_cases_path {
+        Some(path) => {
+            let bytes = std::fs::read(&path)
+                .map_err(|error| anyhow::anyhow!("read policy evaluation cases: {error}"))?;
+            serde_json::from_slice(&bytes)
+                .map_err(|error| anyhow::anyhow!("parse policy evaluation cases: {error}"))?
+        }
+        None => Vec::new(),
+    };
+    let catalog_sidecar: Vec<ToolCatalogFixture> = match tool_catalog_snapshots_path {
+        Some(path) => {
+            let bytes = std::fs::read(&path)
+                .map_err(|error| anyhow::anyhow!("read tool catalog snapshots: {error}"))?;
+            if bytes.len() > 8 * 1024 * 1024 {
+                anyhow::bail!("tool catalog snapshots exceed the 8 MiB sidecar limit");
+            }
+            serde_json::from_slice(&bytes)
+                .map_err(|error| anyhow::anyhow!("parse tool catalog snapshots: {error}"))?
+        }
+        None => Vec::new(),
+    };
 
     let db = open_db(&db_path, no_encrypt)?;
     let flag = EvalFlaggedStore::new(&db)
@@ -2234,7 +2290,7 @@ fn cmd_eval_export_flagged(
             rmp_serde::from_slice(&event.payload).map_err(|error| {
                 anyhow::anyhow!("decode event {} for redaction: {error}", event.seq.0)
             })?;
-        redactor.redact_value(&mut payload, None);
+        redactor.redact_value(&mut payload);
         if event.kind.as_str() == "user_msg" {
             current_turn_seq = event.seq.0;
         }
@@ -2271,6 +2327,56 @@ fn cmd_eval_export_flagged(
         });
     }
 
+    for case in &mut policy_cases {
+        case.case_id = redactor.synthetic_id("POLICY_CASE", &case.case_id);
+    }
+
+    let synthetic_ids = redactor.synthetic_ids();
+    if synthetic_media
+        .iter()
+        .any(|media| !synthetic_ids.contains(&media.attachment_id))
+    {
+        anyhow::bail!("synthetic media IDs must be replacement IDs from the local redaction map");
+    }
+    let has_attachments = fixture_events.iter().any(|event| {
+        event.kind == "user_msg"
+            && event
+                .payload
+                .get("attachment_ids")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|ids| !ids.is_empty())
+    });
+    if has_attachments && synthetic_media.is_empty() {
+        anyhow::bail!(
+            "flagged range has attachments; provide --synthetic-media with synthetic replacements, source bytes are never exported"
+        );
+    }
+
+    let mut tool_catalogs = Vec::new();
+    for user_event in fixture_events
+        .iter()
+        .filter(|event| event.kind == "user_msg")
+    {
+        if let Some(snapshot) =
+            export_tool_catalog_for_turn(&db, &conversation_id, user_event.seq, &mut redactor)?
+        {
+            tool_catalogs.push(snapshot);
+        }
+    }
+    let user_event_seqs = fixture_events
+        .iter()
+        .filter(|event| event.kind == "user_msg")
+        .map(|event| event.seq)
+        .collect::<std::collections::HashSet<_>>();
+    merge_tool_catalog_sidecars(
+        &db,
+        &conversation_id,
+        &user_event_seqs,
+        &mut tool_catalogs,
+        catalog_sidecar,
+        &mut redactor,
+    )?;
+
     let fixture = RegressionFixture {
         schema_version: 1,
         effects_enabled: false,
@@ -2295,11 +2401,15 @@ fn cmd_eval_export_flagged(
             policy_version: "redaction-v1".into(),
             redaction_map_sha256,
             replacements_applied: redactor.applied,
-            synthetic_ids: redactor.synthetic_ids(),
+            synthetic_ids,
         },
         events: fixture_events,
         expected_transitions,
         mock_tool_responses,
+        raw_stream_fixtures: Vec::new(),
+        synthetic_media,
+        policy_cases,
+        tool_catalogs,
     };
     validate_regression_fixture(&fixture)
         .map_err(|error| anyhow::anyhow!("fixture rejected by offline validator: {error}"))?;
@@ -2332,6 +2442,120 @@ fn cmd_eval_export_flagged(
             .unwrap_or("unlinked"),
         output_path.display()
     );
+    Ok(())
+}
+
+fn export_tool_catalog_for_turn(
+    db: &execlaw_core::Database,
+    conversation_id: &execlaw_core::ConversationId,
+    turn_seq: i64,
+    redactor: &mut EvalFixtureRedactor,
+) -> anyhow::Result<Option<execlaw_core::eval::ToolCatalogFixture>> {
+    use execlaw_core::eval::ToolCatalogFixture;
+    use execlaw_core::ids::EventSeq;
+    use execlaw_core::runs::RunStore;
+
+    let runs = RunStore::new(db);
+    let Some(run) = runs.for_input_event(conversation_id, EventSeq(turn_seq))? else {
+        return Ok(None);
+    };
+    let Some(manifest) = runs.input_manifest(&run.run_id)? else {
+        return Ok(None);
+    };
+    let Some(snapshot_json) = manifest.tool_catalog_snapshot_json else {
+        return Ok(None);
+    };
+    let mut snapshot: serde_json::Value =
+        serde_json::from_str(&snapshot_json).map_err(|error| {
+            anyhow::anyhow!("decode persisted tool catalog for fixture export: {error}")
+        })?;
+    let tools = snapshot
+        .get("tools")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("persisted tool catalog omitted tools"))?;
+    let discoverable_tools = snapshot
+        .get("discoverable_tools")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("persisted tool catalog omitted discoverable tools"))?;
+    let mut pinned = discoverable_tools.clone();
+    pinned.extend(tools.iter().cloned());
+    if execlaw_core::tool::tool_schema_hash(&serde_json::Value::Array(pinned))
+        != manifest.tool_catalog_hash
+    {
+        anyhow::bail!("persisted tool catalog does not match its immutable run manifest");
+    }
+    redactor.redact_value(&mut snapshot);
+    let tools = snapshot["tools"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("redacted tool catalog omitted tools"))?;
+    let discoverable_tools = snapshot["discoverable_tools"]
+        .as_array()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("redacted tool catalog omitted discoverable tools"))?;
+    Ok(Some(ToolCatalogFixture {
+        turn_seq,
+        source_catalog_hash: manifest.tool_catalog_hash,
+        snapshot_sha256: execlaw_core::harness::HarnessStore::fingerprint(&snapshot)?,
+        tools,
+        discoverable_tools,
+    }))
+}
+
+fn merge_tool_catalog_sidecars(
+    db: &execlaw_core::Database,
+    conversation_id: &execlaw_core::ConversationId,
+    user_event_seqs: &std::collections::HashSet<i64>,
+    catalogs: &mut Vec<execlaw_core::eval::ToolCatalogFixture>,
+    sidecar: Vec<execlaw_core::eval::ToolCatalogFixture>,
+    redactor: &mut EvalFixtureRedactor,
+) -> anyhow::Result<()> {
+    use execlaw_core::runs::RunStore;
+
+    let runs = RunStore::new(db);
+    for mut catalog in sidecar {
+        if !user_event_seqs.contains(&catalog.turn_seq)
+            || catalogs
+                .iter()
+                .any(|existing| existing.turn_seq == catalog.turn_seq)
+        {
+            anyhow::bail!("tool catalog sidecar has an unknown or duplicate turn sequence");
+        }
+        let mut snapshot = serde_json::json!({
+            "tools":catalog.tools,
+            "discoverable_tools":catalog.discoverable_tools,
+        });
+        if execlaw_core::harness::HarnessStore::fingerprint(&snapshot)? != catalog.snapshot_sha256 {
+            anyhow::bail!("tool catalog sidecar snapshot hash does not match its declarations");
+        }
+        if let Some(run) =
+            runs.for_input_event(conversation_id, execlaw_core::EventSeq(catalog.turn_seq))?
+        {
+            if let Some(manifest) = runs.input_manifest(&run.run_id)? {
+                if manifest.tool_catalog_hash != catalog.source_catalog_hash {
+                    anyhow::bail!("tool catalog sidecar does not match the run's catalog hash");
+                }
+                if manifest.tool_catalog_snapshot_json.is_some() {
+                    anyhow::bail!("tool catalog sidecar duplicates an available durable snapshot");
+                }
+            }
+        }
+        redactor.redact_value(&mut snapshot);
+        catalog.tools = snapshot["tools"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("redacted tool catalog sidecar omitted tools"))?;
+        catalog.discoverable_tools = snapshot["discoverable_tools"]
+            .as_array()
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("redacted tool catalog sidecar omitted discoverable tools")
+            })?;
+        catalog.snapshot_sha256 = execlaw_core::harness::HarnessStore::fingerprint(&snapshot)?;
+        catalogs.push(catalog);
+    }
     Ok(())
 }
 
@@ -4273,17 +4497,25 @@ fn main() -> ExitCode {
                 consent,
                 incident_ref,
                 release_ref,
+                tool_catalog_snapshots,
+                synthetic_media,
+                policy_cases,
                 db,
                 no_encrypt,
             } => cmd_eval_export_flagged(
                 id,
-                to,
-                redaction_map,
-                consent,
-                incident_ref,
-                release_ref,
-                db.unwrap_or_else(default_db_path),
-                no_encrypt,
+                EvalExportOptions {
+                    output_path: to,
+                    redaction_map_path: redaction_map,
+                    consent,
+                    incident_ref,
+                    release_ref,
+                    tool_catalog_snapshots_path: tool_catalog_snapshots,
+                    synthetic_media_path: synthetic_media,
+                    policy_cases_path: policy_cases,
+                    db_path: db.unwrap_or_else(default_db_path),
+                    no_encrypt,
+                },
             ),
         },
         Command::Memory { op } => match op {
@@ -4513,6 +4745,12 @@ mod tests {
             "INC-42",
             "--release-ref",
             "v2026.09.29",
+            "--tool-catalog-snapshots",
+            "tool-catalogs.json",
+            "--synthetic-media",
+            "synthetic-media.json",
+            "--policy-cases",
+            "policy-cases.json",
         ])
         .unwrap();
         let Command::Eval {
@@ -4520,6 +4758,9 @@ mod tests {
                 EvalOp::ExportFlagged {
                     incident_ref,
                     release_ref,
+                    tool_catalog_snapshots,
+                    synthetic_media,
+                    policy_cases,
                     ..
                 },
         } = cli.command
@@ -4528,6 +4769,185 @@ mod tests {
         };
         assert_eq!(incident_ref.as_deref(), Some("INC-42"));
         assert_eq!(release_ref.as_deref(), Some("v2026.09.29"));
+        assert_eq!(
+            tool_catalog_snapshots.as_deref(),
+            Some(std::path::Path::new("tool-catalogs.json"))
+        );
+        assert_eq!(
+            synthetic_media.as_deref(),
+            Some(std::path::Path::new("synthetic-media.json"))
+        );
+        assert_eq!(
+            policy_cases.as_deref(),
+            Some(std::path::Path::new("policy-cases.json"))
+        );
+    }
+
+    #[test]
+    fn fixture_export_reads_and_redacts_the_catalog_snapshot_for_the_flagged_turn() {
+        let db =
+            execlaw_core::Database::open(&execlaw_core::DbConfig::in_memory_unencrypted()).unwrap();
+        execlaw_core::MigrationRunner::new(&db).apply_all().unwrap();
+        let conversation_id = execlaw_core::ConversationId::from("catalog-export-fixture");
+        execlaw_core::conversation::ConversationStore::new(&db)
+            .upsert(&execlaw_core::conversation::ConversationRow {
+                conversation_id: conversation_id.clone(),
+                kind: execlaw_core::conversation::ConversationKind::ControllerDM,
+                last_seq: execlaw_core::ids::EventSeq(0),
+                phase: execlaw_core::conversation::Phase::Idle,
+                controller_id: None,
+                trust_class: "Controller".into(),
+                snapshot_blob: None,
+                snapshot_seq: None,
+                lease_owner: None,
+                lease_expires: None,
+                modality: execlaw_core::conversation::Modality::Text,
+                display_name: None,
+                display_name_source: "auto".into(),
+                is_pinned: false,
+                is_ephemeral: false,
+                ephemeral_expires_at: None,
+                last_activity_at: 1,
+                context_window_policy: None,
+            })
+            .unwrap();
+        execlaw_core::events::EventLog::new(&db)
+            .commit_turn(
+                &conversation_id,
+                execlaw_core::ids::EventSeq(0),
+                vec![
+                    execlaw_core::events::PendingEvent::encode(
+                        execlaw_core::events::EventKind::UserMsg,
+                        &serde_json::json!({"text":"fixture", "attachment_ids": []}),
+                        Some("controller-fixture".into()),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        let runs = execlaw_core::runs::RunStore::new(&db);
+        let run_id = runs
+            .create_run(&execlaw_core::runs::NewRun {
+                conversation_id: conversation_id.clone(),
+                parent_run_id: None,
+                input_event_seq: execlaw_core::EventSeq(1),
+                started_at: 1,
+                deadline_at: None,
+            })
+            .unwrap();
+        let tool = serde_json::json!({
+            "type":"function",
+            "function":{
+                "name":"fixture.echo",
+                "description":"private schema detail",
+                "parameters":{"type":"object","properties":{}}
+            }
+        });
+        let snapshot = serde_json::json!({
+            "tools":[tool.clone()],
+            "discoverable_tools":[tool.clone()]
+        });
+        let pinned = vec![tool.clone(), tool.clone()];
+        let manifest = execlaw_core::runs::RunInputManifest {
+            input_version: 1,
+            prompt_hash: "prompt-fixture".into(),
+            model_settings_hash: "model-fixture".into(),
+            tool_catalog_hash: execlaw_core::tool::tool_schema_hash(&serde_json::Value::Array(
+                pinned,
+            )),
+            tool_catalog_snapshot_json: Some(serde_json::to_string(&snapshot).unwrap()),
+            recorded_at: 1,
+        };
+        runs.record_input_manifest(&run_id, &manifest).unwrap();
+        let mut redactor = EvalFixtureRedactor::new(EvalRedactionMap {
+            replacements: vec![EvalRedactionReplacement {
+                source: "private schema detail".into(),
+                replacement: "<SYNTHETIC_SCHEMA_DESCRIPTION>".into(),
+            }],
+        })
+        .unwrap();
+
+        let exported = export_tool_catalog_for_turn(&db, &conversation_id, 1, &mut redactor)
+            .unwrap()
+            .unwrap();
+        assert_eq!(exported.source_catalog_hash, manifest.tool_catalog_hash);
+        assert_eq!(
+            exported.tools[0]["function"]["description"],
+            "<SYNTHETIC_SCHEMA_DESCRIPTION>"
+        );
+        assert!(
+            !exported.tools[0]
+                .to_string()
+                .contains("private schema detail")
+        );
+        assert_eq!(exported.snapshot_sha256.len(), 64);
+
+        execlaw_core::events::EventLog::new(&db)
+            .commit_turn(
+                &conversation_id,
+                execlaw_core::ids::EventSeq(1),
+                vec![
+                    execlaw_core::events::PendingEvent::encode(
+                        execlaw_core::events::EventKind::UserMsg,
+                        &serde_json::json!({"text":"legacy fixture", "attachment_ids": []}),
+                        Some("controller-fixture".into()),
+                    )
+                    .unwrap(),
+                ],
+            )
+            .unwrap();
+        let legacy_run = runs
+            .create_run(&execlaw_core::runs::NewRun {
+                conversation_id: conversation_id.clone(),
+                parent_run_id: None,
+                input_event_seq: execlaw_core::ids::EventSeq(2),
+                started_at: 2,
+                deadline_at: None,
+            })
+            .unwrap();
+        runs.record_input_manifest(
+            &legacy_run,
+            &execlaw_core::runs::RunInputManifest {
+                input_version: 1,
+                prompt_hash: "prompt-legacy".into(),
+                model_settings_hash: "model-fixture".into(),
+                tool_catalog_hash: manifest.tool_catalog_hash.clone(),
+                tool_catalog_snapshot_json: None,
+                recorded_at: 2,
+            },
+        )
+        .unwrap();
+        let sidecar_snapshot = serde_json::json!({
+            "tools":snapshot["tools"].clone(),
+            "discoverable_tools":snapshot["discoverable_tools"].clone(),
+        });
+        let mut legacy_catalogs = Vec::new();
+        merge_tool_catalog_sidecars(
+            &db,
+            &conversation_id,
+            &std::collections::HashSet::from([2]),
+            &mut legacy_catalogs,
+            vec![execlaw_core::eval::ToolCatalogFixture {
+                turn_seq: 2,
+                source_catalog_hash: manifest.tool_catalog_hash,
+                snapshot_sha256: execlaw_core::harness::HarnessStore::fingerprint(
+                    &sidecar_snapshot,
+                )
+                .unwrap(),
+                tools: sidecar_snapshot["tools"].as_array().unwrap().clone(),
+                discoverable_tools: sidecar_snapshot["discoverable_tools"]
+                    .as_array()
+                    .unwrap()
+                    .clone(),
+            }],
+            &mut redactor,
+        )
+        .unwrap();
+        assert_eq!(legacy_catalogs.len(), 1);
+        assert_eq!(
+            legacy_catalogs[0].tools[0]["function"]["description"],
+            "<SYNTHETIC_SCHEMA_DESCRIPTION>"
+        );
     }
 
     #[test]

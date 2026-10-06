@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "effects_enabled": false,
+  "provenance": {
+    "flagged_range_id": 3,
+    "source_conversation_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "source_fingerprint_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "label": "synthetic-image-offline-smoke",
+    "tags": ["synthetic", "image", "offline"],
+    "from_seq": 1,
+    "to_seq": 2,
+    "flagged_at": 1,
+    "exported_at": 1,
+    "incident_ref": "SYNTHETIC-INC-3",
+    "release_ref": "v0.0.0"
+  },
+  "redaction": {
+    "policy_version": "redaction-v1",
+    "redaction_map_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "replacements_applied": 0,
+    "synthetic_ids": ["synthetic-image-1"]
+  },
+  "events": [
+    {
+      "seq": 1,
+      "kind": "user_msg",
+      "actor": "controller",
+      "committed_at": 1,
+      "payload": {"text":"Describe the synthetic pixel","sender_principal_id":"controller","attachment_ids":["synthetic-image-1"]}
+    },
+    {
+      "seq": 2,
+      "kind": "model_turn",
+      "actor": "agent",
+      "committed_at": 2,
+      "payload": {"model":"fixture-model","finish_reason":"stop","text":"synthetic pixel received","prompt_tokens":1,"completion_tokens":1}
+    }
+  ],
+  "expected_transitions": [
+    {"seq": 1, "transition": "user_msg"},
+    {"seq": 2, "transition": "model_turn"}
+  ],
+  "mock_tool_responses": [],
+  "synthetic_media": [
+    {
+      "attachment_id": "synthetic-image-1",
+      "mime_type": "image/png",
+      "content_hex": "89504E470D0A1A0A0000000D49484452000000010000000108060000001F15C4890000000D49444154789C636000020000050001A5F645400000000049454E44AE426082",
+      "synthetic": true
+    }
+  ]
+}

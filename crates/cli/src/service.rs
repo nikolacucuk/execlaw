@@ -36,7 +36,7 @@ use service_manager::{
     ServiceStopCtx, ServiceUninstallCtx,
 };
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Stable identifier for the systemd unit / launchd label / Windows
 /// SCM name. Matches the binary name so `journalctl -u execlaw`,
@@ -200,7 +200,7 @@ pub fn install(system: bool, bind: Option<String>, db: Option<PathBuf>) -> anyho
 /// `config_general.bind_address` column, then close it. Used during
 /// `service install --bind X` so the value persists across service
 /// restarts and matches what Settings → General would write.
-fn write_bind_to_db(db_path: &PathBuf, bind: &str) -> anyhow::Result<()> {
+fn write_bind_to_db(db_path: &Path, bind: &str) -> anyhow::Result<()> {
     use execlaw_core::general_settings::{GeneralSettingsStore, GeneralSettingsUpdate};
     let db =
         crate::open_db(db_path, false).with_context(|| format!("open {}", db_path.display()))?;
