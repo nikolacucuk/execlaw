@@ -223,6 +223,21 @@ and SQLCipher can trigger another compile. A first focused run can therefore be
 much slower than a later run of the same command. A warm no-op `cargo build`
 measures cache startup, not the cost of recompiling a changed crate.
 
+On Windows, the PowerShell dev-server, full-test, and migration-test scripts use
+a workspace-specific Cargo target under `%LOCALAPPDATA%` by default. This keeps
+frequently rewritten compiler artifacts outside a OneDrive-synced checkout and
+seeds the local cache from the existing `target/` directory on first use. The
+initial copy may take several minutes for a large target tree. An explicit
+`CARGO_TARGET_DIR` is respected; set `EXECLAW_REPO_CARGO_TARGET=1` to keep
+artifacts in the repository. For direct Cargo commands, initialize the same
+target in the current PowerShell session:
+
+```powershell
+. .\scripts\cargo-target-local.ps1
+Use-ExeclawLocalCargoTarget -RepoRoot (Get-Location).Path
+cargo test -p execlaw-server --lib <test_filter>
+```
+
 To locate build time, run `cargo build --workspace --timings`; Cargo saves an
 HTML report under `target/cargo-timings/`. For comparisons, use the same source
 revision and command, keep other Cargo jobs idle, and record cold compilation

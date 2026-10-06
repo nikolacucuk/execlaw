@@ -18,10 +18,10 @@ try {
     }
 
     if (-not $env:CARGO_TARGET_DIR) {
-        # Keep this focused check isolated from stale or ACL-protected build
-        # script directories in the shared workspace target tree.
-        $env:CARGO_TARGET_DIR = Join-Path $repoRoot "target-migration-check"
-        Write-Host "Using isolated Cargo target: $env:CARGO_TARGET_DIR"
+        # Keep this focused check away from synced or ACL-protected workspace
+        # artifacts while still reusing the existing Cargo cache when possible.
+        . (Join-Path $PSScriptRoot 'cargo-target-local.ps1')
+        Use-ExeclawLocalCargoTarget -RepoRoot $repoRoot
     }
 
     # --lib prevents Cargo from printing unrelated zero-test reports for

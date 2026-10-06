@@ -177,32 +177,48 @@ networks:
     driver: bridge
 ```
 
-The database-backed **Settings -> Backends -> Standard** endpoint must match
-the container-resolvable host URL:
+In execlaw, set **Settings -> Backends -> Standard** to **External**, then use
+the container-resolvable Ollama URL and an exact model ID returned by
+`/v1/models`:
 
 ```text
 http://host.docker.internal:30068/v1
 ```
 
 Do not use `localhost` or `127.0.0.1` from inside the control-plane container.
-Because the local endpoint policy validates the resolved Docker gateway, add
-the hostname and its resolved gateway to the persistent approvals. Confirm the
-gateway first:
+The local inference policy requires approval for both the exact DNS name and
+the resolved Docker host-gateway address. Confirm the address from inside the
+control-plane container:
 
 ```bash
 sudo docker compose exec execlaw getent hosts host.docker.internal
+sudo docker compose exec execlaw \
+  curl --fail --silent --show-error http://host.docker.internal:30068/v1/models
 ```
 
-Then approve the returned address, commonly `172.16.0.1`:
+The models request confirms Ollama is reachable from the control-plane
+container, not only from the TrueNAS host shell.
+
+In **Settings -> Network**, add these approvals under the **Local inference**
+capability:
+
+- Type **DNS name**, value `host.docker.internal`.
+- Type **IP range (CIDR)**, value the exact address from `getent` with a
+  single-host prefix: `/32` for IPv4 or `/128` for IPv6 (for example,
+  `172.16.0.1/32` or `fdd0::1/128`).
+
+Do not add them under **Private integration**; approvals are capability-scoped.
+Approvals carried forward by the capability-scope migration were placed under
+**Private integration**, so an older approval there does not authorize Ollama
+inference.
+After saving both approvals, reopen **Settings -> Backends -> Standard** and
+run its inference probe. If a turn still fails, inspect the resolver warning:
 
 ```bash
-sudo sqlite3 /mnt/AI_Pool/execlaw/execlaw.db \
-  "INSERT OR REPLACE INTO config_local_endpoint_approvals(kind, value, created_at) VALUES ('dns_name', 'host.docker.internal', strftime('%s','now'));"
-sudo sqlite3 /mnt/AI_Pool/execlaw/execlaw.db \
-  "INSERT OR REPLACE INTO config_local_endpoint_approvals(kind, value, created_at) VALUES ('cidr', '172.16.0.1/32', strftime('%s','now'));"
+sudo docker compose logs --since=10m execlaw 2>&1 \
+  | grep -Ei 'inference_resolver|configured inference endpoint denied'
 ```
 
-Replace `172.16.0.1/32` with the address returned by `getent` when needed.
 The Compose variable `OLLAMA_OPENAI_URL` is retained for compatibility with
 older setups, but the canonical current value uses `host.docker.internal`.
 

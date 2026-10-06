@@ -12,9 +12,11 @@ with [H030 inference scheduling](llm-harness-roadmap.md#enhancement-030),
 [H074 resource budgets](llm-harness-roadmap.md#enhancement-074),
 [H106 multimodal evidence](llm-harness-roadmap.md#enhancement-106), and
 [H110 local-only verification](llm-harness-roadmap.md#enhancement-110).
-Voice input now uses the authenticated chat route and feeds its streamed token
-deltas to sentence-level local TTS. Welcome capture mints the saved
-conversation before recording; incognito capture remains an editable draft.
+Voice input now uses the authenticated chat route and sends sentence chunks
+from its committed response to local TTS. Playback waits for the chat response
+so streamed model text cannot announce an external effect before the turn is
+durable. Welcome capture mints the saved conversation before recording;
+incognito capture remains an editable draft.
 Continuous endpointing, incremental transcription, playback acknowledgment,
 and supported-hardware qualification remain open. PCM capture and
 per-session cancellation alone do not close those gates.
@@ -66,9 +68,10 @@ the SPA.
 
 **Status**: the browser reserves a saved conversation ID when voice capture
 starts and sends it with `voice_stop`. The server passes the transcript to the
-regular Controller chat route and streams only `ChatTokenDelta` events bearing
-that request's idempotency key into local TTS. Incognito capture sends no saved
-conversation ID and leaves its transcript in the composer draft.
+regular Controller chat route. Once that route returns its committed assistant
+response, the server chunks the text at sentence boundaries and sends those
+chunks to local TTS. Incognito capture sends no saved conversation ID and
+leaves its transcript in the composer draft.
 
 **Follow-up**: qualify the real-browser reconnect, failure recovery, and
 first-task journey; reconcile conversation title generation for a first voice

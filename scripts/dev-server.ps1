@@ -14,6 +14,9 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = Resolve-Path "$PSScriptRoot\.."
 Set-Location $RepoRoot
 
+. (Join-Path $PSScriptRoot 'cargo-target-local.ps1')
+Use-ExeclawLocalCargoTarget -RepoRoot $RepoRoot.Path
+
 $Bind = if ($env:EXECLAW_DEV_BIND) { $env:EXECLAW_DEV_BIND } else { "127.0.0.1:3031" }
 
 $DbFlag = @()

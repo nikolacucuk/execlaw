@@ -535,4 +535,47 @@ mod tests {
         let serialized = serde_json::to_string(&summary).unwrap();
         assert!(!serialized.contains("private_detail"));
     }
+
+    #[test]
+    fn support_bundle_omits_raw_model_profile_details() {
+        let state = crate::routes::test_app_state();
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO state_model_capability_profiles \
+                     (identity_hash, model_id, quantization, chat_template, backend_version, \
+                      parser_version, context_tokens, observed_json, qualified_at) \
+                     VALUES ('profile-id-secret', 'private-model-name', 'private-quant', \
+                             'private-template', 'private-backend-version', 'private-parser', 4096, \
+                             ?1, 1)",
+                    [serde_json::json!({
+                        "text": {"passed": true},
+                        "private_prompt": "PROMPT_SENTINEL",
+                        "access_token": "TOKEN_SENTINEL",
+                    })
+                    .to_string()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let serialized = serde_json::to_string(&build_support_bundle(&state).unwrap()).unwrap();
+        assert!(serialized.contains("\"passing_profiles\":1"));
+        for private_value in [
+            "profile-id-secret",
+            "private-model-name",
+            "private-quant",
+            "private-template",
+            "private-backend-version",
+            "private-parser",
+            "PROMPT_SENTINEL",
+            "TOKEN_SENTINEL",
+        ] {
+            assert!(
+                !serialized.contains(private_value),
+                "support bundle leaked {private_value}"
+            );
+        }
+    }
 }

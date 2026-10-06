@@ -14,6 +14,9 @@ $ErrorActionPreference = "Stop"
 $repoRoot = Split-Path -Parent $PSScriptRoot
 Push-Location $repoRoot
 
+. (Join-Path $PSScriptRoot 'cargo-target-local.ps1')
+Use-ExeclawLocalCargoTarget -RepoRoot $repoRoot
+
 $cargoOnPath = Get-Command cargo -ErrorAction SilentlyContinue
 $cargoFallback = Join-Path $HOME ".cargo/bin/cargo.exe"
 $cargoCommand = if ($cargoOnPath) {

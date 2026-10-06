@@ -670,116 +670,33 @@ fn voice_chat_reply(
     transcript: String,
     cancel: tokio_util::sync::CancellationToken,
 ) -> futures::stream::BoxStream<'static, String> {
+    use futures::StreamExt;
+
     if conversation_id.trim().is_empty() {
         return Box::pin(futures::stream::empty());
     }
-    let (sender, receiver) = tokio::sync::mpsc::channel(16);
-    tokio::spawn(async move {
-        let mut events = state.events.subscribe();
-        let mut turn = Box::pin(run_voice_chat_turn(
-            state,
-            user,
-            voice_session.clone(),
-            conversation_id.clone(),
-            transcript,
-            cancel.clone(),
-        ));
-        let mut collected = String::new();
-        let mut pending = String::new();
-        let mut stream_lost = false;
-        'turn: loop {
-            tokio::select! {
-                _ = cancel.cancelled() => break,
-                result = &mut turn => {
-                    let final_reply = result;
-                    if collected.is_empty() {
-                        pending = final_reply;
-                    } else if final_reply.starts_with(&collected) {
-                        pending.push_str(&final_reply[collected.len()..]);
-                    } else {
-                        stream_lost = true;
-                        tracing::warn!(
-                            conversation_id = %conversation_id,
-                            "voice chat token stream diverged from the committed reply; suppressing its unspoken tail"
-                        );
-                    }
-                    break;
-                }
-                event = events.recv() => match event {
-                    Ok(UiEvent::ChatTokenDelta {
-                        conversation_id: event_conversation,
-                        text,
-                        request_id: Some(event_request),
-                    }) if !stream_lost
-                        && voice_delta_matches(
-                            &event_conversation,
-                            &event_request,
-                            &conversation_id,
-                            &voice_session,
-                        ) =>
-                    {
-                        collected.push_str(&text);
-                        pending.push_str(&text);
-                        while let Some(sentence) = take_voice_sentence(&mut pending) {
-                            let sent = tokio::select! {
-                                _ = cancel.cancelled() => break 'turn,
-                                result = sender.send(sentence) => result.is_ok(),
-                            };
-                            if !sent {
-                                stream_lost = true;
-                                break;
-                            }
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(broadcast::error::RecvError::Lagged(_)) => {
-                        stream_lost = true;
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        stream_lost = true;
-                    }
-                }
+    let cancel_for_output = cancel.clone();
+    Box::pin(
+        futures::stream::once(async move {
+            // TTS consumes only the final response returned by the chat route.
+            // That response is produced after the turn's event commit, so an
+            // interim model delta cannot announce an external effect early.
+            let committed_reply = run_voice_chat_turn(
+                state,
+                user,
+                voice_session,
+                conversation_id,
+                transcript,
+                cancel,
+            )
+            .await;
+            if cancel_for_output.is_cancelled() {
+                return Vec::new();
             }
-        }
-        if !cancel.is_cancelled() && !stream_lost && !pending.trim().is_empty() {
-            for sentence in execlaw_voice_pipeline::chunk_at_sentence_boundaries(&pending) {
-                tokio::select! {
-                    _ = cancel.cancelled() => break,
-                    _ = sender.send(sentence) => {},
-                }
-            }
-        }
-    });
-    Box::pin(futures::stream::unfold(
-        receiver,
-        |mut receiver| async move { receiver.recv().await.map(|sentence| (sentence, receiver)) },
-    ))
-}
-
-fn take_voice_sentence(pending: &mut String) -> Option<String> {
-    let boundary = pending.char_indices().find_map(|(index, character)| {
-        if !matches!(character, '.' | '!' | '?') {
-            return None;
-        }
-        let end = index + character.len_utf8();
-        pending[end..]
-            .chars()
-            .next()
-            .is_some_and(char::is_whitespace)
-            .then_some(end)
-    })?;
-    let sentence = pending[..boundary].trim().to_owned();
-    *pending = pending[boundary..].trim_start().to_owned();
-    (!sentence.is_empty()).then_some(sentence)
-}
-
-fn voice_delta_matches(
-    event_conversation: &str,
-    event_request: &str,
-    conversation_id: &str,
-    request_id: &str,
-) -> bool {
-    event_conversation == conversation_id && event_request == request_id
+            execlaw_voice_pipeline::chunk_at_sentence_boundaries(&committed_reply)
+        })
+        .flat_map(futures::stream::iter),
+    )
 }
 
 async fn run_voice_chat_turn(
@@ -1044,38 +961,14 @@ mod tests {
 
     #[test]
     fn voice_sentence_chunker_preserves_decimal_addresses() {
-        let mut pending = "The service binds to 127.0.0.1. It uses port 3031. ".to_owned();
+        let pending = "The service binds to 127.0.0.1. It uses port 3031.";
         assert_eq!(
-            take_voice_sentence(&mut pending).as_deref(),
-            Some("The service binds to 127.0.0.1.")
+            execlaw_voice_pipeline::chunk_at_sentence_boundaries(pending),
+            vec![
+                "The service binds to 127.0.0.1.".to_owned(),
+                "It uses port 3031.".to_owned()
+            ]
         );
-        assert_eq!(
-            take_voice_sentence(&mut pending).as_deref(),
-            Some("It uses port 3031.")
-        );
-        assert!(pending.is_empty());
-    }
-
-    #[test]
-    fn voice_delta_filter_requires_conversation_and_request_identity() {
-        assert!(voice_delta_matches(
-            "thread-a",
-            "session-a",
-            "thread-a",
-            "session-a"
-        ));
-        assert!(!voice_delta_matches(
-            "thread-b",
-            "session-a",
-            "thread-a",
-            "session-a"
-        ));
-        assert!(!voice_delta_matches(
-            "thread-a",
-            "session-b",
-            "thread-a",
-            "session-a"
-        ));
     }
 
     #[tokio::test]

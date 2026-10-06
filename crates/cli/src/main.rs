@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 mod api_client;
+mod privacy_restore;
 mod service;
 
 // 2026-05-18 — process-wide python-sandbox service handle moved
@@ -2765,18 +2766,34 @@ fn cmd_restore(
         std::fs::remove_file(&tmp)?;
     }
     std::fs::copy(&from, &tmp)?;
+    let existing_bytes = db_path
+        .metadata()
+        .map(|metadata| metadata.len())
+        .unwrap_or_default();
+    let preserved_tombstones = if existing_bytes > 0 {
+        let current_db = open_db(&db_path, no_encrypt)?;
+        let restored_db = open_db(&tmp, no_encrypt)?;
+        let count = privacy_restore::reapply_from(&current_db, &restored_db)?;
+        drop(restored_db);
+        drop(current_db);
+        count
+    } else {
+        0
+    };
+    verify_database_snapshot(&tmp, no_encrypt)?;
     if db_path.exists() {
         std::fs::remove_file(&db_path)?;
     }
     std::fs::rename(&tmp, &db_path)?;
 
     println!(
-        "restore: {} -> {} ({} bytes)",
+        "restore: {} -> {} ({} bytes, {} privacy tombstones reapplied)",
         from.display(),
         db_path.display(),
         std::fs::metadata(&db_path)
             .map(|m| m.len())
-            .unwrap_or_default()
+            .unwrap_or_default(),
+        preserved_tombstones,
     );
     Ok(())
 }
@@ -4997,6 +5014,49 @@ mod tests {
             })
             .unwrap();
         assert_eq!(bind, "127.0.0.1:3031");
+    }
+
+    #[test]
+    fn forced_restore_reapplies_newer_privacy_tombstones() {
+        let dir = tempfile::tempdir().unwrap();
+        let live = dir.path().join("live.db");
+        let backup = dir.path().join("before-deletion.db");
+        let db = open_db(&live, true).unwrap();
+        execlaw_core::migrations::MigrationRunner::new(&db)
+            .apply_all()
+            .unwrap();
+        drop(db);
+
+        cmd_backup(backup.clone(), live.clone(), true).unwrap();
+        let live_db = open_db(&live, true).unwrap();
+        live_db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO state_privacy_deletion_jobs \
+                     (deletion_id, resource_kind, resource_id, requested_by, request_source, \
+                      payload_json, status, requested_at, updated_at, completed_at) \
+                     VALUES ('deleted-job', 'research_job', 'research-1', 'controller-1', \
+                             'controller', '{}', 'complete', 10, 11, 11)",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        drop(live_db);
+
+        cmd_restore(backup, live.clone(), true, true).unwrap();
+        let restored_db = open_db(&live, true).unwrap();
+        let count = restored_db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM state_privacy_deletion_jobs \
+                     WHERE resource_id = 'research-1' AND status = 'complete'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]

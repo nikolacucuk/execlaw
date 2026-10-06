@@ -22,6 +22,7 @@ execlaw-inference-api = { path = "../inference-api" }
 execlaw-plugin-host = { path = "../plugin-host" }
 execlaw-policy = { path = "../policy" }
 execlaw-skills = { path = "../skills" }
+rusqlite.workspace = true
 
 clap.workspace = true
 chrono.workspace = true
