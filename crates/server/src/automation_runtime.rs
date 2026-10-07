@@ -273,7 +273,7 @@ fn run_one(
                 .map_err(|error| format!("decode automation definition snapshot: {error}"))
         })
         .transpose()?
-        .unwrap_or_else(|| automation.definition.clone());
+        .unwrap_or_else(|| automation_definition.clone());
 
     // Accumulated state: each completed node's output keyed by id,
     // plus `event` for the trigger payload. We also inject the

@@ -10,6 +10,83 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, Weak};
+
+static ARTIFACT_PATH_LOCKS: OnceLock<Mutex<std::collections::HashMap<PathBuf, Weak<RwLock<()>>>>> =
+    OnceLock::new();
+
+fn artifact_path_lock(path: &Path) -> Arc<RwLock<()>> {
+    let locks = ARTIFACT_PATH_LOCKS.get_or_init(|| Mutex::new(Default::default()));
+    let Ok(mut locks) = locks.lock() else {
+        return Arc::new(RwLock::new(()));
+    };
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(RwLock::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
+fn publish_content_addressed(path: &Path, root: &Path, bytes: &[u8], sha256: &str) -> Result<(), DbError> {
+    std::fs::create_dir_all(root).map_err(|error| {
+        DbError::Migration(format!("create artifact directory {}: {error}", root.display()))
+    })?;
+    if path.exists() {
+        return verify_content_addressed(path, sha256, bytes.len() as u64);
+    }
+    let temporary = root.join(format!(".{sha256}.{}.tmp", uuid::Uuid::new_v4()));
+    let temporary_lock = artifact_path_lock(&temporary);
+    let _temporary_guard = temporary_lock
+        .write()
+        .map_err(|_| DbError::Config("artifact temp path lock poisoned".into()))?;
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        match std::fs::rename(&temporary, path) {
+            Ok(()) => {}
+            Err(error) if path.exists() => {
+                verify_content_addressed(path, sha256, bytes.len() as u64)?;
+                let _ = std::fs::remove_file(&temporary);
+                let _ = error;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        if let Ok(directory) = std::fs::File::open(root) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn verify_content_addressed(path: &Path, expected_sha256: &str, expected_bytes: u64) -> Result<(), DbError> {
+    let mut file = std::fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        total = total.saturating_add(count as u64);
+        hasher.update(&buffer[..count]);
+    }
+    if total != expected_bytes || hex::encode(hasher.finalize()) != expected_sha256 {
+        return Err(DbError::Invariant(
+            "existing content-addressed artifact does not match its digest or size".into(),
+        ));
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AttachmentRow {
@@ -183,10 +260,56 @@ impl<'db> AttachmentStore<'db> {
         })
     }
 
+    /// Read an attachment while holding a reference lock against concurrent
+    /// garbage collection. Returns `None` when its row was concurrently purged.
+    pub fn read_attachment_bytes(&self, id: &AttachmentId) -> Result<Option<Vec<u8>>, DbError> {
+        let Some(row) = self.get(id)? else { return Ok(None); };
+        let path = PathBuf::from(&row.path);
+        let path_lock = artifact_path_lock(&path);
+        let _path_guard = path_lock
+            .read()
+            .map_err(|_| DbError::Config("attachment path lock poisoned".into()))?;
+        let Some(current) = self.get(id)? else { return Ok(None); };
+        if current.path != row.path || current.sha256 != row.sha256 {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&path)?;
+        if hex::encode(Sha256::digest(&bytes)) != row.sha256 {
+            return Err(DbError::Invariant("attachment blob digest mismatch".into()));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Open an attachment under its reference lock. Once the OS file handle
+    /// is open, POSIX keeps the inode readable after unlink and Windows keeps
+    /// the delete blocked until the reader closes it.
+    pub fn open_attachment_file(&self, id: &AttachmentId) -> Result<Option<std::fs::File>, DbError> {
+        let Some(row) = self.get(id)? else { return Ok(None); };
+        let path = PathBuf::from(&row.path);
+        let path_lock = artifact_path_lock(&path);
+        let _path_guard = path_lock
+            .read()
+            .map_err(|_| DbError::Config("attachment path lock poisoned".into()))?;
+        let Some(current) = self.get(id)? else { return Ok(None); };
+        if current.path != row.path || current.sha256 != row.sha256 {
+            return Ok(None);
+        }
+        match std::fs::File::open(path) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Remove one attachment row and delete its file only when no other
     /// attachment or artifact row still references the same path.
     pub fn purge_attachment(&self, id: &AttachmentId) -> Result<bool, DbError> {
         let attachment_id = id.as_str().to_owned();
+        let Some(before) = self.get(id)? else { return Ok(false); };
+        let path_lock = artifact_path_lock(Path::new(&before.path));
+        let _path_guard = path_lock
+            .write()
+            .map_err(|_| DbError::Config("attachment path lock poisoned".into()))?;
         let removed = self.db.transaction(|tx| {
             let path: Option<String> = tx
                 .query_row(
@@ -232,6 +355,15 @@ impl<'db> AttachmentStore<'db> {
     }
 
     pub fn insert_artifact(&self, row: &ArtifactRow) -> Result<(), DbError> {
+        let path_lock = artifact_path_lock(Path::new(&row.path));
+        let _path_guard = path_lock
+            .read()
+            .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
+        self.insert_artifact_metadata(row)?;
+        self.ensure_artifact_label(row)
+    }
+
+    fn insert_artifact_metadata(&self, row: &ArtifactRow) -> Result<(), DbError> {
         self.db.with_conn(|c| {
             c.execute(
                 "INSERT INTO state_artifacts(id, research_job_id, kind, mime_type, path, sha256, bytes, created_at, plugin_id, filename, expires_at) \
@@ -251,7 +383,10 @@ impl<'db> AttachmentStore<'db> {
                 ],
             )?;
             Ok(())
-        })?;
+        })
+    }
+
+    fn ensure_artifact_label(&self, row: &ArtifactRow) -> Result<(), DbError> {
         self.ensure_information_label(
             crate::information_store::InformationSubject {
                 kind: "artifact".into(),
@@ -315,38 +450,11 @@ impl<'db> AttachmentStore<'db> {
         }
         let sha256 = hex::encode(Sha256::digest(bytes));
         let path = plugin_artifact_path(artifacts_root, &sha256);
-        std::fs::create_dir_all(artifacts_root).map_err(|error| {
-            DbError::Migration(format!(
-                "tool result artifact directory {}: {error}",
-                artifacts_root.display()
-            ))
-        })?;
-        if !path.exists() {
-            let temporary = artifacts_root.join(format!(".{sha256}.{}.tmp", uuid::Uuid::new_v4()));
-            std::fs::write(&temporary, bytes).map_err(|error| {
-                DbError::Migration(format!(
-                    "tool result artifact write {}: {error}",
-                    temporary.display()
-                ))
-            })?;
-            if let Err(error) = std::fs::rename(&temporary, &path) {
-                let _ = std::fs::remove_file(&temporary);
-                if !path.exists() {
-                    return Err(DbError::Migration(format!(
-                        "tool result artifact rename {}: {error}",
-                        path.display()
-                    )));
-                }
-            }
-        }
-        match std::fs::read(&path) {
-            Ok(on_disk) if on_disk == bytes => {}
-            _ => {
-                return Err(DbError::Invariant(
-                    "tool result artifact bytes differ from the content digest".into(),
-                ));
-            }
-        }
+        let path_lock = artifact_path_lock(&path);
+        let _path_guard = path_lock
+            .write()
+            .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
+        publish_content_addressed(&path, artifacts_root, bytes, &sha256)?;
         let expires_at = now.saturating_add(30 * 24 * 60 * 60);
         self.db.transaction(|tx| {
             let inserted = tx.execute(
@@ -539,6 +647,50 @@ impl<'db> AttachmentStore<'db> {
         })
     }
 
+    /// Read an artifact while holding a reference lock against concurrent
+    /// garbage collection. Callers must perform their normal owner/scope
+    /// authorization before exposing the returned bytes.
+    pub fn read_artifact_bytes(&self, id: &str) -> Result<Option<Vec<u8>>, DbError> {
+        let Some(row) = self.get_artifact(id)? else { return Ok(None); };
+        let path = PathBuf::from(&row.path);
+        let path_lock = artifact_path_lock(&path);
+        let _path_guard = path_lock
+            .read()
+            .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
+        let Some(current) = self.get_artifact(id)? else { return Ok(None); };
+        if current.path != row.path || current.sha256 != row.sha256 {
+            return Ok(None);
+        }
+        let bytes = std::fs::read(&path)?;
+        if hex::encode(Sha256::digest(&bytes)) != row.sha256 {
+            return Err(DbError::Invariant("artifact blob digest mismatch".into()));
+        }
+        if current.bytes.is_some_and(|expected| expected >= 0 && expected as usize != bytes.len()) {
+            return Err(DbError::Invariant("artifact blob size mismatch".into()));
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Open an artifact under its reference lock; see
+    /// [`AttachmentStore::open_attachment_file`] for the lifetime contract.
+    pub fn open_artifact_file(&self, id: &str) -> Result<Option<std::fs::File>, DbError> {
+        let Some(row) = self.get_artifact(id)? else { return Ok(None); };
+        let path = PathBuf::from(&row.path);
+        let path_lock = artifact_path_lock(&path);
+        let _path_guard = path_lock
+            .read()
+            .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
+        let Some(current) = self.get_artifact(id)? else { return Ok(None); };
+        if current.path != row.path || current.sha256 != row.sha256 {
+            return Ok(None);
+        }
+        match std::fs::File::open(path) {
+            Ok(file) => Ok(Some(file)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Write a plugin-rendered artifact: hash the bytes, store them on
     /// disk under `artifacts_root/<sha256>` (content-addressed; idempotent
     /// for identical bytes), and insert a `state_artifacts` row with
@@ -563,23 +715,11 @@ impl<'db> AttachmentStore<'db> {
         hasher.update(bytes);
         let sha = format!("{:x}", hasher.finalize());
         let path = plugin_artifact_path(artifacts_root, &sha);
-
-        // Write the bytes if missing. The dir must exist; create it
-        // recursively so first-use on a fresh install Just Works without
-        // requiring the operator to mkdir.
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                DbError::Migration(format!(
-                    "plugin artifact: create_dir_all {}: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
-        if !path.exists() {
-            std::fs::write(&path, bytes).map_err(|e| {
-                DbError::Migration(format!("plugin artifact: write {}: {e}", path.display()))
-            })?;
-        }
+        let path_lock = artifact_path_lock(&path);
+        let _path_guard = path_lock
+            .write()
+            .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
+        publish_content_addressed(&path, artifacts_root, bytes, &sha)?;
 
         let attachment_id = uuid::Uuid::new_v4().to_string();
         let expires_at = ttl_seconds.map(|t| now + t);
@@ -596,7 +736,8 @@ impl<'db> AttachmentStore<'db> {
             filename: Some(filename.to_owned()),
             expires_at,
         };
-        self.insert_artifact(&row)?;
+        self.insert_artifact_metadata(&row)?;
+        self.ensure_artifact_label(&row)?;
         Ok(PluginArtifactCreated {
             attachment_id,
             sha256: sha,
@@ -654,6 +795,10 @@ impl<'db> AttachmentStore<'db> {
         // temp. RAII-cleaned on every error path via the explicit
         // remove_file calls below.
         let tmp_path = artifacts_root.join(format!(".tmp-{}", uuid::Uuid::new_v4()));
+        let tmp_lock = artifact_path_lock(&tmp_path);
+        let _tmp_guard = tmp_lock
+            .write()
+            .map_err(|_| DbError::Config("artifact temp path lock poisoned".into()))?;
         let mut tmp = std::fs::File::create(&tmp_path).map_err(|e| {
             DbError::Migration(format!(
                 "plugin artifact from path: create temp {}: {e}",
@@ -695,14 +840,26 @@ impl<'db> AttachmentStore<'db> {
                 tmp_path.display()
             )));
         }
+        if let Err(e) = tmp.sync_all() {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(DbError::Migration(format!(
+                "plugin artifact from path: sync temp {}: {e}",
+                tmp_path.display()
+            )));
+        }
         drop(tmp); // close before rename — required on Windows
 
         let sha = format!("{:x}", hasher.finalize());
         let final_path = plugin_artifact_path(artifacts_root, &sha);
+        let path_lock = artifact_path_lock(&final_path);
+        let _path_guard = path_lock
+            .write()
+            .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
         if final_path.exists() {
             // Content-addressed dedup: an artifact with these exact
             // bytes is already on disk. Drop the temp; the existing
             // file is what we want.
+            verify_content_addressed(&final_path, &sha, total)?;
             let _ = std::fs::remove_file(&tmp_path);
         } else {
             std::fs::rename(&tmp_path, &final_path).map_err(|e| {
@@ -716,6 +873,9 @@ impl<'db> AttachmentStore<'db> {
                     final_path.display()
                 ))
             })?;
+            if let Ok(directory) = std::fs::File::open(artifacts_root) {
+                let _ = directory.sync_all();
+            }
         }
 
         let attachment_id = uuid::Uuid::new_v4().to_string();
@@ -733,7 +893,8 @@ impl<'db> AttachmentStore<'db> {
             filename: Some(filename.to_owned()),
             expires_at,
         };
-        self.insert_artifact(&row)?;
+        self.insert_artifact_metadata(&row)?;
+        self.ensure_artifact_label(&row)?;
         Ok(PluginArtifactCreated {
             attachment_id,
             sha256: sha,
@@ -770,6 +931,10 @@ impl<'db> AttachmentStore<'db> {
         })?;
         let mut removed = 0usize;
         for (id, path) in rows {
+            let path_lock = artifact_path_lock(Path::new(&path));
+            let _path_guard = path_lock
+                .write()
+                .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
             let id_for_delete = id.clone();
             self.db.with_conn(|c| {
                 c.execute(
@@ -786,7 +951,8 @@ impl<'db> AttachmentStore<'db> {
             let still_used: i64 = self.db.with_conn(|c| {
                 let n: i64 = c
                     .query_row(
-                        "SELECT COUNT(*) FROM state_artifacts WHERE path = ?1",
+                        "SELECT (SELECT COUNT(*) FROM state_artifacts WHERE path = ?1) + \
+                                (SELECT COUNT(*) FROM state_attachments WHERE path = ?1)",
                         params![path.clone()],
                         |r| r.get(0),
                     )
@@ -796,7 +962,11 @@ impl<'db> AttachmentStore<'db> {
             if still_used == 0 {
                 // Best-effort delete — missing file is fine (already
                 // GC'd, never written due to dedupe race, etc).
-                let _ = std::fs::remove_file(&path);
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
             removed += 1;
         }
@@ -829,6 +999,10 @@ impl<'db> AttachmentStore<'db> {
         })?;
         let mut removed = 0usize;
         for (id, path) in expired {
+            let path_lock = artifact_path_lock(Path::new(&path));
+            let _path_guard = path_lock
+                .write()
+                .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
             let id_for_delete = id.clone();
             self.db.with_conn(|c| {
                 c.execute(
@@ -843,7 +1017,8 @@ impl<'db> AttachmentStore<'db> {
             let still_used: i64 = self.db.with_conn(|c| {
                 let n: i64 = c
                     .query_row(
-                        "SELECT COUNT(*) FROM state_artifacts WHERE path = ?1",
+                        "SELECT (SELECT COUNT(*) FROM state_artifacts WHERE path = ?1) + \
+                                (SELECT COUNT(*) FROM state_attachments WHERE path = ?1)",
                         params![path.clone()],
                         |r| r.get(0),
                     )
@@ -853,12 +1028,89 @@ impl<'db> AttachmentStore<'db> {
             if still_used == 0 {
                 // Best-effort delete — a missing file is fine (manually
                 // cleaned up, never written due to dedupe race, etc).
-                let _ = std::fs::remove_file(&path);
+                match std::fs::remove_file(&path) {
+                    Ok(()) => {}
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(error.into()),
+                }
             }
             removed += 1;
         }
         Ok(removed)
     }
+
+    /// Remove aged orphan blobs and interrupted-write temp files.
+    ///
+    /// Only regular files whose names match the content-addressed SHA-256
+    /// format or this module's temporary naming scheme are considered. A
+    /// live DB reference in either attachment or artifact metadata protects
+    /// the blob. Active readers, publishers, and removers coordinate through
+    /// a per-path lock; the grace period also recovers files left by process
+    /// termination between atomic rename and SQLite commit.
+    pub fn sweep_orphan_artifact_blobs(
+        &self,
+        artifacts_root: &Path,
+        now: i64,
+        minimum_age_seconds: i64,
+    ) -> Result<usize, DbError> {
+        let entries = match std::fs::read_dir(artifacts_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error.into()),
+        };
+        let mut removed = 0usize;
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let metadata = std::fs::symlink_metadata(&path)?;
+            if !metadata.file_type().is_file()
+                || !(is_sha256_filename(&name)
+                    || (name.starts_with('.') && (name.ends_with(".tmp") || name.starts_with(".tmp-"))))
+            {
+                continue;
+            }
+            let Some(modified_at) = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
+            else {
+                continue;
+            };
+            if now.saturating_sub(modified_at) < minimum_age_seconds.max(0) {
+                continue;
+            }
+
+            let path_lock = artifact_path_lock(&path);
+            let _path_guard = path_lock
+                .write()
+                .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
+            if is_sha256_filename(&name) {
+                let referenced: i64 = self.db.with_conn(|connection| {
+                    Ok(connection.query_row(
+                        "SELECT (SELECT COUNT(*) FROM state_artifacts WHERE path = ?1) + \
+                                (SELECT COUNT(*) FROM state_attachments WHERE path = ?1)",
+                        [path.to_string_lossy().as_ref()],
+                        |row| row.get(0),
+                    )?)
+                })?;
+                if referenced != 0 {
+                    continue;
+                }
+            }
+            match std::fs::remove_file(&path) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(removed)
+    }
+}
+
+fn is_sha256_filename(name: &str) -> bool {
+    name.len() == 64 && name.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@
 pub mod gpu_memory;
 pub mod hardware;
 pub mod hf_downloader;
+pub mod runtime_profile;
 pub mod service;
 pub mod workspace_executor;
 
@@ -27,6 +28,7 @@ pub use hardware::{
     GpuDevice, GpuId, GpuVendor, HardwareProfile, SysfsSource, available_ram_mb, detect,
     detect_sysfs, parse_macos_system_profiler,
 };
+pub use runtime_profile::{RuntimeExecution, RuntimeProfile, RuntimeProfileLimits};
 pub use service::{
     BollardServiceController, HostMount, MultiplexedServiceController, NativeServiceController,
     ServiceController, ServiceError, ServiceHandle, ServiceRuntime, ServiceSpec, ServiceStatus,

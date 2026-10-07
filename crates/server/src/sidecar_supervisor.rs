@@ -700,6 +700,7 @@ impl SidecarSupervisor {
                     .filter(|network| !network.trim().is_empty()),
                 host_port: port,
                 container_port: sidecar.rpc_port,
+                runtime_profile: Some(execlaw_container_manager::RuntimeProfile::IntegrationSidecar),
                 ..Default::default()
             };
             // Plugin sidecars typically declare images like
@@ -1262,7 +1263,9 @@ fn resolve_mounts(
     use execlaw_container_manager::HostMount;
     let mut out = Vec::with_capacity(sidecar.mounts.len());
     for m in &sidecar.mounts {
+        validate_mount_target(&m.target)?;
         let (host_path, default_ro) = if let Some(rel) = m.source.strip_prefix("stage://") {
+            validate_mount_subpath(rel)?;
             let stage = sidecar.stage_path.as_ref().ok_or_else(|| {
                 format!(
                     "mount '{}' uses stage:// but sidecar was registered without a stage path",
@@ -1283,16 +1286,15 @@ fn resolve_mounts(
             let p = stage_root.join(rel);
             (p, true)
         } else if let Some(name) = m.source.strip_prefix("state://") {
+            validate_mount_subpath(name)?;
             let base = state_dir_for(&sidecar.plugin_id, &sidecar.name);
             let p = base.join(name);
             std::fs::create_dir_all(&p)
                 .map_err(|e| format!("create sidecar state dir {}: {e}", p.display()))?;
             (p, false)
-        } else if std::path::Path::new(&m.source).is_absolute() {
-            (std::path::PathBuf::from(&m.source), false)
         } else {
             return Err(format!(
-                "mount source '{}' must use stage://, state://, or be absolute",
+                "mount source '{}' must use stage:// or state://; arbitrary host paths are denied",
                 m.source
             ));
         };
@@ -1306,6 +1308,42 @@ fn resolve_mounts(
         });
     }
     Ok(out)
+}
+
+fn validate_mount_subpath(path: &str) -> Result<(), String> {
+    let path = std::path::Path::new(path);
+    if path.as_os_str().is_empty()
+        || path.components().any(|component| {
+            !matches!(component, std::path::Component::Normal(_))
+        })
+    {
+        return Err("sidecar mount subpaths must contain normal path components only".into());
+    }
+    Ok(())
+}
+
+fn validate_mount_target(target: &str) -> Result<(), String> {
+    use std::path::Component;
+    let path = std::path::Path::new(target);
+    let mut components = path.components();
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return Err("sidecar mount targets must be absolute container paths".into());
+    }
+    let parts = components
+        .map(|component| match component {
+            Component::Normal(part) => part.to_string_lossy().to_ascii_lowercase(),
+            _ => String::new(),
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() || parts.iter().any(String::is_empty) {
+        return Err("sidecar mount target contains traversal or an invalid component".into());
+    }
+    if matches!(parts[0].as_str(), "proc" | "sys" | "dev" | "run" | "root" | "home" | "etc")
+        || (parts[0] == "var" && parts.get(1).is_some_and(|part| part == "run"))
+    {
+        return Err("sidecar mount target overlaps a protected container system path".into());
+    }
+    Ok(())
 }
 
 /// Per-(plugin, sidecar) state root. Lives under
@@ -1442,6 +1480,48 @@ rpc_port = {port}
         let reg = HookRegistry::new();
         reg.enable(&m).unwrap();
         reg
+    }
+
+    fn sidecar_with_mount(source: &str, target: &str) -> RegisteredSidecar {
+        RegisteredSidecar {
+            plugin_id: "mount-fixture".into(),
+            name: "fixture".into(),
+            image: "fixture:latest".into(),
+            rpc_port: 8080,
+            rpc_health_path: "/health".into(),
+            env: Vec::new(),
+            mounts: vec![execlaw_plugin_sdk::manifest::MountDecl {
+                source: source.into(),
+                target: target.into(),
+                read_only: false,
+            }],
+            entrypoint: None,
+            stage_path: None,
+        }
+    }
+
+    #[test]
+    fn sidecar_mounts_reject_host_paths_traversal_and_docker_socket() {
+        let host_path = if cfg!(windows) {
+            "C:\\Users\\operator"
+        } else {
+            "/home/operator"
+        };
+        assert!(resolve_mounts(&sidecar_with_mount(host_path, "/data")).is_err());
+        assert!(resolve_mounts(&sidecar_with_mount("state://../../outside", "/data")).is_err());
+        assert!(resolve_mounts(&sidecar_with_mount("stage://data", "/var/run/docker.sock")).is_err());
+    }
+
+    #[test]
+    fn staged_sidecar_mount_is_read_only_and_confined_to_stage() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("schemas")).unwrap();
+        let mut sidecar = sidecar_with_mount("stage://schemas", "/opt/plugin/schemas");
+        sidecar.stage_path = Some(temp.path().to_path_buf());
+        let mounts = resolve_mounts(&sidecar).unwrap();
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].host_path, temp.path().join("schemas").to_string_lossy());
+        assert!(mounts[0].read_only);
     }
 
     /// Phase 3: `host_port_for` is the accessor consumer plugins

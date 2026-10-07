@@ -17,9 +17,6 @@ use tokio::io::AsyncWriteExt;
 const OUTPUT_LIMIT_BYTES: usize = 24 * 1024;
 const LSP_FRAME_LIMIT_BYTES: usize = 1024 * 1024;
 const DIAGNOSTIC_LIMIT: usize = 48;
-const JOB_MEMORY_BYTES: i64 = 2 * 1024 * 1024 * 1024;
-const JOB_NANO_CPUS: i64 = 2_000_000_000;
-const JOB_PID_LIMIT: i64 = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRunRequest {
@@ -758,12 +755,7 @@ fn docker_host_path(path: &Path) -> String {
 }
 
 fn sandbox_host_config(checkout_path: &Path) -> HostConfig {
-    let mut tmpfs = HashMap::new();
-    tmpfs.insert(
-        "/tmp".to_owned(),
-        "rw,exec,nosuid,nodev,size=128m,mode=1777".to_owned(),
-    );
-    HostConfig {
+    let mut config = HostConfig {
         mounts: Some(vec![Mount {
             source: Some(docker_host_path(checkout_path)),
             target: Some("/workspace".into()),
@@ -779,13 +771,11 @@ fn sandbox_host_config(checkout_path: &Path) -> HostConfig {
         readonly_rootfs: Some(true),
         cap_drop: Some(vec!["ALL".into()]),
         security_opt: Some(vec!["no-new-privileges:true".into()]),
-        memory: Some(JOB_MEMORY_BYTES),
-        nano_cpus: Some(JOB_NANO_CPUS),
-        pids_limit: Some(JOB_PID_LIMIT),
-        tmpfs: Some(tmpfs),
         auto_remove: Some(false),
         ..Default::default()
-    }
+    };
+    crate::RuntimeProfile::Coding.apply_to_host_config(&mut config);
+    config
 }
 
 fn validate_job_name(name: &str) -> Result<(), WorkspaceExecutionError> {
@@ -1141,6 +1131,7 @@ mod tests {
     fn workspace_job_container_profile_is_networkless_readonly_and_resource_capped() {
         let checkout = tempfile::tempdir().unwrap();
         let config = sandbox_host_config(checkout.path());
+        let limits = crate::RuntimeProfile::Coding.limits();
         assert_eq!(config.network_mode.as_deref(), Some("none"));
         assert_eq!(config.readonly_rootfs, Some(true));
         assert_eq!(
@@ -1151,9 +1142,13 @@ mod tests {
             config.security_opt.as_deref(),
             Some(["no-new-privileges:true".to_owned()].as_slice())
         );
-        assert_eq!(config.memory, Some(JOB_MEMORY_BYTES));
-        assert_eq!(config.nano_cpus, Some(JOB_NANO_CPUS));
-        assert_eq!(config.pids_limit, Some(JOB_PID_LIMIT));
+        assert_eq!(config.memory, Some(limits.memory_bytes));
+        assert_eq!(config.nano_cpus, Some(limits.nano_cpus));
+        assert_eq!(config.pids_limit, Some(limits.pids));
+        let nofile = config.ulimits.as_ref().unwrap().first().unwrap();
+        assert_eq!(nofile.name.as_deref(), Some("nofile"));
+        assert_eq!(nofile.soft, Some(limits.nofile_soft));
+        assert_eq!(nofile.hard, Some(limits.nofile_hard));
         assert_eq!(config.binds, None);
         let mounts = config.mounts.unwrap();
         assert_eq!(mounts.len(), 1);
@@ -1171,7 +1166,11 @@ mod tests {
                 .unwrap()
                 .get("/tmp")
                 .unwrap()
-                .contains("nosuid,nodev")
+                .contains("noexec,nosuid,nodev")
+        );
+        assert!(
+            config.tmpfs.as_ref().unwrap()["/tmp"]
+                .contains(&format!("size={}", limits.tmpfs_bytes))
         );
     }
 

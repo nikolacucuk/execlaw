@@ -652,6 +652,7 @@ mod tests {
             "state_attachments",
             "state_artifacts",
             "state_information_label_events",
+            "state_job_redrive_events",
             "state_plugins",
             "eval_flagged",
             "users",

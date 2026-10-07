@@ -389,6 +389,7 @@ fn spec_from_row(row: &BackendRow) -> Result<ServiceSpec, String> {
         container_port,
         runtime,
         binary_hint,
+        runtime_profile: None,
     })
 }
 

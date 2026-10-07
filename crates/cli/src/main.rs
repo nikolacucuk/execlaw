@@ -4417,7 +4417,6 @@ async fn cmd_serve(
                         "server drain deadline expired; interrupting remaining requests for startup recovery"
                     );
                     server_task.abort();
-                    let _ = server_task.await;
                     Ok(())
                 }
             }
@@ -5194,5 +5193,24 @@ mod tests {
         let (bind, src) = resolve_bind(None, Some("   ".into()));
         assert_eq!(bind, "127.0.0.1:3031");
         assert_eq!(src, "default");
+    }
+
+    #[tokio::test]
+    async fn service_stop_is_forwarded_to_the_graceful_server_drain() {
+        let (service_stop, service_rx) = tokio::sync::oneshot::channel();
+        let (shutdown_trigger, mut trigger_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(trigger_shutdown(Some(service_rx), shutdown_trigger));
+        assert!(tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            &mut trigger_rx
+        )
+        .await
+        .is_err());
+        service_stop.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), &mut trigger_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        task.await.unwrap();
     }
 }

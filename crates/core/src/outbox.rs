@@ -1053,7 +1053,7 @@ mod tests {
         assert!(store.dead_letters(10).unwrap().is_empty());
         let ready = store.ready_pending(chrono::Utc::now().timestamp(), 10).unwrap();
         assert_eq!(ready.len(), 1);
-        assert_eq!(ready[0].idempotency_key, before.idempotency_key);
+        assert_eq!(ready[0].idempotency_key.0, before.idempotency_key);
         let timeline = store.delivery_timeline(id).unwrap();
         let redrive = timeline.last().unwrap();
         assert_eq!(redrive.transition, "operator_redrive");

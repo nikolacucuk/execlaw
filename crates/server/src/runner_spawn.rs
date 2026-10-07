@@ -225,6 +225,11 @@ impl RunnerLauncher for BollardRunnerLauncher {
                 "runner memory limit must be positive".into(),
             ));
         }
+        if memory_bytes > execlaw_container_manager::RuntimeProfile::Runner.limits().memory_bytes {
+            return Err(LauncherError::ResourceAdmission(
+                "runner memory request exceeds the Runner runtime profile".into(),
+            ));
+        }
         let _ = self
             .docker
             .remove_container(
@@ -335,13 +340,14 @@ impl RunnerLauncher for BollardRunnerLauncher {
         // harmless on Desktop (the daemon already maps the name)
         // and load-bearing on Linux (so the runner can reach
         // vLLM / our WS endpoint on the host's loopback).
-        let host_cfg = HostConfig {
+        let mut host_cfg = HostConfig {
             binds: Some(vec![format!("{}:/workspace", volume)]),
             memory: Some(memory_bytes),
             network_mode: spec.network.clone(),
             extra_hosts: Some(vec!["host.docker.internal:host-gateway".to_owned()]),
             ..Default::default()
         };
+        execlaw_container_manager::RuntimeProfile::Runner.apply_to_host_config(&mut host_cfg);
 
         let labels = HashMap::from([
             ("execlaw.kind".to_owned(), "runner".to_owned()),

@@ -312,7 +312,8 @@ impl<'a> BusEventStore<'a> {
                 )?;
                 Ok(DispatchFailureResult::DeadLettered { attempt })
             } else {
-                let backoff_multiplier = 1_i64 << attempt.saturating_sub(1).clamp(0, 10);
+                let backoff_shift = attempt.saturating_sub(1).clamp(0, 10) as u32;
+                let backoff_multiplier = 1_i64 << backoff_shift;
                 let retry_at = now.saturating_add(
                     backoff_base_secs
                         .max(1)

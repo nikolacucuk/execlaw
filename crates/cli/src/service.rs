@@ -407,8 +407,8 @@ mod windows_runtime {
     use std::time::Duration;
     use windows_service::define_windows_service;
     use windows_service::service::{
-        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
-        ServiceType,
+        PowerEventParam, ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState,
+        ServiceStatus, ServiceType,
     };
     use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
     use windows_service::service_dispatcher;
@@ -444,7 +444,11 @@ mod windows_runtime {
 
         let event_handler = move |control_event| -> ServiceControlHandlerResult {
             match control_event {
-                ServiceControl::Stop | ServiceControl::Shutdown => {
+                ServiceControl::Stop
+                | ServiceControl::Shutdown
+                | ServiceControl::Preshutdown
+                | ServiceControl::PowerEvent(PowerEventParam::QuerySuspend)
+                | ServiceControl::PowerEvent(PowerEventParam::Suspend) => {
                     if let Some(tx) = shutdown_tx.take() {
                         let _ = tx.send(());
                     }
@@ -463,7 +467,10 @@ mod windows_runtime {
         status_handle.set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
             current_state: ServiceState::Running,
-            controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+            controls_accepted: ServiceControlAccept::STOP
+                | ServiceControlAccept::SHUTDOWN
+                | ServiceControlAccept::PRESHUTDOWN
+                | ServiceControlAccept::POWEREVENT,
             exit_code: ServiceExitCode::Win32(0),
             checkpoint: 0,
             wait_hint: Duration::default(),

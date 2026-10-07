@@ -316,10 +316,11 @@ async fn redrive_dead_letter(
             );
             let actor = user.user_id.clone();
             let reason = reason.to_owned();
+            let redrive_job_id = job_id.clone();
             let result = tokio::task::spawn_blocking(move || {
                 crate::automation_runtime::redrive_failed_run(
                     &context,
-                    &job_id,
+                    &redrive_job_id,
                     &actor,
                     &reason,
                 )

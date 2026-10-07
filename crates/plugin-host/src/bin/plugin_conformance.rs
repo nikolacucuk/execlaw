@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
-use execlaw_plugin_host::conformance::{check_project, check_upgrade, generate_project};
+use execlaw_plugin_host::conformance::{
+    check_project, check_upgrade, generate_project, run_runtime_cases,
+};
 use execlaw_plugin_sdk::PluginManifest;
 use std::path::PathBuf;
 
@@ -32,7 +34,8 @@ enum Command {
     },
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         Command::Init { path, plugin_id, tier } => {
             generate_project(&path, &plugin_id, &tier)?;
@@ -40,6 +43,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Check { path } => {
             let report = check_project(&path)?;
+            run_runtime_cases(&path).await?;
             println!(
                 "plugin={} runtime={} tools={} fixtures={} capabilities={}",
                 report.plugin_id,

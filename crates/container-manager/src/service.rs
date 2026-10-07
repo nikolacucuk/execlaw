@@ -19,6 +19,7 @@
 
 use crate::hardware::GpuVendor;
 use async_trait::async_trait;
+use crate::runtime_profile::RuntimeProfile;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -117,6 +118,9 @@ pub struct ServiceSpec {
     /// equivalent to "no hint" and surfaces an error from the native
     /// controller — Apple presets MUST set this.
     pub binary_hint: String,
+    /// Optional least-privilege profile. Native subprocesses cannot satisfy
+    /// container isolation profiles and must be rejected when one is set.
+    pub runtime_profile: Option<RuntimeProfile>,
 }
 
 impl Default for ServiceSpec {
@@ -138,6 +142,7 @@ impl Default for ServiceSpec {
             container_port: 0,
             runtime: ServiceRuntime::Docker,
             binary_hint: String::new(),
+            runtime_profile: None,
         }
     }
 }
@@ -416,6 +421,19 @@ impl ServiceController for BollardServiceController {
         if spec.image.trim().is_empty() {
             return Err(ServiceError::Invalid("image must not be empty".into()));
         }
+        if let Some(profile) = spec.runtime_profile {
+            let info = self
+                .docker
+                .info()
+                .await
+                .map_err(|error| ServiceError::Runtime(format!("inspect Docker isolation platform: {error}")))?;
+            let os_type = info.os_type.as_deref().unwrap_or_default();
+            if !profile.supports_docker_ostype(os_type) {
+                return Err(ServiceError::Invalid(format!(
+                    "runtime profile {profile:?} requires Linux container isolation; Docker reports OSType={os_type:?}"
+                )));
+            }
+        }
         self.provenance
             .as_ref()
             .ok_or_else(|| {
@@ -580,7 +598,7 @@ impl ServiceController for BollardServiceController {
         // with `Path::exists()` here.
         let binds = render_binds(&spec.mounts);
 
-        let host_config = HostConfig {
+        let mut host_config = HostConfig {
             port_bindings: Some(port_bindings),
             device_requests,
             devices,
@@ -605,6 +623,9 @@ impl ServiceController for BollardServiceController {
             }),
             ..Default::default()
         };
+        if let Some(profile) = spec.runtime_profile {
+            profile.apply_to_host_config(&mut host_config);
+        }
 
         let env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let cfg = Config {
@@ -983,6 +1004,11 @@ fn find_on_path(name: &str) -> Option<PathBuf> {
 #[async_trait]
 impl ServiceController for NativeServiceController {
     async fn spawn(&self, spec: &ServiceSpec) -> Result<ServiceHandle, ServiceError> {
+        if spec.runtime_profile.is_some() {
+            return Err(ServiceError::Invalid(
+                "native runtime does not enforce container isolation profiles".into(),
+            ));
+        }
         if spec.runtime != ServiceRuntime::Native {
             return Err(ServiceError::Invalid(format!(
                 "NativeServiceController cannot spawn ServiceRuntime::{:?}",
@@ -1289,6 +1315,11 @@ impl MultiplexedServiceController {
 #[async_trait]
 impl ServiceController for MultiplexedServiceController {
     async fn spawn(&self, spec: &ServiceSpec) -> Result<ServiceHandle, ServiceError> {
+        if spec.runtime == ServiceRuntime::Native && spec.runtime_profile.is_some() {
+            return Err(ServiceError::Invalid(
+                "a container isolation profile cannot fall back to a native process".into(),
+            ));
+        }
         let (kind, ctl) = match spec.runtime {
             ServiceRuntime::Native => (ControllerKind::Native, self.native.clone()),
             ServiceRuntime::Docker => (ControllerKind::Docker, self.docker.clone()),
@@ -1540,6 +1571,7 @@ mod tests {
             container_port: 8000,
             runtime: ServiceRuntime::Docker,
             binary_hint: String::new(),
+            runtime_profile: None,
         }
     }
 

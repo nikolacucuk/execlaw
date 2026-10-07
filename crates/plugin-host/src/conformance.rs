@@ -109,6 +109,77 @@ pub fn check_project(root: &Path) -> anyhow::Result<ProjectReport> {
     })
 }
 
+/// Execute fixture calls through the declared runtime using only mock inputs.
+pub async fn run_runtime_cases(root: &Path) -> anyhow::Result<()> {
+    let manifest_source = std::fs::read_to_string(root.join("plugin.toml"))?;
+    let manifest = PluginManifest::parse(&manifest_source)?;
+    let fixture: ConformanceFixture = serde_json::from_slice(
+        &std::fs::read(root.join("tests/conformance.json"))?,
+    )?;
+    let runtime = manifest
+        .runtime
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("a runtime is required for executable conformance cases"))?;
+    match runtime.parsed_tier() {
+        Some(execlaw_plugin_sdk::manifest::RuntimeTier::Script) => {
+            let source = runtime
+                .source
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("script runtime is missing source"))?;
+            let source = safe_project_path(root, source)?;
+            let plugin = execlaw_script::ScriptPlugin::from_file(
+                &manifest.plugin.id,
+                &source,
+                &execlaw_script::ScriptEngine::new(),
+            )?;
+            for case in fixture.cases {
+                let result = plugin.tool_call(
+                    &case.tool_name,
+                    case.arguments,
+                    serde_json::Map::new(),
+                ).await?;
+                if result != case.result {
+                    anyhow::bail!("script runtime case '{}' returned {result}, expected {}", case.tool_name, case.result);
+                }
+            }
+        }
+        Some(execlaw_plugin_sdk::manifest::RuntimeTier::Subprocess) => {
+            let executable = runtime
+                .executable
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("subprocess runtime is missing executable"))?;
+            let executable_path = if executable.contains('/') || executable.contains('\\') || executable.starts_with('.') {
+                safe_project_path(root, executable)?.to_string_lossy().into_owned()
+            } else {
+                executable.to_owned()
+            };
+            let plugin = crate::SubprocessPlugin::spawn(
+                crate::SubprocessSpec {
+                    plugin_id: manifest.plugin.id.clone(),
+                    executable: executable_path,
+                    expected_sha256: None,
+                    args: runtime.args.clone(),
+                    cwd: Some(root.to_path_buf()),
+                },
+                None,
+            ).await.map_err(|error| anyhow::anyhow!("spawn conformance plugin: {error}"))?;
+            for case in fixture.cases {
+                let result = plugin.call("tool.call", serde_json::json!({
+                    "name": case.tool_name,
+                    "arguments": case.arguments,
+                })).await.map_err(|error| anyhow::anyhow!("subprocess conformance call failed: {error}"))?;
+                if result != case.result {
+                    plugin.shutdown().await;
+                    anyhow::bail!("subprocess runtime case returned {result}, expected {}", case.result);
+                }
+            }
+            plugin.shutdown().await;
+        }
+        None => anyhow::bail!("unsupported plugin runtime tier '{}'", runtime.tier),
+    }
+    Ok(())
+}
+
 /// Reject an upgrade that expands tool authority or relaxes a trust floor.
 pub fn check_upgrade(previous: &PluginManifest, candidate: &PluginManifest) -> anyhow::Result<()> {
     if previous.plugin.id != candidate.plugin.id {
@@ -235,6 +306,25 @@ mod tests {
             assert_eq!(report.case_count, 1);
             assert!(generate_project(&project, "sample-plugin", tier).is_err());
         }
+    }
+
+    #[tokio::test]
+    async fn generated_script_runtime_executes_against_the_mock_host_fixture() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("sample-plugin");
+        generate_project(&project, "sample-plugin", "script").unwrap();
+        run_runtime_cases(&project).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn generated_subprocess_runtime_executes_against_the_mock_host_fixture() {
+        if std::process::Command::new("python").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("sample-plugin");
+        generate_project(&project, "sample-plugin", "subprocess").unwrap();
+        run_runtime_cases(&project).await.unwrap();
     }
 
     #[test]
