@@ -136,7 +136,9 @@ struct HardwareObservations {
     battery_percent_after: Option<f64>,
     thermal_celsius_before: Option<f64>,
     thermal_celsius_after: Option<f64>,
-    thermal_throttle_state: Option<bool>,
+    thermal_throttle_count_before: Option<u64>,
+    thermal_throttle_count_after: Option<u64>,
+    thermal_throttled_during_run: Option<bool>,
     unavailable: Vec<String>,
 }
 
@@ -152,36 +154,40 @@ fn sample_hardware_observations() -> HardwareObservations {
     let mut unavailable = Vec::new();
     let battery_percent = sample_battery_percent();
     let thermal_celsius = sample_thermal_celsius();
+    let thermal_throttle_count = sample_thermal_throttle_count();
+    let gpu_devices = profile
+        .gpus
+        .into_iter()
+        .map(|gpu| GpuObservation {
+            vendor: format!("{:?}", gpu.vendor),
+            model: gpu.model_name,
+            memory_mb: gpu.memory_mb,
+        })
+        .collect::<Vec<_>>();
     if battery_percent.is_none() {
         unavailable.push("battery_percent".into());
     }
     if thermal_celsius.is_none() {
         unavailable.push("thermal_celsius".into());
     }
-    // No supported cross-platform probe currently reports actual thermal
-    // throttling. Never infer it from temperature or report an absent sensor
-    // as spare capacity.
-    unavailable.push("thermal_throttle_state".into());
+    if gpu_devices.iter().any(|gpu| gpu.memory_mb.is_none()) {
+        unavailable.push("gpu_memory_mb".into());
+    }
+    if thermal_throttle_count.is_none() {
+        unavailable.push("thermal_throttle_count".into());
+    }
     HardwareObservations {
-        logical_cpu_count: std::thread::available_parallelism()
-            .ok()
-            .map(usize::from),
+        logical_cpu_count: std::thread::available_parallelism().ok().map(usize::from),
         available_ram_mb_before: execlaw_container_manager::available_ram_mb(),
         available_ram_mb_after: None,
-        gpu_devices: profile
-            .gpus
-            .into_iter()
-            .map(|gpu| GpuObservation {
-                vendor: format!("{:?}", gpu.vendor),
-                model: gpu.model_name,
-                memory_mb: gpu.memory_mb,
-            })
-            .collect(),
+        gpu_devices,
         battery_percent_before: battery_percent,
         battery_percent_after: None,
         thermal_celsius_before: thermal_celsius,
         thermal_celsius_after: None,
-        thermal_throttle_state: None,
+        thermal_throttle_count_before: thermal_throttle_count,
+        thermal_throttle_count_after: None,
+        thermal_throttled_during_run: None,
         unavailable,
     }
 }
@@ -193,6 +199,14 @@ fn combine_hardware_observations(
     before.available_ram_mb_after = after.available_ram_mb_before;
     before.battery_percent_after = after.battery_percent_before;
     before.thermal_celsius_after = after.thermal_celsius_before;
+    before.thermal_throttle_count_after = after.thermal_throttle_count_before;
+    before.thermal_throttled_during_run = match (
+        before.thermal_throttle_count_before,
+        after.thermal_throttle_count_before,
+    ) {
+        (Some(start), Some(end)) => Some(end > start),
+        _ => None,
+    };
     for unavailable in after.unavailable {
         if !before.unavailable.contains(&unavailable) {
             before.unavailable.push(unavailable);
@@ -243,6 +257,28 @@ fn sample_thermal_celsius() -> Option<f64> {
             }
         }
     }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn sample_thermal_throttle_count() -> Option<u64> {
+    let root = std::path::Path::new("/sys/devices/system/cpu/cpu0/thermal_throttle");
+    let package = std::fs::read_to_string(root.join("package_throttle_count"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let core = std::fs::read_to_string(root.join("core_throttle_count"))
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    match (package, core) {
+        (Some(package), Some(core)) => Some(package.saturating_add(core)),
+        (Some(package), None) => Some(package),
+        (None, Some(core)) => Some(core),
+        (None, None) => None,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_thermal_throttle_count() -> Option<u64> {
     None
 }
 
@@ -1709,11 +1745,13 @@ mod tests {
             available_ram_mb_before: Some(4096),
             battery_percent_before: None,
             thermal_celsius_before: None,
-            thermal_throttle_state: None,
+            thermal_throttle_count_before: None,
+            thermal_throttle_count_after: None,
+            thermal_throttled_during_run: None,
             unavailable: vec![
                 "battery_percent".into(),
                 "thermal_celsius".into(),
-                "thermal_throttle_state".into(),
+                "thermal_throttle_count".into(),
             ],
             ..Default::default()
         };
@@ -1721,7 +1759,9 @@ mod tests {
             available_ram_mb_before: Some(3072),
             battery_percent_before: None,
             thermal_celsius_before: None,
-            thermal_throttle_state: None,
+            thermal_throttle_count_before: None,
+            thermal_throttle_count_after: None,
+            thermal_throttled_during_run: None,
             unavailable: before.unavailable.clone(),
             ..Default::default()
         };
@@ -1734,8 +1774,12 @@ mod tests {
         assert_eq!(combined.available_ram_mb_before, Some(4096));
         assert_eq!(combined.available_ram_mb_after, Some(3072));
         assert_eq!(combined.battery_percent_before, None);
-        assert_eq!(combined.thermal_throttle_state, None);
-        assert!(combined.unavailable.contains(&"thermal_throttle_state".into()));
+        assert_eq!(combined.thermal_throttled_during_run, None);
+        assert!(
+            combined
+                .unavailable
+                .contains(&"thermal_throttle_count".into())
+        );
         assert_eq!(combined.gpu_devices[0].memory_mb, None);
     }
 

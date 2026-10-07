@@ -432,6 +432,39 @@ impl PluginHost {
         fired
     }
 
+    /// Stop every live plugin runtime without uninstalling persisted plugins.
+    /// The next host boot rehydrates the same installed rows and stages.
+    pub async fn shutdown_runtime(&self) -> usize {
+        let scripts = {
+            let mut plugins = self.inner.script_plugins.write().await;
+            std::mem::take(&mut *plugins)
+        };
+        let subprocesses = {
+            let mut plugins = self.inner.subprocesses.write().await;
+            std::mem::take(&mut *plugins)
+        };
+        let mut stopped = 0;
+        for (plugin_id, plugin) in scripts {
+            self.inner.registry.disable(&plugin_id);
+            stopped += plugin.shutdown();
+        }
+        let mut tasks = tokio::task::JoinSet::new();
+        for (plugin_id, plugin) in subprocesses {
+            self.inner.registry.disable(&plugin_id);
+            tasks.spawn(async move {
+                plugin.shutdown().await;
+                plugin_id
+            });
+        }
+        while let Some(result) = tasks.join_next().await {
+            match result {
+                Ok(_) => stopped += 1,
+                Err(error) => warn!(%error, "plugin subprocess shutdown task failed"),
+            }
+        }
+        stopped
+    }
+
     pub fn stage_root(&self) -> &Path {
         &self.inner.stage_root
     }

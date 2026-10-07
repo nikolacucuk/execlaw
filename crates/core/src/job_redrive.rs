@@ -49,7 +49,62 @@ pub fn append_redrive_event(
         "INSERT INTO state_job_redrive_events \
          (job_kind,job_id,effect_identity,actor,reason,prior_attempt,occurred_at) \
          VALUES (?1,?2,?3,?4,?5,?6,?7)",
-        params![kind.as_str(), job_id, effect_identity, actor, reason, prior_attempt, occurred_at],
+        params![
+            kind.as_str(),
+            job_id,
+            effect_identity,
+            actor,
+            reason,
+            prior_attempt,
+            occurred_at
+        ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Database, DbConfig, MigrationRunner};
+
+    #[test]
+    fn redrive_request_requires_bounded_actor_and_reason() {
+        assert!(validate_redrive_request("controller", "checked receipt").is_ok());
+        assert!(validate_redrive_request(" ", "checked receipt").is_err());
+        assert!(validate_redrive_request("controller", "\n").is_err());
+        assert!(validate_redrive_request("controller", &"x".repeat(513)).is_err());
+    }
+
+    #[test]
+    fn redrive_audit_is_append_only() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        db.transaction(|tx| {
+            append_redrive_event(
+                tx,
+                RedriveKind::Outbox,
+                "41",
+                "conversation:1:2",
+                "controller",
+                "checked receipt",
+                3,
+                100,
+            )
+        })
+        .unwrap();
+        assert!(
+            db.with_conn(|conn| {
+                conn.execute("UPDATE state_job_redrive_events SET reason='changed'", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+        assert!(
+            db.with_conn(|conn| {
+                conn.execute("DELETE FROM state_job_redrive_events", [])?;
+                Ok(())
+            })
+            .is_err()
+        );
+    }
 }

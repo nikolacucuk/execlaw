@@ -1350,6 +1350,19 @@ mod tests {
     }
 
     #[test]
+    fn deprecation_metadata_does_not_change_tool_authority_or_trust_floor() {
+        let manifest = PluginManifest::parse(
+            "[plugin]\nid=\"legacy-log\"\nname=\"Legacy log\"\nversion=\"1.0.0\"\n[compatibility]\n[[compatibility.deprecated_primitives]]\nprimitive=\"host_log\"\nreplacement=\"log_info\"\n[[tools]]\nname=\"legacy-log.write\"\nrequired_capabilities=[\"workspace.write\"]\ntrust_floor=\"Controller\"\n",
+        )
+        .unwrap();
+        let registry = HookRegistry::new();
+        registry.enable(&manifest).unwrap();
+        let tool = registry.tool("legacy-log.write").unwrap();
+        assert_eq!(tool.required_capabilities, vec!["workspace.write"]);
+        assert_eq!(tool.trust_floor.as_deref(), Some("Controller"));
+    }
+
+    #[test]
     fn enable_carries_manifest_description_through_to_registered_tool() {
         // Pre-fix the description was dropped on the floor and the
         // model saw `Plugin tool 'X' (latency: Y)` instead. This

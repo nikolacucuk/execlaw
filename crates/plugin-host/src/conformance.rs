@@ -80,9 +80,16 @@ pub fn check_project(root: &Path) -> anyhow::Result<ProjectReport> {
     let mut capabilities = BTreeSet::new();
     for case in &fixture.cases {
         let tool = tools.get(case.tool_name.as_str()).ok_or_else(|| {
-            anyhow::anyhow!("fixture names undeclared tool '{}'; add it to plugin.toml", case.tool_name)
+            anyhow::anyhow!(
+                "fixture names undeclared tool '{}'; add it to plugin.toml",
+                case.tool_name
+            )
         })?;
-        let declared: BTreeSet<_> = tool.required_capabilities.iter().map(String::as_str).collect();
+        let declared: BTreeSet<_> = tool
+            .required_capabilities
+            .iter()
+            .map(String::as_str)
+            .collect();
         for capability in &case.requested_capabilities {
             if !declared.contains(capability.as_str()) {
                 anyhow::bail!(
@@ -99,10 +106,10 @@ pub fn check_project(root: &Path) -> anyhow::Result<ProjectReport> {
 
     Ok(ProjectReport {
         plugin_id: manifest.plugin.id,
-        runtime_tier: manifest.runtime.as_ref().map_or_else(
-            || "host-declared".into(),
-            |runtime| runtime.tier.clone(),
-        ),
+        runtime_tier: manifest
+            .runtime
+            .as_ref()
+            .map_or_else(|| "host-declared".into(), |runtime| runtime.tier.clone()),
         tool_count: manifest.tools.len(),
         case_count: fixture.cases.len(),
         declared_capabilities: capabilities.into_iter().collect(),
@@ -113,9 +120,8 @@ pub fn check_project(root: &Path) -> anyhow::Result<ProjectReport> {
 pub async fn run_runtime_cases(root: &Path) -> anyhow::Result<()> {
     let manifest_source = std::fs::read_to_string(root.join("plugin.toml"))?;
     let manifest = PluginManifest::parse(&manifest_source)?;
-    let fixture: ConformanceFixture = serde_json::from_slice(
-        &std::fs::read(root.join("tests/conformance.json"))?,
-    )?;
+    let fixture: ConformanceFixture =
+        serde_json::from_slice(&std::fs::read(root.join("tests/conformance.json"))?)?;
     let runtime = manifest
         .runtime
         .as_ref()
@@ -133,13 +139,15 @@ pub async fn run_runtime_cases(root: &Path) -> anyhow::Result<()> {
                 &execlaw_script::ScriptEngine::new(),
             )?;
             for case in fixture.cases {
-                let result = plugin.tool_call(
-                    &case.tool_name,
-                    case.arguments,
-                    serde_json::Map::new(),
-                ).await?;
+                let result = plugin
+                    .tool_call(&case.tool_name, case.arguments, serde_json::Map::new())
+                    .await?;
                 if result != case.result {
-                    anyhow::bail!("script runtime case '{}' returned {result}, expected {}", case.tool_name, case.result);
+                    anyhow::bail!(
+                        "script runtime case '{}' returned {result}, expected {}",
+                        case.tool_name,
+                        case.result
+                    );
                 }
             }
         }
@@ -148,8 +156,13 @@ pub async fn run_runtime_cases(root: &Path) -> anyhow::Result<()> {
                 .executable
                 .as_deref()
                 .ok_or_else(|| anyhow::anyhow!("subprocess runtime is missing executable"))?;
-            let executable_path = if executable.contains('/') || executable.contains('\\') || executable.starts_with('.') {
-                safe_project_path(root, executable)?.to_string_lossy().into_owned()
+            let executable_path = if executable.contains('/')
+                || executable.contains('\\')
+                || executable.starts_with('.')
+            {
+                safe_project_path(root, executable)?
+                    .to_string_lossy()
+                    .into_owned()
             } else {
                 executable.to_owned()
             };
@@ -162,15 +175,28 @@ pub async fn run_runtime_cases(root: &Path) -> anyhow::Result<()> {
                     cwd: Some(root.to_path_buf()),
                 },
                 None,
-            ).await.map_err(|error| anyhow::anyhow!("spawn conformance plugin: {error}"))?;
+            )
+            .await
+            .map_err(|error| anyhow::anyhow!("spawn conformance plugin: {error}"))?;
             for case in fixture.cases {
-                let result = plugin.call("tool.call", serde_json::json!({
-                    "name": case.tool_name,
-                    "arguments": case.arguments,
-                })).await.map_err(|error| anyhow::anyhow!("subprocess conformance call failed: {error}"))?;
+                let result = plugin
+                    .call(
+                        "tool.call",
+                        serde_json::json!({
+                            "name": case.tool_name,
+                            "arguments": case.arguments,
+                        }),
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("subprocess conformance call failed: {error}")
+                    })?;
                 if result != case.result {
                     plugin.shutdown().await;
-                    anyhow::bail!("subprocess runtime case returned {result}, expected {}", case.result);
+                    anyhow::bail!(
+                        "subprocess runtime case returned {result}, expected {}",
+                        case.result
+                    );
                 }
             }
             plugin.shutdown().await;
@@ -183,37 +209,64 @@ pub async fn run_runtime_cases(root: &Path) -> anyhow::Result<()> {
 /// Reject an upgrade that expands tool authority or relaxes a trust floor.
 pub fn check_upgrade(previous: &PluginManifest, candidate: &PluginManifest) -> anyhow::Result<()> {
     if previous.plugin.id != candidate.plugin.id {
-        anyhow::bail!("upgrade plugin id changed from '{}' to '{}'", previous.plugin.id, candidate.plugin.id);
+        anyhow::bail!(
+            "upgrade plugin id changed from '{}' to '{}'",
+            previous.plugin.id,
+            candidate.plugin.id
+        );
     }
     let previous_version = semver::Version::parse(&previous.plugin.version)
         .map_err(|error| anyhow::anyhow!("previous plugin version is not semver: {error}"))?;
     let candidate_version = semver::Version::parse(&candidate.plugin.version)
         .map_err(|error| anyhow::anyhow!("candidate plugin version is not semver: {error}"))?;
     if candidate_version <= previous_version {
-        anyhow::bail!("upgrade version {candidate_version} must exceed installed version {previous_version}");
+        anyhow::bail!(
+            "upgrade version {candidate_version} must exceed installed version {previous_version}"
+        );
     }
     for old_tool in &previous.tools {
-        let Some(new_tool) = candidate.tools.iter().find(|tool| tool.name == old_tool.name) else {
+        let Some(new_tool) = candidate
+            .tools
+            .iter()
+            .find(|tool| tool.name == old_tool.name)
+        else {
             continue;
         };
         let old_caps: BTreeSet<_> = old_tool.required_capabilities.iter().collect();
         for capability in &new_tool.required_capabilities {
             if !old_caps.contains(capability) {
-                anyhow::bail!("upgrade adds authority '{capability}' to tool '{}'", old_tool.name);
+                anyhow::bail!(
+                    "upgrade adds authority '{capability}' to tool '{}'",
+                    old_tool.name
+                );
             }
         }
-        if trust_rank(new_tool.trust_floor.as_deref()) < trust_rank(old_tool.trust_floor.as_deref()) {
-            anyhow::bail!("upgrade lowers the trust floor for tool '{}'", old_tool.name);
+        if trust_rank(new_tool.trust_floor.as_deref()) < trust_rank(old_tool.trust_floor.as_deref())
+        {
+            anyhow::bail!(
+                "upgrade lowers the trust floor for tool '{}'",
+                old_tool.name
+            );
         }
         if old_tool.effect_contract != new_tool.effect_contract {
-            anyhow::bail!("upgrade changes the effect contract for tool '{}'", old_tool.name);
+            anyhow::bail!(
+                "upgrade changes the effect contract for tool '{}'",
+                old_tool.name
+            );
         }
     }
     Ok(())
 }
 
-fn validate_fixture_schema(root: &Path, schema: Option<&str>, value: &Value, label: &str) -> anyhow::Result<()> {
-    let Some(schema) = schema else { return Ok(()); };
+fn validate_fixture_schema(
+    root: &Path,
+    schema: Option<&str>,
+    value: &Value,
+    label: &str,
+) -> anyhow::Result<()> {
+    let Some(schema) = schema else {
+        return Ok(());
+    };
     let path = safe_project_path(root, schema)?;
     let schema_json: Value = serde_json::from_slice(&std::fs::read(&path)?)
         .map_err(|error| anyhow::anyhow!("parse schema {schema}: {error}"))?;
@@ -227,9 +280,14 @@ fn validate_fixture_schema(root: &Path, schema: Option<&str>, value: &Value, lab
 
 fn safe_project_path(root: &Path, relative: &str) -> anyhow::Result<PathBuf> {
     let path = Path::new(relative);
-    if path.is_absolute() || path.components().any(|part| {
-        matches!(part, Component::ParentDir | Component::RootDir | Component::Prefix(_))
-    }) {
+    if path.is_absolute()
+        || path.components().any(|part| {
+            matches!(
+                part,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
         anyhow::bail!("project path escapes plugin root: {relative}");
     }
     Ok(root.join(path))
@@ -253,7 +311,11 @@ pub fn generate_project(root: &Path, plugin_id: &str, tier: &str) -> anyhow::Res
     if !matches!(tier, "script" | "subprocess") {
         anyhow::bail!("runtime tier must be 'script' or 'subprocess'");
     }
-    if plugin_id.is_empty() || !plugin_id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_')) {
+    if plugin_id.is_empty()
+        || !plugin_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
         anyhow::bail!("plugin id must contain only ASCII letters, digits, '-' or '_'");
     }
     std::fs::create_dir_all(root.join("schemas"))?;
@@ -269,22 +331,36 @@ pub fn generate_project(root: &Path, plugin_id: &str, tier: &str) -> anyhow::Res
     write_new(&root.join("plugin.toml"), manifest.as_bytes())?;
     write_new(&root.join("schemas/echo.json"), br#"{"type":"object","required":["value"],"properties":{"value":{"type":"string"}},"additionalProperties":false}"#)?;
     write_new(&root.join("schemas/echo-result.json"), br#"{"type":"object","required":["value"],"properties":{"value":{"type":"string"}},"additionalProperties":false}"#)?;
-    let fixture = format!("{{\"lifecycle\":[\"install\",\"enable\",\"call\",\"disable\",\"upgrade\"],\"cases\":[{{\"tool_name\":\"{plugin_id}.echo\",\"arguments\":{{\"value\":\"hello\"}},\"result\":{{\"value\":\"hello\"}},\"requested_capabilities\":[]}}]}}");
+    let fixture = format!(
+        "{{\"lifecycle\":[\"install\",\"enable\",\"call\",\"disable\",\"upgrade\"],\"cases\":[{{\"tool_name\":\"{plugin_id}.echo\",\"arguments\":{{\"value\":\"hello\"}},\"result\":{{\"value\":\"hello\"}},\"requested_capabilities\":[]}}]}}"
+    );
     write_new(&root.join("tests/conformance.json"), fixture.as_bytes())?;
     let entry = if tier == "script" {
-        "fn tool_call(name, args) { #{ \"value\": args.value } }\n"
+        "fn tool_call(name, args, oauth_tokens) { #{ \"value\": args.value } }\n"
     } else {
         "import json, sys\nfor line in sys.stdin:\n    req = json.loads(line)\n    result = {\"value\": req[\"params\"][\"arguments\"][\"value\"]}\n    print(json.dumps({\"id\": req[\"id\"], \"result\": result}), flush=True)\n"
     };
-    write_new(&root.join(if tier == "script" { "main.rhai" } else { "main.py" }), entry.as_bytes())?;
+    write_new(
+        &root.join(if tier == "script" {
+            "main.rhai"
+        } else {
+            "main.py"
+        }),
+        entry.as_bytes(),
+    )?;
     write_new(&root.join("README.md"), b"Run `execlaw-plugin-conformance check .` before sharing. This offline check does not install or enable the plugin.\n")?;
     Ok(())
 }
 
 fn write_new(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
     use std::io::Write;
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(path)
-        .map_err(|error| anyhow::anyhow!("create {} without overwriting: {error}", path.display()))?;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| {
+            anyhow::anyhow!("create {} without overwriting: {error}", path.display())
+        })?;
     file.write_all(bytes)?;
     file.sync_all()?;
     Ok(())
@@ -318,7 +394,12 @@ mod tests {
 
     #[tokio::test]
     async fn generated_subprocess_runtime_executes_against_the_mock_host_fixture() {
-        if std::process::Command::new("python").arg("--version").output().is_err() {
+        if !std::process::Command::new("python")
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            // no Python runtime on this host
             return;
         }
         let directory = tempfile::tempdir().unwrap();
@@ -333,19 +414,35 @@ mod tests {
         let project = directory.path().join("sample-plugin");
         generate_project(&project, "sample-plugin", "script").unwrap();
         let fixture_path = project.join("tests/conformance.json");
-        let fixture: Value = serde_json::from_slice(&std::fs::read(&fixture_path).unwrap()).unwrap();
+        let fixture: Value =
+            serde_json::from_slice(&std::fs::read(&fixture_path).unwrap()).unwrap();
         let mut fixture = fixture;
         fixture["cases"][0]["requested_capabilities"] = serde_json::json!(["workspace.write"]);
         std::fs::write(&fixture_path, serde_json::to_vec(&fixture).unwrap()).unwrap();
-        assert!(check_project(&project).unwrap_err().to_string().contains("undeclared authority"));
+        assert!(
+            check_project(&project)
+                .unwrap_err()
+                .to_string()
+                .contains("undeclared authority")
+        );
     }
 
     #[test]
     fn upgrade_rejects_authority_expansion_and_relaxed_trust_floor() {
         let old = PluginManifest::parse("[plugin]\nid=\"sample\"\nname=\"Sample\"\nversion=\"1.0.0\"\n[[tools]]\nname=\"sample.write\"\nrequired_capabilities=[\"workspace.write\"]\ntrust_floor=\"Controller\"\n").unwrap();
         let added = PluginManifest::parse("[plugin]\nid=\"sample\"\nname=\"Sample\"\nversion=\"1.1.0\"\n[[tools]]\nname=\"sample.write\"\nrequired_capabilities=[\"workspace.write\",\"network.approved\"]\ntrust_floor=\"Controller\"\n").unwrap();
-        assert!(check_upgrade(&old, &added).unwrap_err().to_string().contains("adds authority"));
+        assert!(
+            check_upgrade(&old, &added)
+                .unwrap_err()
+                .to_string()
+                .contains("adds authority")
+        );
         let relaxed = PluginManifest::parse("[plugin]\nid=\"sample\"\nname=\"Sample\"\nversion=\"1.1.0\"\n[[tools]]\nname=\"sample.write\"\nrequired_capabilities=[\"workspace.write\"]\ntrust_floor=\"KnownTrusted\"\n").unwrap();
-        assert!(check_upgrade(&old, &relaxed).unwrap_err().to_string().contains("lowers the trust floor"));
+        assert!(
+            check_upgrade(&old, &relaxed)
+                .unwrap_err()
+                .to_string()
+                .contains("lowers the trust floor")
+        );
     }
 }

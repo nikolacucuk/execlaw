@@ -709,10 +709,17 @@ pub(crate) fn encode_attachments_as_data_urls(
             );
             continue;
         }
-        match std::fs::read(&row.path) {
-            Ok(bytes) => {
+        match store.read_attachment_bytes(&id) {
+            Ok(Some(bytes)) => {
                 let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
                 out.push(format!("data:{};base64,{}", row.mime_type, b64));
+            }
+            Ok(None) => {
+                tracing::warn!(
+                    target: "chats::encode_attachments",
+                    attachment_id = %id_str,
+                    "attachment disappeared while being read"
+                );
             }
             Err(e) => {
                 tracing::warn!(
@@ -1130,7 +1137,10 @@ pub(crate) fn fetch_data_ref(
             ));
         }
     }
-    let bytes = std::fs::read(&row.path).map_err(|e| format!("data_ref read {}: {e}", row.path))?;
+    let bytes = store
+        .read_artifact_bytes(attachment_id)
+        .map_err(|e| format!("data_ref read {}: {e}", row.path))?
+        .ok_or_else(|| format!("data_ref '{attachment_id}' was removed while reading"))?;
     serde_json::from_slice(&bytes).map_err(|e| format!("data_ref decode: {e}"))
 }
 

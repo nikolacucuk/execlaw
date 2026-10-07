@@ -610,12 +610,7 @@ impl<'db> OutboxStore<'db> {
     /// Requeue a dead-lettered effect with its existing idempotency identity.
     /// Unknown outcomes are deliberately excluded; they require receipt
     /// reconciliation through `authorize_unknown_retry` or confirmation.
-    pub fn redrive_dead_letter(
-        &self,
-        id: i64,
-        actor: &str,
-        reason: &str,
-    ) -> Result<(), DbError> {
+    pub fn redrive_dead_letter(&self, id: i64, actor: &str, reason: &str) -> Result<(), DbError> {
         let (actor, reason) = crate::job_redrive::validate_redrive_request(actor, reason)?;
         self.db.transaction(|tx| {
             let (key, attempts): (String, i64) = tx.query_row(
@@ -1044,22 +1039,37 @@ mod tests {
     fn operator_redrive_preserves_effect_identity_and_records_actor_and_reason() {
         let db = fresh_db();
         let store = OutboxStore::new(&db);
-        let id = store.enqueue(&mk_row(&ConversationId::from("redrive"), 3)).unwrap();
+        let id = store
+            .enqueue(&mk_row(&ConversationId::from("redrive"), 3))
+            .unwrap();
         assert!(!store.record_failure(id, "remote rejected", 1, 0).unwrap());
         let before = store.dead_letters(10).unwrap().pop().unwrap();
         store
-            .redrive_dead_letter(id, "controller-1", "operator confirmed the recipient is ready")
+            .redrive_dead_letter(
+                id,
+                "controller-1",
+                "operator confirmed the recipient is ready",
+            )
             .unwrap();
         assert!(store.dead_letters(10).unwrap().is_empty());
-        let ready = store.ready_pending(chrono::Utc::now().timestamp(), 10).unwrap();
+        let ready = store
+            .ready_pending(chrono::Utc::now().timestamp(), 10)
+            .unwrap();
         assert_eq!(ready.len(), 1);
         assert_eq!(ready[0].idempotency_key.0, before.idempotency_key);
         let timeline = store.delivery_timeline(id).unwrap();
         let redrive = timeline.last().unwrap();
         assert_eq!(redrive.transition, "operator_redrive");
         assert_eq!(redrive.actor.as_deref(), Some("controller-1"));
-        assert_eq!(redrive.detail.as_deref(), Some("operator confirmed the recipient is ready"));
-        assert!(store.redrive_dead_letter(id, "controller-1", "duplicate attempt").is_err());
+        assert_eq!(
+            redrive.detail.as_deref(),
+            Some("operator confirmed the recipient is ready")
+        );
+        assert!(
+            store
+                .redrive_dead_letter(id, "controller-1", "duplicate attempt")
+                .is_err()
+        );
         let audit_rows: i64 = db
             .with_conn(|conn| Ok(conn.query_row(
                 "SELECT COUNT(*) FROM state_job_redrive_events WHERE job_kind='outbox' AND job_id=?1",

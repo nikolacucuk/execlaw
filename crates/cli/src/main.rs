@@ -832,6 +832,8 @@ async fn ensure_runner_image_fresh(image: &str) -> anyhow::Result<()> {
     // exit on miss. We don't go through bollard here because the
     // path also needs `docker build` and that's only via the CLI.
     let inspect = std::process::Command::new("docker")
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
         .args(["image", "inspect", "--format", "{{.Created}}", image])
         .output();
     let needs_build = match inspect {
@@ -898,6 +900,8 @@ async fn ensure_runner_image_fresh(image: &str) -> anyhow::Result<()> {
         "running `docker build -f Dockerfile.runner -t {image} .` (this may take a few minutes on first run)",
     );
     let status = std::process::Command::new("docker")
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
         .arg("build")
         .arg("-f")
         .arg("Dockerfile.runner")
@@ -1002,6 +1006,8 @@ fn cmd_doctor() -> anyhow::Result<()> {
     //    sidecars. A missing Docker downgrades to a NOTE not a
     //    failure.
     match std::process::Command::new("docker")
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
         .arg("--version")
         .output()
     {
@@ -3001,6 +3007,12 @@ async fn cmd_serve(
     allow_unsigned_local_development: bool,
     service_shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> anyhow::Result<()> {
+    // Register process/SCM shutdown before opening the database or spawning
+    // workers so a stop requested during startup is retained until Axum is
+    // ready to perform the graceful drain.
+    let (shutdown_trigger, shutdown_rx) = tokio::sync::oneshot::channel();
+    let mut shutdown_signal_task =
+        tokio::spawn(trigger_shutdown(service_shutdown_rx, shutdown_trigger));
     let (db, db_config) = open_db_with_config(&db_path, no_encrypt)?;
     execlaw_core::MigrationRunner::new(&db).apply_all()?;
     // Advance completed checkpoints and empty cursors automatically. This
@@ -4002,6 +4014,18 @@ async fn cmd_serve(
         let stop = sweep_stop.clone();
         tokio::spawn(async move { log_sweeper.run(stop).await });
     }
+    let artifact_sweeper = execlaw_core::artifact_sweeper::ArtifactSweeper::new(
+        db.clone(),
+        vec![
+            data_dir.join("tool-results"),
+            data_dir.join("blobs"),
+            execlaw_server::host_caps_impl::builtin_artifacts_root_path(),
+        ],
+    );
+    {
+        let stop = sweep_stop.clone();
+        tokio::spawn(async move { artifact_sweeper.run(stop).await });
+    }
     // 2026-04-29 — event retention: deletes `state_events` rows past
     // the operator-configured `history_retention_days` window.
     // Pinned + ephemeral conversations are exempt (the latter is
@@ -4271,11 +4295,12 @@ async fn cmd_serve(
     // max-duration watchdog. Prewarm fires once on boot to spawn
     // the controller's runner so the first chat doesn't pay
     // cold-start latency.
+    let mut startup_tasks: Vec<tokio::task::JoinHandle<()>> = Vec::new();
     if let (Some(sup), Some(launcher)) = (runner_supervisor.as_ref(), runner_launcher.as_ref()) {
         let reaper_sup = sup.clone();
         let reaper_launcher = launcher.clone();
         let stop = sweep_stop.clone();
-        tokio::spawn(async move {
+        startup_tasks.push(tokio::spawn(async move {
             tracing::info!(
                 interval_secs = execlaw_server::runner_supervisor::REAP_INTERVAL.as_secs(),
                 ttl_secs = execlaw_server::runner_supervisor::IDLE_TTL.as_secs(),
@@ -4298,7 +4323,7 @@ async fn cmd_serve(
                     }
                 }
             }
-        });
+        }));
 
         // Boot orphan sweep: remove runner workspace volumes
         // whose principal group rows are gone (server crash mid-
@@ -4320,7 +4345,7 @@ async fn cmd_serve(
         let prewarm_db = db.clone();
         let prewarm_inference = state.inference.clone();
         let prewarm_bind_port = config.bind_addr.port();
-        tokio::spawn(async move {
+        startup_tasks.push(tokio::spawn(async move {
             // Wait briefly so the WS endpoint is up before the
             // runner phones home. (Axum's `serve` task hasn't
             // necessarily started by the time we get here.)
@@ -4383,7 +4408,7 @@ async fn cmd_serve(
                     tracing::warn!(error = %e, "controller prewarm failed (will spawn lazily on first chat)");
                 }
             }
-        });
+        }));
     }
 
     let _safe_chat_recovery = execlaw_server::chats::spawn_safe_chat_run_recovery(state.clone());
@@ -4394,8 +4419,6 @@ async fn cmd_serve(
     // 2026-06-02: use into_make_service_with_connect_info so the
     // login handler can extract the peer SocketAddr for per-IP
     // rate limiting via axum::extract::ConnectInfo.
-    let (shutdown_trigger, shutdown_rx) = tokio::sync::oneshot::channel();
-    let mut shutdown_signal_task = tokio::spawn(trigger_shutdown(service_shutdown_rx, shutdown_trigger));
     let mut server_task = tokio::spawn(async move {
         axum::serve(
             listener,
@@ -4425,33 +4448,80 @@ async fn cmd_serve(
     shutdown_signal_task.abort();
     let _ = outbox_drain.stop.send(true);
     sweep_stop.notify_waiters();
+    for mut startup_task in startup_tasks {
+        if tokio::time::timeout(std::time::Duration::from_secs(35), &mut startup_task)
+            .await
+            .is_err()
+        {
+            startup_task.abort();
+            let _ = startup_task.await;
+        }
+    }
     match tokio::time::timeout(std::time::Duration::from_secs(10), &mut outbox_drain.task).await {
         Ok(Ok(())) => {}
         Ok(Err(error)) => tracing::warn!(%error, "outbox drain task failed during shutdown"),
         Err(_) => {
-            tracing::warn!("outbox drain exceeded shutdown budget; in-flight leases will reconcile after restart");
+            tracing::warn!(
+                "outbox drain exceeded shutdown budget; in-flight leases will reconcile after restart"
+            );
             outbox_drain.task.abort();
         }
     }
     let teardown = async {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            shutdown_state.plugin_host.fire_on_disable_for_all(),
+        )
+        .await
+        {
+            Ok(fired) => tracing::info!(
+                plugin_disable_hooks = fired,
+                "plugin shutdown hooks completed"
+            ),
+            Err(_) => tracing::warn!(
+                "plugin shutdown hooks exceeded their deadline; continuing process teardown"
+            ),
+        }
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            shutdown_state.plugin_host.shutdown_runtime(),
+        )
+        .await
+        {
+            Ok(stopped) => {
+                tracing::info!(stopped_plugin_runtimes = stopped, "plugin runtimes stopped")
+            }
+            Err(_) => tracing::error!("plugin runtimes did not stop before the shutdown deadline"),
+        }
         if let Some(supervisor) = shutdown_state.sidecar_supervisor.as_ref() {
             let stopped = supervisor.stop_all().await;
-            tracing::info!(stopped_sidecars = stopped, "sidecars stopped for service shutdown");
+            tracing::info!(
+                stopped_sidecars = stopped,
+                "sidecars stopped for service shutdown"
+            );
         }
         if let Some(supervisor) = shutdown_state.backend_supervisor.as_ref() {
             let stopped = supervisor.stop_all().await;
-            tracing::info!(stopped_backends = stopped, "managed backends stopped for service shutdown");
+            tracing::info!(
+                stopped_backends = stopped,
+                "managed backends stopped for service shutdown"
+            );
         }
         if let Some(supervisor) = shutdown_state.runner_supervisor.as_ref() {
             let stopped = supervisor.shutdown_all().await;
-            tracing::info!(stopped_runners = stopped, "conversation runners stopped for service shutdown");
+            tracing::info!(
+                stopped_runners = stopped,
+                "conversation runners stopped for service shutdown"
+            );
         }
     };
     if tokio::time::timeout(std::time::Duration::from_secs(20), teardown)
         .await
         .is_err()
     {
-        tracing::error!("owned process teardown exceeded shutdown budget; remaining leases and containers require startup reconciliation");
+        tracing::error!(
+            "owned process teardown exceeded shutdown budget; remaining leases and containers require startup reconciliation"
+        );
     }
     serve_result
 }
@@ -5200,12 +5270,11 @@ mod tests {
         let (service_stop, service_rx) = tokio::sync::oneshot::channel();
         let (shutdown_trigger, mut trigger_rx) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(trigger_shutdown(Some(service_rx), shutdown_trigger));
-        assert!(tokio::time::timeout(
-            std::time::Duration::from_millis(20),
-            &mut trigger_rx
-        )
-        .await
-        .is_err());
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut trigger_rx)
+                .await
+                .is_err()
+        );
         service_stop.send(()).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(1), &mut trigger_rx)
             .await

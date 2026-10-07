@@ -468,9 +468,8 @@ mod windows_runtime {
             service_type: ServiceType::OWN_PROCESS,
             current_state: ServiceState::Running,
             controls_accepted: ServiceControlAccept::STOP
-                | ServiceControlAccept::SHUTDOWN
                 | ServiceControlAccept::PRESHUTDOWN
-                | ServiceControlAccept::POWEREVENT,
+                | ServiceControlAccept::POWER_EVENT,
             exit_code: ServiceExitCode::Win32(0),
             checkpoint: 0,
             wait_hint: Duration::default(),

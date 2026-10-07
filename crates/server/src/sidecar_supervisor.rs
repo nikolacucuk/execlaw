@@ -700,7 +700,9 @@ impl SidecarSupervisor {
                     .filter(|network| !network.trim().is_empty()),
                 host_port: port,
                 container_port: sidecar.rpc_port,
-                runtime_profile: Some(execlaw_container_manager::RuntimeProfile::IntegrationSidecar),
+                runtime_profile: Some(
+                    execlaw_container_manager::RuntimeProfile::IntegrationSidecar,
+                ),
                 ..Default::default()
             };
             // Plugin sidecars typically declare images like
@@ -1133,6 +1135,8 @@ fn container_name(plugin_id: &str, name: &str) -> String {
 /// is the same either way.
 async fn image_is_local(docker: &str, image: &str) -> bool {
     tokio::process::Command::new(docker)
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
         .arg("image")
         .arg("inspect")
         .arg(image)
@@ -1180,6 +1184,8 @@ fn spawn_image_build_task(
             "sidecar image build started",
         );
         let result = tokio::process::Command::new(&docker)
+            .env_clear()
+            .envs(execlaw_core::process_environment::current_minimal_environment())
             .arg("build")
             .arg("-t")
             .arg(&image)
@@ -1233,7 +1239,12 @@ fn resolve_docker_binary() -> Option<String> {
         // Pre-fix this returned None on the first miss and the
         // sidecar supervisor never tried `/usr/local/bin/docker`,
         // leaving python-sandbox stuck on a pull-404.
-        if let Ok(out) = Command::new(candidate).arg("-v").output() {
+        if let Ok(out) = Command::new(candidate)
+            .env_clear()
+            .envs(execlaw_core::process_environment::current_minimal_environment())
+            .arg("-v")
+            .output()
+        {
             if out.status.success() {
                 return Some(candidate.to_owned());
             }
@@ -1255,8 +1266,10 @@ fn resolve_docker_binary() -> Option<String> {
 ///     `<execlaw>/sidecars/<plugin>/<sidecar>/<name>/`, creating it
 ///     on first spawn so signal-cli's keystore (and similar)
 ///     persists across container restarts.
-///   * absolute `/path` (or `C:\path` on Windows) — passed through
-///     to dockerd verbatim. For operator-controlled mounts.
+///
+/// Absolute host paths and traversal components are rejected. This
+/// keeps a plugin manifest from mounting the operator's home, Docker
+/// socket, or unrelated host directories into an integration sidecar.
 fn resolve_mounts(
     sidecar: &execlaw_plugin_host::hook_registry::RegisteredSidecar,
 ) -> Result<Vec<execlaw_container_manager::HostMount>, String> {
@@ -1313,9 +1326,9 @@ fn resolve_mounts(
 fn validate_mount_subpath(path: &str) -> Result<(), String> {
     let path = std::path::Path::new(path);
     if path.as_os_str().is_empty()
-        || path.components().any(|component| {
-            !matches!(component, std::path::Component::Normal(_))
-        })
+        || path
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
     {
         return Err("sidecar mount subpaths must contain normal path components only".into());
     }
@@ -1338,8 +1351,10 @@ fn validate_mount_target(target: &str) -> Result<(), String> {
     if parts.is_empty() || parts.iter().any(String::is_empty) {
         return Err("sidecar mount target contains traversal or an invalid component".into());
     }
-    if matches!(parts[0].as_str(), "proc" | "sys" | "dev" | "run" | "root" | "home" | "etc")
-        || (parts[0] == "var" && parts.get(1).is_some_and(|part| part == "run"))
+    if matches!(
+        parts[0].as_str(),
+        "proc" | "sys" | "dev" | "run" | "root" | "home" | "etc"
+    ) || (parts[0] == "var" && parts.get(1).is_some_and(|part| part == "run"))
     {
         return Err("sidecar mount target overlaps a protected container system path".into());
     }
@@ -1509,7 +1524,9 @@ rpc_port = {port}
         };
         assert!(resolve_mounts(&sidecar_with_mount(host_path, "/data")).is_err());
         assert!(resolve_mounts(&sidecar_with_mount("state://../../outside", "/data")).is_err());
-        assert!(resolve_mounts(&sidecar_with_mount("stage://data", "/var/run/docker.sock")).is_err());
+        assert!(
+            resolve_mounts(&sidecar_with_mount("stage://data", "/var/run/docker.sock")).is_err()
+        );
     }
 
     #[test]
@@ -1520,7 +1537,10 @@ rpc_port = {port}
         sidecar.stage_path = Some(temp.path().to_path_buf());
         let mounts = resolve_mounts(&sidecar).unwrap();
         assert_eq!(mounts.len(), 1);
-        assert_eq!(mounts[0].host_path, temp.path().join("schemas").to_string_lossy());
+        assert_eq!(
+            mounts[0].host_path,
+            temp.path().join("schemas").to_string_lossy()
+        );
         assert!(mounts[0].read_only);
     }
 

@@ -12,6 +12,7 @@ use rmp_serde as rmps;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use zeroize::Zeroizing;
 
 const VERSIONED_PAYLOAD_MAGIC: &[u8] = b"EXECLAW-EVENT\0";
 
@@ -433,7 +434,7 @@ struct IntegrityHead {
 /// looks up each row's `key_id` column to fish out the right key.
 #[derive(Debug, Clone, Default)]
 pub struct KeyRing {
-    keys: std::collections::HashMap<i64, Vec<u8>>,
+    keys: std::collections::HashMap<i64, Zeroizing<Vec<u8>>>,
     current_id: i64,
 }
 
@@ -490,6 +491,11 @@ impl KeyRing {
     /// Build a ring starting with one key. The id is the operator's
     /// choice; Phase-1 single-key deployments used `0`.
     pub fn single(id: i64, key: Vec<u8>) -> Self {
+        Self::single_zeroizing(id, Zeroizing::new(key))
+    }
+
+    /// Build a ring from key material that is already held in zeroizing memory.
+    pub fn single_zeroizing(id: i64, key: Zeroizing<Vec<u8>>) -> Self {
         let mut keys = std::collections::HashMap::new();
         keys.insert(id, key);
         Self {
@@ -501,7 +507,7 @@ impl KeyRing {
     /// Register an additional key without changing `current_id`. Used
     /// when bringing an old key forward for verification only.
     pub fn add(&mut self, id: i64, key: Vec<u8>) {
-        self.keys.insert(id, key);
+        self.keys.insert(id, Zeroizing::new(key));
     }
 
     /// Promote `id` to the current signing key. Errors if the id was
@@ -520,7 +526,7 @@ impl KeyRing {
     /// the previous `current_id` so the caller can persist it.
     pub fn rotate(&mut self, new_id: i64, new_key: Vec<u8>) -> i64 {
         let prev = self.current_id;
-        self.keys.insert(new_id, new_key);
+        self.keys.insert(new_id, Zeroizing::new(new_key));
         self.current_id = new_id;
         prev
     }
@@ -727,7 +733,9 @@ impl<'db> EventLog<'db> {
     pub fn new(db: &'db Database) -> Self {
         Self {
             db,
-            key_ring: db.event_hmac_key().map(|key| KeyRing::single(0, key)),
+            key_ring: db
+                .event_hmac_key()
+                .map(|key| KeyRing::single_zeroizing(0, key)),
         }
     }
 

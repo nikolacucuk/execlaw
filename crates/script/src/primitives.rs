@@ -503,6 +503,14 @@ pub(crate) fn register(
     }
     {
         let pid = pid_for_logs.clone();
+        // Kept as a compatibility alias; its logging authority and level
+        // match log_info exactly while the manifest validator emits guidance.
+        engine.register_fn("host_log", move |msg: ImmutableString| {
+            tracing::info!(plugin_id = %pid, "{msg}");
+        });
+    }
+    {
+        let pid = pid_for_logs.clone();
         engine.register_fn("log_warn", move |msg: ImmutableString| {
             tracing::warn!(plugin_id = %pid, "{msg}");
         });

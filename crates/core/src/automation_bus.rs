@@ -218,7 +218,7 @@ impl<'a> BusEventStore<'a> {
         let n = self.db.with_conn(|c| {
             let n = c.execute(
                 "UPDATE state_bus_events SET dispatched_at = ?2, completed_at = ?2 \
-                 WHERE id = ?1 AND dispatched_at IS NULL",
+                 WHERE id = ?1 AND dispatched_at IS NULL AND dead_lettered_at IS NULL",
                 params![id, dispatched_at],
             )?;
             Ok(n)
@@ -255,7 +255,7 @@ impl<'a> BusEventStore<'a> {
     ) -> Result<bool, BusEventError> {
         let changed = self.db.with_conn(|connection| {
             Ok(connection.execute(
-                    "UPDATE state_bus_events SET completed_at = ?3, dispatch_lease_owner = NULL, \
+                "UPDATE state_bus_events SET completed_at = ?3, dispatch_lease_owner = NULL, \
                     dispatch_lease_expires_at = NULL WHERE id = ?1 AND dispatch_lease_owner = ?2 \
                     AND completed_at IS NULL AND dead_lettered_at IS NULL",
                 params![id, owner, completed_at],
@@ -334,26 +334,28 @@ impl<'a> BusEventStore<'a> {
     }
 
     pub fn dead_letters(&self, limit: usize) -> Result<Vec<DeadLetterBusEvent>, BusEventError> {
-        self.db.with_conn(|connection| {
-            let mut statement = connection.prepare_cached(
-                "SELECT id,kind,source,received_at,dispatch_attempts,dispatch_error \
+        self.db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare_cached(
+                    "SELECT id,kind,source,received_at,dispatch_attempts,dispatch_error \
                  FROM state_bus_events WHERE dead_lettered_at IS NOT NULL \
                  ORDER BY dead_lettered_at,id LIMIT ?1",
-            )?;
-            statement
-                .query_map([limit.clamp(1, 200)], |row| {
-                    Ok(DeadLetterBusEvent {
-                        id: row.get(0)?,
-                        kind: BusEventKind::parse(&row.get::<_, String>(1)?),
-                        source: row.get(2)?,
-                        received_at: row.get(3)?,
-                        attempts: row.get(4)?,
-                        last_error: row.get(5)?,
-                    })
-                })?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(DbError::from)
-        }).map_err(BusEventError::from)
+                )?;
+                statement
+                    .query_map([limit.clamp(1, 200)], |row| {
+                        Ok(DeadLetterBusEvent {
+                            id: row.get(0)?,
+                            kind: BusEventKind::parse(&row.get::<_, String>(1)?),
+                            source: row.get(2)?,
+                            received_at: row.get(3)?,
+                            attempts: row.get(4)?,
+                            last_error: row.get(5)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)
+            })
+            .map_err(BusEventError::from)
     }
 
     /// Fetch a single row by id. The dispatcher uses this after
@@ -533,7 +535,9 @@ mod tests {
     fn handler_failures_back_off_and_dead_letter_after_a_bounded_budget() {
         let db = fresh_db();
         let store = BusEventStore::new(&db);
-        store.publish(&sample_event("poison", "fixture", 100), false).unwrap();
+        store
+            .publish(&sample_event("poison", "fixture", 100), false)
+            .unwrap();
         let now = chrono::Utc::now().timestamp();
         assert!(store.claim_dispatch("poison", "worker-1", now, 60).unwrap());
         assert_eq!(
@@ -543,7 +547,11 @@ mod tests {
             DispatchFailureResult::RetryScheduled { attempt: 1 }
         );
         assert!(store.dead_letters(10).unwrap().is_empty());
-        assert!(store.claim_dispatch("poison", "worker-2", now + 3, 60).unwrap());
+        assert!(
+            store
+                .claim_dispatch("poison", "worker-2", now + 3, 60)
+                .unwrap()
+        );
         assert_eq!(
             store
                 .fail_dispatch("poison", "worker-2", "still failing", 2, 2, now + 3)

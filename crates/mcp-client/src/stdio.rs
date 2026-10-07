@@ -60,7 +60,9 @@ pub struct StdioSpec {
 impl StdioTransport {
     pub async fn spawn(spec: &StdioSpec) -> McpResult<Self> {
         let mut cmd = Command::new(&spec.command);
-        cmd.args(&spec.args);
+        cmd.args(&spec.args)
+            .env_clear()
+            .envs(execlaw_core::process_environment::current_minimal_environment());
         if let Some(cwd) = &spec.cwd {
             cmd.current_dir(cwd);
         }

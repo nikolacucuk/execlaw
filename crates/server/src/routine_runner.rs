@@ -438,12 +438,15 @@ mod tests {
         assert!(!runs.is_empty());
         assert!(
             runs.iter()
-                .filter(|run| run.occurrence_at.is_some_and(|at| now - at > 60))
+                .filter(|run| run.occurrence_at.is_some_and(|at| now - at >= 60))
                 .all(|run| run.status == RoutineRunStatus::Skipped)
         );
         assert!(
             runs.iter()
-                .filter(|run| run.occurrence_at.is_some_and(|at| now - at <= 60))
+                .filter(|run| {
+                    run.status != RoutineRunStatus::Skipped
+                        && run.occurrence_at.is_some_and(|at| now - at < 60)
+                })
                 .count()
                 <= 1
         );

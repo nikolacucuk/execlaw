@@ -17,7 +17,8 @@ pub mod manifest;
 pub mod zip_stage;
 
 pub use manifest::{
-    HealthCheckProbe, OauthAccountDecl, PluginHeader, PluginManifest, RuntimeDecl,
+    DeprecatedPrimitiveUse, HOST_API_FEATURES, HOST_API_VERSION, HealthCheckProbe,
+    OauthAccountDecl, PluginCompatibility, PluginHeader, PluginManifest, RuntimeDecl,
     ToolCancellation, ToolConcurrency, ToolDecl, ToolEffectContract, ToolEffectPolicy,
     ToolExternalEffect, ToolIdempotency, ToolReconciliation, ToolResourceAccess, ToolResourceMode,
     ToolSensitivity, UiPanelDecl,

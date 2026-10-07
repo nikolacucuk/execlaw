@@ -386,10 +386,14 @@ async fn dispatch_one(db: &Database, handler: &EventHandler, workers: &Arc<Semap
                     DISPATCH_HANDLER_BACKOFF_BASE_SECS,
                     now,
                 ) {
-                    Ok(execlaw_core::automation_bus::DispatchFailureResult::RetryScheduled { attempt }) => {
+                    Ok(execlaw_core::automation_bus::DispatchFailureResult::RetryScheduled {
+                        attempt,
+                    }) => {
                         warn!(event_id = %event_id, attempt, error = %error, "automation bus: handler failed; retry is delayed");
                     }
-                    Ok(execlaw_core::automation_bus::DispatchFailureResult::DeadLettered { attempt }) => {
+                    Ok(execlaw_core::automation_bus::DispatchFailureResult::DeadLettered {
+                        attempt,
+                    }) => {
                         warn!(event_id = %event_id, attempt, error = %error, "automation bus: handler exhausted its retry budget and was dead-lettered");
                     }
                     Err(failure_error) => {

@@ -2458,6 +2458,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_stops_managed_backends_for_restart_reconciliation() {
+        let db = fresh_db();
+        let store = BackendStore::new(&db);
+        upsert_managed(&store, BackendPurpose::Standard, "vllm:test");
+        let mock = Arc::new(MockServiceController::new());
+        let supervisor = BackendSupervisor::new(db, mock.clone());
+        supervisor.reconcile_once().await;
+        assert_eq!(mock.spawn_count().await, 1);
+        assert_eq!(supervisor.stop_all().await, 1);
+        assert_eq!(mock.stop_count().await, 1);
+        assert_eq!(supervisor.stop_all().await, 0);
+    }
+
+    #[tokio::test]
     async fn reconcile_skips_external_rows() {
         let db = fresh_db();
         let store = BackendStore::new(&db);

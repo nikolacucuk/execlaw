@@ -83,6 +83,8 @@ impl CosignCliVerifier {
 impl AttestationVerifier for CosignCliVerifier {
     fn verify(&self, statement: &ProvenanceStatement) -> Result<(), String> {
         let output = Command::new(&self.executable)
+            .env_clear()
+            .envs(crate::process_environment::current_minimal_environment())
             .args([
                 "verify-blob-attestation",
                 "--offline",

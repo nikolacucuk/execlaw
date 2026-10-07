@@ -82,6 +82,7 @@ pub async fn get_attachment_handler(
     enum Source {
         /// Conversation-scoped attachment.
         Attachment {
+            id: String,
             path: String,
             mime: String,
             conversation_id: String,
@@ -89,6 +90,7 @@ pub async fn get_attachment_handler(
         /// Plugin-rendered artifact with the operator-facing filename
         /// the plugin chose at render time.
         Artifact {
+            id: String,
             path: String,
             mime: String,
             filename: Option<String>,
@@ -101,6 +103,7 @@ pub async fn get_attachment_handler(
         message: e.to_string(),
     })? {
         Some(row) => Source::Attachment {
+            id: row.id.as_str().to_owned(),
             path: row.path,
             mime: row.mime_type,
             conversation_id: row.conversation_id.0,
@@ -113,6 +116,7 @@ pub async fn get_attachment_handler(
                 message: e.to_string(),
             })? {
             Some(art) => Source::Artifact {
+                id: art.id,
                 path: art.path,
                 mime: art.mime_type,
                 filename: art.filename,
@@ -157,13 +161,14 @@ pub async fn get_attachment_handler(
         }
     }
 
-    let (raw_path, mime_type, preferred_filename) = match source {
-        Source::Attachment { path, mime, .. } => (path, mime, None),
+    let (source_id, is_artifact, raw_path, mime_type, preferred_filename) = match source {
+        Source::Attachment { id, path, mime, .. } => (id, false, path, mime, None),
         Source::Artifact {
+            id,
             path,
             mime,
             filename,
-        } => (path, mime, filename),
+        } => (id, true, path, mime, filename),
     };
 
     // Path-traversal defense: reject any `..` component. The path
@@ -182,20 +187,21 @@ pub async fn get_attachment_handler(
         });
     }
 
-    let file = tokio::fs::File::open(&path).await.map_err(|e| ApiError {
-        status: if e.kind() == std::io::ErrorKind::NotFound {
-            StatusCode::NOT_FOUND
-        } else {
-            StatusCode::INTERNAL_SERVER_ERROR
-        },
-        code: if e.kind() == std::io::ErrorKind::NotFound {
-            "attachment_file_missing"
-        } else {
-            "attachment_io"
-        },
+    let open_result = if is_artifact {
+        store.open_artifact_file(&source_id)
+    } else {
+        store.open_attachment_file(&AttachmentId::from(source_id.as_str()))
+    }
+    .map_err(|e| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "attachment_io",
         message: format!("opening attachment: {e}"),
     })?;
-
+    let file = tokio::fs::File::from_std(open_result.ok_or_else(|| ApiError {
+        status: StatusCode::NOT_FOUND,
+        code: "attachment_file_missing",
+        message: "attachment was removed while opening".into(),
+    })?);
     let metadata = file.metadata().await.ok();
     let length = metadata.as_ref().map(|m| m.len());
 

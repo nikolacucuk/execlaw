@@ -1319,11 +1319,15 @@ mod tests {
 
 /// Start the production relay for plugin-backed transport effects and durable
 /// wakeups. Send `true` to the returned handle during graceful shutdown.
+/// Shutdown controls and task handle for the background outbox relay.
 pub struct OutboxDrainTask {
+    /// Set to stop the relay after its current bounded drain pass.
     pub stop: tokio::sync::watch::Sender<bool>,
+    /// Join handle used by graceful server shutdown.
     pub task: tokio::task::JoinHandle<()>,
 }
 
+/// Start the background outbox relay and return its shutdown handle.
 pub fn spawn(state: AppState) -> OutboxDrainTask {
     let db = state.db.clone();
     let mut registry = DispatcherRegistry::new();

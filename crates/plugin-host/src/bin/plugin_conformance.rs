@@ -6,7 +6,10 @@ use execlaw_plugin_sdk::PluginManifest;
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
-#[command(name = "execlaw-plugin-conformance", about = "Offline plugin author conformance kit")]
+#[command(
+    name = "execlaw-plugin-conformance",
+    about = "Offline plugin author conformance kit"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -32,12 +35,21 @@ enum Command {
         #[arg(long)]
         candidate: PathBuf,
     },
+    /// Emit the manifest JSON Schema generated from plugin-sdk structs.
+    Schema {
+        #[arg(long)]
+        output: PathBuf,
+    },
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::Init { path, plugin_id, tier } => {
+        Command::Init {
+            path,
+            plugin_id,
+            tier,
+        } => {
             generate_project(&path, &plugin_id, &tier)?;
             println!("generated {tier} plugin project at {}", path.display());
         }
@@ -57,11 +69,22 @@ async fn main() -> anyhow::Result<()> {
                 }
             );
         }
-        Command::Upgrade { previous, candidate } => {
+        Command::Upgrade {
+            previous,
+            candidate,
+        } => {
             let previous = read_manifest(&previous)?;
             let candidate = read_manifest(&candidate)?;
             check_upgrade(&previous, &candidate)?;
             println!("upgrade contract passed for {}", candidate.plugin.id);
+        }
+        Command::Schema { output } => {
+            let schema = execlaw_plugin_sdk::PluginManifest::json_schema();
+            if let Some(parent) = output.parent().filter(|path| !path.as_os_str().is_empty()) {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&output, serde_json::to_vec_pretty(&schema)?)?;
+            println!("manifest schema: {}", output.display());
         }
     }
     Ok(())

@@ -2,6 +2,7 @@
 
 use bollard::secret::{HostConfig, ResourcesUlimits};
 
+/// Least-privilege container contract for a class of agent runtime work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeProfile {
     Runner,
@@ -11,12 +12,14 @@ pub enum RuntimeProfile {
     IntegrationSidecar,
 }
 
+/// Execution substrate available to a runtime-profile request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeExecution {
     Container,
     NativeProcess,
 }
 
+/// Enforced process and scratch-space ceilings for one profile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeProfileLimits {
     pub pids: i64,
@@ -29,6 +32,7 @@ pub struct RuntimeProfileLimits {
 }
 
 impl RuntimeProfile {
+    /// Return the immutable resource contract for this profile.
     pub fn limits(self) -> RuntimeProfileLimits {
         match self {
             Self::Runner => RuntimeProfileLimits {
@@ -91,6 +95,14 @@ impl RuntimeProfile {
         os_type.eq_ignore_ascii_case("linux")
     }
 
+    pub fn image_user_is_non_root(self, image_user: Option<&str>) -> bool {
+        let Some(user) = image_user.map(str::trim).filter(|user| !user.is_empty()) else {
+            return false;
+        };
+        let uid = user.split(':').next().unwrap_or_default();
+        !matches!(uid.to_ascii_lowercase().as_str(), "0" | "root")
+    }
+
     /// Apply the common profile contract to a Docker host configuration.
     pub fn apply_to_host_config(self, config: &mut HostConfig) {
         let limits = self.limits();
@@ -100,9 +112,19 @@ impl RuntimeProfile {
         config.readonly_rootfs = Some(true);
         config.cap_drop = Some(vec!["ALL".into()]);
         config.security_opt = Some(vec!["no-new-privileges:true".into()]);
-        config.pids_limit = Some(config.pids_limit.map_or(limits.pids, |current| current.min(limits.pids)));
-        config.memory = Some(config.memory.map_or(limits.memory_bytes, |current| current.min(limits.memory_bytes)));
-        config.nano_cpus = Some(config.nano_cpus.map_or(limits.nano_cpus, |current| current.min(limits.nano_cpus)));
+        config.pids_limit = Some(
+            config
+                .pids_limit
+                .map_or(limits.pids, |current| current.min(limits.pids)),
+        );
+        config.memory = Some(config.memory.map_or(limits.memory_bytes, |current| {
+            current.min(limits.memory_bytes)
+        }));
+        config.nano_cpus = Some(
+            config
+                .nano_cpus
+                .map_or(limits.nano_cpus, |current| current.min(limits.nano_cpus)),
+        );
         config.ulimits = Some(vec![ResourcesUlimits {
             name: Some("nofile".into()),
             soft: Some(limits.nofile_soft),
@@ -111,7 +133,10 @@ impl RuntimeProfile {
         let mut tmpfs = config.tmpfs.take().unwrap_or_default();
         tmpfs.insert(
             "/tmp".into(),
-            format!("rw,noexec,nosuid,nodev,size={},mode=1777", limits.tmpfs_bytes),
+            format!(
+                "rw,noexec,nosuid,nodev,size={},mode=1777",
+                limits.tmpfs_bytes
+            ),
         );
         config.tmpfs = Some(tmpfs);
     }
@@ -136,6 +161,11 @@ mod tests {
             assert!(profile.supports_docker_ostype("linux"));
             assert!(!profile.supports_docker_ostype("windows"));
             assert!(!profile.supports_docker_ostype(""));
+            assert!(profile.image_user_is_non_root(Some("1000:1000")));
+            assert!(profile.image_user_is_non_root(Some("publisher")));
+            assert!(!profile.image_user_is_non_root(None));
+            assert!(!profile.image_user_is_non_root(Some("root")));
+            assert!(!profile.image_user_is_non_root(Some("0:0")));
             let limits = profile.limits();
             assert!(limits.pids > 0);
             assert!(limits.memory_bytes > 0);
@@ -159,11 +189,26 @@ mod tests {
         RuntimeProfile::Coding.apply_to_host_config(&mut config);
         assert_eq!(config.network_mode.as_deref(), Some("none"));
         assert_eq!(config.readonly_rootfs, Some(true));
-        assert_eq!(config.cap_drop.as_deref(), Some(["ALL".to_owned()].as_slice()));
-        assert_eq!(config.security_opt.as_deref(), Some(["no-new-privileges:true".to_owned()].as_slice()));
-        assert_eq!(config.pids_limit, Some(RuntimeProfile::Coding.limits().pids));
-        assert_eq!(config.memory, Some(RuntimeProfile::Coding.limits().memory_bytes));
-        assert_eq!(config.ulimits.as_ref().unwrap()[0].name.as_deref(), Some("nofile"));
+        assert_eq!(
+            config.cap_drop.as_deref(),
+            Some(["ALL".to_owned()].as_slice())
+        );
+        assert_eq!(
+            config.security_opt.as_deref(),
+            Some(["no-new-privileges:true".to_owned()].as_slice())
+        );
+        assert_eq!(
+            config.pids_limit,
+            Some(RuntimeProfile::Coding.limits().pids)
+        );
+        assert_eq!(
+            config.memory,
+            Some(RuntimeProfile::Coding.limits().memory_bytes)
+        );
+        assert_eq!(
+            config.ulimits.as_ref().unwrap()[0].name.as_deref(),
+            Some("nofile")
+        );
         assert!(config.tmpfs.as_ref().unwrap()["/tmp"].contains("noexec"));
     }
 }

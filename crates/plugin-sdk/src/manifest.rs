@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Top-level manifest.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginManifest {
     pub plugin: PluginHeader,
 
@@ -86,7 +86,7 @@ pub struct PluginManifest {
 }
 
 /// Host API requirements kept separate from the plugin's cosmetic release.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PluginCompatibility {
     /// Semver requirement against [`HOST_API_VERSION`], for example
@@ -103,7 +103,7 @@ pub struct PluginCompatibility {
 }
 
 /// A plugin-declared use of a deprecated primitive and its compatible replacement.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DeprecatedPrimitiveUse {
     pub primitive: String,
@@ -123,7 +123,15 @@ pub const HOST_API_FEATURES: &[&str] = &[
     "ui.panel.v1",
 ];
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+/// Deprecated host primitive replacements recognized by this SDK.
+pub fn deprecated_primitive_replacement(primitive: &str) -> Option<&'static str> {
+    match primitive {
+        "host_log" => Some("log_info"),
+        _ => None,
+    }
+}
+
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginHeader {
     pub id: String,
     pub name: String,
@@ -140,7 +148,7 @@ pub struct PluginHeader {
     pub core_version: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolDecl {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -212,7 +220,7 @@ pub struct ToolDecl {
 }
 
 /// Declarative tool behavior shared by script and subprocess plugins.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ToolEffectContract {
     #[serde(default)]
@@ -233,7 +241,9 @@ pub struct ToolEffectContract {
 
 /// Host/operator decisions that may further restrict plugin declarations.
 /// The default denies automatic retries and parallel execution.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(deny_unknown_fields)]
 pub struct ToolEffectPolicy {
     #[serde(default)]
@@ -243,14 +253,16 @@ pub struct ToolEffectPolicy {
 }
 
 /// A stable, plugin-defined resource name and the access mode used by a tool.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ToolResourceAccess {
     pub resource: String,
     pub access: ToolResourceMode,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResourceMode {
     Read,
@@ -259,7 +271,9 @@ pub enum ToolResourceMode {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolExternalEffect {
     None,
@@ -270,7 +284,9 @@ pub enum ToolExternalEffect {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolIdempotency {
     None,
@@ -280,7 +296,9 @@ pub enum ToolIdempotency {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolReconciliation {
     None,
@@ -291,7 +309,9 @@ pub enum ToolReconciliation {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCancellation {
     Safe,
@@ -301,7 +321,9 @@ pub enum ToolCancellation {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolSensitivity {
     Public,
@@ -311,7 +333,9 @@ pub enum ToolSensitivity {
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolConcurrency {
     ReadOnly,
@@ -364,7 +388,9 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(
+    schemars::JsonSchema, Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolLatency {
     Low,
@@ -373,7 +399,7 @@ pub enum ToolLatency {
     High,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TransportDecl {
     pub transport_id: String,
     #[serde(default)]
@@ -392,7 +418,7 @@ pub struct TransportDecl {
     pub icon: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct IdentityProviderDecl {
     /// Identifier kinds this provider can resolve. E.g.
     /// `["phone", "email", "signal_uuid"]`.
@@ -414,7 +440,7 @@ fn default_confidence_ceiling() -> f32 {
     0.95
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InferenceBackendDecl {
     pub openai_compatible_endpoint: String,
     pub supports_streaming: bool,
@@ -437,7 +463,7 @@ pub struct InferenceBackendDecl {
     pub runtimes: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HardwareProbeDecl {
     /// Which GPU vendors this probe handles.
     #[serde(default)]
@@ -446,7 +472,7 @@ pub struct HardwareProbeDecl {
     pub image: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ServiceDecl {
     pub name: String,
     pub image: String,
@@ -508,7 +534,7 @@ pub struct ServiceDecl {
 ///     pass-through.
 ///
 /// The `target` is always the absolute container-side path.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct MountDecl {
     pub source: String,
     pub target: String,
@@ -527,7 +553,7 @@ pub struct MountDecl {
 /// in a future separate `[transport]` declaration; the sidecar meta
 /// only carries fields the supervisor actually uses (RPC port to
 /// publish + health path to probe).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SidecarMeta {
     /// Container port serving the sidecar's local RPC. The
     /// supervisor publishes this as `127.0.0.1:<host_port>` and
@@ -545,7 +571,7 @@ fn default_rpc_health_path() -> String {
     "/healthz".to_owned()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OauthAccountDecl {
     pub name: String,
     pub provider: String,
@@ -559,7 +585,7 @@ pub struct OauthAccountDecl {
     pub token_store: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UiPanelDecl {
     pub mount: String,
     pub entry: String,
@@ -569,7 +595,7 @@ pub struct UiPanelDecl {
 }
 
 /// Narrow host services a sandboxed panel may request through RPC.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(schemars::JsonSchema, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum PanelRpcCapability {
     /// Call only this plugin's own manifest-declared `admin_routes`.
@@ -618,7 +644,7 @@ fn is_safe_panel_asset_path(path: &str) -> bool {
 /// otherwise), and `headers` (subset the host whitelisted).
 /// Return value is JSON the host serialises into the HTTP
 /// response. Plugins can throw a Rhai error to surface a 500.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AdminRouteDecl {
     /// HTTP method — `"GET"`, `"POST"`, `"DELETE"`, etc. The host
     /// uppercases before matching, so `"post"` is fine too.
@@ -663,7 +689,7 @@ pub struct AdminRouteDecl {
 /// `webhook_route_auth_unset` warning at plugin enable and leaves
 /// the handler solely responsible for validating the caller —
 /// migrate to a declared `auth` mode as soon as practical.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WebhookRouteDecl {
     pub method: String,
     pub path: String,
@@ -686,7 +712,7 @@ pub struct WebhookRouteDecl {
 /// can rotate the secret without code changes. Comparisons are
 /// constant-time. A missing or empty vault value is treated as an
 /// authentication failure (NOT as "no auth required").
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WebhookAuthDecl {
     /// Match `?<query>=<value>` constant-time against the plugin's
@@ -714,25 +740,25 @@ pub enum WebhookAuthDecl {
     None,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ChatComponentDecl {
     pub kind: String,
     pub entry: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EventSubscriptionDecl {
     pub on: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handler: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AlertSourceDecl {
     pub fingerprint_prefix: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct HealthCheckDecl {
     pub name: String,
     pub interval: String,
@@ -751,7 +777,7 @@ fn default_severity() -> String {
     "Error".to_owned()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HealthCheckProbe {
     Http {
@@ -784,7 +810,7 @@ pub enum HealthCheckProbe {
 /// On plugin uninstall, every skill with this `owning_plugin_id` is
 /// archived. Admins can re-author a clean copy via `skills.create` if
 /// they want to keep the procedure after removing the plugin.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SkillDecl {
     /// Local skill name (without the `<plugin_id>/` prefix). Lowercase
     /// alphanumeric + hyphen. Slashes are sanitized to hyphens.
@@ -821,7 +847,7 @@ pub struct SkillDecl {
 /// The validator enforces the right field is set per tier so a
 /// script plugin can't accidentally smuggle in a binary executable
 /// path and vice versa.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeDecl {
     /// `"subprocess"` or `"script"`. WASM lands later.
     pub tier: String,
@@ -956,6 +982,12 @@ impl PluginManifest {
         Ok(m)
     }
 
+    /// Generate the author-facing JSON Schema from the same structs used by
+    /// TOML parsing and installation validation.
+    pub fn json_schema() -> schemars::Schema {
+        schemars::schema_for!(PluginManifest)
+    }
+
     pub fn validate(&self) -> Result<(), ManifestError> {
         if self.plugin.id.is_empty()
             || !self
@@ -1009,6 +1041,12 @@ impl PluginManifest {
                 if use_decl.primitive.trim().is_empty()
                     || use_decl.replacement.trim().is_empty()
                     || use_decl.primitive == use_decl.replacement
+                    || use_decl.primitive.len() > 128
+                    || use_decl.replacement.len() > 128
+                    || use_decl.primitive.chars().any(char::is_control)
+                    || use_decl.replacement.chars().any(char::is_control)
+                    || deprecated_primitive_replacement(&use_decl.primitive)
+                        != Some(use_decl.replacement.as_str())
                     || !primitives.insert(use_decl.primitive.as_str())
                 {
                     return Err(ManifestError::InvalidDeprecatedPrimitive(
@@ -1212,6 +1250,27 @@ mod tests {
         assert!(matches!(
             PluginManifest::parse(&source),
             Err(ManifestError::TomlParse(_))
+        ));
+    }
+
+    #[test]
+    fn deprecation_diagnostic_must_name_the_host_registered_replacement() {
+        let valid = format!(
+            "{EXAMPLE}\n[compatibility]\n[[compatibility.deprecated_primitives]]\nprimitive = \"host_log\"\nreplacement = \"log_info\"\n"
+        );
+        let manifest = PluginManifest::parse(&valid).unwrap();
+        assert_eq!(
+            manifest.compatibility.unwrap().deprecated_primitives[0].replacement,
+            "log_info"
+        );
+
+        let invalid = valid.replace(
+            "replacement = \"log_info\"",
+            "replacement = \"send_message\"",
+        );
+        assert!(matches!(
+            PluginManifest::parse(&invalid),
+            Err(ManifestError::InvalidDeprecatedPrimitive(_))
         ));
     }
 

@@ -2,6 +2,8 @@
 
 Reference for the plugin framework. This is what a contributor needs in order to extend execlaw without touching host crates.
 
+Before publishing an independently authored plugin, run the [offline conformance kit](plugin-conformance.md).
+
 Relationship to other docs:
 
 - [`architecture.md`](architecture.md) — full system topology + the design principles (esp. #6 _"Plugins, not hardcoded built-ins"_) that this doc operationalises.

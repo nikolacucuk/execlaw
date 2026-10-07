@@ -1410,6 +1410,7 @@ pub struct MemoryJob {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Payload-free metadata for a failed memory extraction job.
 pub struct FailedMemoryJob {
     pub job_id: String,
     pub kind: String,
@@ -1569,6 +1570,7 @@ impl<'db> MemoryJobStore<'db> {
             params![job_id, owner, next_attempt_at, error])? == 1)).map_err(MemoryAssertionError::from)
     }
 
+    /// List bounded metadata for failed memory-extraction jobs.
     pub fn failed_jobs(&self, limit: usize) -> Result<Vec<FailedMemoryJob>, MemoryAssertionError> {
         self.db
             .with_conn(|conn| {
@@ -1623,8 +1625,12 @@ impl<'db> MemoryJobStore<'db> {
                     [job_id],
                     |row| {
                         Ok((
-                            row.get(0)?, row.get(1)?, row.get(2)?,
-                            row.get(3)?, row.get(4)?, row.get(5)?,
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
                         ))
                     },
                 )?;
@@ -2221,13 +2227,18 @@ mod tests {
         assert_eq!(claimed_again.event_start_seq, EventSeq(3));
         assert_eq!(claimed_again.attempt, 1);
         let audit: (String, String, i64) = db
-            .with_conn(|conn| Ok(conn.query_row(
-                "SELECT actor,reason,prior_attempt FROM state_job_redrive_events \
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT actor,reason,prior_attempt FROM state_job_redrive_events \
                  WHERE job_kind='memory_extraction' AND job_id=?1",
-                [&job_id],
-                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-            )?))
+                    [&job_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            })
             .unwrap();
-        assert_eq!(audit, ("controller-1".into(), "local backend recovered".into(), 1));
+        assert_eq!(
+            audit,
+            ("controller-1".into(), "local backend recovered".into(), 1)
+        );
     }
 }

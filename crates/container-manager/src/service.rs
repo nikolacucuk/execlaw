@@ -18,8 +18,8 @@
 //! when those plugins do.
 
 use crate::hardware::GpuVendor;
-use async_trait::async_trait;
 use crate::runtime_profile::RuntimeProfile;
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -422,11 +422,9 @@ impl ServiceController for BollardServiceController {
             return Err(ServiceError::Invalid("image must not be empty".into()));
         }
         if let Some(profile) = spec.runtime_profile {
-            let info = self
-                .docker
-                .info()
-                .await
-                .map_err(|error| ServiceError::Runtime(format!("inspect Docker isolation platform: {error}")))?;
+            let info = self.docker.info().await.map_err(|error| {
+                ServiceError::Runtime(format!("inspect Docker isolation platform: {error}"))
+            })?;
             let os_type = info.os_type.as_deref().unwrap_or_default();
             if !profile.supports_docker_ostype(os_type) {
                 return Err(ServiceError::Invalid(format!(
@@ -493,17 +491,36 @@ impl ServiceController for BollardServiceController {
         // `inspect_image` returns Ok → image is local → skip the
         // pull. Returns 404 (or any other error) → try the pull,
         // which will surface its own diagnostics.
-        match self.docker.inspect_image(&spec.image).await {
-            Ok(_) => {
+        let image = match self.docker.inspect_image(&spec.image).await {
+            Ok(image) => {
                 tracing::info!(
                     image = %spec.image,
                     container = %spec.name,
                     "image already present locally — skipping pull"
                 );
+                image
             }
             Err(_) => {
                 self.pull_image(&spec.image, &spec.name).await?;
+                self.docker
+                    .inspect_image(&spec.image)
+                    .await
+                    .map_err(|error| {
+                        ServiceError::Runtime(format!("inspect pulled image: {error}"))
+                    })?
             }
+        };
+        if let Some(profile) = spec.runtime_profile
+            && !profile.image_user_is_non_root(
+                image
+                    .config
+                    .as_ref()
+                    .and_then(|config| config.user.as_deref()),
+            )
+        {
+            return Err(ServiceError::Invalid(format!(
+                "runtime profile {profile:?} requires an image with a non-root USER"
+            )));
         }
 
         // --- 3. Build the container Config + HostConfig.
@@ -1040,7 +1057,9 @@ impl ServiceController for NativeServiceController {
         let env = native_service_env(spec);
 
         let mut cmd = tokio::process::Command::new(&binary);
-        cmd.args(&spec.args);
+        cmd.args(&spec.args)
+            .env_clear()
+            .envs(execlaw_core::process_environment::current_minimal_environment());
         for (k, v) in &env {
             cmd.env(k, v);
         }
@@ -1685,6 +1704,23 @@ mod tests {
             args: vec!["serve".into()],
             ..Default::default()
         }
+    }
+
+    #[tokio::test]
+    async fn native_runtime_rejects_container_isolation_profiles_before_spawn() {
+        use crate::runtime_profile::RuntimeProfile;
+        let controller = NativeServiceController::new();
+        let spec = ServiceSpec {
+            runtime_profile: Some(RuntimeProfile::Coding),
+            ..apple_spec("ollama")
+        };
+        let error = controller.spawn(&spec).await.unwrap_err();
+        assert!(matches!(error, ServiceError::Invalid(_)));
+        assert!(
+            error
+                .to_string()
+                .contains("does not enforce container isolation")
+        );
     }
 
     #[test]

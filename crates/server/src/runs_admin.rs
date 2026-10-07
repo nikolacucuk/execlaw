@@ -59,6 +59,7 @@ pub struct UnknownOutboxResolutionRequest {
 }
 
 #[derive(Debug, Clone, Serialize)]
+/// Sanitized operator-facing metadata for one exhausted job.
 pub struct DeadLetterJobView {
     pub job_kind: String,
     pub job_id: String,
@@ -201,10 +202,25 @@ async fn list_dead_letters(
             message: "could not load failed automation jobs".into(),
         })?
     {
+        let completed_redrives: i64 = state
+            .db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM state_job_redrive_events \
+                     WHERE job_kind='automation' AND job_id=?1",
+                    [&row.id],
+                    |result| result.get(0),
+                )?)
+            })
+            .map_err(|_| ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "dead_letter_list_failed",
+                message: "could not load redrive audit".into(),
+            })?;
         jobs.push(DeadLetterJobView {
             job_kind: "automation".into(),
             job_id: row.id,
-            attempts: row.step_traces.len() as i64,
+            attempts: completed_redrives.saturating_add(1),
             max_attempts: None,
             affected_resource: format!("automation {} event {}", row.automation_id, row.event_id),
             cause: sanitized_cause(
@@ -230,7 +246,11 @@ async fn list_dead_letters(
             job_id: row.id,
             attempts: row.attempts,
             max_attempts: None,
-            affected_resource: format!("automation event {} from {}", row.kind.as_str(), row.source),
+            affected_resource: format!(
+                "automation event {} from {}",
+                row.kind.as_str(),
+                row.source
+            ),
             cause: sanitized_cause(row.last_error.as_deref()),
             reconciliation_status: "manual_handler_review_required".into(),
             redrive_mode: None,
@@ -248,7 +268,10 @@ fn sanitized_cause(error: Option<&str>) -> String {
     let text = error.unwrap_or_default().to_ascii_lowercase();
     if text.contains("timeout") || text.contains("timed out") || text.contains("deadline") {
         "timeout".into()
-    } else if text.contains("disk full") || text.contains("sqlite_full") || text.contains("no space") {
+    } else if text.contains("disk full")
+        || text.contains("sqlite_full")
+        || text.contains("no space")
+    {
         "storage_exhausted".into()
     } else if text.contains("rate limit") || text.contains("quota") || text.contains("budget") {
         "resource_budget_exhausted".into()
@@ -290,7 +313,9 @@ async fn redrive_dead_letter(
                     code: "dead_letter_redrive_rejected",
                     message: "effect is not eligible for same-identity redrive".into(),
                 })?;
-            Ok(Json(serde_json::json!({"job_kind":job_kind,"job_id":job_id,"status":"pending"})))
+            Ok(Json(
+                serde_json::json!({"job_kind":job_kind,"job_id":job_id,"status":"pending"}),
+            ))
         }
         "memory_extraction" => {
             execlaw_core::memory_assertions::MemoryJobStore::new(&state.db)
@@ -306,7 +331,9 @@ async fn redrive_dead_letter(
                     message: "extraction job is not eligible for same-identity redrive".into(),
                 })?;
             state.memory_extract.wake();
-            Ok(Json(serde_json::json!({"job_kind":job_kind,"job_id":job_id,"status":"pending"})))
+            Ok(Json(
+                serde_json::json!({"job_kind":job_kind,"job_id":job_id,"status":"pending"}),
+            ))
         }
         "automation" => {
             let context = crate::automation_runtime::ExecutorContext::new(
@@ -1244,15 +1271,21 @@ mod tests {
             .uri(format!("/api/admin/dead-letters/outbox/{id}/redrive"))
             .header("authorization", format!("Bearer {token}"))
             .header("content-type", "application/json")
-            .body(Body::from(serde_json::json!({
-                "reason": "operator checked the transport and approved one retry"
-            }).to_string()))
+            .body(Body::from(
+                serde_json::json!({
+                    "reason": "operator checked the transport and approved one retry"
+                })
+                .to_string(),
+            ))
             .unwrap();
         let response = app.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let timeline = OutboxStore::new(&state.db).delivery_timeline(id).unwrap();
         assert_eq!(timeline.last().unwrap().transition, "operator_redrive");
-        assert_eq!(timeline.last().unwrap().actor.as_deref(), Some("dead-letter-controller"));
+        assert_eq!(
+            timeline.last().unwrap().actor.as_deref(),
+            Some("dead-letter-controller")
+        );
     }
 }
 

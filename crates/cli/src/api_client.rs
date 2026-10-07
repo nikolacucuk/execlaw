@@ -888,9 +888,13 @@ pub fn run_editor_adapter(server: String) -> anyhow::Result<()> {
                     .cloned()
                     .unwrap_or_default();
                 match editor_command_args(command, &server, &arguments) {
-                    Ok(arguments) => match std::env::current_exe()
-                        .and_then(|exe| std::process::Command::new(exe).args(arguments).output())
-                    {
+                    Ok(arguments) => match std::env::current_exe().and_then(|exe| {
+                        std::process::Command::new(exe)
+                            .env_clear()
+                            .envs(execlaw_core::process_environment::current_minimal_environment())
+                            .args(arguments)
+                            .output()
+                    }) {
                         Ok(output) if output.status.success() => {
                             let result = serde_json::from_slice::<Value>(&output.stdout).unwrap_or_else(|_| serde_json::json!({"text":String::from_utf8_lossy(&output.stdout)}));
                             serde_json::json!({"jsonrpc":"2.0","id":id,"result":result})

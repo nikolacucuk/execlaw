@@ -301,6 +301,7 @@ impl<'a> AutomationRunStore<'a> {
         Ok(rows)
     }
 
+    /// List bounded metadata and checkpoints for failed automation runs.
     pub fn list_failed(&self, limit: usize) -> Result<Vec<AutomationRunRow>, AutomationRunError> {
         let rows = self.db.with_conn(|connection| {
             let mut statement = connection.prepare_cached(
@@ -357,7 +358,13 @@ impl<'a> AutomationRunStore<'a> {
                 |row| row.get(0),
             )?;
             let changed = tx.execute(
-                "UPDATE state_automation_runs SET status='pending',started_at=?2,finished_at=NULL \
+                "UPDATE state_automation_runs SET status='pending',started_at=?2,finished_at=NULL, \
+                    step_traces=CASE \
+                      WHEN json_array_length(step_traces)>0 AND ( \
+                        json_extract(step_traces,'$[#-1].error') IS NOT NULL OR \
+                        substr(COALESCE(json_extract(step_traces,'$[#-1].node_id'),''),1,10)='edge-from:' \
+                      ) THEN json_remove(step_traces,'$[#-1]') \
+                      ELSE step_traces END \
                  WHERE id=?1 AND status='failed'",
                 params![run_id, now],
             )?;
@@ -377,7 +384,9 @@ impl<'a> AutomationRunStore<'a> {
             Ok(())
         })?;
         self.get(run_id)?.ok_or_else(|| {
-            AutomationRunError::Db(DbError::Invariant("redriven automation run disappeared".into()))
+            AutomationRunError::Db(DbError::Invariant(
+                "redriven automation run disappeared".into(),
+            ))
         })
     }
 }
@@ -527,6 +536,14 @@ mod tests {
             .unwrap();
         let checkpoint = t("send", 5);
         store.append_trace(&run_id, &checkpoint).unwrap();
+        let failure = StepTrace {
+            node_id: "notify".into(),
+            input: serde_json::json!({}),
+            output: serde_json::Value::Null,
+            ms: 1,
+            error: Some("temporary dispatch failure".into()),
+        };
+        store.append_trace(&run_id, &failure).unwrap();
         store
             .finish(&run_id, AutomationRunStatus::Failed, 110)
             .unwrap();
@@ -539,17 +556,28 @@ mod tests {
         assert_eq!(redriven.status, AutomationRunStatus::Pending);
         assert_eq!(redriven.step_traces, vec![checkpoint]);
         assert_eq!(store.list_failed(10).unwrap().len(), 0);
-        assert!(store
-            .redrive_failed(&run_id, "controller-1", "duplicate", 121)
-            .is_err());
+        assert!(
+            store
+                .redrive_failed(&run_id, "controller-1", "duplicate", 121)
+                .is_err()
+        );
         let audit: (String, String, String) = db
-            .with_conn(|conn| Ok(conn.query_row(
-                "SELECT actor,reason,effect_identity FROM state_job_redrive_events \
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT actor,reason,effect_identity FROM state_job_redrive_events \
                  WHERE job_kind='automation' AND job_id=?1",
-                [&run_id],
-                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
-            )?))
+                    [&run_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )?)
+            })
             .unwrap();
-        assert_eq!(audit, ("controller-1".into(), "sink reconciled".into(), "auto-1:evt-1".into()));
+        assert_eq!(
+            audit,
+            (
+                "controller-1".into(),
+                "sink reconciled".into(),
+                "auto-1:evt-1".into()
+            )
+        );
     }
 }

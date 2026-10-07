@@ -229,7 +229,7 @@ pub enum DbError {
 pub struct Database {
     inner: Arc<std::sync::Mutex<Connection>>,
     path: PathBuf,
-    event_hmac_key: Arc<std::sync::RwLock<Option<Vec<u8>>>>,
+    event_hmac_key: Arc<std::sync::RwLock<Option<Zeroizing<Vec<u8>>>>>,
 }
 
 impl Database {
@@ -398,16 +398,19 @@ impl Database {
             .event_hmac_key
             .write()
             .map_err(|_| DbError::Config("event HMAC key lock poisoned".into()))?;
-        if slot.as_ref().is_some_and(|existing| existing != &key) {
+        if slot
+            .as_ref()
+            .is_some_and(|existing| existing.as_slice() != key.as_slice())
+        {
             return Err(DbError::Config(
                 "cannot replace the event HMAC key in a running database".into(),
             ));
         }
-        *slot = Some(key);
+        *slot = Some(Zeroizing::new(key));
         Ok(())
     }
 
-    pub(crate) fn event_hmac_key(&self) -> Option<Vec<u8>> {
+    pub(crate) fn event_hmac_key(&self) -> Option<Zeroizing<Vec<u8>>> {
         self.event_hmac_key.read().ok()?.clone()
     }
 

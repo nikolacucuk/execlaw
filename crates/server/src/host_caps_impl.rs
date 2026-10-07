@@ -222,35 +222,41 @@ impl HostCapabilities for AppStateHostCapabilities {
         // back to artifacts so `discord.send_with_attachments` (and the
         // SPA's `/api/attachments/<id>` route) accept chart ids minted
         // by `host_create_attachment`.
-        let (path, mime_type) = match store
+        let (is_artifact, mime_type) = match store
             .get(&aid)
             .map_err(|e| HostCapError::new(format!("attachment lookup: {e}")))?
         {
-            Some(row) => (row.path, row.mime_type),
+            Some(row) => (false, row.mime_type),
             None => {
                 let art = store
                     .get_artifact(attachment_id)
                     .map_err(|e| HostCapError::new(format!("artifact lookup: {e}")))?
                     .ok_or_else(|| HostCapError::new(format!("no attachment '{attachment_id}'")))?;
-                (art.path, art.mime_type)
+                (true, art.mime_type)
             }
         };
         // 25 MiB cap mirrors the inbound + outbound caps in the
         // retired signal_transport.rs.
         const MAX_BYTES: u64 = 25 * 1024 * 1024;
-        let on_disk = std::fs::metadata(&path)
-            .map_err(|e| HostCapError::new(format!("attachment stat: {e}")))?
-            .len();
-        if on_disk > MAX_BYTES {
-            return Err(HostCapError::new(format!(
-                "attachment '{attachment_id}' is {on_disk} bytes; max is {MAX_BYTES}"
-            )));
-        }
-        let path_for_read = path.clone();
-        let bytes = tokio::task::spawn_blocking(move || std::fs::read(path_for_read))
-            .await
-            .map_err(|e| HostCapError::new(format!("attachment read join: {e}")))?
-            .map_err(|e| HostCapError::new(format!("attachment read: {e}")))?;
+        let db = self.state.db.clone();
+        let read_id = attachment_id.to_owned();
+        let bytes = tokio::task::spawn_blocking(move || {
+            let store = AttachmentStore::new(&db);
+            if is_artifact {
+                store.read_artifact_bytes_limited(&read_id, MAX_BYTES as usize)
+            } else {
+                store
+                    .read_attachment_bytes_limited(&AttachmentId::from(read_id), MAX_BYTES as usize)
+            }
+        })
+        .await
+        .map_err(|e| HostCapError::new(format!("attachment read join: {e}")))?
+        .map_err(|e| HostCapError::new(format!("attachment read: {e}")))?
+        .ok_or_else(|| {
+            HostCapError::new(format!(
+                "attachment '{attachment_id}' was removed while reading"
+            ))
+        })?;
         let mime = if mime_type.is_empty() {
             "application/octet-stream"
         } else {
@@ -363,7 +369,7 @@ fn plugin_artifacts_root(_state: &AppState) -> PathBuf {
 /// can reach the same path without an `&AppState` borrow. Same
 /// resolution chain as `plugin_artifacts_root`: env override →
 /// `~/.execlaw/plugin_artifacts/` → cwd-relative fallback.
-pub(crate) fn builtin_artifacts_root_path() -> PathBuf {
+pub fn builtin_artifacts_root_path() -> PathBuf {
     if let Ok(p) = std::env::var("EXECLAW_PLUGIN_ARTIFACTS_DIR") {
         if !p.is_empty() {
             return PathBuf::from(p);

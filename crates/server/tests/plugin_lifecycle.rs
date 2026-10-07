@@ -287,6 +287,32 @@ async fn install_list_disable_enable_uninstall_without_tools() {
     assert_eq!(body["plugins"].as_array().unwrap().len(), 0);
 }
 
+#[tokio::test]
+async fn unsupported_host_api_is_rejected_before_plugin_persistence() {
+    let dir = tempfile::tempdir().unwrap();
+    let (app, state) = build_app(dir.path().join("stage"));
+    let manifest = r#"[plugin]
+id = "future-api-plugin"
+name = "Future API Plugin"
+version = "1.0.0"
+
+[compatibility]
+host_api = ">=9.0.0, <10.0.0"
+required_features = ["jsonrpc.line.v1"]
+"#;
+    let zip = build_zip(&[("plugin.toml", manifest.as_bytes())]);
+    let (status, body) = post_zip(app, zip).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body={body}");
+    assert!(body.to_string().contains("host API"));
+    assert!(
+        state
+            .plugin_host
+            .get_row("future-api-plugin")
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// Zip-slip: an archive with a `../evil.txt` entry must be rejected
 /// before any filesystem write lands outside the stage dir.
 #[tokio::test]

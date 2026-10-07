@@ -1134,6 +1134,37 @@ mod tests {
     }
 
     #[test]
+    fn replace_overlap_supersedes_only_unclaimed_queued_occurrences() {
+        let db = fresh_db();
+        let store = RoutineStore::new(&db);
+        let routine = store.upsert(&upsert("replace", "0 8 * * *"), 0).unwrap();
+        let active = store
+            .insert_run_for_occurrence(&routine.id, 100, 100)
+            .unwrap();
+        let old_queued = store
+            .insert_run_for_occurrence(&routine.id, 200, 200)
+            .unwrap();
+        let replacement = store
+            .insert_run_for_occurrence(&routine.id, 300, 300)
+            .unwrap();
+        assert!(store.claim_pending_run(&active, 101).unwrap());
+
+        assert_eq!(
+            store.supersede_queued_runs(&routine.id, 300, 301).unwrap(),
+            1
+        );
+        let runs = store.list_runs(&routine.id, 10).unwrap();
+        let old = runs.iter().find(|run| run.id == old_queued).unwrap();
+        let active = runs.iter().find(|run| run.id == active).unwrap();
+        let replacement = runs.iter().find(|run| run.id == replacement).unwrap();
+        assert_eq!(old.status, RoutineRunStatus::Skipped);
+        assert_eq!(active.status, RoutineRunStatus::Pending);
+        assert!(active.started_at.is_some());
+        assert_eq!(replacement.status, RoutineRunStatus::Pending);
+        assert!(replacement.started_at.is_none());
+    }
+
+    #[test]
     fn editing_a_routine_cancels_unstarted_queued_occurrences() {
         let db = fresh_db();
         let store = RoutineStore::new(&db);
@@ -1245,7 +1276,10 @@ mod tests {
         );
         assert_eq!(
             plan_due_occurrences(MissedRunPolicy::Skip, 1, 460, &occurrences),
-            DueOccurrencePlan { execute: vec![], skip: vec![100, 200, 300, 400] }
+            DueOccurrencePlan {
+                execute: vec![],
+                skip: vec![100, 200, 300, 400]
+            }
         );
     }
 

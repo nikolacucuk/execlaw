@@ -16,6 +16,7 @@
 //!    passphrase-file (if not), return.
 
 use rand::RngCore;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -36,6 +37,8 @@ pub enum KeyringLoadError {
     Hex(#[from] hex::FromHexError),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("could not restrict key file permissions: {0}")]
+    Permissions(String),
 }
 
 /// Default location for the passphrase-file fallback.
@@ -265,7 +268,20 @@ fn persist_to_file(path: &Path, key: &[u8; 32]) -> Result<(), KeyringLoadError> 
         std::fs::create_dir_all(parent)?;
     }
     let encoded = Zeroizing::new(hex::encode(key));
-    std::fs::write(path, encoded.as_bytes())?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    // Create the secret file with restrictive permissions from its first
+    // inode on POSIX; chmod-after-write leaves an avoidable exposure window.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    #[cfg(all(windows, not(test)))]
+    restrict_file_to_current_user_windows(path).map_err(KeyringLoadError::Permissions)?;
+    file.write_all(encoded.as_bytes())?;
+    file.sync_all()?;
     // Tighten Unix permissions to 0600 — only the operator can read.
     #[cfg(unix)]
     {
@@ -286,13 +302,7 @@ fn persist_to_file(path: &Path, key: &[u8; 32]) -> Result<(), KeyringLoadError> 
     // ephemeral temp-dir paths used in tests.
     #[cfg(all(windows, not(test)))]
     {
-        if let Err(e) = restrict_file_to_current_user_windows(path) {
-            tracing::warn!(
-                path = %path.display(),
-                error = %e,
-                "master.key Windows DACL restriction failed; file may be readable by other users",
-            );
-        }
+        // The restrictive DACL was applied before any key bytes were written.
     }
     Ok(())
 }
@@ -343,7 +353,7 @@ pub fn warn_if_key_file_too_permissive(path: &Path) {
 /// inherited ACEs. Doing it in this order ensures we can never lock
 /// ourselves out: if the grant step fails (e.g., domain account format
 /// issues), we bail before touching inheritance, leaving the DACL intact.
-#[cfg(windows)]
+#[cfg(all(windows, not(test)))]
 fn restrict_file_to_current_user_windows(path: &Path) -> Result<(), String> {
     let path_str = path
         .to_str()
@@ -358,6 +368,8 @@ fn restrict_file_to_current_user_windows(path: &Path) -> Result<(), String> {
     // This must succeed before we touch inheritance so we can never
     // accidentally produce a file with an empty DACL.
     let grant = std::process::Command::new("icacls")
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
         .args([path_str, "/grant:r", &format!("{username}:(F)")])
         .output()
         .map_err(|e| format!("icacls grant spawn failed: {e}"))?;
@@ -371,6 +383,8 @@ fn restrict_file_to_current_user_windows(path: &Path) -> Result<(), String> {
 
     // Step 2: remove inherited ACEs now that the explicit ACE is in place.
     let inherit = std::process::Command::new("icacls")
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
         .args([path_str, "/inheritance:r"])
         .output()
         .map_err(|e| format!("icacls inheritance removal spawn failed: {e}"))?;
@@ -499,7 +513,8 @@ mod tests {
         );
         let from_file = load_from_file(&path).unwrap();
         assert_eq!(
-            from_file[..], key[..],
+            from_file[..],
+            key[..],
             "the file's contents must match the key we returned",
         );
     }
@@ -516,7 +531,8 @@ mod tests {
         let k1 = load_or_create_master_key_with_fallback(&path).unwrap();
         let k2 = load_or_create_master_key_with_fallback(&path).unwrap();
         assert_eq!(
-            k1[..], k2[..],
+            k1[..],
+            k2[..],
             "load_or_create must be idempotent across calls when the file is the durable sink",
         );
     }

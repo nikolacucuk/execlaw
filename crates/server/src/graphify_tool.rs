@@ -238,6 +238,9 @@ impl ToolImpl for GraphifyTool {
         let mut last_spawn_error = None;
         for (program, prefix_args) in graphify_candidates() {
             let mut command = Command::new(&program);
+            command
+                .env_clear()
+                .envs(execlaw_core::process_environment::current_minimal_environment());
             command.stdin(Stdio::null());
             command.stdout(Stdio::piped()).stderr(Stdio::piped());
             if !prefix_args.is_empty() {

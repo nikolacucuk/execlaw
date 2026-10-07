@@ -167,6 +167,8 @@ pub fn available_ram_mb() -> Option<u64> {
 fn detect_macos() -> Option<HardwareProfile> {
     use std::process::Command;
     let json_out = match Command::new("system_profiler")
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
         .args(["SPDisplaysDataType", "-json"])
         .output()
     {
@@ -184,6 +186,8 @@ fn detect_macos() -> Option<HardwareProfile> {
         }
     };
     let memsize: u64 = Command::new("sysctl")
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
         .args(["-n", "hw.memsize"])
         .output()
         .ok()

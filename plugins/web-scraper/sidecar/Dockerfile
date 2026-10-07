@@ -14,5 +14,9 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app.py evidence.py /app/
 
+RUN useradd --create-home --uid 1000 scraper \
+    && chown -R scraper:scraper /app
+USER scraper
+
 EXPOSE 8080
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -217,6 +217,19 @@ impl RunnerLauncher for BollardRunnerLauncher {
             )
             .map_err(|error| LauncherError::Docker(error.to_string()))?;
 
+        let image = self
+            .docker
+            .inspect_image(&spec.image)
+            .await
+            .map_err(|error| LauncherError::Docker(format!("inspect runner isolation profile: {error}")))?;
+        if !execlaw_container_manager::RuntimeProfile::Runner
+            .image_user_is_non_root(image.config.as_ref().and_then(|config| config.user.as_deref()))
+        {
+            return Err(LauncherError::ResourceAdmission(
+                "runner runtime profile requires an image with a non-root USER".into(),
+            ));
+        }
+
         let volume = self.volume_name_for(&spec.group_id);
         let container_name = volume.clone();
         let memory_bytes = spec.memory_bytes.unwrap_or(DEFAULT_RUNNER_MEMORY_BYTES);

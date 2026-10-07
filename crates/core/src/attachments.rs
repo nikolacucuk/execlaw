@@ -28,9 +28,17 @@ fn artifact_path_lock(path: &Path) -> Arc<RwLock<()>> {
     lock
 }
 
-fn publish_content_addressed(path: &Path, root: &Path, bytes: &[u8], sha256: &str) -> Result<(), DbError> {
+fn publish_content_addressed(
+    path: &Path,
+    root: &Path,
+    bytes: &[u8],
+    sha256: &str,
+) -> Result<(), DbError> {
     std::fs::create_dir_all(root).map_err(|error| {
-        DbError::Migration(format!("create artifact directory {}: {error}", root.display()))
+        DbError::Migration(format!(
+            "create artifact directory {}: {error}",
+            root.display()
+        ))
     })?;
     if path.exists() {
         return verify_content_addressed(path, sha256, bytes.len() as u64);
@@ -67,7 +75,17 @@ fn publish_content_addressed(path: &Path, root: &Path, bytes: &[u8], sha256: &st
     result
 }
 
-fn verify_content_addressed(path: &Path, expected_sha256: &str, expected_bytes: u64) -> Result<(), DbError> {
+fn verify_content_addressed(
+    path: &Path,
+    expected_sha256: &str,
+    expected_bytes: u64,
+) -> Result<(), DbError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_file() || metadata.len() != expected_bytes {
+        return Err(DbError::Invariant(
+            "content-addressed artifact path is not a regular file of the referenced size".into(),
+        ));
+    }
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
     let mut total = 0u64;
@@ -263,15 +281,33 @@ impl<'db> AttachmentStore<'db> {
     /// Read an attachment while holding a reference lock against concurrent
     /// garbage collection. Returns `None` when its row was concurrently purged.
     pub fn read_attachment_bytes(&self, id: &AttachmentId) -> Result<Option<Vec<u8>>, DbError> {
-        let Some(row) = self.get(id)? else { return Ok(None); };
+        self.read_attachment_bytes_limited(id, usize::MAX)
+    }
+
+    /// Read an attachment only when its on-disk size is within the supplied bound.
+    pub fn read_attachment_bytes_limited(
+        &self,
+        id: &AttachmentId,
+        maximum_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, DbError> {
+        let Some(row) = self.get(id)? else {
+            return Ok(None);
+        };
         let path = PathBuf::from(&row.path);
         let path_lock = artifact_path_lock(&path);
         let _path_guard = path_lock
             .read()
             .map_err(|_| DbError::Config("attachment path lock poisoned".into()))?;
-        let Some(current) = self.get(id)? else { return Ok(None); };
+        let Some(current) = self.get(id)? else {
+            return Ok(None);
+        };
         if current.path != row.path || current.sha256 != row.sha256 {
             return Ok(None);
+        }
+        if std::fs::metadata(&path)?.len() > maximum_bytes as u64 {
+            return Err(DbError::Invariant(format!(
+                "attachment exceeds the {maximum_bytes} byte read limit"
+            )));
         }
         let bytes = std::fs::read(&path)?;
         if hex::encode(Sha256::digest(&bytes)) != row.sha256 {
@@ -283,14 +319,21 @@ impl<'db> AttachmentStore<'db> {
     /// Open an attachment under its reference lock. Once the OS file handle
     /// is open, POSIX keeps the inode readable after unlink and Windows keeps
     /// the delete blocked until the reader closes it.
-    pub fn open_attachment_file(&self, id: &AttachmentId) -> Result<Option<std::fs::File>, DbError> {
-        let Some(row) = self.get(id)? else { return Ok(None); };
+    pub fn open_attachment_file(
+        &self,
+        id: &AttachmentId,
+    ) -> Result<Option<std::fs::File>, DbError> {
+        let Some(row) = self.get(id)? else {
+            return Ok(None);
+        };
         let path = PathBuf::from(&row.path);
         let path_lock = artifact_path_lock(&path);
         let _path_guard = path_lock
             .read()
             .map_err(|_| DbError::Config("attachment path lock poisoned".into()))?;
-        let Some(current) = self.get(id)? else { return Ok(None); };
+        let Some(current) = self.get(id)? else {
+            return Ok(None);
+        };
         if current.path != row.path || current.sha256 != row.sha256 {
             return Ok(None);
         }
@@ -305,7 +348,9 @@ impl<'db> AttachmentStore<'db> {
     /// attachment or artifact row still references the same path.
     pub fn purge_attachment(&self, id: &AttachmentId) -> Result<bool, DbError> {
         let attachment_id = id.as_str().to_owned();
-        let Some(before) = self.get(id)? else { return Ok(false); };
+        let Some(before) = self.get(id)? else {
+            return Ok(false);
+        };
         let path_lock = artifact_path_lock(Path::new(&before.path));
         let _path_guard = path_lock
             .write()
@@ -573,6 +618,29 @@ impl<'db> AttachmentStore<'db> {
             return Ok(None);
         };
         let path = plugin_artifact_path(artifacts_root, &sha256);
+        let path_lock = artifact_path_lock(&path);
+        let _path_guard = path_lock
+            .read()
+            .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
+        let still_authorized = self.db.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(*) FROM state_tool_result_artifacts \
+                 WHERE artifact_id=?1 AND conversation_id=?2 AND run_id=?3 AND sha256=?4 \
+                   AND byte_length=?5 AND expires_at>?6",
+                params![
+                    artifact_id,
+                    conversation_id.as_str(),
+                    run_id,
+                    sha256,
+                    total_bytes,
+                    now
+                ],
+                |row| row.get::<_, i64>(0),
+            )? > 0)
+        })?;
+        if !still_authorized {
+            return Ok(None);
+        }
         let bytes = std::fs::read(&path).map_err(|error| {
             DbError::Migration(format!(
                 "tool result artifact read {}: {error}",
@@ -651,21 +719,42 @@ impl<'db> AttachmentStore<'db> {
     /// garbage collection. Callers must perform their normal owner/scope
     /// authorization before exposing the returned bytes.
     pub fn read_artifact_bytes(&self, id: &str) -> Result<Option<Vec<u8>>, DbError> {
-        let Some(row) = self.get_artifact(id)? else { return Ok(None); };
+        self.read_artifact_bytes_limited(id, usize::MAX)
+    }
+
+    /// Read an artifact only when its on-disk size is within the supplied bound.
+    pub fn read_artifact_bytes_limited(
+        &self,
+        id: &str,
+        maximum_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, DbError> {
+        let Some(row) = self.get_artifact(id)? else {
+            return Ok(None);
+        };
         let path = PathBuf::from(&row.path);
         let path_lock = artifact_path_lock(&path);
         let _path_guard = path_lock
             .read()
             .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
-        let Some(current) = self.get_artifact(id)? else { return Ok(None); };
+        let Some(current) = self.get_artifact(id)? else {
+            return Ok(None);
+        };
         if current.path != row.path || current.sha256 != row.sha256 {
             return Ok(None);
+        }
+        if std::fs::metadata(&path)?.len() > maximum_bytes as u64 {
+            return Err(DbError::Invariant(format!(
+                "artifact exceeds the {maximum_bytes} byte read limit"
+            )));
         }
         let bytes = std::fs::read(&path)?;
         if hex::encode(Sha256::digest(&bytes)) != row.sha256 {
             return Err(DbError::Invariant("artifact blob digest mismatch".into()));
         }
-        if current.bytes.is_some_and(|expected| expected >= 0 && expected as usize != bytes.len()) {
+        if current
+            .bytes
+            .is_some_and(|expected| expected >= 0 && expected as usize != bytes.len())
+        {
             return Err(DbError::Invariant("artifact blob size mismatch".into()));
         }
         Ok(Some(bytes))
@@ -674,13 +763,17 @@ impl<'db> AttachmentStore<'db> {
     /// Open an artifact under its reference lock; see
     /// [`AttachmentStore::open_attachment_file`] for the lifetime contract.
     pub fn open_artifact_file(&self, id: &str) -> Result<Option<std::fs::File>, DbError> {
-        let Some(row) = self.get_artifact(id)? else { return Ok(None); };
+        let Some(row) = self.get_artifact(id)? else {
+            return Ok(None);
+        };
         let path = PathBuf::from(&row.path);
         let path_lock = artifact_path_lock(&path);
         let _path_guard = path_lock
             .read()
             .map_err(|_| DbError::Config("artifact path lock poisoned".into()))?;
-        let Some(current) = self.get_artifact(id)? else { return Ok(None); };
+        let Some(current) = self.get_artifact(id)? else {
+            return Ok(None);
+        };
         if current.path != row.path || current.sha256 != row.sha256 {
             return Ok(None);
         }
@@ -949,15 +1042,12 @@ impl<'db> AttachmentStore<'db> {
             // share one blob; uninstalling one must not break the
             // other.
             let still_used: i64 = self.db.with_conn(|c| {
-                let n: i64 = c
-                    .query_row(
-                        "SELECT (SELECT COUNT(*) FROM state_artifacts WHERE path = ?1) + \
-                                (SELECT COUNT(*) FROM state_attachments WHERE path = ?1)",
-                        params![path.clone()],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(0);
-                Ok(n)
+                Ok(c.query_row(
+                    "SELECT (SELECT COUNT(*) FROM state_artifacts WHERE path = ?1) + \
+                            (SELECT COUNT(*) FROM state_attachments WHERE path = ?1)",
+                    params![path.clone()],
+                    |r| r.get(0),
+                )?)
             })?;
             if still_used == 0 {
                 // Best-effort delete — missing file is fine (already
@@ -1015,15 +1105,12 @@ impl<'db> AttachmentStore<'db> {
             // same path. This is the content-addressed dedupe — two
             // identical chart renders share one file.
             let still_used: i64 = self.db.with_conn(|c| {
-                let n: i64 = c
-                    .query_row(
-                        "SELECT (SELECT COUNT(*) FROM state_artifacts WHERE path = ?1) + \
-                                (SELECT COUNT(*) FROM state_attachments WHERE path = ?1)",
-                        params![path.clone()],
-                        |r| r.get(0),
-                    )
-                    .unwrap_or(0);
-                Ok(n)
+                Ok(c.query_row(
+                    "SELECT (SELECT COUNT(*) FROM state_artifacts WHERE path = ?1) + \
+                            (SELECT COUNT(*) FROM state_attachments WHERE path = ?1)",
+                    params![path.clone()],
+                    |r| r.get(0),
+                )?)
             })?;
             if still_used == 0 {
                 // Best-effort delete — a missing file is fine (manually
@@ -1066,7 +1153,8 @@ impl<'db> AttachmentStore<'db> {
             let metadata = std::fs::symlink_metadata(&path)?;
             if !metadata.file_type().is_file()
                 || !(is_sha256_filename(&name)
-                    || (name.starts_with('.') && (name.ends_with(".tmp") || name.starts_with(".tmp-"))))
+                    || (name.starts_with('.')
+                        && (name.ends_with(".tmp") || name.starts_with(".tmp-"))))
             {
                 continue;
             }
@@ -1120,6 +1208,95 @@ mod tests {
     use crate::ids::EventSeq;
     use crate::migrations::MigrationRunner;
     use crate::runs::{NewRun, RunStore};
+
+    #[test]
+    fn orphan_collection_preserves_references_and_recovers_crash_files() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("artifacts");
+        std::fs::create_dir_all(&root).unwrap();
+        let store = AttachmentStore::new(&db);
+        let live_bytes = b"referenced artifact";
+        let live_sha = hex::encode(Sha256::digest(live_bytes));
+        let live_path = plugin_artifact_path(&root, &live_sha);
+        publish_content_addressed(&live_path, &root, live_bytes, &live_sha).unwrap();
+        store
+            .insert_artifact(&ArtifactRow {
+                id: "live-artifact".into(),
+                research_job_id: None,
+                kind: "other".into(),
+                mime_type: "application/octet-stream".into(),
+                path: live_path.to_string_lossy().into_owned(),
+                sha256: live_sha,
+                bytes: Some(live_bytes.len() as i64),
+                created_at: 1,
+                plugin_id: None,
+                filename: None,
+                expires_at: None,
+            })
+            .unwrap();
+
+        let orphan_bytes = b"renamed before crash";
+        let orphan_sha = hex::encode(Sha256::digest(orphan_bytes));
+        let orphan_path = plugin_artifact_path(&root, &orphan_sha);
+        std::fs::write(&orphan_path, orphan_bytes).unwrap();
+        let interrupted_temp = root.join(format!(".{orphan_sha}.interrupted.tmp"));
+        std::fs::write(&interrupted_temp, b"partial write").unwrap();
+
+        let now = chrono::Utc::now().timestamp().saturating_add(1);
+        assert_eq!(store.sweep_orphan_artifact_blobs(&root, now, 0).unwrap(), 2);
+        assert!(
+            live_path.is_file(),
+            "a referenced artifact must survive collection"
+        );
+        assert!(
+            !orphan_path.exists(),
+            "a rename-before-commit orphan must be collected"
+        );
+        assert!(
+            !interrupted_temp.exists(),
+            "an interrupted temp write must be collected"
+        );
+        assert_eq!(
+            store
+                .read_artifact_bytes("live-artifact")
+                .unwrap()
+                .unwrap()
+                .as_slice(),
+            live_bytes
+        );
+    }
+
+    #[test]
+    fn artifact_read_lock_keeps_a_concurrent_collector_out_until_file_open() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("reader-lock-probe");
+        std::fs::write(&path, b"readable").unwrap();
+        let lock = artifact_path_lock(&path);
+        let reader = lock.read().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let collector_lock = Arc::clone(&lock);
+        let collector = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            let _guard = collector_lock.write().unwrap();
+            done_tx.send(()).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(20))
+                .is_err()
+        );
+        drop(reader);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        collector.join().unwrap();
+    }
 
     #[test]
     fn stable_tool_result_artifact_reuses_only_same_run_and_digest() {
@@ -1182,6 +1359,20 @@ mod tests {
             )
             .unwrap();
         assert_eq!(a.attachment_id, b.attachment_id);
+        assert!(
+            store
+                .read_tool_result_artifact(
+                    directory.path(),
+                    &a.attachment_id,
+                    &ConversationId::from("another-conversation"),
+                    &first,
+                    0,
+                    100,
+                    12,
+                )
+                .unwrap()
+                .is_none()
+        );
         let label = crate::information_store::InformationLabelStore::new(&db)
             .get(&crate::information_store::InformationSubject {
                 kind: "artifact".into(),

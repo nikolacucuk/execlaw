@@ -202,13 +202,7 @@ fn run_matching_automations_checked(
             );
             continue;
         }
-        run_one(
-            ctx,
-            &automation.id,
-            &automation.definition,
-            evt,
-            &event_ctx,
-        )?;
+        run_one(ctx, &automation.id, &automation.definition, evt, &event_ctx)?;
     }
     Ok(())
 }
@@ -2769,7 +2763,14 @@ mod tests {
             "args": {},
         }));
         let event_ctx = event_context(&event);
-        run_one(&context, "redrive-automation", &definition, &event, &event_ctx).unwrap();
+        run_one(
+            &context,
+            "redrive-automation",
+            &definition,
+            &event,
+            &event_ctx,
+        )
+        .unwrap();
         let store = AutomationRunStore::new(&db);
         let failed = store.list_failed(10).unwrap().pop().unwrap();
         assert_eq!(failed.event_id, event.id);
@@ -2787,12 +2788,14 @@ mod tests {
         assert_eq!(retried.event_id, failed.event_id);
         assert!(retried.step_traces.len() >= failed.step_traces.len());
         let redrives: i64 = db
-            .with_conn(|conn| Ok(conn.query_row(
-                "SELECT COUNT(*) FROM state_job_redrive_events \
+            .with_conn(|conn| {
+                Ok(conn.query_row(
+                    "SELECT COUNT(*) FROM state_job_redrive_events \
                  WHERE job_kind='automation' AND job_id=?1",
-                [&failed.id],
-                |row| row.get(0),
-            )?))
+                    [&failed.id],
+                    |row| row.get(0),
+                )?)
+            })
             .unwrap();
         assert_eq!(redrives, 1);
     }

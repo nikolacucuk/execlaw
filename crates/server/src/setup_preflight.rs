@@ -392,6 +392,8 @@ fn try_docker_at(binary: &str) -> Option<DockerStatus> {
     use std::time::Instant;
 
     let mut child = Command::new(binary)
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
         .arg("info")
         .arg("--format")
         .arg("{{.ServerVersion}}")
@@ -508,7 +510,11 @@ fn detect_ollama() -> OllamaStatus {
             };
         }
     };
-    let output = Command::new(&path).arg("--version").output();
+    let output = Command::new(&path)
+        .env_clear()
+        .envs(execlaw_core::process_environment::current_minimal_environment())
+        .arg("--version")
+        .output();
     match output {
         Ok(o) if o.status.success() => {
             let raw = String::from_utf8_lossy(&o.stdout).trim().to_owned();

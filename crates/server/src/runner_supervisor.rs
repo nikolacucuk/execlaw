@@ -1057,8 +1057,14 @@ impl RunnerSupervisor {
                 .reap_group(&group_id, ShutdownReason::OperatorRestart)
                 .await
             {
-                Ok(()) => stopped += 1,
-                Err(error) => warn!(group_id = %group_id, %error, "runner shutdown during service drain failed"),
+                Ok(()) if self.get(&group_id).is_none() => stopped += 1,
+                Ok(()) => warn!(
+                    group_id = %group_id,
+                    "runner remains registered after shutdown request; startup recovery must reconcile it"
+                ),
+                Err(error) => {
+                    warn!(group_id = %group_id, %error, "runner shutdown during service drain failed")
+                }
             }
         }
         stopped
@@ -2362,6 +2368,48 @@ mod tests {
         assert_eq!(launcher.killed().await, vec![id.container_id]);
         // Volume wasn't wiped — restart preserves the workspace.
         assert!(launcher.wiped().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_reaps_owned_runners_without_wiping_workspaces() {
+        use crate::runner_spawn::{MockRunnerLauncher, RunnerLauncher, RunnerSpec};
+        let launcher = Arc::new(MockRunnerLauncher::new());
+        let template = RunnerSpec {
+            group_id: String::new(),
+            image: "x".into(),
+            spawn_secret_hex: String::new(),
+            rpc_url: "ws://x".into(),
+            inference_url: "http://x".into(),
+            memory_bytes: Some(1024),
+            network: None,
+            env: Vec::new(),
+        };
+        let supervisor = fresh_supervisor().with_launcher(launcher.clone(), template);
+        let spawned = launcher
+            .spawn(&RunnerSpec {
+                group_id: "g-shutdown".into(),
+                image: "x".into(),
+                spawn_secret_hex: "00".into(),
+                rpc_url: "ws://x".into(),
+                inference_url: "http://x".into(),
+                memory_bytes: Some(1024),
+                network: None,
+                env: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let (secret, _) = supervisor.register_pending_spawn("g-shutdown");
+        let handle = supervisor
+            .accept_registration("g-shutdown", &secret, false)
+            .unwrap();
+        handle.state.write().await.container_id = Some(spawned.container_id.clone());
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        *handle.tx.lock().await = Some(out_tx);
+
+        assert_eq!(supervisor.shutdown_all().await, 1);
+        assert_eq!(launcher.killed().await, vec![spawned.container_id]);
+        assert!(launcher.wiped().await.is_empty());
+        assert!(supervisor.get("g-shutdown").is_none());
     }
 
     #[tokio::test]
