@@ -438,7 +438,14 @@ mod tests {
         assert!(!runs.is_empty());
         assert!(
             runs.iter()
+                .filter(|run| run.occurrence_at.is_some_and(|at| now - at > 60))
                 .all(|run| run.status == RoutineRunStatus::Skipped)
+        );
+        assert!(
+            runs.iter()
+                .filter(|run| run.occurrence_at.is_some_and(|at| now - at <= 60))
+                .count()
+                <= 1
         );
         assert!(store.get(&id).unwrap().unwrap().next_run_at.unwrap() > now);
     }

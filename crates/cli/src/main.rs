@@ -2946,11 +2946,60 @@ fn resolve_bind(cli: Option<String>, db: Option<String>) -> (String, &'static st
     ("127.0.0.1:3031".to_string(), "default")
 }
 
+const SHUTDOWN_DRAIN_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = terminate.recv() => {}
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "could not register SIGTERM handler; waiting for Ctrl-C");
+                let _ = tokio::signal::ctrl_c().await;
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+async fn trigger_shutdown(
+    service_shutdown: Option<tokio::sync::oneshot::Receiver<()>>,
+    trigger: tokio::sync::oneshot::Sender<()>,
+) {
+    if let Some(service_shutdown) = service_shutdown {
+        let _ = service_shutdown.await;
+    } else {
+        wait_for_shutdown_signal().await;
+    }
+    let _ = trigger.send(());
+}
+
+fn join_server_result(
+    result: Result<std::io::Result<()>, tokio::task::JoinError>,
+    phase: &str,
+) -> anyhow::Result<()> {
+    match result {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(error.into()),
+        Err(error) => Err(anyhow::anyhow!("server task failed {phase}: {error}")),
+    }
+}
+
 async fn cmd_serve(
     bind: Option<String>,
     db_path: PathBuf,
     no_encrypt: bool,
     allow_unsigned_local_development: bool,
+    service_shutdown_rx: Option<tokio::sync::oneshot::Receiver<()>>,
 ) -> anyhow::Result<()> {
     let (db, db_config) = open_db_with_config(&db_path, no_encrypt)?;
     execlaw_core::MigrationRunner::new(&db).apply_all()?;
@@ -3890,7 +3939,7 @@ async fn cmd_serve(
             "could not reconcile interrupted agent runs; inspect agent run history"
         ),
     }
-    let outbox_stop = execlaw_server::transport_outbox::spawn(state.clone());
+    let mut outbox_drain = execlaw_server::transport_outbox::spawn(state.clone());
     match execlaw_server::chats::reconcile_idempotent_chat_requests(
         &state,
         chrono::Utc::now().timestamp(),
@@ -4338,20 +4387,74 @@ async fn cmd_serve(
     }
 
     let _safe_chat_recovery = execlaw_server::chats::spawn_safe_chat_run_recovery(state.clone());
+    let shutdown_state = state.clone();
     let app = execlaw_server::routes::build_router(state);
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!(addr = %config.bind_addr, "execlaw server listening");
     // 2026-06-02: use into_make_service_with_connect_info so the
     // login handler can extract the peer SocketAddr for per-IP
     // rate limiting via axum::extract::ConnectInfo.
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .await?;
-    let _ = outbox_stop.send(true);
+    let (shutdown_trigger, shutdown_rx) = tokio::sync::oneshot::channel();
+    let mut shutdown_signal_task = tokio::spawn(trigger_shutdown(service_shutdown_rx, shutdown_trigger));
+    let mut server_task = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.await;
+        })
+        .await
+    });
+    let serve_result: anyhow::Result<()> = tokio::select! {
+        result = &mut server_task => join_server_result(result, "before drain"),
+        _ = &mut shutdown_signal_task => {
+            match tokio::time::timeout(SHUTDOWN_DRAIN_DEADLINE, &mut server_task).await {
+                Ok(result) => join_server_result(result, "while draining"),
+                Err(_) => {
+                    tracing::error!(
+                        drain_deadline_secs = SHUTDOWN_DRAIN_DEADLINE.as_secs(),
+                        "server drain deadline expired; interrupting remaining requests for startup recovery"
+                    );
+                    server_task.abort();
+                    let _ = server_task.await;
+                    Ok(())
+                }
+            }
+        }
+    };
+    shutdown_signal_task.abort();
+    let _ = outbox_drain.stop.send(true);
     sweep_stop.notify_waiters();
-    Ok(())
+    match tokio::time::timeout(std::time::Duration::from_secs(10), &mut outbox_drain.task).await {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => tracing::warn!(%error, "outbox drain task failed during shutdown"),
+        Err(_) => {
+            tracing::warn!("outbox drain exceeded shutdown budget; in-flight leases will reconcile after restart");
+            outbox_drain.task.abort();
+        }
+    }
+    let teardown = async {
+        if let Some(supervisor) = shutdown_state.sidecar_supervisor.as_ref() {
+            let stopped = supervisor.stop_all().await;
+            tracing::info!(stopped_sidecars = stopped, "sidecars stopped for service shutdown");
+        }
+        if let Some(supervisor) = shutdown_state.backend_supervisor.as_ref() {
+            let stopped = supervisor.stop_all().await;
+            tracing::info!(stopped_backends = stopped, "managed backends stopped for service shutdown");
+        }
+        if let Some(supervisor) = shutdown_state.runner_supervisor.as_ref() {
+            let stopped = supervisor.shutdown_all().await;
+            tracing::info!(stopped_runners = stopped, "conversation runners stopped for service shutdown");
+        }
+    };
+    if tokio::time::timeout(std::time::Duration::from_secs(20), teardown)
+        .await
+        .is_err()
+    {
+        tracing::error!("owned process teardown exceeded shutdown budget; remaining leases and containers require startup reconciliation");
+    }
+    serve_result
 }
 
 fn main() -> ExitCode {
@@ -4420,6 +4523,7 @@ fn main() -> ExitCode {
                         db.unwrap_or_else(default_db_path),
                         no_encrypt,
                         false,
+                        None,
                     ))
                 }
             }
@@ -4471,6 +4575,7 @@ fn main() -> ExitCode {
                 db.unwrap_or_else(default_db_path),
                 no_encrypt,
                 allow_unsigned_local_development,
+                None,
             ))
         }
         Command::Replay {

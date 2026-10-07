@@ -77,7 +77,51 @@ pub struct PluginManifest {
     /// transport MUST set `[runtime]`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<RuntimeDecl>,
+
+    /// Explicit compatibility contract for host API ranges and required
+    /// protocol features. Omitted for pre-negotiation bundles, which retain
+    /// their legacy compatibility path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<PluginCompatibility>,
 }
+
+/// Host API requirements kept separate from the plugin's cosmetic release.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PluginCompatibility {
+    /// Semver requirement against [`HOST_API_VERSION`], for example
+    /// `">=1.0.0, <2.0.0"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_api: Option<String>,
+    /// Required host protocol features. Unknown values fail closed.
+    #[serde(default)]
+    pub required_features: Vec<String>,
+    /// Deprecated calls retained with identical semantics. The host emits
+    /// diagnostics naming the replacement; this metadata never changes policy.
+    #[serde(default)]
+    pub deprecated_primitives: Vec<DeprecatedPrimitiveUse>,
+}
+
+/// A plugin-declared use of a deprecated primitive and its compatible replacement.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DeprecatedPrimitiveUse {
+    pub primitive: String,
+    pub replacement: String,
+}
+
+/// Version of the host plugin API, independent from execlaw's product version.
+pub const HOST_API_VERSION: &str = "1.0.0";
+
+/// Protocol features implemented by this host API version.
+pub const HOST_API_FEATURES: &[&str] = &[
+    "jsonrpc.line.v1",
+    "tool.schema.validation.v1",
+    "tool.result.schema.v1",
+    "sidecar.lifecycle.v1",
+    "webhook.route.v1",
+    "ui.panel.v1",
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct PluginHeader {
@@ -874,6 +918,14 @@ pub enum ManifestError {
     DuplicateServiceName(String),
     #[error("service has empty name string")]
     ServiceEmptyName,
+    #[error("invalid compatibility.host_api semver requirement '{0}'")]
+    InvalidHostApiRequirement(String),
+    #[error("plugin requires host API {required}, but this host provides {provided}")]
+    UnsupportedHostApi { required: String, provided: String },
+    #[error("plugin requires unsupported host API feature '{0}'")]
+    UnsupportedHostFeature(String),
+    #[error("invalid deprecated primitive diagnostic: {0}")]
+    InvalidDeprecatedPrimitive(String),
 }
 
 /// Trust levels the manifest may pin a tool to. Kept as a small flat
@@ -926,6 +978,44 @@ impl PluginManifest {
             })
         {
             return Err(ManifestError::BadVersion(self.plugin.version.clone()));
+        }
+
+        if let Some(compatibility) = &self.compatibility {
+            if let Some(required) = compatibility.host_api.as_deref() {
+                let requirement = semver::VersionReq::parse(required)
+                    .map_err(|_| ManifestError::InvalidHostApiRequirement(required.into()))?;
+                let provided = semver::Version::parse(HOST_API_VERSION)
+                    .expect("HOST_API_VERSION is a valid semver constant");
+                if !requirement.matches(&provided) {
+                    return Err(ManifestError::UnsupportedHostApi {
+                        required: required.into(),
+                        provided: HOST_API_VERSION.into(),
+                    });
+                }
+            }
+            let mut features = std::collections::HashSet::new();
+            for feature in &compatibility.required_features {
+                if !features.insert(feature.as_str()) {
+                    return Err(ManifestError::UnsupportedHostFeature(format!(
+                        "duplicate declaration: {feature}"
+                    )));
+                }
+                if !HOST_API_FEATURES.contains(&feature.as_str()) {
+                    return Err(ManifestError::UnsupportedHostFeature(feature.clone()));
+                }
+            }
+            let mut primitives = std::collections::HashSet::new();
+            for use_decl in &compatibility.deprecated_primitives {
+                if use_decl.primitive.trim().is_empty()
+                    || use_decl.replacement.trim().is_empty()
+                    || use_decl.primitive == use_decl.replacement
+                    || !primitives.insert(use_decl.primitive.as_str())
+                {
+                    return Err(ManifestError::InvalidDeprecatedPrimitive(
+                        use_decl.primitive.clone(),
+                    ));
+                }
+            }
         }
 
         // Uniqueness + trust_floor validation, in one pass.
@@ -1082,6 +1172,47 @@ mod tests {
         };
         assert!(url.contains("googleapis.com"));
         assert_eq!(*expect_status, Some(200));
+    }
+
+    #[test]
+    fn omitted_compatibility_preserves_older_bundle_support() {
+        let manifest = PluginManifest::parse(EXAMPLE).unwrap();
+        assert!(manifest.compatibility.is_none());
+    }
+
+    #[test]
+    fn compatible_host_range_and_known_features_are_accepted() {
+        let source = format!(
+            "{EXAMPLE}\n[compatibility]\nhost_api = \"^1.0.0\"\nrequired_features = [\"tool.schema.validation.v1\", \"sidecar.lifecycle.v1\"]\n"
+        );
+        let manifest = PluginManifest::parse(&source).unwrap();
+        assert_eq!(manifest.compatibility.unwrap().required_features.len(), 2);
+    }
+
+    #[test]
+    fn unsupported_host_range_and_unknown_security_feature_fail_during_parse() {
+        let unsupported_range = format!("{EXAMPLE}\n[compatibility]\nhost_api = \"^2.0.0\"\n");
+        assert!(matches!(
+            PluginManifest::parse(&unsupported_range),
+            Err(ManifestError::UnsupportedHostApi { .. })
+        ));
+
+        let unknown_feature = format!(
+            "{EXAMPLE}\n[compatibility]\nrequired_features = [\"tool.schema.validation.v1\", \"tool.authority.bypass.v9\"]\n"
+        );
+        assert!(matches!(
+            PluginManifest::parse(&unknown_feature),
+            Err(ManifestError::UnsupportedHostFeature(feature)) if feature == "tool.authority.bypass.v9"
+        ));
+    }
+
+    #[test]
+    fn unknown_compatibility_fields_fail_closed() {
+        let source = format!("{EXAMPLE}\n[compatibility]\nunknown_security_mode = true\n");
+        assert!(matches!(
+            PluginManifest::parse(&source),
+            Err(ManifestError::TomlParse(_))
+        ));
     }
 
     #[test]

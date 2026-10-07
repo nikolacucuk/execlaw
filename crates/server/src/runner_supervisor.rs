@@ -1041,6 +1041,29 @@ impl RunnerSupervisor {
         reaped
     }
 
+    /// Stop every runner owned by this supervisor before the control plane
+    /// exits. `OperatorRestart` preserves reusable workspace volumes while
+    /// delivering the normal runner shutdown handshake and removing owned
+    /// container processes.
+    pub async fn shutdown_all(&self) -> usize {
+        let groups = self
+            .snapshot()
+            .into_iter()
+            .map(|handle| handle.group_id.clone())
+            .collect::<Vec<_>>();
+        let mut stopped = 0;
+        for group_id in groups {
+            match self
+                .reap_group(&group_id, ShutdownReason::OperatorRestart)
+                .await
+            {
+                Ok(()) => stopped += 1,
+                Err(error) => warn!(group_id = %group_id, %error, "runner shutdown during service drain failed"),
+            }
+        }
+        stopped
+    }
+
     /// Send the supervisor's reap path: graceful shutdown frame,
     /// wait briefly for runner ack, drop registry entry. The
     /// container kill + volume removal are layered on top by the

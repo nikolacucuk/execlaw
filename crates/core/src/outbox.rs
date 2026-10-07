@@ -92,6 +92,18 @@ pub struct UnknownOutboxEffect {
     pub enqueued_seq: EventSeq,
 }
 
+/// Payload-free summary of an exhausted outbox effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeadLetterEffect {
+    pub id: i64,
+    pub conversation_id: ConversationId,
+    pub effect_kind: String,
+    pub idempotency_key: String,
+    pub attempts: i64,
+    pub enqueued_seq: EventSeq,
+    pub last_error: Option<String>,
+}
+
 pub struct OutboxStore<'db> {
     db: &'db Database,
 }
@@ -571,6 +583,80 @@ impl<'db> OutboxStore<'db> {
         })
     }
 
+    /// List exhausted effects without returning the effect payload.
+    pub fn dead_letters(&self, limit: usize) -> Result<Vec<DeadLetterEffect>, DbError> {
+        self.db.with_conn(|connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT id,conversation_id,effect_kind,idempotency_key,attempts,enqueued_seq,last_error \
+                 FROM state_outbox WHERE status='dead_letter' ORDER BY id LIMIT ?1",
+            )?;
+            statement
+                .query_map([limit.clamp(1, 200)], |row| {
+                    Ok(DeadLetterEffect {
+                        id: row.get(0)?,
+                        conversation_id: ConversationId::from(row.get::<_, String>(1)?),
+                        effect_kind: row.get(2)?,
+                        idempotency_key: row.get(3)?,
+                        attempts: row.get(4)?,
+                        enqueued_seq: EventSeq(row.get(5)?),
+                        last_error: row.get(6)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)
+        })
+    }
+
+    /// Requeue a dead-lettered effect with its existing idempotency identity.
+    /// Unknown outcomes are deliberately excluded; they require receipt
+    /// reconciliation through `authorize_unknown_retry` or confirmation.
+    pub fn redrive_dead_letter(
+        &self,
+        id: i64,
+        actor: &str,
+        reason: &str,
+    ) -> Result<(), DbError> {
+        let (actor, reason) = crate::job_redrive::validate_redrive_request(actor, reason)?;
+        self.db.transaction(|tx| {
+            let (key, attempts): (String, i64) = tx.query_row(
+                "SELECT idempotency_key,attempts FROM state_outbox \
+                 WHERE id=?1 AND status='dead_letter'",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if key.trim().is_empty() {
+                return Err(DbError::Invariant(
+                    "dead-lettered effect has no stable idempotency identity".into(),
+                ));
+            }
+            let now = chrono::Utc::now().timestamp();
+            let changed = tx.execute(
+                "UPDATE state_outbox SET status='pending',next_attempt_at=NULL,lease_owner=NULL, \
+                    lease_expires_at=NULL WHERE id=?1 AND status='dead_letter'",
+                [id],
+            )?;
+            if changed != 1 {
+                return Err(DbError::Invariant("dead-letter status changed during redrive".into()));
+            }
+            tx.execute(
+                "INSERT INTO state_outbox_delivery_events(outbox_id,transition,occurred_at,attempt,detail,actor) \
+                 VALUES (?1,'operator_redrive',?2,?3,?4,?5)",
+                params![id, now, attempts, reason, actor],
+            )?;
+            crate::job_redrive::append_redrive_event(
+                tx,
+                crate::job_redrive::RedriveKind::Outbox,
+                &id.to_string(),
+                &key,
+                &actor,
+                &reason,
+                attempts,
+                now,
+            )?;
+            Ok(())
+        })
+    }
+
     /// List bounded metadata for effects that need operator reconciliation.
     pub fn unknown_effects(&self, limit: usize) -> Result<Vec<UnknownOutboxEffect>, DbError> {
         self.db.with_conn(|connection| {
@@ -952,6 +1038,36 @@ mod tests {
         assert!(!store.record_failure(id, "permanent", 1, 0).unwrap());
         let timeline = store.delivery_timeline(id).unwrap();
         assert_eq!(timeline.last().unwrap().transition, "dead_letter");
+    }
+
+    #[test]
+    fn operator_redrive_preserves_effect_identity_and_records_actor_and_reason() {
+        let db = fresh_db();
+        let store = OutboxStore::new(&db);
+        let id = store.enqueue(&mk_row(&ConversationId::from("redrive"), 3)).unwrap();
+        assert!(!store.record_failure(id, "remote rejected", 1, 0).unwrap());
+        let before = store.dead_letters(10).unwrap().pop().unwrap();
+        store
+            .redrive_dead_letter(id, "controller-1", "operator confirmed the recipient is ready")
+            .unwrap();
+        assert!(store.dead_letters(10).unwrap().is_empty());
+        let ready = store.ready_pending(chrono::Utc::now().timestamp(), 10).unwrap();
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].idempotency_key, before.idempotency_key);
+        let timeline = store.delivery_timeline(id).unwrap();
+        let redrive = timeline.last().unwrap();
+        assert_eq!(redrive.transition, "operator_redrive");
+        assert_eq!(redrive.actor.as_deref(), Some("controller-1"));
+        assert_eq!(redrive.detail.as_deref(), Some("operator confirmed the recipient is ready"));
+        assert!(store.redrive_dead_letter(id, "controller-1", "duplicate attempt").is_err());
+        let audit_rows: i64 = db
+            .with_conn(|conn| Ok(conn.query_row(
+                "SELECT COUNT(*) FROM state_job_redrive_events WHERE job_kind='outbox' AND job_id=?1",
+                [id.to_string()],
+                |row| row.get(0),
+            )?))
+            .unwrap();
+        assert_eq!(audit_rows, 1);
     }
 
     #[test]

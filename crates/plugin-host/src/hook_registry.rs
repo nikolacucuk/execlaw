@@ -976,6 +976,16 @@ impl HookRegistry {
             w.webhook_routes.insert(plugin_id.clone(), cached);
         }
         w.enabled_plugins.insert(plugin_id.clone());
+        if let Some(compatibility) = &manifest.compatibility {
+            for deprecated in &compatibility.deprecated_primitives {
+                tracing::warn!(
+                    plugin_id = %plugin_id,
+                    primitive = %deprecated.primitive,
+                    replacement = %deprecated.replacement,
+                    "plugin uses a deprecated host primitive; semantics remain unchanged"
+                );
+            }
+        }
         Ok(())
     }
 

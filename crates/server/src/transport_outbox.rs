@@ -1319,7 +1319,12 @@ mod tests {
 
 /// Start the production relay for plugin-backed transport effects and durable
 /// wakeups. Send `true` to the returned handle during graceful shutdown.
-pub fn spawn(state: AppState) -> tokio::sync::watch::Sender<bool> {
+pub struct OutboxDrainTask {
+    pub stop: tokio::sync::watch::Sender<bool>,
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+pub fn spawn(state: AppState) -> OutboxDrainTask {
     let db = state.db.clone();
     let mut registry = DispatcherRegistry::new();
     registry.register(std::sync::Arc::new(PluginTransportDispatcher::new(
@@ -1330,13 +1335,13 @@ pub fn spawn(state: AppState) -> tokio::sync::watch::Sender<bool> {
     ));
     registry.register(std::sync::Arc::new(WakeupDispatcher::new(db.clone())));
     let (stop, receiver) = tokio::sync::watch::channel(false);
-    tokio::spawn(run_drain_loop(
+    let task = tokio::spawn(run_drain_loop(
         db,
         std::sync::Arc::new(registry),
         DrainConfig::default(),
         receiver,
     ));
-    stop
+    OutboxDrainTask { stop, task }
 }
 
 #[async_trait]

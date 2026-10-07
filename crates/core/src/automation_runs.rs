@@ -300,6 +300,86 @@ impl<'a> AutomationRunStore<'a> {
         })?;
         Ok(rows)
     }
+
+    pub fn list_failed(&self, limit: usize) -> Result<Vec<AutomationRunRow>, AutomationRunError> {
+        let rows = self.db.with_conn(|connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT id,automation_id,event_id,status,step_traces,started_at,finished_at \
+                 FROM state_automation_runs WHERE status='failed' \
+                 ORDER BY COALESCE(finished_at,started_at),id LIMIT ?1",
+            )?;
+            let rows = statement.query_map([limit.clamp(1, 200)], |row| {
+                let status = AutomationRunStatus::parse(&row.get::<_, String>(3)?)
+                    .unwrap_or(AutomationRunStatus::Failed);
+                let traces: String = row.get(4)?;
+                let step_traces = serde_json::from_str(&traces).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        4,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(AutomationRunRow {
+                    id: row.get(0)?,
+                    automation_id: row.get(1)?,
+                    event_id: row.get(2)?,
+                    status,
+                    step_traces,
+                    started_at: row.get(5)?,
+                    finished_at: row.get(6)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+        })?;
+        Ok(rows)
+    }
+
+    /// Requeue a failed run in place, preserving its run id, frozen graph,
+    /// event identity, and completed-step trace for safe resume.
+    pub fn redrive_failed(
+        &self,
+        run_id: &str,
+        actor: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<AutomationRunRow, AutomationRunError> {
+        let (actor, reason) = crate::job_redrive::validate_redrive_request(actor, reason)?;
+        self.db.transaction(|tx| {
+            let (automation_id, event_id): (String, String) = tx.query_row(
+                "SELECT automation_id,event_id FROM state_automation_runs WHERE id=?1 AND status='failed'",
+                [run_id],
+                |row| Ok((row.get(0)?,row.get(1)?)),
+            )?;
+            let prior_redrives: i64 = tx.query_row(
+                "SELECT COUNT(*) FROM state_job_redrive_events \
+                 WHERE job_kind='automation' AND job_id=?1",
+                [run_id],
+                |row| row.get(0),
+            )?;
+            let changed = tx.execute(
+                "UPDATE state_automation_runs SET status='pending',started_at=?2,finished_at=NULL \
+                 WHERE id=?1 AND status='failed'",
+                params![run_id, now],
+            )?;
+            if changed != 1 {
+                return Err(DbError::Invariant("failed automation run changed during redrive".into()));
+            }
+            crate::job_redrive::append_redrive_event(
+                tx,
+                crate::job_redrive::RedriveKind::Automation,
+                run_id,
+                &format!("{automation_id}:{event_id}"),
+                &actor,
+                &reason,
+                prior_redrives,
+                now,
+            )?;
+            Ok(())
+        })?;
+        self.get(run_id)?.ok_or_else(|| {
+            AutomationRunError::Db(DbError::Invariant("redriven automation run disappeared".into()))
+        })
+    }
 }
 
 #[cfg(test)]
@@ -436,5 +516,40 @@ mod tests {
             assert_eq!(AutomationRunStatus::parse(s.as_str()), Some(s));
         }
         assert_eq!(AutomationRunStatus::parse("garbage"), None);
+    }
+
+    #[test]
+    fn failed_automation_redrive_resumes_the_original_run_and_checkpoints() {
+        let db = fresh_db();
+        let store = AutomationRunStore::new(&db);
+        let run_id = store
+            .insert_pending_with_definition("auto-1", "evt-1", "{\"version\":1}", 100)
+            .unwrap();
+        let checkpoint = t("send", 5);
+        store.append_trace(&run_id, &checkpoint).unwrap();
+        store
+            .finish(&run_id, AutomationRunStatus::Failed, 110)
+            .unwrap();
+        let redriven = store
+            .redrive_failed(&run_id, "controller-1", "sink reconciled", 120)
+            .unwrap();
+        assert_eq!(redriven.id, run_id);
+        assert_eq!(redriven.automation_id, "auto-1");
+        assert_eq!(redriven.event_id, "evt-1");
+        assert_eq!(redriven.status, AutomationRunStatus::Pending);
+        assert_eq!(redriven.step_traces, vec![checkpoint]);
+        assert_eq!(store.list_failed(10).unwrap().len(), 0);
+        assert!(store
+            .redrive_failed(&run_id, "controller-1", "duplicate", 121)
+            .is_err());
+        let audit: (String, String, String) = db
+            .with_conn(|conn| Ok(conn.query_row(
+                "SELECT actor,reason,effect_identity FROM state_job_redrive_events \
+                 WHERE job_kind='automation' AND job_id=?1",
+                [&run_id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            )?))
+            .unwrap();
+        assert_eq!(audit, ("controller-1".into(), "sink reconciled".into(), "auto-1:evt-1".into()));
     }
 }

@@ -40,6 +40,7 @@ chrono-tz.workspace = true
 cron.workspace = true
 uuid.workspace = true
 hex.workspace = true
+zeroize.workspace = true
 sha2.workspace = true
 hmac.workspace = true
 schemars.workspace = true

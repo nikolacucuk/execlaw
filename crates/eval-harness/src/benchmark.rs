@@ -105,6 +105,8 @@ struct Record {
     max_tokens: u32,
     offline_fixture: bool,
     workspace_toolchain_fingerprint_sha256: Option<String>,
+    #[serde(default)]
+    hardware_observations: HardwareObservations,
     results: Vec<TaskResult>,
     summary: Summary,
     comparison: Option<Comparison>,
@@ -117,9 +119,136 @@ struct TaskResult {
     task_id: String,
     category: String,
     success: bool,
+    #[serde(default)]
+    elapsed_ms: u64,
     failure: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     evidence: Option<Value>,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct HardwareObservations {
+    logical_cpu_count: Option<usize>,
+    available_ram_mb_before: Option<u64>,
+    available_ram_mb_after: Option<u64>,
+    gpu_devices: Vec<GpuObservation>,
+    battery_percent_before: Option<f64>,
+    battery_percent_after: Option<f64>,
+    thermal_celsius_before: Option<f64>,
+    thermal_celsius_after: Option<f64>,
+    thermal_throttle_state: Option<bool>,
+    unavailable: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct GpuObservation {
+    vendor: String,
+    model: Option<String>,
+    memory_mb: Option<u64>,
+}
+
+fn sample_hardware_observations() -> HardwareObservations {
+    let profile = execlaw_container_manager::detect();
+    let mut unavailable = Vec::new();
+    let battery_percent = sample_battery_percent();
+    let thermal_celsius = sample_thermal_celsius();
+    if battery_percent.is_none() {
+        unavailable.push("battery_percent".into());
+    }
+    if thermal_celsius.is_none() {
+        unavailable.push("thermal_celsius".into());
+    }
+    // No supported cross-platform probe currently reports actual thermal
+    // throttling. Never infer it from temperature or report an absent sensor
+    // as spare capacity.
+    unavailable.push("thermal_throttle_state".into());
+    HardwareObservations {
+        logical_cpu_count: std::thread::available_parallelism()
+            .ok()
+            .map(usize::from),
+        available_ram_mb_before: execlaw_container_manager::available_ram_mb(),
+        available_ram_mb_after: None,
+        gpu_devices: profile
+            .gpus
+            .into_iter()
+            .map(|gpu| GpuObservation {
+                vendor: format!("{:?}", gpu.vendor),
+                model: gpu.model_name,
+                memory_mb: gpu.memory_mb,
+            })
+            .collect(),
+        battery_percent_before: battery_percent,
+        battery_percent_after: None,
+        thermal_celsius_before: thermal_celsius,
+        thermal_celsius_after: None,
+        thermal_throttle_state: None,
+        unavailable,
+    }
+}
+
+fn combine_hardware_observations(
+    mut before: HardwareObservations,
+    after: HardwareObservations,
+) -> HardwareObservations {
+    before.available_ram_mb_after = after.available_ram_mb_before;
+    before.battery_percent_after = after.battery_percent_before;
+    before.thermal_celsius_after = after.thermal_celsius_before;
+    for unavailable in after.unavailable {
+        if !before.unavailable.contains(&unavailable) {
+            before.unavailable.push(unavailable);
+        }
+    }
+    before.unavailable.sort();
+    before
+}
+
+#[cfg(target_os = "linux")]
+fn sample_battery_percent() -> Option<f64> {
+    let entries = std::fs::read_dir("/sys/class/power_supply").ok()?;
+    for entry in entries.flatten() {
+        let root = entry.path();
+        let kind = std::fs::read_to_string(root.join("type")).ok()?;
+        if kind.trim() != "Battery" {
+            continue;
+        }
+        if let Ok(capacity) = std::fs::read_to_string(root.join("capacity"))
+            && let Ok(value) = capacity.trim().parse::<f64>()
+            && (0.0..=100.0).contains(&value)
+        {
+            return Some(value);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_battery_percent() -> Option<f64> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn sample_thermal_celsius() -> Option<f64> {
+    let entries = std::fs::read_dir("/sys/class/thermal").ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().starts_with("thermal_zone") {
+            continue;
+        }
+        if let Ok(raw) = std::fs::read_to_string(entry.path().join("temp"))
+            && let Ok(millidegrees) = raw.trim().parse::<i64>()
+        {
+            let celsius = millidegrees as f64 / 1000.0;
+            if (-40.0..=150.0).contains(&celsius) {
+                return Some(celsius);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn sample_thermal_celsius() -> Option<f64> {
+    None
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -275,10 +404,12 @@ pub(super) async fn run(
     let client = InferenceClient::new(endpoint);
     let mut results = Vec::with_capacity(suite.tasks.len() * runs as usize);
     let started_at_utc = chrono::Utc::now().to_rfc3339();
+    let hardware_before = sample_hardware_observations();
 
     for trial in 0..runs {
         let task_seed = seed.wrapping_add(u64::from(trial));
         for task in &suite.tasks {
+            let task_started = std::time::Instant::now();
             if let Verifier::WorkspaceCoding { .. } = &task.verifier {
                 let executor = workspace_executor
                     .as_ref()
@@ -309,6 +440,7 @@ pub(super) async fn run(
                     task_id: task.id.clone(),
                     category: task.category.clone(),
                     success,
+                    elapsed_ms: task_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                     failure,
                     evidence,
                 });
@@ -329,6 +461,7 @@ pub(super) async fn run(
                 task_id: task.id.clone(),
                 category: task.category.clone(),
                 success: result.is_ok(),
+                elapsed_ms: task_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
                 failure: result.err(),
                 evidence: None,
             });
@@ -336,8 +469,9 @@ pub(super) async fn run(
     }
 
     let summary = summarize(&results);
+    let hardware_after = sample_hardware_observations();
     let mut record = Record {
-        schema_version: 1,
+        schema_version: 2,
         started_at_utc,
         suite: suite.name,
         suite_version: suite.version,
@@ -356,6 +490,7 @@ pub(super) async fn run(
         workspace_toolchain_fingerprint_sha256: workspace_image
             .as_deref()
             .map(|image| hex::encode(Sha256::digest(image.as_bytes()))),
+        hardware_observations: combine_hardware_observations(hardware_before, hardware_after),
         results,
         summary,
         comparison: None,
@@ -1566,6 +1701,43 @@ fn wilson(successes: usize, attempts: usize) -> (f64, f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hardware_report_preserves_missing_telemetry_instead_of_inventing_capacity() {
+        let before = HardwareObservations {
+            logical_cpu_count: Some(8),
+            available_ram_mb_before: Some(4096),
+            battery_percent_before: None,
+            thermal_celsius_before: None,
+            thermal_throttle_state: None,
+            unavailable: vec![
+                "battery_percent".into(),
+                "thermal_celsius".into(),
+                "thermal_throttle_state".into(),
+            ],
+            ..Default::default()
+        };
+        let mut after = HardwareObservations {
+            available_ram_mb_before: Some(3072),
+            battery_percent_before: None,
+            thermal_celsius_before: None,
+            thermal_throttle_state: None,
+            unavailable: before.unavailable.clone(),
+            ..Default::default()
+        };
+        after.gpu_devices.push(GpuObservation {
+            vendor: "Intel".into(),
+            model: Some("fixture GPU".into()),
+            memory_mb: None,
+        });
+        let combined = combine_hardware_observations(before, after);
+        assert_eq!(combined.available_ram_mb_before, Some(4096));
+        assert_eq!(combined.available_ram_mb_after, Some(3072));
+        assert_eq!(combined.battery_percent_before, None);
+        assert_eq!(combined.thermal_throttle_state, None);
+        assert!(combined.unavailable.contains(&"thermal_throttle_state".into()));
+        assert_eq!(combined.gpu_devices[0].memory_mb, None);
+    }
 
     #[derive(Default)]
     struct MockWorkspaceExecutor;

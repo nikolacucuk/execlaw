@@ -47,6 +47,7 @@ pub mod history_budget;
 pub mod ids;
 pub mod information;
 pub mod information_store;
+pub(crate) mod job_redrive;
 pub mod local_endpoint_policy;
 pub mod log_retention;
 pub mod logs;

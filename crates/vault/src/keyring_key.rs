@@ -18,9 +18,13 @@
 use rand::RngCore;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+use zeroize::Zeroizing;
 
 const SERVICE: &str = "execlaw";
 const ENTRY: &str = "sqlcipher_master_key";
+
+/// Key buffers that are cleared on ordinary drop paths.
+pub type SecretKey = Zeroizing<[u8; 32]>;
 
 #[derive(Debug, Error)]
 pub enum KeyringLoadError {
@@ -46,14 +50,14 @@ pub fn default_passphrase_file_path() -> PathBuf {
 ///
 /// Tries the OS keyring first, then falls back to the passphrase
 /// file at the path returned by [`default_passphrase_file_path`].
-pub fn load_or_create_master_key() -> Result<[u8; 32], KeyringLoadError> {
+pub fn load_or_create_master_key() -> Result<SecretKey, KeyringLoadError> {
     load_or_create_master_key_with_fallback(&default_passphrase_file_path())
 }
 
 /// Load or initialize the event-log signing key independently of the
 /// SQLCipher encryption key. Keeping it stable across database-key rotations
 /// preserves event HMAC chains and signed checkpoints without rewriting history.
-pub fn load_or_create_event_hmac_key() -> Result<[u8; 32], KeyringLoadError> {
+pub fn load_or_create_event_hmac_key() -> Result<SecretKey, KeyringLoadError> {
     let master_path = default_passphrase_file_path();
     let master_key = load_or_create_master_key_with_fallback(&master_path)?;
     let hmac_path = master_path.with_file_name("event-hmac.key");
@@ -63,7 +67,7 @@ pub fn load_or_create_event_hmac_key() -> Result<[u8; 32], KeyringLoadError> {
 fn ensure_event_hmac_key(
     hmac_path: &Path,
     initial_key: &[u8; 32],
-) -> Result<[u8; 32], KeyringLoadError> {
+) -> Result<SecretKey, KeyringLoadError> {
     if hmac_path.exists() {
         let key = load_from_file(hmac_path)?;
         warn_if_key_file_too_permissive(hmac_path);
@@ -73,7 +77,7 @@ fn ensure_event_hmac_key(
     // Existing installs begin with the master key as their event signer.
     // Persist the same bytes before any key rotation can replace master.key.
     replace_master_key_file(hmac_path, initial_key)?;
-    Ok(*initial_key)
+    Ok(Zeroizing::new(*initial_key))
 }
 
 /// Same as [`load_or_create_master_key`] but with a caller-supplied
@@ -81,7 +85,7 @@ fn ensure_event_hmac_key(
 /// want the file in a specific location.
 pub fn load_or_create_master_key_with_fallback(
     fallback_path: &Path,
-) -> Result<[u8; 32], KeyringLoadError> {
+) -> Result<SecretKey, KeyringLoadError> {
     // 2026-04-28: Drift-resistance refactor.
     //
     // The previous policy persisted the minted key to *whichever* sink
@@ -134,7 +138,7 @@ pub fn load_or_create_master_key_with_fallback(
     };
 
     match (from_keyring, from_file) {
-        (Some(k_ring), Some(k_file)) if k_ring == k_file => Ok(k_ring),
+        (Some(k_ring), Some(k_file)) if k_ring[..] == k_file[..] => Ok(k_ring),
         (Some(k_ring), Some(k_file)) => {
             // Both sinks have a key but they disagree. The file wins:
             // it has been the durable sink since this fix landed, so
@@ -145,7 +149,7 @@ pub fn load_or_create_master_key_with_fallback(
             tracing::warn!("keyring + master.key disagree; preferring file and refreshing keyring",);
             let _ = try_persist_to_keyring(&k_file);
             // Suppress the unused-binding lint.
-            let _ = k_ring;
+            drop(k_ring);
             Ok(k_file)
         }
         (Some(k_ring), None) => {
@@ -232,10 +236,13 @@ fn replace_master_key_file(path: &Path, key: &[u8; 32]) -> Result<(), KeyringLoa
     }
 }
 
-fn try_load_from_keyring() -> Result<Option<[u8; 32]>, KeyringLoadError> {
+fn try_load_from_keyring() -> Result<Option<SecretKey>, KeyringLoadError> {
     let entry = keyring::Entry::new(SERVICE, ENTRY)?;
     match entry.get_password() {
-        Ok(hex_key) => Ok(Some(parse_hex_key(&hex_key)?)),
+        Ok(hex_key) => {
+            let hex_key = Zeroizing::new(hex_key);
+            Ok(Some(parse_hex_key(&hex_key)?))
+        }
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(e.into()),
     }
@@ -243,12 +250,13 @@ fn try_load_from_keyring() -> Result<Option<[u8; 32]>, KeyringLoadError> {
 
 fn try_persist_to_keyring(key: &[u8; 32]) -> Result<(), KeyringLoadError> {
     let entry = keyring::Entry::new(SERVICE, ENTRY)?;
-    entry.set_password(&hex::encode(key))?;
+    let encoded = Zeroizing::new(hex::encode(key));
+    entry.set_password(&encoded)?;
     Ok(())
 }
 
-fn load_from_file(path: &Path) -> Result<[u8; 32], KeyringLoadError> {
-    let raw = std::fs::read_to_string(path)?;
+fn load_from_file(path: &Path) -> Result<SecretKey, KeyringLoadError> {
+    let raw = Zeroizing::new(std::fs::read_to_string(path)?);
     parse_hex_key(raw.trim())
 }
 
@@ -256,7 +264,8 @@ fn persist_to_file(path: &Path, key: &[u8; 32]) -> Result<(), KeyringLoadError> 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(path, hex::encode(key))?;
+    let encoded = Zeroizing::new(hex::encode(key));
+    std::fs::write(path, encoded.as_bytes())?;
     // Tighten Unix permissions to 0600 — only the operator can read.
     #[cfg(unix)]
     {
@@ -376,22 +385,22 @@ fn restrict_file_to_current_user_windows(path: &Path) -> Result<(), String> {
     }
 }
 
-fn parse_hex_key(s: &str) -> Result<[u8; 32], KeyringLoadError> {
-    let bytes = hex::decode(s)?;
+fn parse_hex_key(s: &str) -> Result<SecretKey, KeyringLoadError> {
+    let bytes = Zeroizing::new(hex::decode(s)?);
     if bytes.len() != 32 {
         return Err(KeyringLoadError::BadKey(format!(
             "expected 32 bytes, got {}",
             bytes.len()
         )));
     }
-    let mut out = [0u8; 32];
+    let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&bytes);
     Ok(out)
 }
 
-fn mint_fresh_key() -> [u8; 32] {
-    let mut key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut key);
+fn mint_fresh_key() -> SecretKey {
+    let mut key = Zeroizing::new([0u8; 32]);
+    rand::thread_rng().fill_bytes(&mut key[..]);
     key
 }
 
@@ -437,7 +446,7 @@ mod tests {
         std::fs::write(&path, hex::encode(known)).unwrap();
         // Direct load (bypasses the keyring race).
         let got = load_from_file(&path).unwrap();
-        assert_eq!(got, known);
+        assert_eq!(got[..], known[..]);
     }
 
     /// A pre-populated fallback file is loaded verbatim.
@@ -448,7 +457,7 @@ mod tests {
         let known = [7u8; 32];
         std::fs::write(&path, hex::encode(known)).unwrap();
         let got = load_from_file(&path).unwrap();
-        assert_eq!(got, known);
+        assert_eq!(got[..], known[..]);
     }
 
     /// Malformed file (wrong length) is rejected.
@@ -490,7 +499,7 @@ mod tests {
         );
         let from_file = load_from_file(&path).unwrap();
         assert_eq!(
-            from_file, key,
+            from_file[..], key[..],
             "the file's contents must match the key we returned",
         );
     }
@@ -507,7 +516,7 @@ mod tests {
         let k1 = load_or_create_master_key_with_fallback(&path).unwrap();
         let k2 = load_or_create_master_key_with_fallback(&path).unwrap();
         assert_eq!(
-            k1, k2,
+            k1[..], k2[..],
             "load_or_create must be idempotent across calls when the file is the durable sink",
         );
     }
@@ -520,7 +529,7 @@ mod tests {
         let new = [8_u8; 32];
         persist_to_file(&path, &old).unwrap();
         replace_master_key_file(&path, &new).unwrap();
-        assert_eq!(load_from_file(&path).unwrap(), new);
+        assert_eq!(load_from_file(&path).unwrap()[..], new[..]);
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
@@ -532,14 +541,14 @@ mod tests {
         let new_master = [8_u8; 32];
 
         assert_eq!(
-            ensure_event_hmac_key(&event_path, &old_master).unwrap(),
-            old_master
+            ensure_event_hmac_key(&event_path, &old_master).unwrap()[..],
+            old_master[..]
         );
         assert_eq!(
-            ensure_event_hmac_key(&event_path, &new_master).unwrap(),
-            old_master
+            ensure_event_hmac_key(&event_path, &new_master).unwrap()[..],
+            old_master[..]
         );
-        assert_eq!(load_from_file(&event_path).unwrap(), old_master);
+        assert_eq!(load_from_file(&event_path).unwrap()[..], old_master[..]);
     }
 
     /// Default path resolves under `$HOME/.execlaw/master.key`.

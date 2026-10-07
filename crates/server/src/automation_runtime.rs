@@ -202,7 +202,13 @@ fn run_matching_automations_checked(
             );
             continue;
         }
-        run_one(ctx, &automation, evt, &event_ctx)?;
+        run_one(
+            ctx,
+            &automation.id,
+            &automation.definition,
+            evt,
+            &event_ctx,
+        )?;
     }
     Ok(())
 }
@@ -240,16 +246,17 @@ fn trigger_matches(trigger: &TriggerDef, event_ctx: &serde_json::Value) -> bool 
 
 fn run_one(
     ctx: &ExecutorContext,
-    automation: &AutomationRow,
+    automation_id: &str,
+    automation_definition: &AutomationDef,
     evt: &BusEventRow,
     event_ctx: &serde_json::Value,
 ) -> Result<(), String> {
     let run_store = AutomationRunStore::new(&ctx.db);
     let started_at = chrono::Utc::now().timestamp_millis();
-    let definition_json = serde_json::to_string(&automation.definition)
+    let definition_json = serde_json::to_string(automation_definition)
         .map_err(|error| format!("serialize automation definition: {error}"))?;
     let run_id = run_store
-        .insert_pending_with_definition(&automation.id, &evt.id, &definition_json, started_at)
+        .insert_pending_with_definition(automation_id, &evt.id, &definition_json, started_at)
         .map_err(|error| format!("claim automation run: {error}"))?;
     let run = run_store
         .get(&run_id)
@@ -276,7 +283,7 @@ fn run_one(
     state.insert("event".to_string(), event_ctx.clone());
     state.insert(
         "__automation_id__".to_string(),
-        serde_json::Value::String(automation.id.to_string()),
+        serde_json::Value::String(automation_id.to_owned()),
     );
 
     // Inline trace sink: each node-boundary advance calls
@@ -317,6 +324,45 @@ fn run_one(
         .finish(&run_id, final_status, finished_at)
         .map_err(|error| format!("finalize automation run: {error}"))?;
     Ok(())
+}
+
+/// Resume one failed automation run in place, preserving its event, run id,
+/// frozen definition, completed-step checkpoints, and effect idempotency keys.
+pub fn redrive_failed_run(
+    ctx: &ExecutorContext,
+    run_id: &str,
+    actor: &str,
+    reason: &str,
+) -> Result<AutomationRunStatus, String> {
+    let run_store = AutomationRunStore::new(&ctx.db);
+    let failed = run_store
+        .get(run_id)
+        .map_err(|error| format!("load automation run: {error}"))?
+        .ok_or_else(|| format!("automation run '{run_id}' was not found"))?;
+    if failed.status != AutomationRunStatus::Failed {
+        return Err("only failed automation runs can be redriven".into());
+    }
+    let definition_json = run_store
+        .definition_snapshot(run_id)
+        .map_err(|error| format!("load automation definition snapshot: {error}"))?
+        .ok_or_else(|| "automation definition snapshot is missing".to_owned())?;
+    let definition: AutomationDef = serde_json::from_str(&definition_json)
+        .map_err(|error| format!("decode automation definition snapshot: {error}"))?;
+    let event = execlaw_core::automation_bus::BusEventStore::new(&ctx.db)
+        .get(&failed.event_id)
+        .map_err(|error| format!("load source automation event: {error}"))?
+        .ok_or_else(|| "source automation event is no longer retained".to_owned())?;
+
+    run_store
+        .redrive_failed(run_id, actor, reason, chrono::Utc::now().timestamp_millis())
+        .map_err(|error| format!("authorize same-identity automation redrive: {error}"))?;
+    let event_ctx = event_context(&event);
+    run_one(ctx, &failed.automation_id, &definition, &event, &event_ctx)?;
+    let completed = run_store
+        .get(run_id)
+        .map_err(|error| format!("read redriven automation result: {error}"))?
+        .ok_or_else(|| "redriven automation run disappeared".to_owned())?;
+    Ok(completed.status)
 }
 
 /// Result of a [`dry_run`] â€” outcome + captured per-node trace.
@@ -2711,6 +2757,44 @@ mod tests {
             "expected plugin-host error, got: {:?}",
             trace.error
         );
+    }
+
+    #[tokio::test]
+    async fn failed_automation_redrive_resumes_same_run_and_source_event() {
+        let db = fresh_db();
+        let context = noop_ctx(&db);
+        let event = seed_bus_event(&db, "redrive-event", serde_json::json!({}));
+        let definition = def_call_plugin(serde_json::json!({
+            "tool": "missing.plugin_tool",
+            "args": {},
+        }));
+        let event_ctx = event_context(&event);
+        run_one(&context, "redrive-automation", &definition, &event, &event_ctx).unwrap();
+        let store = AutomationRunStore::new(&db);
+        let failed = store.list_failed(10).unwrap().pop().unwrap();
+        assert_eq!(failed.event_id, event.id);
+        let status = redrive_failed_run(
+            &context,
+            &failed.id,
+            "controller-1",
+            "plugin host configuration was corrected",
+        )
+        .unwrap();
+        let retried = store.get(&failed.id).unwrap().unwrap();
+        assert_eq!(status, AutomationRunStatus::Failed);
+        assert_eq!(retried.id, failed.id);
+        assert_eq!(retried.automation_id, failed.automation_id);
+        assert_eq!(retried.event_id, failed.event_id);
+        assert!(retried.step_traces.len() >= failed.step_traces.len());
+        let redrives: i64 = db
+            .with_conn(|conn| Ok(conn.query_row(
+                "SELECT COUNT(*) FROM state_job_redrive_events \
+                 WHERE job_kind='automation' AND job_id=?1",
+                [&failed.id],
+                |row| row.get(0),
+            )?))
+            .unwrap();
+        assert_eq!(redrives, 1);
     }
 
     #[test]

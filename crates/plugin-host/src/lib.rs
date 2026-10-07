@@ -10,6 +10,7 @@
 #![forbid(unsafe_code)]
 
 pub mod builtin_registrar;
+pub mod conformance;
 pub mod hook_registry;
 pub mod host;
 pub mod subprocess;

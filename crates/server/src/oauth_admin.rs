@@ -920,6 +920,7 @@ mod tests {
             admin_routes: vec![],
             webhook_routes: vec![],
             runtime: None,
+            compatibility: None,
         };
         state
             .plugin_host

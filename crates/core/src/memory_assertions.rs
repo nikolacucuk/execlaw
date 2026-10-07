@@ -1409,6 +1409,19 @@ pub struct MemoryJob {
     pub max_attempts: i64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FailedMemoryJob {
+    pub job_id: String,
+    pub kind: String,
+    pub conversation_id: ConversationId,
+    pub event_start_seq: EventSeq,
+    pub event_end_seq: EventSeq,
+    pub run_id: String,
+    pub attempt: i64,
+    pub max_attempts: i64,
+    pub last_error: Option<String>,
+}
+
 pub struct MemoryJobStore<'db> {
     db: &'db Database,
 }
@@ -1554,6 +1567,92 @@ impl<'db> MemoryJobStore<'db> {
              lease_owner = NULL, lease_expires_at = NULL, next_attempt_at = ?3, updated_at = ?3, last_error = ?4 \
              WHERE job_id = ?1 AND status = 'running' AND lease_owner = ?2",
             params![job_id, owner, next_attempt_at, error])? == 1)).map_err(MemoryAssertionError::from)
+    }
+
+    pub fn failed_jobs(&self, limit: usize) -> Result<Vec<FailedMemoryJob>, MemoryAssertionError> {
+        self.db
+            .with_conn(|conn| {
+                let mut statement = conn.prepare_cached(
+                    "SELECT job_id,kind,conversation_id,event_start_seq,event_end_seq,run_id, \
+                            attempt,max_attempts,last_error FROM memory_jobs \
+                     WHERE status='failed' AND kind='memory_extract' \
+                     ORDER BY updated_at,job_id LIMIT ?1",
+                )?;
+                statement
+                    .query_map([limit.clamp(1, 200)], |row| {
+                        Ok(FailedMemoryJob {
+                            job_id: row.get(0)?,
+                            kind: row.get(1)?,
+                            conversation_id: ConversationId::from(row.get::<_, String>(2)?),
+                            event_start_seq: EventSeq(row.get(3)?),
+                            event_end_seq: EventSeq(row.get(4)?),
+                            run_id: row.get(5)?,
+                            attempt: row.get(6)?,
+                            max_attempts: row.get(7)?,
+                            last_error: row.get(8)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)
+            })
+            .map_err(MemoryAssertionError::from)
+    }
+
+    /// Requeue a failed extraction under its original job/source identity.
+    /// The audit row captures the previous attempt count and operator reason.
+    pub fn redrive_failed(
+        &self,
+        job_id: &str,
+        actor: &str,
+        reason: &str,
+        now: i64,
+    ) -> Result<(), MemoryAssertionError> {
+        let (actor, reason) = crate::job_redrive::validate_redrive_request(actor, reason)?;
+        self.db
+            .transaction(|tx| {
+                let (kind, conversation_id, start_seq, end_seq, run_id, attempt): (
+                    String,
+                    String,
+                    i64,
+                    i64,
+                    String,
+                    i64,
+                ) = tx.query_row(
+                    "SELECT kind,conversation_id,event_start_seq,event_end_seq,run_id,attempt \
+                     FROM memory_jobs WHERE job_id=?1 AND status='failed'",
+                    [job_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?, row.get(1)?, row.get(2)?,
+                            row.get(3)?, row.get(4)?, row.get(5)?,
+                        ))
+                    },
+                )?;
+                let identity = format!("{kind}:{conversation_id}:{start_seq}-{end_seq}:{run_id}");
+                let changed = tx.execute(
+                    "UPDATE memory_jobs SET status='pending',attempt=0,lease_owner=NULL, \
+                        lease_expires_at=NULL,next_attempt_at=?2,completed_at=NULL, \
+                        updated_at=?2,last_error=NULL WHERE job_id=?1 AND status='failed'",
+                    params![job_id, now],
+                )?;
+                if changed != 1 {
+                    return Err(DbError::Invariant(
+                        "failed memory job changed during redrive".into(),
+                    ));
+                }
+                crate::job_redrive::append_redrive_event(
+                    tx,
+                    crate::job_redrive::RedriveKind::MemoryExtraction,
+                    job_id,
+                    &identity,
+                    &actor,
+                    &reason,
+                    attempt,
+                    now,
+                )?;
+                Ok(())
+            })
+            .map_err(MemoryAssertionError::from)
     }
 }
 
@@ -2075,5 +2174,60 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn failed_memory_extraction_redrive_keeps_job_source_identity_and_audits_operator() {
+        let db = fresh();
+        let store = MemoryJobStore::new(&db);
+        let conversation_id = ConversationId::from("redrive-memory");
+        let job_id = store
+            .enqueue_extraction(
+                &NewMemoryJob {
+                    kind: MemoryJobKind::MemoryExtract,
+                    conversation_id: conversation_id.clone(),
+                    event_start_seq: EventSeq(3),
+                    event_end_seq: EventSeq(4),
+                    run_id: "turn-4".into(),
+                    policy_hash: "policy".into(),
+                    model_hash: "model".into(),
+                    max_attempts: 1,
+                    now: 10,
+                },
+                "principal:p1",
+                "Controller",
+            )
+            .unwrap();
+        let claimed = store
+            .claim_next(MemoryJobKind::MemoryExtract, "worker", 10, 20)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed.job_id, job_id);
+        assert!(store.retry(&job_id, "worker", "model timeout", 11).unwrap());
+        let failed = store.failed_jobs(10).unwrap().pop().unwrap();
+        assert_eq!(failed.event_start_seq, EventSeq(3));
+        assert_eq!(failed.event_end_seq, EventSeq(4));
+        assert_eq!(failed.attempt, 1);
+
+        store
+            .redrive_failed(&job_id, "controller-1", "local backend recovered", 12)
+            .unwrap();
+        assert!(store.failed_jobs(10).unwrap().is_empty());
+        let claimed_again = store
+            .claim_next(MemoryJobKind::MemoryExtract, "worker-2", 12, 22)
+            .unwrap()
+            .unwrap();
+        assert_eq!(claimed_again.job_id, job_id);
+        assert_eq!(claimed_again.event_start_seq, EventSeq(3));
+        assert_eq!(claimed_again.attempt, 1);
+        let audit: (String, String, i64) = db
+            .with_conn(|conn| Ok(conn.query_row(
+                "SELECT actor,reason,prior_attempt FROM state_job_redrive_events \
+                 WHERE job_kind='memory_extraction' AND job_id=?1",
+                [&job_id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            )?))
+            .unwrap();
+        assert_eq!(audit, ("controller-1".into(), "local backend recovered".into(), 1));
     }
 }

@@ -62,6 +62,8 @@ pub const INTERNAL_POLL_INTERVAL: Duration = Duration::from_millis(100);
 /// that one tick can't hog SQLite's write lock.
 pub const POLL_BATCH_SIZE: i64 = 256;
 const DISPATCH_LEASE_SECONDS: i64 = 15 * 60;
+const DISPATCH_HANDLER_MAX_ATTEMPTS: u32 = 5;
+const DISPATCH_HANDLER_BACKOFF_BASE_SECS: i64 = 1;
 static DISPATCH_OWNER_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 type BoxFut = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
@@ -375,11 +377,24 @@ async fn dispatch_one(db: &Database, handler: &EventHandler, workers: &Arc<Semap
                 }
             }
             Err(error) => {
-                warn!(event_id = %event_id, error = %error, "automation bus: handler failed; releasing lease for recovery retry");
-                if let Err(release_error) =
-                    BusEventStore::new(&db).release_dispatch(&event_id, &owner)
-                {
-                    warn!(event_id = %event_id, error = %release_error, "automation bus: failed to release handler lease");
+                let now = chrono::Utc::now().timestamp();
+                match BusEventStore::new(&db).fail_dispatch(
+                    &event_id,
+                    &owner,
+                    &error,
+                    DISPATCH_HANDLER_MAX_ATTEMPTS,
+                    DISPATCH_HANDLER_BACKOFF_BASE_SECS,
+                    now,
+                ) {
+                    Ok(execlaw_core::automation_bus::DispatchFailureResult::RetryScheduled { attempt }) => {
+                        warn!(event_id = %event_id, attempt, error = %error, "automation bus: handler failed; retry is delayed");
+                    }
+                    Ok(execlaw_core::automation_bus::DispatchFailureResult::DeadLettered { attempt }) => {
+                        warn!(event_id = %event_id, attempt, error = %error, "automation bus: handler exhausted its retry budget and was dead-lettered");
+                    }
+                    Err(failure_error) => {
+                        warn!(event_id = %event_id, error = %failure_error, "automation bus: could not persist failed-handler disposition; lease recovery remains active");
+                    }
                 }
             }
         }

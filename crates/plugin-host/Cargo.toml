@@ -16,6 +16,8 @@ execlaw-skills = { path = "../skills" }
 tokio = { workspace = true, features = ["full", "macros", "process", "io-util", "sync"] }
 serde.workspace = true
 serde_json.workspace = true
+clap.workspace = true
+semver.workspace = true
 jsonschema.workspace = true
 tracing.workspace = true
 anyhow.workspace = true
@@ -27,6 +29,10 @@ chrono.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 criterion.workspace = true
+
+[[bin]]
+name = "execlaw-plugin-conformance"
+path = "src/bin/plugin_conformance.rs"
 
 [[bench]]
 name = "plugin_host_hot_paths"

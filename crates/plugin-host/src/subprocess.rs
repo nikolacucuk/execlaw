@@ -18,6 +18,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -124,6 +125,11 @@ impl SubprocessPlugin {
         }
         let mut cmd = Command::new(&spec.executable);
         cmd.args(&spec.args)
+            // Plugin runtimes need only a small OS environment. Clearing the
+            // parent's full environment prevents cloud credentials and
+            // unrelated service secrets from crossing the process boundary.
+            .env_clear()
+            .envs(safe_plugin_environment(std::env::vars_os()))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -302,6 +308,33 @@ impl SubprocessPlugin {
     }
 }
 
+const SAFE_PLUGIN_ENVIRONMENT: &[&str] = &[
+    "PATH",
+    "SYSTEMROOT",
+    "WINDIR",
+    "SYSTEMDRIVE",
+    "TEMP",
+    "TMP",
+    "HOME",
+    "USERPROFILE",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+];
+
+fn safe_plugin_environment(
+    variables: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    variables
+        .into_iter()
+        .filter(|(name, _)| {
+            SAFE_PLUGIN_ENVIRONMENT
+                .iter()
+                .any(|allowed| name.eq_ignore_ascii_case(OsStr::new(allowed)))
+        })
+        .collect()
+}
+
 /// Cap on the graceful-shutdown RPC. The reader-task drain
 /// usually resolves the call within a tick of the plugin
 /// exiting; this is a backstop for "plugin's shutdown handler
@@ -312,6 +345,27 @@ const SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugin_environment_drops_credentials_and_keeps_required_os_values() {
+        let variables = vec![
+            (OsString::from("PATH"), OsString::from("C:\\Windows\\System32")),
+            (OsString::from("OPENAI_API_KEY"), OsString::from("must-not-pass")),
+            (OsString::from("AWS_SECRET_ACCESS_KEY"), OsString::from("must-not-pass")),
+            (OsString::from("EXECLAW_MASTER_KEY"), OsString::from("must-not-pass")),
+            (OsString::from("SystemRoot"), OsString::from("C:\\Windows")),
+        ];
+        let filtered = safe_plugin_environment(variables);
+        assert_eq!(filtered.len(), 2);
+        assert!(filtered.iter().any(|(key, _)| key == OsStr::new("PATH")));
+        assert!(filtered
+            .iter()
+            .any(|(key, _)| key.eq_ignore_ascii_case(OsStr::new("SYSTEMROOT"))));
+        assert!(!filtered.iter().any(|(key, _)| {
+            key.to_string_lossy().to_ascii_lowercase().contains("secret")
+                || key.to_string_lossy().to_ascii_lowercase().contains("api_key")
+        }));
+    }
 
     #[test]
     fn rpc_request_serializes_as_expected() {

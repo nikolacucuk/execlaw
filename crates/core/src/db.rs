@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Instant;
 use thiserror::Error;
+use zeroize::{Zeroize, Zeroizing};
 
 const DB_EXECUTION_QUEUE_CAPACITY: usize = 16;
 type DbJob = Box<dyn FnOnce() + Send + 'static>;
@@ -186,6 +187,15 @@ impl std::fmt::Debug for SqlCipherKey {
     }
 }
 
+impl Drop for SqlCipherKey {
+    fn drop(&mut self) {
+        match self {
+            Self::RawBytes(bytes) => bytes.zeroize(),
+            Self::Passphrase(passphrase) => passphrase.zeroize(),
+        }
+    }
+}
+
 /// Top-level errors from this crate's database layer.
 #[derive(Debug, Error)]
 pub enum DbError {
@@ -266,18 +276,18 @@ impl Database {
                             bytes.len()
                         )));
                     }
-                    let hex = hex::encode(bytes);
+                    let hex = Zeroizing::new(hex::encode(bytes));
                     // Use `x'...'` blob literal form so SQLCipher treats this
                     // as raw key material and skips KDF.
-                    let pragma = format!("PRAGMA key = \"x'{}'\";", hex);
+                    let pragma = Zeroizing::new(format!("PRAGMA key = \"x'{}'\";", hex.as_str()));
                     conn.execute_batch(&pragma)?;
                 }
                 SqlCipherKey::Passphrase(pass) => {
                     // rusqlite offers `pragma_update` but it double-quotes the
                     // value; we need single-quote escaping here to match
                     // SQLCipher's expected input.
-                    let escaped = pass.replace('\'', "''");
-                    let pragma = format!("PRAGMA key = '{}';", escaped);
+                    let escaped = Zeroizing::new(pass.replace('\'', "''"));
+                    let pragma = Zeroizing::new(format!("PRAGMA key = '{}';", escaped.as_str()));
                     conn.execute_batch(&pragma)?;
                 }
             }

@@ -124,6 +124,22 @@ pub struct BusEventRow {
     pub dispatch_lease_expires_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeadLetterBusEvent {
+    pub id: String,
+    pub kind: BusEventKind,
+    pub source: String,
+    pub received_at: i64,
+    pub attempts: i64,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DispatchFailureResult {
+    RetryScheduled { attempt: i64 },
+    DeadLettered { attempt: i64 },
+}
+
 #[derive(Debug, Error)]
 pub enum BusEventError {
     #[error(transparent)]
@@ -222,7 +238,7 @@ impl<'a> BusEventStore<'a> {
             Ok(connection.execute(
                 "UPDATE state_bus_events SET dispatched_at = COALESCE(dispatched_at, ?3), \
                     dispatch_lease_owner = ?2, dispatch_lease_expires_at = ?4 \
-                 WHERE id = ?1 AND completed_at IS NULL \
+                 WHERE id = ?1 AND completed_at IS NULL AND dead_lettered_at IS NULL \
                    AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= ?3)",
                 params![id, owner, now, now.saturating_add(lease_seconds.max(1))],
             )?)
@@ -239,9 +255,9 @@ impl<'a> BusEventStore<'a> {
     ) -> Result<bool, BusEventError> {
         let changed = self.db.with_conn(|connection| {
             Ok(connection.execute(
-                "UPDATE state_bus_events SET completed_at = ?3, dispatch_lease_owner = NULL, \
+                    "UPDATE state_bus_events SET completed_at = ?3, dispatch_lease_owner = NULL, \
                     dispatch_lease_expires_at = NULL WHERE id = ?1 AND dispatch_lease_owner = ?2 \
-                    AND completed_at IS NULL",
+                    AND completed_at IS NULL AND dead_lettered_at IS NULL",
                 params![id, owner, completed_at],
             )?)
         })?;
@@ -260,6 +276,83 @@ impl<'a> BusEventStore<'a> {
             )?)
         })?;
         Ok(changed == 1)
+    }
+
+    /// Record a handler failure with bounded retries and a scheduled backoff.
+    /// A poison event leaves the pending index after its attempt budget ends.
+    pub fn fail_dispatch(
+        &self,
+        id: &str,
+        owner: &str,
+        error: &str,
+        max_attempts: u32,
+        backoff_base_secs: i64,
+        now: i64,
+    ) -> Result<DispatchFailureResult, BusEventError> {
+        if max_attempts == 0 {
+            return Err(DbError::Invariant("dispatch retry budget must be positive".into()).into());
+        }
+        let result = self.db.transaction(|tx| {
+            let attempts: i64 = tx.query_row(
+                "SELECT dispatch_attempts FROM state_bus_events \
+                 WHERE id=?1 AND dispatch_lease_owner=?2 AND completed_at IS NULL \
+                   AND dead_lettered_at IS NULL",
+                params![id, owner],
+                |row| row.get(0),
+            )?;
+            let attempt = attempts.saturating_add(1);
+            let detail = error.chars().take(1024).collect::<String>();
+            if attempt >= i64::from(max_attempts) {
+                tx.execute(
+                    "UPDATE state_bus_events SET dispatch_attempts=?3,dispatch_error=?4, \
+                        dead_lettered_at=?5,dispatch_lease_owner=NULL,dispatch_lease_expires_at=NULL \
+                     WHERE id=?1 AND dispatch_lease_owner=?2 AND completed_at IS NULL \
+                       AND dead_lettered_at IS NULL",
+                    params![id, owner, attempt, detail, now],
+                )?;
+                Ok(DispatchFailureResult::DeadLettered { attempt })
+            } else {
+                let backoff_multiplier = 1_i64 << attempt.saturating_sub(1).clamp(0, 10);
+                let retry_at = now.saturating_add(
+                    backoff_base_secs
+                        .max(1)
+                        .saturating_mul(backoff_multiplier)
+                        .min(300),
+                );
+                tx.execute(
+                    "UPDATE state_bus_events SET dispatch_attempts=?3,dispatch_error=?4, \
+                        dispatch_lease_owner=NULL,dispatch_lease_expires_at=?5 \
+                     WHERE id=?1 AND dispatch_lease_owner=?2 AND completed_at IS NULL \
+                       AND dead_lettered_at IS NULL",
+                    params![id, owner, attempt, detail, retry_at],
+                )?;
+                Ok(DispatchFailureResult::RetryScheduled { attempt })
+            }
+        })?;
+        Ok(result)
+    }
+
+    pub fn dead_letters(&self, limit: usize) -> Result<Vec<DeadLetterBusEvent>, BusEventError> {
+        self.db.with_conn(|connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT id,kind,source,received_at,dispatch_attempts,dispatch_error \
+                 FROM state_bus_events WHERE dead_lettered_at IS NOT NULL \
+                 ORDER BY dead_lettered_at,id LIMIT ?1",
+            )?;
+            statement
+                .query_map([limit.clamp(1, 200)], |row| {
+                    Ok(DeadLetterBusEvent {
+                        id: row.get(0)?,
+                        kind: BusEventKind::parse(&row.get::<_, String>(1)?),
+                        source: row.get(2)?,
+                        received_at: row.get(3)?,
+                        attempts: row.get(4)?,
+                        last_error: row.get(5)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::from)
+        }).map_err(BusEventError::from)
     }
 
     /// Fetch a single row by id. The dispatcher uses this after
@@ -378,11 +471,11 @@ impl<'a> BusEventStore<'a> {
         let ids = self.db.with_conn(|c| {
             let sql = if internal_only {
                 "SELECT id FROM state_bus_events \
-                 WHERE completed_at IS NULL AND internal = 1 AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= strftime('%s','now')) \
+                 WHERE completed_at IS NULL AND dead_lettered_at IS NULL AND internal = 1 AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= strftime('%s','now')) \
                  ORDER BY received_at ASC LIMIT ?1"
             } else {
                 "SELECT id FROM state_bus_events \
-                 WHERE completed_at IS NULL AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= strftime('%s','now')) \
+                 WHERE completed_at IS NULL AND dead_lettered_at IS NULL AND (dispatch_lease_expires_at IS NULL OR dispatch_lease_expires_at <= strftime('%s','now')) \
                  ORDER BY received_at ASC LIMIT ?1"
             };
             let mut stmt = c.prepare(sql)?;
@@ -433,6 +526,35 @@ mod tests {
             received_at: ts,
             payload: serde_json::json!({"k": "v"}),
         }
+    }
+
+    #[test]
+    fn handler_failures_back_off_and_dead_letter_after_a_bounded_budget() {
+        let db = fresh_db();
+        let store = BusEventStore::new(&db);
+        store.publish(&sample_event("poison", "fixture", 100), false).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        assert!(store.claim_dispatch("poison", "worker-1", now, 60).unwrap());
+        assert_eq!(
+            store
+                .fail_dispatch("poison", "worker-1", "fixture handler error", 2, 2, now)
+                .unwrap(),
+            DispatchFailureResult::RetryScheduled { attempt: 1 }
+        );
+        assert!(store.dead_letters(10).unwrap().is_empty());
+        assert!(store.claim_dispatch("poison", "worker-2", now + 3, 60).unwrap());
+        assert_eq!(
+            store
+                .fail_dispatch("poison", "worker-2", "still failing", 2, 2, now + 3)
+                .unwrap(),
+            DispatchFailureResult::DeadLettered { attempt: 2 }
+        );
+        let dead = store.dead_letters(10).unwrap();
+        assert_eq!(dead.len(), 1);
+        assert_eq!(dead[0].id, "poison");
+        assert_eq!(dead[0].attempts, 2);
+        assert_eq!(dead[0].last_error.as_deref(), Some("still failing"));
+        assert!(store.fetch_pending(false, 10).unwrap().is_empty());
     }
 
     #[test]

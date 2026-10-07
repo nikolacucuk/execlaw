@@ -25,11 +25,14 @@ import {
     setRunCompletionContract,
     listUnknownOutboxEffects,
     resolveUnknownOutboxEffect,
+    listDeadLetters,
+    redriveDeadLetter,
     type RunCompletionReport,
     type RunSummary,
     type RunTracePage,
     type UnknownOutboxEffect,
     type UnknownOutboxResolution,
+    type DeadLetterJobView,
     type WorkspaceRoot,
     type WorkspaceDiffPreview,
     type WorkspaceApplyState,
@@ -94,6 +97,9 @@ export function RunInspectorPage() {
     const [outboxEvidence, setOutboxEvidence] = useState<Record<number, string>>({});
     const [resolvingOutboxId, setResolvingOutboxId] = useState<number | null>(null);
     const [outboxError, setOutboxError] = useState<string | null>(null);
+    const [deadLetters, setDeadLetters] = useState<DeadLetterJobView[]>([]);
+    const [redriveReasons, setRedriveReasons] = useState<Record<string, string>>({});
+    const [redrivingKey, setRedrivingKey] = useState<string | null>(null);
 
     const refreshRuns = useCallback(async (append = false) => {
         try {
@@ -132,6 +138,7 @@ export function RunInspectorPage() {
     const refreshUnknownOutbox = useCallback(async () => {
         try {
             setUnknownOutboxEffects(await listUnknownOutboxEffects(token));
+            setDeadLetters(await listDeadLetters(token));
             setOutboxError(null);
         } catch (cause) {
             setOutboxError((cause as Error).message || "Could not load uncertain delivery outcomes");
@@ -150,6 +157,22 @@ export function RunInspectorPage() {
             setOutboxError((cause as Error).message || "Could not resolve the outbox outcome");
         } finally {
             setResolvingOutboxId(null);
+        }
+    };
+
+    const redriveJob = async (job: DeadLetterJobView) => {
+        const key = `${job.job_kind}:${job.job_id}`;
+        const reason = redriveReasons[key]?.trim();
+        if (!reason || !job.redrive_mode) return;
+        setRedrivingKey(key);
+        try {
+            await redriveDeadLetter(job.job_kind, job.job_id, reason, token);
+            setRedriveReasons((current) => ({ ...current, [key]: "" }));
+            await refreshUnknownOutbox();
+        } catch (cause) {
+            setOutboxError((cause as Error).message || "Could not redrive the failed job");
+        } finally {
+            setRedrivingKey(null);
         }
     };
 
@@ -449,6 +472,22 @@ export function RunInspectorPage() {
                         <Button size="sm" variant="outline-success" disabled={!outboxEvidence[effect.id]?.trim() || resolvingOutboxId !== null} onClick={() => { void resolveOutboxEffect(effect.id, "confirm_delivered"); }}>{resolvingOutboxId === effect.id ? "Saving…" : "Confirm delivered"}</Button>
                     </div>
                 </li>)}</ul>
+            </div>}
+            {deadLetters.some((job) => job.job_kind !== "outbox_unknown") && <div className="card mb-3" data-testid="dead-letter-jobs">
+                <div className="card-header">Dead-letter queue</div>
+                <div className="list-group list-group-flush">{deadLetters.filter((job) => job.job_kind !== "outbox_unknown").map((job) => {
+                    const key = `${job.job_kind}:${job.job_id}`;
+                    return <div key={key} className="list-group-item">
+                        <div className="d-flex flex-wrap justify-content-between gap-2"><strong>{job.job_kind.replaceAll("_", " ")}</strong><small>{job.attempts}{job.max_attempts === null ? "" : ` / ${job.max_attempts}`} attempts</small></div>
+                        <code>{job.job_id}</code>
+                        <div className="small text-muted">{job.affected_resource}</div>
+                        <div className="small mt-1">Cause: {job.cause.replaceAll("_", " ")} Â· {job.reconciliation_status.replaceAll("_", " ")}</div>
+                        {job.redrive_mode ? <div className="d-flex flex-wrap gap-2 mt-2">
+                            <Form.Control size="sm" className="flex-grow-1" style={{ minWidth: "16rem" }} aria-label={`Redrive reason for ${job.job_kind} ${job.job_id}`} placeholder="Why is this safe to retry?" value={redriveReasons[key] ?? ""} onChange={(event) => setRedriveReasons((current) => ({ ...current, [key]: event.target.value }))} />
+                            <Button size="sm" variant="outline-warning" disabled={!redriveReasons[key]?.trim() || redrivingKey !== null} onClick={() => { void redriveJob(job); }}>{redrivingKey === key ? "Redrivingâ€¦" : "Redrive same identity"}</Button>
+                        </div> : <div className="small text-warning mt-2">Automatic redrive is disabled until this handler failure is reviewed.</div>}
+                    </div>;
+                })}</div>
             </div>}
             {resetNotice && <div className="alert alert-info py-2" role="status">The saved trace cursor was unavailable. The inspector reloaded the authoritative run snapshot.</div>}
             <div className="row g-3">

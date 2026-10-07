@@ -794,6 +794,29 @@ impl BackendSupervisor {
         self.kick.notify_one();
     }
 
+    /// Stop every managed backend container before the control plane exits.
+    /// The next process startup reconciles the saved backend configuration.
+    pub async fn stop_all(&self) -> usize {
+        let mut slots = self.slots.lock().await;
+        let mut stopped = 0;
+        for (purpose, slot) in slots.iter_mut() {
+            let Some(handle) = slot.handle.take() else {
+                continue;
+            };
+            match self.controller.stop(&handle).await {
+                Ok(()) => {
+                    slot.status = ServiceStatus::Stopped;
+                    stopped += 1;
+                }
+                Err(error) => {
+                    slot.handle = Some(handle);
+                    warn!(backend = %purpose, %error, "backend container did not stop during service drain");
+                }
+            }
+        }
+        stopped
+    }
+
     /// Reset the per-purpose restart counter. Called by the upsert
     /// handler after every save so a row that was parked at
     /// `MAX_RESTART_ATTEMPTS` gets a fresh runway when the operator

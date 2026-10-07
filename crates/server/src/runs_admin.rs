@@ -12,7 +12,7 @@ use axum::{
 };
 use execlaw_core::audit::AuditStore;
 use execlaw_core::{runs::*, users::UserRole};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize)]
 pub struct CompletionContractRequest {
@@ -56,6 +56,23 @@ pub enum UnknownOutboxResolution {
 pub struct UnknownOutboxResolutionRequest {
     pub resolution: UnknownOutboxResolution,
     pub evidence_ref: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DeadLetterJobView {
+    pub job_kind: String,
+    pub job_id: String,
+    pub attempts: i64,
+    pub max_attempts: Option<i64>,
+    pub affected_resource: String,
+    pub cause: String,
+    pub reconciliation_status: String,
+    pub redrive_mode: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RedriveJobRequest {
+    pub reason: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -102,6 +119,234 @@ pub fn router() -> Router<AppState> {
             "/api/admin/outbox/{outbox_id}/resolution",
             post(resolve_unknown_outbox),
         )
+        .route("/api/admin/dead-letters", get(list_dead_letters))
+        .route(
+            "/api/admin/dead-letters/{job_kind}/{job_id}/redrive",
+            post(redrive_dead_letter),
+        )
+}
+
+async fn list_dead_letters(
+    State(state): State<AppState>,
+    user: AuthedUser,
+) -> Result<Json<Vec<DeadLetterJobView>>, ApiError> {
+    controller(&user)?;
+    let outbox = execlaw_core::outbox::OutboxStore::new(&state.db);
+    let mut jobs = Vec::new();
+    for row in outbox.dead_letters(100).map_err(|_| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "dead_letter_list_failed",
+        message: "could not load dead-lettered effects".into(),
+    })? {
+        jobs.push(DeadLetterJobView {
+            job_kind: "outbox".into(),
+            job_id: row.id.to_string(),
+            attempts: row.attempts,
+            max_attempts: None,
+            affected_resource: format!(
+                "{} in conversation {} at event {}",
+                row.effect_kind, row.conversation_id, row.enqueued_seq.0
+            ),
+            cause: sanitized_cause(row.last_error.as_deref()),
+            reconciliation_status: "known_not_accepted".into(),
+            redrive_mode: Some("same_effect_identity".into()),
+        });
+    }
+    for row in outbox.unknown_effects(100).map_err(|_| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "dead_letter_list_failed",
+        message: "could not load unresolved effects".into(),
+    })? {
+        jobs.push(DeadLetterJobView {
+            job_kind: "outbox_unknown".into(),
+            job_id: row.id.to_string(),
+            attempts: row.attempts,
+            max_attempts: None,
+            affected_resource: format!(
+                "{} in conversation {} at event {}",
+                row.effect_kind, row.conversation_id, row.enqueued_seq.0
+            ),
+            cause: "delivery_outcome_unknown".into(),
+            reconciliation_status: "operator_receipt_resolution_required".into(),
+            redrive_mode: None,
+        });
+    }
+    for row in execlaw_core::memory_assertions::MemoryJobStore::new(&state.db)
+        .failed_jobs(100)
+        .map_err(|_| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "dead_letter_list_failed",
+            message: "could not load failed extraction jobs".into(),
+        })?
+    {
+        jobs.push(DeadLetterJobView {
+            job_kind: "memory_extraction".into(),
+            job_id: row.job_id,
+            attempts: row.attempt,
+            max_attempts: Some(row.max_attempts),
+            affected_resource: format!(
+                "conversation {} events {}-{}",
+                row.conversation_id, row.event_start_seq.0, row.event_end_seq.0
+            ),
+            cause: sanitized_cause(row.last_error.as_deref()),
+            reconciliation_status: "local_idempotent_resume_available".into(),
+            redrive_mode: Some("same_job_and_source_identity".into()),
+        });
+    }
+    for row in execlaw_core::automation_runs::AutomationRunStore::new(&state.db)
+        .list_failed(100)
+        .map_err(|_| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "dead_letter_list_failed",
+            message: "could not load failed automation jobs".into(),
+        })?
+    {
+        jobs.push(DeadLetterJobView {
+            job_kind: "automation".into(),
+            job_id: row.id,
+            attempts: row.step_traces.len() as i64,
+            max_attempts: None,
+            affected_resource: format!("automation {} event {}", row.automation_id, row.event_id),
+            cause: sanitized_cause(
+                row.step_traces
+                    .iter()
+                    .rev()
+                    .find_map(|trace| trace.error.as_deref()),
+            ),
+            reconciliation_status: "completed_steps_resume_with_original_run_identity".into(),
+            redrive_mode: Some("same_run_and_effect_identity".into()),
+        });
+    }
+    for row in execlaw_core::automation_bus::BusEventStore::new(&state.db)
+        .dead_letters(100)
+        .map_err(|_| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "dead_letter_list_failed",
+            message: "could not load failed automation events".into(),
+        })?
+    {
+        jobs.push(DeadLetterJobView {
+            job_kind: "automation_event".into(),
+            job_id: row.id,
+            attempts: row.attempts,
+            max_attempts: None,
+            affected_resource: format!("automation event {} from {}", row.kind.as_str(), row.source),
+            cause: sanitized_cause(row.last_error.as_deref()),
+            reconciliation_status: "manual_handler_review_required".into(),
+            redrive_mode: None,
+        });
+    }
+    jobs.sort_by(|left, right| {
+        left.job_kind
+            .cmp(&right.job_kind)
+            .then_with(|| left.job_id.cmp(&right.job_id))
+    });
+    Ok(Json(jobs))
+}
+
+fn sanitized_cause(error: Option<&str>) -> String {
+    let text = error.unwrap_or_default().to_ascii_lowercase();
+    if text.contains("timeout") || text.contains("timed out") || text.contains("deadline") {
+        "timeout".into()
+    } else if text.contains("disk full") || text.contains("sqlite_full") || text.contains("no space") {
+        "storage_exhausted".into()
+    } else if text.contains("rate limit") || text.contains("quota") || text.contains("budget") {
+        "resource_budget_exhausted".into()
+    } else if text.contains("denied") || text.contains("forbidden") || text.contains("policy") {
+        "policy_denied".into()
+    } else if text.trim().is_empty() {
+        "cause_not_recorded".into()
+    } else {
+        "operation_failed".into()
+    }
+}
+
+async fn redrive_dead_letter(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path((job_kind, job_id)): Path<(String, String)>,
+    Json(request): Json<RedriveJobRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    controller(&user)?;
+    let reason = request.reason.trim();
+    if reason.is_empty() || reason.len() > 512 || reason.chars().any(char::is_control) {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "dead_letter_redrive_reason_invalid",
+            message: "redrive requires a bounded operator reason".into(),
+        });
+    }
+    match job_kind.as_str() {
+        "outbox" => {
+            let id = job_id.parse::<i64>().map_err(|_| ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "dead_letter_id_invalid",
+                message: "outbox id must be numeric".into(),
+            })?;
+            execlaw_core::outbox::OutboxStore::new(&state.db)
+                .redrive_dead_letter(id, &user.user_id, reason)
+                .map_err(|_| ApiError {
+                    status: StatusCode::CONFLICT,
+                    code: "dead_letter_redrive_rejected",
+                    message: "effect is not eligible for same-identity redrive".into(),
+                })?;
+            Ok(Json(serde_json::json!({"job_kind":job_kind,"job_id":job_id,"status":"pending"})))
+        }
+        "memory_extraction" => {
+            execlaw_core::memory_assertions::MemoryJobStore::new(&state.db)
+                .redrive_failed(
+                    &job_id,
+                    &user.user_id,
+                    reason,
+                    chrono::Utc::now().timestamp(),
+                )
+                .map_err(|_| ApiError {
+                    status: StatusCode::CONFLICT,
+                    code: "dead_letter_redrive_rejected",
+                    message: "extraction job is not eligible for same-identity redrive".into(),
+                })?;
+            state.memory_extract.wake();
+            Ok(Json(serde_json::json!({"job_kind":job_kind,"job_id":job_id,"status":"pending"})))
+        }
+        "automation" => {
+            let context = crate::automation_runtime::ExecutorContext::new(
+                state.db.clone(),
+                state.automation_agent_pool.clone(),
+                Some(state.plugin_host.clone()),
+            );
+            let actor = user.user_id.clone();
+            let reason = reason.to_owned();
+            let result = tokio::task::spawn_blocking(move || {
+                crate::automation_runtime::redrive_failed_run(
+                    &context,
+                    &job_id,
+                    &actor,
+                    &reason,
+                )
+            })
+            .await
+            .map_err(|_| ApiError {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "automation_redrive_worker_failed",
+                message: "automation redrive worker stopped unexpectedly".into(),
+            })?
+            .map_err(|_| ApiError {
+                status: StatusCode::CONFLICT,
+                code: "dead_letter_redrive_rejected",
+                message: "automation run is not eligible for same-identity redrive".into(),
+            })?;
+            Ok(Json(serde_json::json!({
+                "job_kind":job_kind,
+                "job_id":job_id,
+                "status":result.as_str()
+            })))
+        }
+        _ => Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "dead_letter_kind_invalid",
+            message: "unsupported dead-letter job kind".into(),
+        }),
+    }
 }
 
 async fn list_unknown_outbox(
@@ -949,6 +1194,64 @@ mod tests {
                 .get("content_ref")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn dead_letter_view_is_sanitized_and_controller_redrive_is_audited() {
+        let state = crate::routes::test_app_state();
+        let token = controller_token(&state, "dead-letter-controller", UserRole::Controller);
+        let conversation_id = ConversationId::from("dead-letter-view");
+        let id = OutboxStore::new(&state.db)
+            .enqueue(&OutboxRow {
+                id: None,
+                idempotency_key: IdempotencyKey::mint(&conversation_id, TurnSeq(1), 44),
+                conversation_id,
+                effect_kind: "transport.send".into(),
+                payload: vec![1, 2, 3],
+                status: OutboxStatus::Pending,
+                attempts: 0,
+                next_attempt_at: None,
+                last_error: None,
+                enqueued_seq: EventSeq(4),
+            })
+            .unwrap();
+        OutboxStore::new(&state.db)
+            .record_failure(id, "Authorization: Bearer private-token", 1, 0)
+            .unwrap();
+        let app = crate::routes::build_router(state.clone());
+        let request = Request::builder()
+            .method("GET")
+            .uri("/api/admin/dead-letters")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let rows: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(rows[0]["job_id"], id.to_string());
+        assert_eq!(rows[0]["cause"], "operation_failed");
+        assert!(rows[0].to_string().find("private-token").is_none());
+        assert_eq!(rows[0]["redrive_mode"], "same_effect_identity");
+
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/admin/dead-letters/outbox/{id}/redrive"))
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({
+                "reason": "operator checked the transport and approved one retry"
+            }).to_string()))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let timeline = OutboxStore::new(&state.db).delivery_timeline(id).unwrap();
+        assert_eq!(timeline.last().unwrap().transition, "operator_redrive");
+        assert_eq!(timeline.last().unwrap().actor.as_deref(), Some("dead-letter-controller"));
     }
 }
 

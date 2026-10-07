@@ -471,22 +471,19 @@ mod windows_runtime {
         })?;
 
         // Build a tokio runtime in this thread (SCM threads are not
-        // tokio-aware) and run the server until shutdown_rx fires.
+        // tokio-aware). Pass SCM stop/shutdown into cmd_serve so Axum
+        // stops accepting work and drains before the service reports stopped.
         let rt = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()
             .context("build tokio runtime for service")?;
-        let result: anyhow::Result<()> = rt.block_on(async move {
-            tokio::select! {
-                r = crate::cmd_serve(
-                    args.bind.clone(),
-                    args.db.clone(),
-                    args.no_encrypt,
-                    false,
-                ) => r,
-                _ = shutdown_rx => Ok(()),
-            }
-        });
+        let result: anyhow::Result<()> = rt.block_on(crate::cmd_serve(
+            args.bind.clone(),
+            args.db.clone(),
+            args.no_encrypt,
+            false,
+            Some(shutdown_rx),
+        ));
 
         // Tell the SCM we're stopping regardless of result; failures
         // surface in the Application event log via tracing.
@@ -532,6 +529,7 @@ mod windows_runtime {
                     args.db.clone(),
                     args.no_encrypt,
                     false,
+                    None,
                 ))
             }
         }

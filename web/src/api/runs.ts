@@ -262,6 +262,17 @@ export interface UnknownOutboxEffect {
     enqueued_seq: number;
 }
 
+export interface DeadLetterJobView {
+    job_kind: string;
+    job_id: string;
+    attempts: number;
+    max_attempts: number | null;
+    affected_resource: string;
+    cause: string;
+    reconciliation_status: string;
+    redrive_mode: string | null;
+}
+
 export type UnknownOutboxResolution = "authorize_retry" | "confirm_delivered";
 
 export function listRuns(token: () => string | null, before?: Pick<RunSummary, "started_at" | "run_id">): Promise<RunSummary[]> {
@@ -324,6 +335,22 @@ export function confirmRunDelivery(runId: string, evidence_ref: string, token: (
 
 export function listUnknownOutboxEffects(token: () => string | null): Promise<UnknownOutboxEffect[]> {
     return apiFetch("/api/admin/outbox/unknown", {}, token);
+}
+
+export function listDeadLetters(token: () => string | null): Promise<DeadLetterJobView[]> {
+    return apiFetch("/api/admin/dead-letters", {}, token);
+}
+
+export function redriveDeadLetter(
+    jobKind: string,
+    jobId: string,
+    reason: string,
+    token: () => string | null,
+): Promise<{ job_kind: string; job_id: string; status: string }> {
+    return apiFetch(`/api/admin/dead-letters/${encodeURIComponent(jobKind)}/${encodeURIComponent(jobId)}/redrive`, {
+        method: "POST",
+        body: { reason },
+    }, token);
 }
 
 export function resolveUnknownOutboxEffect(

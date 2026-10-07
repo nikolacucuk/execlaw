@@ -186,12 +186,13 @@ http://host.docker.internal:30068/v1
 ```
 
 Do not use `localhost` or `127.0.0.1` from inside the control-plane container.
-The local inference policy requires approval for both the exact DNS name and
-the resolved Docker host-gateway address. Confirm the address from inside the
-control-plane container:
+The local inference policy requires approval for the exact DNS name and
+every address it resolves to. List all unique host-gateway addresses from
+inside the control-plane container:
 
 ```bash
-sudo docker compose exec execlaw getent hosts host.docker.internal
+sudo docker compose exec execlaw sh -lc \
+  "getent ahosts host.docker.internal | awk '{print \$1}' | sort -u"
 sudo docker compose exec execlaw \
   curl --fail --silent --show-error http://host.docker.internal:30068/v1/models
 ```
@@ -209,9 +210,10 @@ In **Settings -> Network**, add these approvals under the **Local inference**
 capability:
 
 - Type **DNS name**, value `host.docker.internal`.
-- Type **IP range (CIDR)**, value the exact address from `getent` with a
-  single-host prefix: `/32` for IPv4 or `/128` for IPv6 (for example,
-  `172.16.0.1/32` or `fdd0::1/128`).
+- For **each unique IP** printed by `getent ahosts`, add type **IP range
+  (CIDR)** with a single-host prefix: `/32` for IPv4 or `/128` for IPv6. For
+  example, if it prints `fdd0::1` and `172.16.0.1`, add both `fdd0::1/128`
+  and `172.16.0.1/32`.
 
 Do not add them under **Private integration**; approvals are capability-scoped.
 Approvals carried forward by the capability-scope migration were placed under

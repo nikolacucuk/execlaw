@@ -52,6 +52,13 @@ impl MemoryExtractionSink {
         }
     }
 
+    /// Wake the leased extraction worker after an operator redrive.
+    pub fn wake(&self) {
+        if let Some(wake) = &self.wake {
+            wake.notify_one();
+        }
+    }
+
     /// Enqueue an exact committed turn range with host-derived authority.
     pub fn enqueue(&self, request: MemoryExtractionRequest) -> bool {
         let (Some(db), Some(inference)) = (&self.db, &self.inference) else {
@@ -82,9 +89,7 @@ impl MemoryExtractionSink {
         {
             return false;
         }
-        if let Some(wake) = &self.wake {
-            wake.notify_one();
-        }
+        self.wake();
         true
     }
 }

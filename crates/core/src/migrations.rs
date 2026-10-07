@@ -406,6 +406,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "projection_rebuild_generations",
         sql: include_str!("../migrations/0076_projection_rebuild_generations.sql"),
     },
+    Migration {
+        id: 77,
+        name: "https_only_session_cookies",
+        sql: include_str!("../migrations/0077_https_only_session_cookies.sql"),
+    },
+    Migration {
+        id: 78,
+        name: "controlled_job_redrive",
+        sql: include_str!("../migrations/0078_controlled_job_redrive.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

@@ -229,7 +229,7 @@ pub struct DueOccurrencePlan {
 }
 
 /// Apply a missed-run policy to sorted, due UTC occurrence timestamps.
-/// An occurrence up to 60 seconds late is treated as an ordinary scheduler
+/// An occurrence less than 60 seconds late is treated as an ordinary scheduler
 /// delay; older occurrences are handled by the configured downtime policy.
 pub fn plan_due_occurrences(
     policy: MissedRunPolicy,
@@ -245,7 +245,7 @@ pub fn plan_due_occurrences(
     let (ordinary, missed): (Vec<_>, Vec<_>) = due
         .iter()
         .copied()
-        .partition(|at| now.saturating_sub(*at) <= 60);
+        .partition(|at| now.saturating_sub(*at) < 60);
     let mut execute = Vec::new();
     let mut skip = Vec::new();
     match policy {
@@ -1237,11 +1237,15 @@ mod tests {
             }
         );
         assert_eq!(
-            plan_due_occurrences(MissedRunPolicy::Skip, 1, 460, &occurrences),
+            plan_due_occurrences(MissedRunPolicy::Skip, 1, 459, &occurrences),
             DueOccurrencePlan {
                 execute: vec![400],
                 skip: vec![100, 200, 300]
             }
+        );
+        assert_eq!(
+            plan_due_occurrences(MissedRunPolicy::Skip, 1, 460, &occurrences),
+            DueOccurrencePlan { execute: vec![], skip: vec![100, 200, 300, 400] }
         );
     }
 
