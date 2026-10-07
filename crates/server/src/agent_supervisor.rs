@@ -1066,6 +1066,19 @@ mod tests {
         )
         .expect("active governed asset should be loaded");
         assert_eq!(receipt.assets[0].asset_id, "agent-restart-memory");
+        let source = receipt
+            .instruction_sources
+            .iter()
+            .find(|source| source.source_kind == "skill_or_repository_asset")
+            .expect("injected asset must have an instruction source receipt");
+        assert_eq!(
+            source.source_id,
+            format!(
+                "{}@{}",
+                receipt.assets[0].asset_id, receipt.assets[0].version
+            )
+        );
+        assert_eq!(source.content_sha256.len(), 64);
 
         let original_run = {
             let store = AgentStore::new(&db);

@@ -2185,8 +2185,18 @@ mod tests {
     #[test]
     fn failed_memory_extraction_redrive_keeps_job_source_identity_and_audits_operator() {
         let db = fresh();
-        let store = MemoryJobStore::new(&db);
+        db.with_conn(|conn| {
+            conn.execute(
+                "INSERT INTO state_conversations(conversation_id,kind,last_seq,phase,trust_class,modality,display_name_source,is_pinned,is_ephemeral,context_window_policy) VALUES('redrive-memory','ControllerDM',0,'idle','Controller','text','auto',0,0,'default')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
         let conversation_id = ConversationId::from("redrive-memory");
+        event(&db, &conversation_id, 3);
+        event(&db, &conversation_id, 4);
+        let store = MemoryJobStore::new(&db);
         let job_id = store
             .enqueue_extraction(
                 &NewMemoryJob {

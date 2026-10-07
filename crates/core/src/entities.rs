@@ -75,13 +75,15 @@ impl<'db> EntityStore<'db> {
     }
     /// Accept a proposal; identity authority is not stored or copied by this semantic relation.
     pub fn accept_merge(&self, proposal_id: &str, now: i64) -> Result<(), DbError> {
-        self.db.with_conn(|c| { let (left,right)=c.query_row("SELECT left_entity_id,right_entity_id FROM knowledge_entity_merge_proposals WHERE proposal_id=?1 AND status='proposed'",[proposal_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?.ok_or_else(||DbError::Invariant("merge proposal is not pending".into()))?;
+        self.db.transaction(|c| { let (left,right)=c.query_row("SELECT left_entity_id,right_entity_id FROM knowledge_entity_merge_proposals WHERE proposal_id=?1 AND status='proposed'",[proposal_id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?))).optional()?.ok_or_else(||DbError::Invariant("merge proposal is not pending".into()))?;
+            let involved:i64=c.query_row("SELECT COUNT(*) FROM knowledge_entity_redirects WHERE source_entity_id IN (?1,?2) OR target_entity_id IN (?1,?2)",params![left,right],|r|r.get(0))?;
+            if involved>0{return Err(DbError::Invariant("merge rejected because an entity already participates in a merge; reverse that merge first".into()));}
             c.execute("UPDATE knowledge_entity_merge_proposals SET status='accepted',decided_at=?2 WHERE proposal_id=?1",params![proposal_id,now])?;
             c.execute("INSERT INTO knowledge_entity_redirects(source_entity_id,target_entity_id,proposal_id) VALUES(?1,?2,?3)",params![right,left,proposal_id])?; Ok(()) })
     }
     /// Reverse an accepted merge without rewriting aliases or source evidence.
     pub fn reverse_merge(&self, proposal_id: &str, now: i64) -> Result<(), DbError> {
-        self.db.with_conn(|c| { let changed=c.execute("DELETE FROM knowledge_entity_redirects WHERE proposal_id=?1",[proposal_id])?; if changed!=1{return Err(DbError::Invariant("accepted merge redirect is missing".into()));}
+        self.db.transaction(|c| { let changed=c.execute("DELETE FROM knowledge_entity_redirects WHERE proposal_id=?1",[proposal_id])?; if changed!=1{return Err(DbError::Invariant("accepted merge redirect is missing".into()));}
             let changed=c.execute("UPDATE knowledge_entity_merge_proposals SET status='reversed',decided_at=?2 WHERE proposal_id=?1 AND status='accepted'",params![proposal_id,now])?; if changed!=1{return Err(DbError::Invariant("merge proposal is not accepted".into()));} Ok(()) })
     }
 }
@@ -110,6 +112,8 @@ mod tests {
         assert_eq!(s.candidates("Jordan", 2).unwrap().len(), 2);
         s.accept_merge(&p, 4).unwrap();
         assert_eq!(s.candidates("Jordan", 2).unwrap().len(), 1);
+        let reverse_cycle = s.propose_merge(&b, &a, "operator-review:10", 4).unwrap();
+        assert!(s.accept_merge(&reverse_cycle, 5).is_err());
         s.reverse_merge(&p, 5).unwrap();
         assert_eq!(s.candidates("Jordan", 2).unwrap().len(), 2);
         assert!(s.add_alias(&a, "old", 10, Some(9), "e", true).is_err());

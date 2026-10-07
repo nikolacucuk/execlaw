@@ -1193,6 +1193,7 @@ mod tests {
                 admission_reasons: vec!["trust_floor_readable".into()],
             }],
             retrieved_assets: Vec::new(),
+            instruction_sources: Vec::new(),
         };
         execlaw_core::memory_assets::MemoryAssetStore::new(&state.db)
             .record_turn_loadout(conversation_id.as_str(), 1, &receipt)

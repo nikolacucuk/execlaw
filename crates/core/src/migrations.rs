@@ -818,7 +818,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(runner.apply_all().unwrap(), vec![76]);
+        assert_eq!(runner.apply_all().unwrap(), (76..=81).collect::<Vec<_>>());
     }
 
     // ----------------------------------------------------------------
