@@ -221,10 +221,15 @@ impl RunnerLauncher for BollardRunnerLauncher {
             .docker
             .inspect_image(&spec.image)
             .await
-            .map_err(|error| LauncherError::Docker(format!("inspect runner isolation profile: {error}")))?;
-        if !execlaw_container_manager::RuntimeProfile::Runner
-            .image_user_is_non_root(image.config.as_ref().and_then(|config| config.user.as_deref()))
-        {
+            .map_err(|error| {
+                LauncherError::Docker(format!("inspect runner isolation profile: {error}"))
+            })?;
+        if !execlaw_container_manager::RuntimeProfile::Runner.image_user_is_non_root(
+            image
+                .config
+                .as_ref()
+                .and_then(|config| config.user.as_deref()),
+        ) {
             return Err(LauncherError::ResourceAdmission(
                 "runner runtime profile requires an image with a non-root USER".into(),
             ));
@@ -238,7 +243,11 @@ impl RunnerLauncher for BollardRunnerLauncher {
                 "runner memory limit must be positive".into(),
             ));
         }
-        if memory_bytes > execlaw_container_manager::RuntimeProfile::Runner.limits().memory_bytes {
+        if memory_bytes
+            > execlaw_container_manager::RuntimeProfile::Runner
+                .limits()
+                .memory_bytes
+        {
             return Err(LauncherError::ResourceAdmission(
                 "runner memory request exceeds the Runner runtime profile".into(),
             ));

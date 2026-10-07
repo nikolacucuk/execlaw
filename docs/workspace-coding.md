@@ -46,7 +46,13 @@ closed.
 
 ## Job boundaries
 
-`workspace.run` accepts an argv array. It does not build a host shell command.
+`workspace.run` accepts an argv array, an optional workspace-relative `cwd`,
+and at most 64 KiB of optional stdin. It does not build a host shell command;
+standard shell executables are rejected because this plugin does not declare a
+separate shell capability. The inherited environment is allowlisted by the
+host, and credentials are not injected into the job container. Credential-like
+argument forms and URL user-info are rejected. Exit code and timeout remain
+separate result fields; retained stdout/stderr are bounded.
 `workspace.diagnostics` accepts a workspace-relative file path and language ID;
 the language-server command comes from the Controller configuration. Both
 require Controller trust, `workspace.process`, and a durable run binding.

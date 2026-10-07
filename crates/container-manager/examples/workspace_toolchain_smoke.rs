@@ -47,6 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "--locked".into(),
                 "--workspace".into(),
             ],
+            cwd: ".".into(),
+            stdin: None,
             timeout_ms: 120_000,
         })
         .await?;

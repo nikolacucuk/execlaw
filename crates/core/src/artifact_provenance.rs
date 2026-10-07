@@ -1,7 +1,7 @@
 //! Durable, fail-closed artifact provenance verification.
 
 use crate::{Database, DbError};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -56,6 +56,49 @@ pub struct ArtifactVerificationPolicy {
     pub allowed_publishers: Vec<String>,
     pub allowed_source_repositories: Vec<String>,
     pub allowed_workflows: Vec<String>,
+}
+
+/// An operator-approved publisher or digest revocation with import provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArtifactRevocation {
+    pub revocation_id: String,
+    pub scope: String,
+    pub subject: String,
+    pub source: String,
+    pub freshness: String,
+    pub issued_at: i64,
+    pub expires_at: Option<i64>,
+    pub revoked_at: i64,
+    pub revoked_by: String,
+    pub recovery_package: String,
+    pub active: bool,
+}
+
+/// Installed artifacts affected by a revocation, including their enabled state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevocationImpact {
+    pub artifact_id: String,
+    pub artifact_type: String,
+    pub artifact_locator: String,
+    pub sha256: String,
+    pub publisher_identity: String,
+}
+
+/// Offline imports retain where the snapshot came from and its validity window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RevocationFreshness {
+    OnlineVerified,
+    OfflineSnapshot,
+}
+
+impl RevocationFreshness {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OnlineVerified => "online_verified",
+            Self::OfflineSnapshot => "offline_snapshot",
+        }
+    }
 }
 
 /// Cryptographic verification boundary. Production can inject a cosign-backed
@@ -141,6 +184,8 @@ pub enum ArtifactVerificationError {
     LocalOverrideRequired,
     #[error("only a Controller may change artifact verification policy")]
     ControllerRequired,
+    #[error("artifact is revoked: {0}")]
+    Revoked(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -216,6 +261,174 @@ impl ArtifactProvenanceStore {
         Ok(())
     }
 
+    /// Install an operator-approved revocation. Offline snapshots are durable
+    /// but retain their source, issuance, and expiry so their freshness is visible.
+    pub fn revoke(
+        &self,
+        scope: &str,
+        subject: &str,
+        source: &str,
+        freshness: RevocationFreshness,
+        issued_at: i64,
+        expires_at: Option<i64>,
+        recovery_package: &str,
+        actor_trust: &str,
+        actor: &str,
+    ) -> Result<(), ArtifactVerificationError> {
+        if actor_trust != "Controller" {
+            return Err(ArtifactVerificationError::ControllerRequired);
+        }
+        let normalized_subject = match scope {
+            "publisher" => subject.trim().to_owned(),
+            "digest" => subject
+                .trim()
+                .strip_prefix("sha256:")
+                .unwrap_or(subject.trim())
+                .to_ascii_lowercase(),
+            _ => {
+                return Err(ArtifactVerificationError::InvalidMetadata(
+                    "revocation scope must be publisher or digest".into(),
+                ));
+            }
+        };
+        if normalized_subject.is_empty()
+            || normalized_subject.len() > 512
+            || source.trim().is_empty()
+            || source.len() > 1024
+            || actor.trim().is_empty()
+            || actor.len() > 128
+            || recovery_package.len() > 4096
+            || issued_at <= 0
+            || expires_at.is_some_and(|expiry| expiry <= issued_at)
+            || (scope == "digest"
+                && (normalized_subject.len() != 64
+                    || !normalized_subject
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())))
+        {
+            return Err(ArtifactVerificationError::InvalidMetadata(
+                "revocation metadata is invalid".into(),
+            ));
+        }
+        let revoked_at = chrono::Utc::now().timestamp();
+        let revocation_id = format!("{scope}:{}", sha256_bytes(normalized_subject.as_bytes()));
+        let detail = serde_json::json!({"scope":scope,"subject":normalized_subject,"source":source,"freshness":freshness.as_str(),"issued_at":issued_at,"expires_at":expires_at,"recovery_package":recovery_package});
+        self.db.transaction(|tx| {
+            tx.execute(
+                "INSERT INTO state_artifact_revocations(revocation_id,scope,subject,source,freshness,issued_at,expires_at,revoked_at,revoked_by,recovery_package,active) \
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1) \
+                 ON CONFLICT(scope,subject) DO UPDATE SET revocation_id=excluded.revocation_id,source=excluded.source,freshness=excluded.freshness,issued_at=excluded.issued_at,expires_at=excluded.expires_at,revoked_at=excluded.revoked_at,revoked_by=excluded.revoked_by,recovery_package=excluded.recovery_package,active=1",
+                params![revocation_id, scope, normalized_subject, source, freshness.as_str(), issued_at, expires_at, revoked_at, actor, recovery_package],
+            )?;
+            tx.execute(
+                "INSERT INTO state_artifact_verification_events(artifact_id,event_type,status,actor,detail_json,created_at) VALUES(NULL,'revocation_imported','active',?1,?2,?3)",
+                params![actor, detail.to_string(), revoked_at],
+            )?;
+            Ok(())
+        })?;
+        Ok(())
+    }
+
+    /// Re-enable a subject only through an explicit Controller recovery action.
+    pub fn clear_revocation(
+        &self,
+        scope: &str,
+        subject: &str,
+        actor_trust: &str,
+        actor: &str,
+    ) -> Result<bool, ArtifactVerificationError> {
+        if actor_trust != "Controller" {
+            return Err(ArtifactVerificationError::ControllerRequired);
+        }
+        if !matches!(scope, "publisher" | "digest") || actor.trim().is_empty() || actor.len() > 128
+        {
+            return Err(ArtifactVerificationError::InvalidMetadata(
+                "revocation recovery metadata is invalid".into(),
+            ));
+        }
+        let subject = if scope == "digest" {
+            subject
+                .strip_prefix("sha256:")
+                .unwrap_or(subject)
+                .to_ascii_lowercase()
+        } else {
+            subject.to_owned()
+        };
+        let now = chrono::Utc::now().timestamp();
+        self.db.transaction(|tx| {
+            let changed = tx.execute("UPDATE state_artifact_revocations SET active=0, revoked_by=?1, revoked_at=?2 WHERE scope=?3 AND subject=?4 AND active=1", params![actor, now, scope, subject])? != 0;
+            if changed {
+                tx.execute("INSERT INTO state_artifact_verification_events(artifact_id,event_type,status,actor,detail_json,created_at) VALUES(NULL,'revocation_cleared','recorded',?1,?2,?3)", params![actor, serde_json::json!({"scope":scope,"subject":subject}).to_string(), now])?;
+            }
+            Ok(changed)
+        }).map_err(Into::into)
+    }
+
+    /// Return the active revocation metadata for audit and offline freshness review.
+    pub fn revocations(&self) -> Result<Vec<ArtifactRevocation>, ArtifactVerificationError> {
+        self.db.with_conn(|conn| {
+            let mut query = conn.prepare("SELECT revocation_id,scope,subject,source,freshness,issued_at,expires_at,revoked_at,revoked_by,recovery_package,active FROM state_artifact_revocations ORDER BY scope,subject")?;
+            let rows = query.query_map([], |row| Ok(ArtifactRevocation { revocation_id:row.get(0)?,scope:row.get(1)?,subject:row.get(2)?,source:row.get(3)?,freshness:row.get(4)?,issued_at:row.get(5)?,expires_at:row.get(6)?,revoked_at:row.get(7)?,revoked_by:row.get(8)?,recovery_package:row.get(9)?,active:row.get::<_,i64>(10)? != 0 }))?;
+            rows.collect::<Result<Vec<_>,_>>().map_err(DbError::from)
+        }).map_err(Into::into)
+    }
+
+    /// Inventory currently verified artifacts covered by an active revocation.
+    pub fn revocation_impact(
+        &self,
+        scope: &str,
+        subject: &str,
+    ) -> Result<Vec<RevocationImpact>, ArtifactVerificationError> {
+        let normalized = if scope == "digest" {
+            subject
+                .strip_prefix("sha256:")
+                .unwrap_or(subject)
+                .to_ascii_lowercase()
+        } else {
+            subject.to_owned()
+        };
+        self.db.with_conn(|conn| {
+            let mut query = conn.prepare("SELECT artifact_id,artifact_type,artifact_locator,sha256,publisher_identity FROM state_artifact_provenance WHERE verification_status IN ('verified','local_development_override') AND (?1='publisher' AND publisher_identity=?2 OR ?1='digest' AND lower(sha256)=lower(?2))")?;
+            let rows = query.query_map(params![scope, normalized], |row| Ok(RevocationImpact { artifact_id:row.get(0)?,artifact_type:row.get(1)?,artifact_locator:row.get(2)?,sha256:row.get(3)?,publisher_identity:row.get(4)? }))?;
+            rows.collect::<Result<Vec<_>,_>>().map_err(DbError::from)
+        }).map_err(Into::into)
+    }
+
+    fn ensure_not_revoked(
+        &self,
+        publisher: &str,
+        digest: &str,
+    ) -> Result<(), ArtifactVerificationError> {
+        let current = chrono::Utc::now().timestamp();
+        let revoked: Option<String> = self.db.with_conn(|conn| conn.query_row(
+            "SELECT scope || ':' || subject FROM state_artifact_revocations WHERE active=1 AND (expires_at IS NULL OR expires_at>?1) AND ((scope='publisher' AND subject=?2) OR (scope='digest' AND lower(subject)=lower(?3))) LIMIT 1",
+            params![current, publisher, digest], |row| row.get(0)).optional().map_err(DbError::from))?;
+        if let Some(subject) = revoked {
+            Err(ArtifactVerificationError::Revoked(subject))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Refuse to start a previously installed artifact whose provenance is now revoked.
+    pub fn ensure_locator_not_revoked(
+        &self,
+        artifact_type: ArtifactType,
+        locator: &str,
+    ) -> Result<(), ArtifactVerificationError> {
+        let provenance: Option<(String, String)> = self.db.with_conn(|conn| {
+            conn.query_row(
+                "SELECT publisher_identity,sha256 FROM state_artifact_provenance WHERE artifact_type=?1 AND artifact_locator=?2",
+                params![artifact_type.as_str(), locator],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).optional().map_err(DbError::from)
+        })?;
+        if let Some((publisher, digest)) = provenance {
+            self.ensure_not_revoked(&publisher, &digest)?;
+        }
+        Ok(())
+    }
+
     pub fn verify_bytes(
         &self,
         bytes: &[u8],
@@ -230,6 +443,7 @@ impl ArtifactProvenanceStore {
                 actual,
             });
         }
+        self.ensure_not_revoked(&statement.publisher_identity, &actual)?;
         let policy = self.policy()?;
         require_allowlisted(&policy.allowed_publishers, &statement.publisher_identity)
             .map_err(ArtifactVerificationError::PublisherNotAllowed)?;
@@ -290,7 +504,7 @@ impl ArtifactProvenanceStore {
         artifact_type: ArtifactType,
         locator: &str,
     ) -> Result<Option<ProvenanceStatement>, ArtifactVerificationError> {
-        self.db.with_conn(|conn| {
+        let statement = self.db.with_conn(|conn| {
             let mut statement = conn.prepare(
                 "SELECT artifact_id,artifact_locator,sha256,publisher_identity,source_repository,source_commit,workflow_identity,signature_reference,attestation_result,sbom_format,sbom_location,sbom_sha256 \
                  FROM state_artifact_provenance WHERE artifact_type=?1 AND artifact_locator=?2 AND verification_status='verified'",
@@ -303,7 +517,11 @@ impl ArtifactProvenanceStore {
                 workflow_identity: row.get(6)?, signature_reference: row.get(7)?, attestation_result: row.get(8)?,
                 sbom_format: row.get(9)?, sbom_location: row.get(10)?, sbom_sha256: row.get(11)?,
             }))
-        }).map_err(Into::into)
+        }).map_err(ArtifactVerificationError::from)?;
+        if let Some(statement) = &statement {
+            self.ensure_not_revoked(&statement.publisher_identity, &statement.sha256)?;
+        }
+        Ok(statement)
     }
 
     pub fn digest_for_artifact_id(
@@ -373,7 +591,23 @@ impl ArtifactProvenanceStore {
             sbom_location: "local-development-override".into(),
             sbom_sha256: "0".repeat(64),
         };
+        self.ensure_not_revoked(&local.publisher_identity, &local.sha256)?;
         self.record(&local, "local_development_override", actor)
+    }
+
+    /// Record a content-addressed local artifact when its original archive is unavailable.
+    pub fn record_local_artifact_override(
+        &self,
+        statement: &ProvenanceStatement,
+        actor_trust: &str,
+        actor: &str,
+    ) -> Result<(), ArtifactVerificationError> {
+        if actor_trust != "Controller" || !self.policy()?.allow_unsigned_local_development {
+            return Err(ArtifactVerificationError::LocalOverrideRequired);
+        }
+        validate_statement(statement)?;
+        self.ensure_not_revoked(&statement.publisher_identity, &statement.sha256)?;
+        self.record(statement, "local_development_override", actor)
     }
 
     /// Record a Controller's explicit per-installation approval for one exact OCI image digest.
@@ -450,6 +684,9 @@ impl ArtifactProvenanceStore {
         reference: &str,
         actor: &str,
     ) -> Result<(), ArtifactVerificationError> {
+        if let Some((_, digest)) = reference.rsplit_once("@sha256:") {
+            self.ensure_not_revoked("", digest)?;
+        }
         if is_pinned_oci_reference(reference)
             && self.statement_for(artifact_type, reference)?.is_some()
         {
@@ -561,12 +798,13 @@ impl ArtifactProvenanceStore {
         status: &str,
         actor: &str,
     ) -> Result<(), ArtifactVerificationError> {
+        self.ensure_not_revoked(&statement.publisher_identity, &statement.sha256)?;
         let now = chrono::Utc::now().timestamp();
         self.db.transaction(|tx| {
             tx.execute(
                 "INSERT INTO state_artifact_provenance(artifact_id,artifact_type,artifact_locator,sha256,publisher_identity,source_repository,source_commit,workflow_identity,signature_reference,attestation_result,sbom_format,sbom_location,sbom_sha256,verified_at,verification_status,created_at) \
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?14) \
-                 ON CONFLICT(artifact_id) DO UPDATE SET sha256=excluded.sha256,publisher_identity=excluded.publisher_identity,source_repository=excluded.source_repository,source_commit=excluded.source_commit,workflow_identity=excluded.workflow_identity,signature_reference=excluded.signature_reference,attestation_result=excluded.attestation_result,sbom_format=excluded.sbom_format,sbom_location=excluded.sbom_location,sbom_sha256=excluded.sbom_sha256,verified_at=excluded.verified_at,verification_status=excluded.verification_status",
+                 ON CONFLICT DO UPDATE SET artifact_id=excluded.artifact_id,artifact_type=excluded.artifact_type,artifact_locator=excluded.artifact_locator,sha256=excluded.sha256,publisher_identity=excluded.publisher_identity,source_repository=excluded.source_repository,source_commit=excluded.source_commit,workflow_identity=excluded.workflow_identity,signature_reference=excluded.signature_reference,attestation_result=excluded.attestation_result,sbom_format=excluded.sbom_format,sbom_location=excluded.sbom_location,sbom_sha256=excluded.sbom_sha256,verified_at=excluded.verified_at,verification_status=excluded.verification_status",
                 params![statement.artifact_id, statement.artifact_type.as_str(), statement.artifact_locator, statement.sha256.to_ascii_lowercase(), statement.publisher_identity, statement.source_repository, statement.source_commit, statement.workflow_identity, statement.signature_reference, statement.attestation_result, statement.sbom_format, statement.sbom_location, statement.sbom_sha256.to_ascii_lowercase(), now, status],
             )?;
             tx.execute(
@@ -796,6 +1034,110 @@ mod tests {
                 .statement_for(ArtifactType::PluginZip, "hello-1.zip")
                 .unwrap()
                 .is_some()
+        );
+    }
+
+    #[test]
+    fn controller_revocation_blocks_reinstall_and_reports_impact() {
+        let store = store();
+        allow(&store, false);
+        let artifact = statement(b"artifact");
+        store
+            .verify_bytes(b"artifact", &artifact, Some(&Accept))
+            .unwrap();
+        assert_eq!(
+            store
+                .revocation_impact("publisher", &artifact.publisher_identity)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(matches!(
+            store.revoke(
+                "publisher",
+                &artifact.publisher_identity,
+                "operator incident package",
+                RevocationFreshness::OfflineSnapshot,
+                100,
+                Some(i64::MAX),
+                "recovery.tar",
+                "KnownTrusted",
+                "operator"
+            ),
+            Err(ArtifactVerificationError::ControllerRequired)
+        ));
+        store
+            .revoke(
+                "publisher",
+                &artifact.publisher_identity,
+                "operator incident package",
+                RevocationFreshness::OfflineSnapshot,
+                chrono::Utc::now().timestamp(),
+                None,
+                "recovery.tar",
+                "Controller",
+                "operator",
+            )
+            .unwrap();
+        assert!(matches!(
+            store.verify_bytes(b"artifact", &artifact, Some(&Accept)),
+            Err(ArtifactVerificationError::Revoked(_))
+        ));
+        assert!(matches!(
+            store.statement_for(ArtifactType::PluginZip, "hello-1.zip"),
+            Err(ArtifactVerificationError::Revoked(_))
+        ));
+        let stored = store.revocations().unwrap();
+        assert_eq!(stored[0].freshness, "offline_snapshot");
+        assert_eq!(stored[0].source, "operator incident package");
+        assert_eq!(stored[0].recovery_package, "recovery.tar");
+        assert!(
+            store
+                .clear_revocation(
+                    "publisher",
+                    &artifact.publisher_identity,
+                    "Controller",
+                    "operator"
+                )
+                .unwrap()
+        );
+        store
+            .verify_bytes(b"artifact", &artifact, Some(&Accept))
+            .unwrap();
+    }
+
+    #[test]
+    fn digest_revocation_blocks_digest_pinned_cache_reuse() {
+        let store = store();
+        let digest = sha256_bytes(b"artifact");
+        store
+            .revoke(
+                "digest",
+                &format!("sha256:{digest}"),
+                "offline advisory",
+                RevocationFreshness::OfflineSnapshot,
+                chrono::Utc::now().timestamp(),
+                None,
+                "",
+                "Controller",
+                "operator",
+            )
+            .unwrap();
+        let reference = format!("example/plugin@sha256:{digest}");
+        assert!(matches!(
+            store.authorize_oci_reference(
+                "sidecar:x",
+                ArtifactType::Sidecar,
+                &reference,
+                "install"
+            ),
+            Err(ArtifactVerificationError::Revoked(_))
+        ));
+        assert!(
+            store
+                .revocation_impact("digest", &digest)
+                .unwrap()
+                .is_empty()
         );
     }
 

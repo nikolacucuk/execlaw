@@ -36,9 +36,9 @@ results. No item is release-qualified by this documentation change.
 
 | Status | Items | Meaning |
 |---|---:|---|
-| Planned | 78 | Accepted items without delivery evidence attached yet |
+| Planned | 76 | Accepted items without delivery evidence attached yet |
 | Implemented; revalidate | 49 | Implementation is recorded; current acceptance and supported-platform evidence remains to be executed |
-| Partial | 26 | Implemented slices with open acceptance gates; see the individual rows below |
+| Partial | 28 | Implemented slices with open acceptance gates; see the individual rows below |
 | Reopened | 0 | No reopened enhancement items |
 | Verification blocked | 1 | H020 requires production SQLCipher qualification and reconciliation of F04/F16 |
 | Qualified | 0 | All applicable acceptance, security, and supported-platform evidence passes |
@@ -227,8 +227,8 @@ parallel list with its own status.
 | H079 | [Ship a plugin author conformance kit](llm-harness-roadmap.md#enhancement-079) | S6 | Implemented; revalidate | Unassigned | `execlaw-plugin-conformance` generates script/subprocess sample projects, runs them through mock inputs, validates input/result schemas and declared capabilities, checks lifecycle fixtures, and rejects authority-expanding or trust-relaxing upgrades with actionable messages. Server integration coverage installs the generated author sample through the public lifecycle API. Manifest JSON Schema is generated from plugin-sdk structs. Independent third-party author and release qualification remain |
 | H080 | [Negotiate plugin API compatibility explicitly](llm-harness-roadmap.md#enhancement-080) | S6 | Implemented; revalidate | Unassigned | Manifests can declare a semver host API range and required protocol features; unsupported ranges, unknown security features, and unknown compatibility fields fail during install parsing. Legacy bundles without the table remain supported. Deprecated `host_log` remains an alias for `log_info`; enable-time diagnostics name the replacement without changing its authority or effect. Supported-release fixture qualification remains |
 | H081 | [Pin executable tool versions for in-flight runs](llm-harness-roadmap.md#enhancement-081) | S6 | Planned | Unassigned | Pending |
-| H082 | [Support publisher revocation and offline compromise response](llm-harness-roadmap.md#enhancement-082) | S2 | Planned | Unassigned | Pending |
-| H083 | [Make plugin hook ordering, failure, and reentrancy predictable](llm-harness-roadmap.md#enhancement-083) | S6 | Planned | Unassigned | Pending |
+| H082 | [Support publisher revocation and offline compromise response](llm-harness-roadmap.md#enhancement-082) | S2 | Partial | Unassigned | Added Controller-approved publisher/digest revocation records with source, freshness, issue/expiry times, recovery package references, audit events, impact inventory, and checks on verified reinstall and digest-pinned OCI authorization. Local staged plugin trees now receive a content digest, and startup quarantines signed plugin artifacts whose publisher/digest has since been revoked. Tests cover non-Controller denial, offline metadata retention, impact inventory, clear/recover, reinstall denial, and OCI cache denial. Live running-sidecar stop/drain, operator-facing import/recovery workflow, and cached legacy/local package attribution remain |
+| H083 | [Make plugin hook ordering, failure, and reentrancy predictable](llm-harness-roadmap.md#enhancement-083) | S6 | Partial | Unassigned | Event subscribers now sort by plugin ID and handler rather than enable timing; a reverse-enable-order regression test records the contract. Event hook execution is not currently wired into a dispatcher, so failure isolation/abort semantics, invocation budgets, reentrancy controls, and versioned conformance traces remain |
 | H084 | [Trial a restricted WebAssembly plugin tier](llm-harness-roadmap.md#enhancement-084) | S6 | Planned | Unassigned | Pending |
 | H085 | [Trial delegation between explicitly paired operator-owned hosts](llm-harness-roadmap.md#enhancement-085) | S4 | Planned | Unassigned | Pending |
 | H086 | [Make instruction precedence inspectable and resistant to injection](llm-harness-roadmap.md#enhancement-086) | S3 | Planned | Unassigned | Pending |
@@ -238,8 +238,8 @@ parallel list with its own status.
 | H090 | [Separate explicit preferences from inferred personalization](llm-harness-roadmap.md#enhancement-090) | S5 | Planned | Unassigned | Pending |
 | H091 | [Ingest documents with page, cell, and region evidence](llm-harness-roadmap.md#enhancement-091) | S5 | Planned | Unassigned | Pending |
 | H092 | [Maintain a revision-aware local code and documentation index](llm-harness-roadmap.md#enhancement-092) | S4 | Planned | Unassigned | Pending |
-| H093 | [Apply patches with explicit file preconditions and transactions](llm-harness-roadmap.md#enhancement-093) | S4 | Planned | Unassigned | Pending |
-| H094 | [Use structured command specifications and platform-aware execution](llm-harness-roadmap.md#enhancement-094) | S4 | Planned | Unassigned | Pending |
+| H093 | [Apply patches with explicit file preconditions and transactions](llm-harness-roadmap.md#enhancement-093) | S4 | Partial | Unassigned | Multi-file checkout patches now validate all hashes and bounds before writes, reject duplicate paths, preserve permissions, and roll back already-applied files on a later I/O failure while protecting concurrent edits. Same-request replay accepts already-applied files so a reclaimed durable job can finish. Server regression tests were added but remain unverified because unrelated missing core modules currently stop server compilation; process-kill recovery and permission/encoding matrices remain |
+| H094 | [Use structured command specifications and platform-aware execution](llm-harness-roadmap.md#enhancement-094) | S4 | Partial | Unassigned | Workspace jobs now carry argv, a validated workspace-relative cwd, and bounded stdin; the sandbox rejects standard shell entry points and credential-like flags/URL user-info, uses a fixed environment, and returns exit and timeout separately. The request-validation test passes. Actual Windows/POSIX process behavior, universal secret echo prevention, and cancellation-to-container cleanup qualification remain |
 | H095 | [Manage development servers as owned run resources](llm-harness-roadmap.md#enhancement-095) | S4 | Planned | Unassigned | Pending |
 | H096 | [Make test and build evidence independently verifiable](llm-harness-roadmap.md#enhancement-096) | S4 | Planned | Unassigned | Pending |
 | H097 | [Treat dependency installation as an explicit execution boundary](llm-harness-roadmap.md#enhancement-097) | S4 | Planned | Unassigned | Pending |
@@ -373,6 +373,13 @@ operator-state changes by itself.
    with its own regression evidence. Never renumber IDs to hide unfinished work.
 
 ## Change record
+
+- 2026-10-07: began H082 revocation and H083 deterministic hook-order slices.
+  Added migration 0080 and focused adversarial tests. H082 remains Partial
+  because live sidecar drain and the operator import/recovery flow are open;
+  H083 remains Partial because the event hook dispatcher and its execution
+  contract are not implemented. The focused Rust test command was blocked by
+  Windows Application Control error 4551 before crate tests executed.
 
 - 2026-10-06: continued the main numbering with H131-H154 for the 24
   Paperclip-related enhancements; merged their rows into the item ledger and

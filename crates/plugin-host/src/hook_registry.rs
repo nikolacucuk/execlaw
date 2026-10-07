@@ -1319,13 +1319,20 @@ impl HookRegistry {
     }
 
     pub fn subscribers_for(&self, event_kind: &str) -> Vec<RegisteredEventSubscription> {
-        self.inner
+        let mut subscribers = self
+            .inner
             .read()
             .unwrap()
             .event_subs
             .get(event_kind)
             .cloned()
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Enable order depends on startup/install timing. Stable ordering makes
+        // replays and conformance traces independent of that timing.
+        subscribers.sort_by(|left, right| {
+            (&left.plugin_id, &left.handler).cmp(&(&right.plugin_id, &right.handler))
+        });
+        subscribers
     }
 }
 
@@ -1901,6 +1908,41 @@ handler = "handle_p2"
         let plugin_ids: Vec<&str> = subs.iter().map(|s| s.plugin_id.as_str()).collect();
         assert!(plugin_ids.contains(&"p1"));
         assert!(plugin_ids.contains(&"p2"));
+    }
+
+    #[test]
+    fn subscriber_order_is_stable_independent_of_enable_order() {
+        let p1 = r#"[plugin]
+id = "p1"
+name = "p1"
+version = "1.0.0"
+[[event_subscriptions]]
+on = "x"
+handler = "z_handler"
+"#;
+        let p2 = r#"[plugin]
+id = "p2"
+name = "p2"
+version = "1.0.0"
+[[event_subscriptions]]
+on = "x"
+handler = "a_handler"
+"#;
+        let registry = HookRegistry::new();
+        registry
+            .enable(&PluginManifest::parse(p2).unwrap())
+            .unwrap();
+        registry
+            .enable(&PluginManifest::parse(p1).unwrap())
+            .unwrap();
+        let subscriptions = registry.subscribers_for("x");
+        assert_eq!(
+            subscriptions
+                .iter()
+                .map(|sub| sub.plugin_id.as_str())
+                .collect::<Vec<_>>(),
+            ["p1", "p2"]
+        );
     }
 
     /// Disabling one of two plugins that share an event kind must leave

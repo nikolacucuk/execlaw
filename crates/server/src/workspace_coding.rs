@@ -68,7 +68,7 @@ pub struct WorkspacePatchRequest {
     pub edits: Vec<WorkspaceFileEdit>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WorkspaceFileEdit {
     pub path: String,
     /// SHA-256 of the current checkout file, or null when creating a file.
@@ -568,115 +568,7 @@ pub async fn patch_run_workspace(
         });
     }
 
-    let mut results = Vec::with_capacity(request.edits.len());
-    for edit in request.edits {
-        let target = match safe_target(&checkout, &edit.path, true) {
-            Ok((_, target)) => target,
-            Err(message) => {
-                return Err(ApiError {
-                    status: StatusCode::FORBIDDEN,
-                    code: "workspace_patch_path_denied",
-                    message,
-                });
-            }
-        };
-        let current = match read_target(&checkout, &edit.path, false) {
-            Ok(content) => content,
-            Err(message) => {
-                return Err(ApiError {
-                    status: StatusCode::FORBIDDEN,
-                    code: "workspace_patch_path_denied",
-                    message,
-                });
-            }
-        };
-        let current_hash = current
-            .as_ref()
-            .map(|bytes| hex::encode(Sha256::digest(bytes)));
-        let content = edit.content.into_bytes();
-        let next_hash = hex::encode(Sha256::digest(&content));
-        if current_hash.as_deref() == Some(next_hash.as_str()) {
-            results.push(serde_json::json!({"path": edit.path, "sha256": next_hash}));
-            continue;
-        }
-        if current_hash.as_deref() != edit.expected_sha256.as_deref() {
-            return Err(ApiError {
-                status: StatusCode::CONFLICT,
-                code: "workspace_patch_conflict",
-                message: format!("workspace file changed since it was read: {}", edit.path),
-            });
-        }
-        if current.as_deref() != Some(content.as_slice()) {
-            let parent = target.parent().ok_or_else(|| ApiError {
-                status: StatusCode::BAD_REQUEST,
-                code: "workspace_patch_path_denied",
-                message: "workspace patch target has no parent directory".into(),
-            })?;
-            let mut temp = tempfile::NamedTempFile::new_in(parent)
-                .map_err(|error| io_error("workspace_patch_temp_create", error))?;
-            temp.write_all(&content)
-                .and_then(|()| temp.as_file().sync_all())
-                .map_err(|error| io_error("workspace_patch_write", error))?;
-            let mut backup = None;
-            if current.is_some() {
-                let placeholder = tempfile::NamedTempFile::new_in(parent)
-                    .map_err(|error| io_error("workspace_patch_backup_create", error))?;
-                let backup_path = placeholder.into_temp_path();
-                std::fs::remove_file(&backup_path)
-                    .map_err(|error| io_error("workspace_patch_backup_stage", error))?;
-                std::fs::rename(&target, &backup_path)
-                    .map_err(|error| io_error("workspace_patch_backup", error))?;
-                let moved_hash = match std::fs::read(&backup_path) {
-                    Ok(bytes) => hex::encode(Sha256::digest(bytes)),
-                    Err(error) => {
-                        let preserved = restore_patch_backup(backup_path, &target);
-                        return Err(io_error(
-                            "workspace_patch_backup_read",
-                            std::io::Error::other(format!(
-                                "{error}; backup {}",
-                                preserved.unwrap_or_else(|| "restored".into())
-                            )),
-                        ));
-                    }
-                };
-                if edit.expected_sha256.as_deref() != Some(moved_hash.as_str()) {
-                    let preserved = restore_patch_backup(backup_path, &target);
-                    return Err(ApiError {
-                        status: StatusCode::CONFLICT,
-                        code: "workspace_patch_conflict",
-                        message: format!(
-                            "workspace file changed while patching: {}{}",
-                            edit.path,
-                            preserved
-                                .map(|path| format!("; original preserved at {path}"))
-                                .unwrap_or_default()
-                        ),
-                    });
-                }
-                backup = Some(backup_path);
-            }
-            if let Err(error) = temp.persist_noclobber(&target) {
-                if let Some(backup_path) = backup.take() {
-                    if let Some(preserved) = restore_patch_backup(backup_path, &target) {
-                        return Err(ApiError {
-                            status: StatusCode::CONFLICT,
-                            code: "workspace_patch_conflict",
-                            message: format!(
-                                "workspace target appeared during patching; original content was preserved at {}",
-                                preserved
-                            ),
-                        });
-                    }
-                }
-                return Err(io_error("workspace_patch_replace", error.error));
-            }
-            if let Some(backup_path) = backup {
-                std::fs::remove_file(backup_path)
-                    .map_err(|error| io_error("workspace_patch_backup_remove", error))?;
-            }
-        }
-        results.push(serde_json::json!({"path": edit.path, "sha256": next_hash}));
-    }
+    let results = apply_checkout_patch(&checkout, &request.edits)?;
     let result = serde_json::json!({"run_id": run_id, "request_id": request_id, "edits": results});
     let result_json = serde_json::to_string(&result).map_err(|error| ApiError {
         status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -713,6 +605,15 @@ pub(crate) fn apply_checkout_edit(
         code: "workspace_patch_path_denied",
         message,
     })?;
+    let original_permissions = if current.is_some() {
+        Some(
+            std::fs::metadata(&target)
+                .map_err(|error| io_error("workspace_patch_metadata", error))?
+                .permissions(),
+        )
+    } else {
+        None
+    };
     let current_hash = current
         .as_ref()
         .map(|bytes| hex::encode(Sha256::digest(bytes)));
@@ -738,6 +639,11 @@ pub(crate) fn apply_checkout_edit(
     temp.write_all(content)
         .and_then(|()| temp.as_file().sync_all())
         .map_err(|error| io_error("workspace_patch_write", error))?;
+    if let Some(permissions) = original_permissions {
+        temp.as_file()
+            .set_permissions(permissions)
+            .map_err(|error| io_error("workspace_patch_permissions", error))?;
+    }
     let mut backup = None;
     if current.is_some() {
         let placeholder = tempfile::NamedTempFile::new_in(parent)
@@ -795,6 +701,152 @@ pub(crate) fn apply_checkout_edit(
             .map_err(|error| io_error("workspace_patch_backup_remove", error))?;
     }
     Ok(serde_json::json!({"path": edit.path, "sha256": next_hash}))
+}
+
+/// Apply a bounded multi-file patch after checking every precondition.
+///
+/// Preflight ensures a conflict in a later edit cannot leave earlier edits
+/// committed. If an I/O error occurs during replacement, edits from this call
+/// are rolled back only while their proposed hashes still match, preserving
+/// any concurrent human change. Replayed batches accept files already at
+/// their proposed hash and finish the remaining edits idempotently.
+pub(crate) fn apply_checkout_patch(
+    checkout: &FsPath,
+    edits: &[WorkspaceFileEdit],
+) -> Result<Vec<serde_json::Value>, ApiError> {
+    const MAX_PATCH_BYTES: usize = 8 * 1024 * 1024;
+    if edits.is_empty() || edits.len() > 64 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "workspace_patch_bounds",
+            message: "workspace patch must contain 1 to 64 file edits".into(),
+        });
+    }
+    let total_bytes = edits
+        .iter()
+        .try_fold(0usize, |total, edit| total.checked_add(edit.content.len()));
+    if total_bytes.is_none_or(|total| total > MAX_PATCH_BYTES) {
+        return Err(ApiError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "workspace_patch_bounds",
+            message: "workspace patch exceeds the 8 MiB total content limit".into(),
+        });
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut originals = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let (_, target) = safe_target(checkout, &edit.path, true).map_err(|message| ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "workspace_patch_path_denied",
+            message,
+        })?;
+        if !seen.insert(target) {
+            return Err(ApiError {
+                status: StatusCode::BAD_REQUEST,
+                code: "workspace_patch_duplicate_path",
+                message: format!("workspace patch lists '{}' more than once", edit.path),
+            });
+        }
+        let current = read_target(checkout, &edit.path, false).map_err(|message| ApiError {
+            status: StatusCode::FORBIDDEN,
+            code: "workspace_patch_path_denied",
+            message,
+        })?;
+        if let Some(bytes) = &current {
+            String::from_utf8(bytes.clone()).map_err(|_| ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "workspace_patch_encoding_unsupported",
+                message: format!("workspace patch target is not UTF-8 text: {}", edit.path),
+            })?;
+        }
+        let current_hash = current
+            .as_ref()
+            .map(|bytes| hex::encode(Sha256::digest(bytes)));
+        let proposed_hash = hex::encode(Sha256::digest(edit.content.as_bytes()));
+        if current_hash.as_deref() != Some(proposed_hash.as_str())
+            && current_hash.as_deref() != edit.expected_sha256.as_deref()
+        {
+            return Err(ApiError {
+                status: StatusCode::CONFLICT,
+                code: "workspace_patch_conflict",
+                message: format!("workspace file changed since it was read: {}", edit.path),
+            });
+        }
+        originals.push(current);
+    }
+
+    let mut results = Vec::with_capacity(edits.len());
+    for (index, edit) in edits.iter().enumerate() {
+        match apply_checkout_edit(checkout, edit) {
+            Ok(result) => results.push(result),
+            Err(error) => {
+                let mut rollback_errors = Vec::new();
+                for rollback_index in (0..index).rev() {
+                    let applied = &edits[rollback_index];
+                    let proposed_hash = hex::encode(Sha256::digest(applied.content.as_bytes()));
+                    let target = match safe_target(checkout, &applied.path, true) {
+                        Ok((_, target)) => target,
+                        Err(message) => {
+                            rollback_errors.push(format!("{}: {message}", applied.path));
+                            continue;
+                        }
+                    };
+                    let current = match read_target(checkout, &applied.path, false) {
+                        Ok(current) => current,
+                        Err(message) => {
+                            rollback_errors.push(format!("{}: {message}", applied.path));
+                            continue;
+                        }
+                    };
+                    if current
+                        .as_ref()
+                        .map(|bytes| hex::encode(Sha256::digest(bytes)))
+                        != Some(proposed_hash.clone())
+                    {
+                        rollback_errors.push(format!(
+                            "{}: changed concurrently; left untouched",
+                            applied.path
+                        ));
+                        continue;
+                    }
+                    match originals[rollback_index].as_deref() {
+                        Some(original_bytes) => {
+                            let original = String::from_utf8(original_bytes.to_vec())
+                                .expect("preflight rejected non-UTF-8 patch targets");
+                            let restore = WorkspaceFileEdit {
+                                path: applied.path.clone(),
+                                expected_sha256: Some(proposed_hash),
+                                content: original,
+                            };
+                            if let Err(restore_error) = apply_checkout_edit(checkout, &restore) {
+                                rollback_errors
+                                    .push(format!("{}: {}", applied.path, restore_error.message));
+                            }
+                        }
+                        None => {
+                            if let Err(remove_error) = std::fs::remove_file(&target) {
+                                rollback_errors.push(format!("{}: {remove_error}", applied.path));
+                            }
+                        }
+                    }
+                }
+                if rollback_errors.is_empty() {
+                    return Err(error);
+                }
+                return Err(ApiError {
+                    status: error.status,
+                    code: error.code,
+                    message: format!(
+                        "{}; rollback incomplete: {}",
+                        error.message,
+                        rollback_errors.join("; ")
+                    ),
+                });
+            }
+        }
+    }
+    Ok(results)
 }
 
 struct WorkspacePatchLease {
@@ -2185,6 +2237,59 @@ mod tests {
 
     fn digest(bytes: &[u8]) -> String {
         hex::encode(Sha256::digest(bytes))
+    }
+
+    #[test]
+    fn patch_batch_preflights_all_hashes_before_writing_any_file() {
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::write(checkout.path().join("first.txt"), "first-old").unwrap();
+        std::fs::write(checkout.path().join("second.txt"), "second-human-edit").unwrap();
+        let edits = vec![
+            WorkspaceFileEdit {
+                path: "first.txt".into(),
+                expected_sha256: Some(digest(b"first-old")),
+                content: "first-new".into(),
+            },
+            WorkspaceFileEdit {
+                path: "second.txt".into(),
+                expected_sha256: Some(digest(b"second-original")),
+                content: "second-new".into(),
+            },
+        ];
+
+        let error = apply_checkout_patch(checkout.path(), &edits).unwrap_err();
+        assert_eq!(error.code, "workspace_patch_conflict");
+        assert_eq!(
+            std::fs::read_to_string(checkout.path().join("first.txt")).unwrap(),
+            "first-old",
+            "a later file conflict must not leave the earlier file patched"
+        );
+        assert_eq!(
+            std::fs::read_to_string(checkout.path().join("second.txt")).unwrap(),
+            "second-human-edit"
+        );
+    }
+
+    #[test]
+    fn patch_batch_replay_is_idempotent_and_duplicate_paths_are_rejected() {
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::write(checkout.path().join("file.txt"), "before").unwrap();
+        let edit = WorkspaceFileEdit {
+            path: "file.txt".into(),
+            expected_sha256: Some(digest(b"before")),
+            content: "after".into(),
+        };
+        let first = apply_checkout_patch(checkout.path(), std::slice::from_ref(&edit)).unwrap();
+        let replay = apply_checkout_patch(checkout.path(), std::slice::from_ref(&edit)).unwrap();
+        assert_eq!(first, replay);
+        assert_eq!(
+            std::fs::read_to_string(checkout.path().join("file.txt")).unwrap(),
+            "after"
+        );
+
+        let duplicate_error =
+            apply_checkout_patch(checkout.path(), &[edit.clone(), edit]).unwrap_err();
+        assert_eq!(duplicate_error.code, "workspace_patch_duplicate_path");
     }
 
     #[tokio::test]

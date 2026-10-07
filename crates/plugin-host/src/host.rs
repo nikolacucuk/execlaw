@@ -38,6 +38,53 @@ use thiserror::Error;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
+fn staged_tree_digest(root: &Path) -> Result<String, PluginHostError> {
+    fn collect(
+        current: &Path,
+        files: &mut Vec<PathBuf>,
+        total: &mut u64,
+    ) -> Result<(), PluginHostError> {
+        for entry in std::fs::read_dir(current)? {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                return Err(PluginHostError::Manifest(format!(
+                    "staged plugin contains a symbolic link: {}",
+                    path.display()
+                )));
+            }
+            if kind.is_dir() {
+                collect(&path, files, total)?;
+            } else if kind.is_file() {
+                *total = total.saturating_add(entry.metadata()?.len());
+                if *total > 256 * 1024 * 1024 {
+                    return Err(PluginHostError::Manifest(
+                        "staged plugin exceeds 256 MiB digest limit".into(),
+                    ));
+                }
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+    let mut files = Vec::new();
+    let mut total = 0;
+    collect(root, &mut files, &mut total)?;
+    files.sort();
+    let mut material = Vec::with_capacity(total as usize);
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .map_err(|error| PluginHostError::Manifest(error.to_string()))?;
+        material.extend_from_slice(relative.to_string_lossy().replace('\\', "/").as_bytes());
+        material.push(0);
+        material.extend_from_slice(&std::fs::read(path)?);
+        material.push(0);
+    }
+    Ok(execlaw_core::artifact_provenance::sha256_bytes(&material))
+}
+
 #[derive(Debug, Error)]
 pub enum PluginHostError {
     #[error("plugin '{0}' not installed")]
@@ -213,10 +260,7 @@ impl PluginHost {
         target: &Path,
     ) -> Result<(), PluginHostError> {
         let store = ArtifactProvenanceStore::new(self.inner.db.clone());
-        let artifact_id = format!(
-            "plugin-zip:{}:{}",
-            manifest.plugin.id, manifest.plugin.version
-        );
+        let artifact_id = format!("plugin-zip:{}", manifest.plugin.id);
         store
             .use_local_development_override(
                 &artifact_id,
@@ -225,6 +269,24 @@ impl PluginHost {
                 "Controller",
                 "plugin-admin-upload",
             )
+            .map_err(|error| PluginHostError::Provenance(error.to_string()))?;
+        let statement = ProvenanceStatement {
+            artifact_id,
+            artifact_type: ArtifactType::PluginZip,
+            artifact_locator: manifest.plugin.id.clone(),
+            sha256: staged_tree_digest(target)?,
+            publisher_identity: "local-development-override".into(),
+            source_repository: "local-development-override".into(),
+            source_commit: "local-development-override".into(),
+            workflow_identity: "local-development-override".into(),
+            signature_reference: "local-development-override".into(),
+            attestation_result: "Controller-approved local staged plugin tree".into(),
+            sbom_format: "cyclonedx".into(),
+            sbom_location: "local-development-override".into(),
+            sbom_sha256: "0".repeat(64),
+        };
+        store
+            .record_local_artifact_override(&statement, "Controller", "plugin-admin-upload")
             .map_err(|error| PluginHostError::Provenance(error.to_string()))
     }
 
@@ -1165,6 +1227,14 @@ impl PluginHost {
     pub async fn hydrate(&self) -> Result<(), PluginHostError> {
         let rows = self.list_rows()?;
         for row in rows.into_iter().filter(|r| r.enabled) {
+            let provenance = ArtifactProvenanceStore::new(self.inner.db.clone());
+            if let Err(error) =
+                provenance.ensure_locator_not_revoked(ArtifactType::PluginZip, &row.plugin_id)
+            {
+                warn!(plugin_id = %row.plugin_id, error = %error, "revoked plugin artifact blocked during hydration");
+                self.quarantine_plugin(&row.plugin_id, &format!("artifact revoked: {error}"));
+                continue;
+            }
             // The staged plugin directory is the installed artifact. Refresh
             // the cached manifest before registering hooks so upgrades to
             // sidecar mounts and services cannot be shadowed by stale SQLite
@@ -3614,5 +3684,17 @@ entry = "ui/panel.js"
         let error = host.install(outside_stage.path()).await.unwrap_err();
         assert!(matches!(error, PluginHostError::StagePathOutsideRoot(_)));
         assert!(host.get_row("outside-stage").unwrap().is_none());
+    }
+
+    #[test]
+    fn staged_tree_identity_is_stable_and_tracks_nested_executable_content() {
+        let stage = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(stage.path().join("nested")).unwrap();
+        std::fs::write(stage.path().join("plugin.toml"), "manifest").unwrap();
+        std::fs::write(stage.path().join("nested/main.rhai"), "return 1;").unwrap();
+        let first = staged_tree_digest(stage.path()).unwrap();
+        assert_eq!(first, staged_tree_digest(stage.path()).unwrap());
+        std::fs::write(stage.path().join("nested/main.rhai"), "return 2;").unwrap();
+        assert_ne!(first, staged_tree_digest(stage.path()).unwrap());
     }
 }

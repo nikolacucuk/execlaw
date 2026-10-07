@@ -1202,6 +1202,8 @@ async fn execute_workspace_tool(
                     checkout_path: snapshot.path().to_owned(),
                     job_name,
                     argv: argv.clone(),
+                    cwd: ".".into(),
+                    stdin: None,
                     timeout_ms,
                 })
                 .await?;

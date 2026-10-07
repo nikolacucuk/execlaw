@@ -11,6 +11,8 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+const MAX_CHILD_TASKS_PER_PARENT: usize = 128;
 use uuid::Uuid;
 
 /// Lifecycle state of a durable run.
@@ -443,6 +445,47 @@ pub enum RunStoreError {
     Corrupt(String),
 }
 
+fn child_dependency_cycle(
+    graph: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    fn visit(
+        node: &str,
+        graph: &std::collections::HashMap<String, Vec<String>>,
+        active: &mut Vec<String>,
+        complete: &mut std::collections::HashSet<String>,
+    ) -> Option<Vec<String>> {
+        if let Some(position) = active.iter().position(|entry| entry == node) {
+            let mut cycle = active[position..].to_vec();
+            cycle.push(node.to_owned());
+            return Some(cycle);
+        }
+        if complete.contains(node) {
+            return None;
+        }
+        active.push(node.to_owned());
+        if let Some(dependencies) = graph.get(node) {
+            for dependency in dependencies {
+                if graph.contains_key(dependency)
+                    && let Some(cycle) = visit(dependency, graph, active, complete)
+                {
+                    return Some(cycle);
+                }
+            }
+        }
+        active.pop();
+        complete.insert(node.to_owned());
+        None
+    }
+
+    let mut complete = std::collections::HashSet::new();
+    for node in graph.keys() {
+        if let Some(cycle) = visit(node, graph, &mut Vec::new(), &mut complete) {
+            return Some(cycle);
+        }
+    }
+    None
+}
+
 /// SQLite-backed durable run and step store.
 pub struct RunStore<'db> {
     db: &'db Database,
@@ -521,9 +564,16 @@ impl<'db> RunStore<'db> {
                 "child budgets must be positive and fit the parent aggregate limits".into(),
             ));
         }
-        if dependencies.len() > 64 || dependencies.iter().any(|dependency| dependency.len() > 128) {
+        if dependencies.len() > 64
+            || dependencies.iter().any(|dependency| dependency.len() > 128)
+            || dependencies
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                != dependencies.len()
+        {
             return Err(RunStoreError::Conflict(
-                "child dependency list exceeds its bounds".into(),
+                "child dependency list exceeds its bounds or repeats an edge".into(),
             ));
         }
         let task_json = serde_json::to_string(task)
@@ -548,6 +598,34 @@ impl<'db> RunStore<'db> {
             let child_parent: Option<String> = tx.query_row("SELECT parent_run_id FROM state_runs WHERE run_id=?1", [child_run_id], |row| row.get(0)).optional()?;
             if !parent_exists || child_parent.as_deref() != Some(parent_run_id) {
                 return Err(DbError::Invariant("child contract must reference an existing child and parent run".into()));
+            }
+            let mut dependency_graph = std::collections::HashMap::<String, Vec<String>>::new();
+            let mut dependency_statement = tx.prepare(
+                "SELECT child_run_id, dependencies_json FROM state_run_child_tasks \
+                 WHERE parent_run_id = ?1 ORDER BY child_run_id LIMIT ?2",
+            )?;
+            let dependency_rows = dependency_statement.query_map(
+                params![parent_run_id, MAX_CHILD_TASKS_PER_PARENT as i64 + 1],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?;
+            for row in dependency_rows {
+                let (run_id, encoded) = row?;
+                let dependencies: Vec<String> = serde_json::from_str(&encoded).map_err(|error| {
+                    DbError::Invariant(format!("stored child dependency list is invalid: {error}"))
+                })?;
+                dependency_graph.insert(run_id, dependencies);
+            }
+            if dependency_graph.len() >= MAX_CHILD_TASKS_PER_PARENT {
+                return Err(DbError::Invariant(format!(
+                    "parent child-task limit ({MAX_CHILD_TASKS_PER_PARENT}) reached"
+                )));
+            }
+            dependency_graph.insert(child_run_id.to_owned(), dependencies.to_vec());
+            if let Some(cycle) = child_dependency_cycle(&dependency_graph) {
+                return Err(DbError::Invariant(format!(
+                    "child dependency cycle rejected: {}",
+                    cycle.join(" -> ")
+                )));
             }
             tx.execute(
                 "INSERT OR IGNORE INTO state_run_child_budgets(
@@ -2947,6 +3025,18 @@ mod tests {
     use crate::ids::IdempotencyKey;
     use crate::migrations::MigrationRunner;
     use crate::outbox::OutboxStatus;
+
+    #[test]
+    fn child_dependency_cycles_are_reported_with_an_actionable_path() {
+        let graph = std::collections::HashMap::from([
+            ("child-a".to_owned(), vec!["child-b".to_owned()]),
+            ("child-b".to_owned(), vec!["child-c".to_owned()]),
+            ("child-c".to_owned(), vec!["child-a".to_owned()]),
+        ]);
+        let cycle = child_dependency_cycle(&graph).unwrap();
+        assert!(cycle.len() >= 4);
+        assert_eq!(cycle.first(), cycle.last());
+    }
 
     fn fresh_db() -> Database {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();

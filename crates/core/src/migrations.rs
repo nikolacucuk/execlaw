@@ -421,6 +421,16 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "resource_version_preconditions",
         sql: include_str!("../migrations/0079_resource_version_preconditions.sql"),
     },
+    Migration {
+        id: 80,
+        name: "artifact_revocations",
+        sql: include_str!("../migrations/0080_artifact_revocations.sql"),
+    },
+    Migration {
+        id: 81,
+        name: "knowledge_governance_primitives",
+        sql: include_str!("../migrations/0081_knowledge_governance_primitives.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

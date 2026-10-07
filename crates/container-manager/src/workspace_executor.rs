@@ -24,7 +24,17 @@ pub struct WorkspaceRunRequest {
     pub checkout_path: PathBuf,
     pub job_name: String,
     pub argv: Vec<String>,
+    /// Relative directory within the isolated checkout; defaults to its root.
+    #[serde(default = "default_workspace_cwd")]
+    pub cwd: String,
+    /// Optional bounded input written to the child's stdin.
+    #[serde(default)]
+    pub stdin: Option<String>,
     pub timeout_ms: u64,
+}
+
+fn default_workspace_cwd() -> String {
+    ".".into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -142,6 +152,7 @@ impl BollardWorkspaceJobExecutor {
         checkout_path: &Path,
         job_name: &str,
         command: &[String],
+        working_dir: &str,
         timeout_ms: u64,
         open_stdin: bool,
     ) -> Result<String, WorkspaceExecutionError> {
@@ -179,7 +190,7 @@ impl BollardWorkspaceJobExecutor {
             image: Some(image.to_owned()),
             entrypoint: Some(vec!["/usr/bin/timeout".into()]),
             cmd: Some(cmd),
-            working_dir: Some("/workspace".into()),
+            working_dir: Some(working_dir.into()),
             user: Some(container_user(&checkout_path)?),
             env: Some(vec![
                 "HOME=/tmp".into(),
@@ -304,6 +315,7 @@ impl BollardWorkspaceJobExecutor {
                 &request.checkout_path,
                 &request.job_name,
                 &request.server_argv,
+                "/workspace",
                 request.timeout_ms,
                 true,
             )
@@ -576,15 +588,48 @@ impl WorkspaceJobExecutor for BollardWorkspaceJobExecutor {
                 &request.checkout_path,
                 &request.job_name,
                 &request.argv,
+                &validate_working_directory(&request.checkout_path, &request.cwd)?,
                 request.timeout_ms,
-                false,
+                request.stdin.is_some(),
             )
             .await?;
         let result = async {
+            let mut attached = if request.stdin.is_some() {
+                Some(
+                    self.docker
+                        .attach_container(
+                            &name,
+                            Some(AttachContainerOptions::<String> {
+                                stdin: Some(true),
+                                stdout: Some(true),
+                                stderr: Some(true),
+                                stream: Some(true),
+                                logs: Some(false),
+                                ..Default::default()
+                            }),
+                        )
+                        .await
+                        .map_err(|error| WorkspaceExecutionError::Runtime(error.to_string()))?,
+                )
+            } else {
+                None
+            };
             self.docker
                 .start_container(&name, None::<StartContainerOptions<String>>)
                 .await
                 .map_err(|error| WorkspaceExecutionError::Runtime(error.to_string()))?;
+            if let (Some(stdin), Some(attached)) = (&request.stdin, &mut attached) {
+                attached
+                    .input
+                    .write_all(stdin.as_bytes())
+                    .await
+                    .map_err(|error| WorkspaceExecutionError::Runtime(error.to_string()))?;
+                attached
+                    .input
+                    .shutdown()
+                    .await
+                    .map_err(|error| WorkspaceExecutionError::Runtime(error.to_string()))?;
+            }
             let (exit_code, timed_out) = self.wait_for_exit(&name, request.timeout_ms).await?;
             let (output, output_truncated) = self.read_logs(&name, OUTPUT_LIMIT_BYTES).await?;
             Ok(WorkspaceRunResult {
@@ -820,7 +865,137 @@ fn validate_run_request(request: &WorkspaceRunRequest) -> Result<(), WorkspaceEx
     validate_job_name(&request.job_name)?;
     validate_argv(&request.argv)?;
     validate_timeout(request.timeout_ms)?;
+    if is_shell_executable(&request.argv[0]) {
+        return Err(WorkspaceExecutionError::Invalid(
+            "shell interpretation requires a separately approved shell capability".into(),
+        ));
+    }
+    if request
+        .stdin
+        .as_ref()
+        .is_some_and(|value| value.len() > 64 * 1024)
+    {
+        return Err(WorkspaceExecutionError::Invalid(
+            "workspace stdin exceeds the 64 KiB limit".into(),
+        ));
+    }
+    if request
+        .argv
+        .iter()
+        .any(|argument| credential_argument(argument))
+    {
+        return Err(WorkspaceExecutionError::Invalid(
+            "credential-like values cannot be passed in command arguments".into(),
+        ));
+    }
+    let _ = validate_working_directory(&request.checkout_path, &request.cwd)?;
     Ok(())
+}
+
+fn is_shell_executable(program: &str) -> bool {
+    Path::new(program)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            [
+                "sh",
+                "bash",
+                "zsh",
+                "fish",
+                "dash",
+                "cmd",
+                "cmd.exe",
+                "powershell",
+                "powershell.exe",
+                "pwsh",
+                "pwsh.exe",
+            ]
+            .iter()
+            .any(|shell| name.eq_ignore_ascii_case(shell))
+        })
+}
+
+fn credential_argument(argument: &str) -> bool {
+    let lower = argument.to_ascii_lowercase();
+    [
+        "--password=",
+        "--token=",
+        "--secret=",
+        "--api-key=",
+        "--apikey=",
+        "password=",
+        "token=",
+        "secret=",
+        "api_key=",
+        "apikey=",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+        || lower.contains("://")
+            && lower.split_once("://").is_some_and(|(_, tail)| {
+                tail.split('/')
+                    .next()
+                    .is_some_and(|authority| authority.contains('@'))
+            })
+}
+
+fn validate_working_directory(
+    checkout: &Path,
+    relative: &str,
+) -> Result<String, WorkspaceExecutionError> {
+    if relative.is_empty()
+        || relative.len() > 240
+        || relative.contains('\\')
+        || relative.starts_with('/')
+    {
+        return Err(WorkspaceExecutionError::Invalid(
+            "workspace working directory must be a bounded relative path".into(),
+        ));
+    }
+    let root = std::fs::canonicalize(checkout)
+        .map_err(|error| WorkspaceExecutionError::Invalid(error.to_string()))?;
+    let mut current = root;
+    if relative != "." {
+        for component in Path::new(relative).components() {
+            let std::path::Component::Normal(component) = component else {
+                return Err(WorkspaceExecutionError::Invalid(
+                    "workspace working directory cannot traverse its checkout".into(),
+                ));
+            };
+            if is_secret_component(&component.to_string_lossy()) {
+                return Err(WorkspaceExecutionError::Invalid(
+                    "workspace working directory cannot point into a secret path".into(),
+                ));
+            }
+            current.push(component);
+            let metadata = std::fs::symlink_metadata(&current)
+                .map_err(|error| WorkspaceExecutionError::Invalid(error.to_string()))?;
+            if metadata.file_type().is_symlink()
+                || is_reparse_point(&metadata)
+                || !metadata.is_dir()
+            {
+                return Err(WorkspaceExecutionError::Invalid(
+                    "workspace working directory must contain only real directories".into(),
+                ));
+            }
+        }
+    }
+    let relative_path = current
+        .strip_prefix(
+            std::fs::canonicalize(checkout)
+                .map_err(|error| WorkspaceExecutionError::Invalid(error.to_string()))?,
+        )
+        .map_err(|_| {
+            WorkspaceExecutionError::Invalid(
+                "workspace working directory escaped its checkout".into(),
+            )
+        })?;
+    let suffix = relative_path.to_string_lossy().replace('\\', "/");
+    Ok(if suffix.is_empty() {
+        "/workspace".into()
+    } else {
+        format!("/workspace/{suffix}")
+    })
 }
 
 fn validate_lsp_request(
@@ -1125,6 +1300,38 @@ mod tests {
         assert!(validate_job_name("../../etc").is_err());
         assert!(validate_timeout(1_000).is_ok());
         assert!(validate_timeout(180_001).is_err());
+    }
+
+    #[test]
+    fn structured_run_request_bounds_cwd_stdin_and_credential_arguments() {
+        let checkout = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(checkout.path().join("sp ace/ü")).unwrap();
+        let mut request = WorkspaceRunRequest {
+            image_reference: "local/toolchain@sha256:test".into(),
+            checkout_path: checkout.path().to_owned(),
+            job_name: "structured-run".into(),
+            argv: vec!["test-program".into(), "quoted ; value".into()],
+            cwd: "sp ace/ü".into(),
+            stdin: Some("line one\nline two".into()),
+            timeout_ms: 5_000,
+        };
+        assert!(validate_run_request(&request).is_ok());
+        assert_eq!(
+            validate_working_directory(checkout.path(), &request.cwd).unwrap(),
+            "/workspace/sp ace/ü"
+        );
+
+        request.cwd = "../outside".into();
+        assert!(validate_run_request(&request).is_err());
+        request.cwd = ".".into();
+        request.stdin = Some("x".repeat(64 * 1024 + 1));
+        assert!(validate_run_request(&request).is_err());
+        request.stdin = None;
+        request.argv[0] = "powershell.exe".into();
+        assert!(validate_run_request(&request).is_err());
+        request.argv = vec!["tool".into(), "--api-key=private".into()];
+        assert!(validate_run_request(&request).is_err());
+        assert!(credential_argument("https://alice:secret@example.test/"));
     }
 
     #[test]

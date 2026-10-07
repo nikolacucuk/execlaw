@@ -150,6 +150,16 @@ pub struct TurnAssetLoadoutReceipt {
     pub retrieval_query_sha256: Option<String>,
     pub assets: Vec<TurnAssetLoadoutEntry>,
     pub retrieved_assets: Vec<TurnAssetRetrievalEntry>,
+    #[serde(default)]
+    pub instruction_sources: Vec<InstructionSourceReceipt>,
+}
+
+/// Hash-only instruction source/version metadata; never contains prompt text or credentials.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct InstructionSourceReceipt {
+    pub source_kind: String,
+    pub source_id: String,
+    pub content_sha256: String,
 }
 
 /// One asset that passed every loadout policy check and was actually injected.
@@ -2037,6 +2047,7 @@ mod tests {
                 ],
             }],
             retrieved_assets: Vec::new(),
+            instruction_sources: Vec::new(),
         };
         let store = MemoryAssetStore::new(&db);
         store

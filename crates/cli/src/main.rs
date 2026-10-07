@@ -2821,7 +2821,7 @@ fn verify_database_snapshot(path: &Path, no_encrypt: bool) -> anyhow::Result<()>
                 .map_err(|error| anyhow::anyhow!("event HMAC key: {error}"))?,
         )
     };
-    verify_database_snapshot_inner(path, key.as_ref(), hmac_key.as_ref())
+    verify_database_snapshot_inner(path, key.as_deref(), hmac_key.as_deref())
 }
 
 #[cfg(feature = "sqlcipher")]

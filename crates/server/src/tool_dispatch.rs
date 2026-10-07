@@ -511,19 +511,27 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
                     }
                     execlaw_core::workspaces::WorkspacePatchClaim::Claimed => {}
                 }
-                let mut results = Vec::with_capacity(request.edits.len());
-                let mut error_code = None;
-                for edit in &request.edits {
-                    match crate::workspace_coding::apply_checkout_edit(&checkout, edit) {
-                        Ok(result) => results.push(result),
-                        Err(error) => {
-                            error_code = Some(error.code.to_owned());
-                            break;
-                        }
+                let edits = match crate::workspace_coding::apply_checkout_patch(
+                    &checkout,
+                    &request.edits,
+                ) {
+                    Ok(edits) => edits,
+                    Err(error) => {
+                        store
+                            .finish_patch_job(
+                                run_id,
+                                &request_id,
+                                &owner,
+                                None,
+                                Some(error.code),
+                                chrono::Utc::now().timestamp(),
+                            )
+                            .map_err(|finish| finish.to_string())?;
+                        return Err(format!("workspace patch failed: {}", error.message));
                     }
-                }
+                };
                 let result =
-                    serde_json::json!({"run_id":run_id,"request_id":request_id,"edits":results});
+                    serde_json::json!({"run_id":run_id,"request_id":request_id,"edits":edits});
                 let result_json =
                     serde_json::to_string(&result).map_err(|error| error.to_string())?;
                 store
@@ -531,14 +539,11 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
                         run_id,
                         &request_id,
                         &owner,
-                        error_code.is_none().then_some(result_json.as_str()),
-                        error_code.as_deref(),
+                        Some(result_json.as_str()),
+                        None,
                         chrono::Utc::now().timestamp(),
                     )
                     .map_err(|error| error.to_string())?;
-                if let Some(code) = error_code {
-                    return Err(format!("workspace patch failed: {code}"));
-                }
                 Ok(result)
             }
             "workspace.run" | "workspace.diagnostics" => {
@@ -619,6 +624,15 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
                         checkout_path: std::path::PathBuf::new(),
                         job_name: job_name.clone(),
                         argv,
+                        cwd: args
+                            .get("cwd")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or(".")
+                            .to_owned(),
+                        stdin: args
+                            .get("stdin")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
                         timeout_ms,
                     }),
                     None,

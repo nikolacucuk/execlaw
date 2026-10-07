@@ -8,6 +8,17 @@
       "maxItems": 64,
       "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
     },
+    "cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 240,
+      "description": "Optional workspace-relative working directory. Defaults to the checkout root."
+    },
+    "stdin": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Optional bounded UTF-8 input written to the process stdin and closed before waiting."
+    },
     "timeout_ms": { "type": "integer", "minimum": 1000, "maximum": 180000 }
   },
   "required": ["argv"],
