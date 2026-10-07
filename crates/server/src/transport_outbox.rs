@@ -3,7 +3,7 @@
 use crate::{chats, message_archive, state::AppState};
 use async_trait::async_trait;
 use execlaw_core::{
-    ids::{ConversationId, EventSeq, IdempotencyKey, TurnSeq},
+    ids::{AttachmentId, ConversationId, EventSeq, IdempotencyKey, TurnSeq},
     outbox::{OutboxRow, OutboxStatus, OutboxStore},
 };
 use execlaw_outbox::{
@@ -11,6 +11,8 @@ use execlaw_outbox::{
     WakeupDispatcher, run_drain_loop,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::io::Read;
 
 const EFFECT_KIND: &str = "transport.send";
 const ATTACHMENT_EFFECT_KIND: &str = "transport.send_attachments";
@@ -39,6 +41,12 @@ struct TransportSendEffect {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct LabeledTransportSendEffect {
+    effect: TransportSendEffect,
+    information_label: execlaw_core::information::InformationLabel,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct OwnerFence {
     agent_id: String,
     generation: u64,
@@ -63,6 +71,205 @@ struct TransportAttachmentEffect {
     recipient: String,
     text: String,
     attachments: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct LabeledTransportAttachmentEffect {
+    effect: TransportAttachmentEffect,
+    information_label: execlaw_core::information::InformationLabel,
+}
+
+fn decode_transport_send_effect(
+    payload: &[u8],
+) -> Result<
+    (
+        TransportSendEffect,
+        Option<execlaw_core::information::InformationLabel>,
+    ),
+    String,
+> {
+    if let Ok(labeled) = rmp_serde::from_slice::<LabeledTransportSendEffect>(payload) {
+        return Ok((labeled.effect, Some(labeled.information_label)));
+    }
+    Err("transport effect is missing its authority and information label".into())
+}
+
+fn decode_transport_attachment_effect(
+    payload: &[u8],
+) -> Result<
+    (
+        TransportAttachmentEffect,
+        Option<execlaw_core::information::InformationLabel>,
+    ),
+    String,
+> {
+    if let Ok(labeled) = rmp_serde::from_slice::<LabeledTransportAttachmentEffect>(payload) {
+        return Ok((labeled.effect, Some(labeled.information_label)));
+    }
+    Err("transport attachment effect is missing its authority and information label".into())
+}
+
+fn transport_information_label(
+    db: &execlaw_core::Database,
+    conversation_id: &ConversationId,
+    channel: &str,
+    recipient: &str,
+    source_id: &str,
+) -> execlaw_core::information::InformationLabel {
+    let trust_class = execlaw_core::conversation::ConversationStore::new(db)
+        .get(conversation_id)
+        .ok()
+        .flatten()
+        .map(|conversation| conversation.trust_class)
+        .unwrap_or_else(|| "Unknown".into());
+    let destination = format!("transport:{channel}:{recipient}");
+    let policy_revision = execlaw_core::tool_access::ToolAccessStore::new(db)
+        .latest_policy_revision_id()
+        .unwrap_or(0);
+    let mut label = execlaw_core::information::InformationLabel::observed(
+        execlaw_core::information::Sensitivity::Sensitive,
+        Some(conversation_id.as_str().to_owned()),
+        trust_class,
+        "conversation_output",
+        source_id,
+        [destination],
+    );
+    if let Some(turn_seq) = source_id
+        .strip_prefix("turn:")
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|value| value.parse::<i64>().ok())
+        && let Ok(Some(run)) = execlaw_core::runs::RunStore::new(db)
+            .find_run_for_input(conversation_id, EventSeq(turn_seq))
+        && let Ok(Some((run_subject, run_label))) =
+            execlaw_core::information_store::InformationLabelStore::new(db)
+                .latest_for_identity("run", &run.run_id)
+        && let Some(combined) = execlaw_core::information::InformationLabel::combine(
+            &[label.clone(), run_label],
+            "transport_effect",
+        )
+    {
+        let _ = run_subject;
+        label = combined;
+    }
+    label.with_policy_revision(policy_revision)
+}
+
+fn transport_information_subject(
+    source_id: &str,
+    text: &str,
+) -> execlaw_core::information_store::InformationSubject {
+    execlaw_core::information_store::InformationSubject {
+        kind: "transport_effect".into(),
+        id: source_id.to_owned(),
+        sha256: hex::encode(Sha256::digest(text.as_bytes())),
+    }
+}
+
+fn persist_transport_information_label(
+    db: &execlaw_core::Database,
+    source_id: &str,
+    text: &str,
+    label: execlaw_core::information::InformationLabel,
+) -> Result<execlaw_core::information::InformationLabel, String> {
+    let store = execlaw_core::information_store::InformationLabelStore::new(db);
+    let subject = transport_information_subject(source_id, text);
+    if let Some(existing) = store
+        .get(&subject)
+        .map_err(|error| format!("read outbound information label: {error}"))?
+    {
+        if existing.authority_principal_id != label.authority_principal_id
+            || existing.authority_fingerprint != label.authority_fingerprint
+        {
+            return Err("outbound information label is bound to different authority".into());
+        }
+        return Ok(existing);
+    }
+    store
+        .observe(
+            &subject,
+            &label,
+            "host:transport-outbox",
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(|error| format!("persist outbound information label: {error}"))?;
+    Ok(label)
+}
+
+fn load_transport_information_label(
+    db: &execlaw_core::Database,
+    text: &str,
+    payload_label: Option<execlaw_core::information::InformationLabel>,
+) -> Result<Option<execlaw_core::information::InformationLabel>, DispatchError> {
+    let Some(payload_label) = payload_label else {
+        return Ok(None);
+    };
+    let source_id = payload_label
+        .provenance
+        .first()
+        .map(|entry| entry.source_id.as_str())
+        .ok_or_else(|| {
+            DispatchError::NotAccepted("outbound information provenance is missing".into())
+        })?;
+    let subject = transport_information_subject(source_id, text);
+    execlaw_core::information_store::InformationLabelStore::new(db)
+        .get(&subject)
+        .map_err(|_| DispatchError::NotAccepted("outbound information label lookup failed".into()))
+        .map(|stored| stored.or(Some(payload_label)))
+}
+
+fn originating_principal_authority(
+    db: &execlaw_core::Database,
+    conversation_id: &ConversationId,
+    model_seq: i64,
+) -> Result<Option<(String, String)>, String> {
+    use execlaw_core::events::EventKind;
+    let events = execlaw_core::EventLog::new(db)
+        .replay_since(conversation_id, EventSeq(0))
+        .map_err(|error| format!("read outbound source events: {error}"))?;
+    let raw_id = events
+        .iter()
+        .filter(|event| event.seq.0 < model_seq && event.kind == EventKind::UserMsg)
+        .rev()
+        .find_map(|event| {
+            event
+                .decode_payload::<serde_json::Value>()
+                .ok()?
+                .get("sender_principal_id")?
+                .as_str()
+                .map(ToOwned::to_owned)
+        });
+    let Some(raw_id) = raw_id else {
+        return Ok(None);
+    };
+    let principal_id = if raw_id == "controller" {
+        crate::routes::controller_principal_id(db)
+            .ok()
+            .map(|id| id.as_str().to_owned())
+    } else {
+        Some(raw_id)
+    };
+    let Some(principal_id) = principal_id else {
+        return Ok(None);
+    };
+    let principal_id = if principal_id == "controller" {
+        crate::routes::controller_principal_id(db)
+            .ok()
+            .map(|id| id.as_str().to_owned())
+    } else {
+        Some(principal_id)
+    };
+    let Some(principal_id) = principal_id else {
+        return Ok(None);
+    };
+    let principal = execlaw_core::principal::PrincipalStore::new(db)
+        .get(&execlaw_core::ids::PrincipalId::from(principal_id.clone()))
+        .map_err(|error| format!("read outbound source authority: {error}"))?;
+    let Some(principal) = principal else {
+        return Ok(None);
+    };
+    let snapshot = serde_json::to_vec(&principal.trust_level)
+        .map_err(|error| format!("encode outbound source authority: {error}"))?;
+    Ok(Some((principal_id, hex::encode(Sha256::digest(snapshot)))))
 }
 
 fn transport_tool_call(
@@ -167,10 +374,19 @@ pub fn stage_plugin_text(
     channel: &str,
     recipient: &str,
     text: &str,
+    authority: Option<(&str, &str)>,
 ) -> Result<i64, String> {
     if turn_seq <= 0 || channel.is_empty() || recipient.is_empty() || text.trim().is_empty() {
         return Err("transport tool effect is missing its turn, destination, or text".into());
     }
+    let source_id = format!("turn:{turn_seq}:{ordinal}");
+    let mut information_label =
+        transport_information_label(db, conversation_id, channel, recipient, &source_id);
+    if let Some((principal_id, fingerprint)) = authority {
+        information_label = information_label.with_authority(principal_id, fingerprint);
+    }
+    information_label =
+        persist_transport_information_label(db, &source_id, text, information_label)?;
     let effect = TransportSendEffect {
         channel: channel.to_owned(),
         recipient: recipient.to_owned(),
@@ -179,8 +395,11 @@ pub fn stage_plugin_text(
         archive_message_id: None,
         owner: None,
     };
-    let payload = rmp_serde::to_vec(&effect)
-        .map_err(|error| format!("encode transport tool effect: {error}"))?;
+    let payload = rmp_serde::to_vec(&LabeledTransportSendEffect {
+        effect,
+        information_label,
+    })
+    .map_err(|error| format!("encode transport tool effect: {error}"))?;
     let row = OutboxRow {
         id: None,
         idempotency_key: IdempotencyKey::mint(conversation_id, TurnSeq(turn_seq), ordinal),
@@ -212,6 +431,30 @@ pub fn stage_plugin_attachments(
     text: &str,
     attachments: &[String],
 ) -> Result<i64, String> {
+    stage_plugin_attachments_with_authority(
+        db,
+        conversation_id,
+        turn_seq,
+        ordinal,
+        channel,
+        recipient,
+        text,
+        attachments,
+        None,
+    )
+}
+
+pub fn stage_plugin_attachments_with_authority(
+    db: &execlaw_core::Database,
+    conversation_id: &ConversationId,
+    turn_seq: i64,
+    ordinal: u32,
+    channel: &str,
+    recipient: &str,
+    text: &str,
+    attachments: &[String],
+    authority: Option<(&str, &str)>,
+) -> Result<i64, String> {
     if turn_seq <= 0
         || channel.is_empty()
         || recipient.is_empty()
@@ -225,14 +468,25 @@ pub fn stage_plugin_attachments(
             "transport attachment effect is missing its turn, destination, or attachment".into(),
         );
     }
+    let source_id = format!("turn:{turn_seq}:{ordinal}");
+    let mut information_label =
+        transport_information_label(db, conversation_id, channel, recipient, &source_id);
+    if let Some((principal_id, fingerprint)) = authority {
+        information_label = information_label.with_authority(principal_id, fingerprint);
+    }
+    information_label =
+        persist_transport_information_label(db, &source_id, text, information_label)?;
     let effect = TransportAttachmentEffect {
         channel: channel.to_owned(),
         recipient: recipient.to_owned(),
         text: text.to_owned(),
         attachments: attachments.to_vec(),
     };
-    let payload = rmp_serde::to_vec(&effect)
-        .map_err(|error| format!("encode transport attachment effect: {error}"))?;
+    let payload = rmp_serde::to_vec(&LabeledTransportAttachmentEffect {
+        effect,
+        information_label,
+    })
+    .map_err(|error| format!("encode transport attachment effect: {error}"))?;
     let row = OutboxRow {
         id: None,
         idempotency_key: IdempotencyKey::mint(conversation_id, TurnSeq(turn_seq), ordinal),
@@ -276,14 +530,21 @@ pub fn enqueue_task_attachments(
     {
         return Err("task attachment effect is missing its source, scope, or destination".into());
     }
+    let information_label =
+        transport_information_label(db, conversation_id, channel, recipient, "task_attachment");
+    let information_label =
+        persist_transport_information_label(db, "task_attachment", text, information_label)?;
     let effect = TransportAttachmentEffect {
         channel: channel.to_owned(),
         recipient: recipient.to_owned(),
         text: text.to_owned(),
         attachments: attachments.to_vec(),
     };
-    let payload = rmp_serde::to_vec(&effect)
-        .map_err(|error| format!("encode task attachment effect: {error}"))?;
+    let payload = rmp_serde::to_vec(&LabeledTransportAttachmentEffect {
+        effect,
+        information_label,
+    })
+    .map_err(|error| format!("encode task attachment effect: {error}"))?;
     let row = OutboxRow {
         id: None,
         idempotency_key: IdempotencyKey::mint_scoped(conversation_id, task_scope, 0),
@@ -310,6 +571,21 @@ fn enqueue_with_key(
     text: &str,
     context: EnqueueContext<'_>,
 ) -> Result<(i64, bool), String> {
+    let source_id = context
+        .model_seq
+        .map(|seq| format!("event:{seq}"))
+        .unwrap_or_else(|| "agent_output".into());
+    let mut information_label =
+        transport_information_label(&state.db, conversation_id, channel, recipient, &source_id);
+    if let Some(model_seq) = context.model_seq {
+        if let Some((principal_id, fingerprint)) =
+            originating_principal_authority(&state.db, conversation_id, model_seq)?
+        {
+            information_label = information_label.with_authority(principal_id, fingerprint);
+        }
+    }
+    information_label =
+        persist_transport_information_label(&state.db, &source_id, text, information_label)?;
     let effect = TransportSendEffect {
         channel: channel.to_owned(),
         recipient: recipient.to_owned(),
@@ -318,8 +594,11 @@ fn enqueue_with_key(
         archive_message_id: context.archive_message_id.map(ToOwned::to_owned),
         owner: context.owner.clone(),
     };
-    let payload =
-        rmp_serde::to_vec(&effect).map_err(|error| format!("encode transport effect: {error}"))?;
+    let payload = rmp_serde::to_vec(&LabeledTransportSendEffect {
+        effect,
+        information_label,
+    })
+    .map_err(|error| format!("encode transport effect: {error}"))?;
     let row = OutboxRow {
         id: None,
         idempotency_key,
@@ -373,6 +652,131 @@ fn enqueue_with_key(
 /// Dispatch transport effects through the channel named by the persisted
 /// effect. Since transport plugins do not yet expose sink deduplication or
 /// status lookup contracts, an ambiguous plugin result is parked as unknown.
+fn inspect_transport_attachment(
+    state: &AppState,
+    conversation_id: &ConversationId,
+    attachment_id: &str,
+    destination: &str,
+) -> Result<(), DispatchError> {
+    const MAX_SCAN_BYTES: u64 = 32 * 1024 * 1024;
+    let store = execlaw_core::attachments::AttachmentStore::new(&state.db);
+    let attachment = store
+        .get(&AttachmentId::from(attachment_id.to_owned()))
+        .map_err(|_| DispatchError::NotAccepted("attachment lookup failed before delivery".into()))?
+        .ok_or_else(|| {
+            DispatchError::NotAccepted("attachment is unavailable for outbound inspection".into())
+        })?;
+    if attachment.conversation_id.as_str() != conversation_id.as_str() {
+        return Err(DispatchError::NotAccepted(
+            "attachment is outside the sending conversation".into(),
+        ));
+    }
+    let (path, expected_hash) = (attachment.path, attachment.sha256);
+    let file = std::fs::File::open(&path).map_err(|_| {
+        DispatchError::NotAccepted(
+            "attachment bytes are unavailable for outbound inspection".into(),
+        )
+    })?;
+    let mut bytes = Vec::new();
+    file.take(MAX_SCAN_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| DispatchError::NotAccepted("attachment could not be inspected".into()))?;
+    if bytes.len() as u64 > MAX_SCAN_BYTES {
+        return Err(DispatchError::NotAccepted(
+            "attachment exceeds the outbound inspection size limit".into(),
+        ));
+    }
+    let actual_hash = hex::encode(Sha256::digest(&bytes));
+    if actual_hash != expected_hash {
+        return Err(DispatchError::NotAccepted(
+            "attachment integrity check failed before delivery".into(),
+        ));
+    }
+    let attachment_subject = execlaw_core::information_store::InformationSubject {
+        kind: "attachment".into(),
+        id: attachment_id.to_owned(),
+        sha256: expected_hash,
+    };
+    let attachment_label = execlaw_core::information_store::InformationLabelStore::new(&state.db)
+        .get(&attachment_subject)
+        .map_err(|_| {
+            DispatchError::NotAccepted("attachment information label lookup failed".into())
+        })?
+        .ok_or_else(|| {
+            DispatchError::NotAccepted("attachment information label is unavailable".into())
+        })?;
+    let decision =
+        execlaw_policy::outbound::inspect_outbound(&bytes, Some(&attachment_label), destination);
+    if !decision.allowed {
+        return Err(DispatchError::NotAccepted(format!(
+            "outbound data check blocked attachment: {}",
+            decision.findings.join(",")
+        )));
+    }
+    Ok(())
+}
+
+fn validate_outbound_authority(
+    db: &execlaw_core::Database,
+    label: Option<&execlaw_core::information::InformationLabel>,
+) -> Result<(), DispatchError> {
+    let Some(label) = label else {
+        return Err(DispatchError::NotAccepted(
+            "outbound effect is missing its authority receipt".into(),
+        ));
+    };
+    let current_policy_revision = execlaw_core::tool_access::ToolAccessStore::new(db)
+        .latest_policy_revision_id()
+        .map_err(|_| DispatchError::NotAccepted("outbound policy revision lookup failed".into()))?;
+    if label.authority_policy_revision != Some(current_policy_revision) {
+        return Err(DispatchError::NotAccepted(
+            "outbound policy changed before delivery".into(),
+        ));
+    }
+    let (Some(principal_id), Some(expected_fingerprint)) = (
+        label.authority_principal_id.as_deref(),
+        label.authority_fingerprint.as_deref(),
+    ) else {
+        if label.authority_principal_id.is_some() || label.authority_fingerprint.is_some() {
+            return Err(DispatchError::NotAccepted(
+                "outbound authority receipt is incomplete".into(),
+            ));
+        }
+        return Ok(());
+    };
+    let principal = execlaw_core::principal::PrincipalStore::new(db)
+        .get(&execlaw_core::ids::PrincipalId::from(
+            principal_id.to_owned(),
+        ))
+        .map_err(|_| DispatchError::NotAccepted("outbound authority lookup failed".into()))?
+        .ok_or_else(|| DispatchError::NotAccepted("outbound principal was removed".into()))?;
+    let current = serde_json::to_vec(&principal.trust_level)
+        .map(|bytes| hex::encode(Sha256::digest(bytes)))
+        .map_err(|_| {
+            DispatchError::NotAccepted("outbound authority could not be verified".into())
+        })?;
+    if current != expected_fingerprint
+        || principal.trust_level.class_tag() != label.source_trust_class
+    {
+        return Err(DispatchError::NotAccepted(
+            "outbound authority changed before delivery".into(),
+        ));
+    }
+    match principal.trust_level {
+        execlaw_core::principal::TrustLevel::Blocked { .. }
+        | execlaw_core::principal::TrustLevel::UnknownPending { .. } => Err(
+            DispatchError::NotAccepted("outbound principal is no longer trusted".into()),
+        ),
+        execlaw_core::principal::TrustLevel::Delegated {
+            expires_at: Some(expires_at),
+            ..
+        } if expires_at <= chrono::Utc::now().timestamp() => Err(DispatchError::NotAccepted(
+            "outbound delegated authority expired before delivery".into(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 pub struct PluginTransportDispatcher {
     state: AppState,
     effect_kind: &'static str,
@@ -429,6 +833,355 @@ mod tests {
     }
 
     #[test]
+    fn staged_model_send_carries_a_typed_non_model_editable_label() {
+        let db = fresh_db();
+        let conversation_id = ConversationId::from("labelled-transport-outbox");
+        let id = stage_plugin_text(
+            &db,
+            &conversation_id,
+            12,
+            3,
+            "signal",
+            "recipient",
+            "ordinary report",
+            Some(("principal-1", "grant-fingerprint-1")),
+        )
+        .unwrap();
+        let bytes: Vec<u8> = db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT payload FROM state_outbox WHERE id = ?1",
+                    [id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        let effect: LabeledTransportSendEffect = rmp_serde::from_slice(&bytes).unwrap();
+        let label = effect.information_label;
+        assert_eq!(
+            label.sensitivity,
+            execlaw_core::information::Sensitivity::Sensitive
+        );
+        assert!(
+            label
+                .allowed_destinations
+                .contains("transport:signal:recipient")
+        );
+        assert_eq!(label.authority_principal_id.as_deref(), Some("principal-1"));
+        assert_eq!(
+            label.authority_fingerprint.as_deref(),
+            Some("grant-fingerprint-1")
+        );
+    }
+
+    #[test]
+    fn staged_transport_secret_can_be_exported_only_after_scoped_controller_declassification() {
+        let db = fresh_db();
+        let conversation_id = ConversationId::from("declassified-transport-outbox");
+        let text = "api_key=synthetic-secret-value";
+        let id = stage_plugin_text(
+            &db,
+            &conversation_id,
+            12,
+            1,
+            "signal",
+            "recipient",
+            text,
+            None,
+        )
+        .unwrap();
+        let bytes: Vec<u8> = db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT payload FROM state_outbox WHERE id=?1",
+                    [id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        let effect: LabeledTransportSendEffect = rmp_serde::from_slice(&bytes).unwrap();
+        let destination = "transport:signal:recipient";
+        assert!(
+            !execlaw_policy::outbound::inspect_outbound(
+                text.as_bytes(),
+                Some(&effect.information_label),
+                destination,
+            )
+            .allowed
+        );
+        let source_id = effect.information_label.provenance[0].source_id.clone();
+        let subject = transport_information_subject(&source_id, text);
+        execlaw_core::information_store::InformationLabelStore::new(&db)
+            .declassify(&subject, "controller-1", destination, "case-17", 20)
+            .unwrap();
+        let current = load_transport_information_label(&db, text, Some(effect.information_label))
+            .unwrap()
+            .unwrap();
+        assert!(
+            execlaw_policy::outbound::inspect_outbound(
+                text.as_bytes(),
+                Some(&current),
+                destination,
+            )
+            .allowed
+        );
+        assert!(
+            !execlaw_policy::outbound::inspect_outbound(
+                text.as_bytes(),
+                Some(&current),
+                "transport:signal:other-recipient",
+            )
+            .allowed
+        );
+    }
+
+    #[test]
+    fn outbound_attachment_scan_blocks_synthetic_credentials_at_the_sink_boundary() {
+        use execlaw_core::attachments::{AttachmentRow, AttachmentStore};
+        use execlaw_core::ids::AttachmentId;
+        use sha2::{Digest, Sha256};
+
+        let state = crate::routes::test_app_state();
+        let conversation_id = ConversationId::from("outbound-scan-conversation");
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO state_conversations (conversation_id,kind,phase,trust_class,modality) VALUES (?1,'ControllerDM','idle','Controller','Text')",
+                    [conversation_id.as_str()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("report.txt");
+        let bytes = b"api_key=synthetic-credential-value";
+        std::fs::write(&path, bytes).unwrap();
+        AttachmentStore::new(&state.db)
+            .insert(&AttachmentRow {
+                id: AttachmentId::from("outbound-secret-file"),
+                conversation_id: conversation_id.clone(),
+                mime_type: "text/plain".into(),
+                path: path.to_string_lossy().into_owned(),
+                sha256: hex::encode(Sha256::digest(bytes)),
+                received_at: 1,
+                filename: Some("report.txt".into()),
+            })
+            .unwrap();
+        let result = inspect_transport_attachment(
+            &state,
+            &conversation_id,
+            "outbound-secret-file",
+            "transport:signal:recipient",
+        );
+        assert!(
+            matches!(result, Err(DispatchError::NotAccepted(reason)) if reason.contains("credential_assignment"))
+        );
+    }
+
+    #[test]
+    fn controller_declassification_allows_an_attachment_only_for_its_approved_recipient() {
+        use execlaw_core::attachments::{AttachmentRow, AttachmentStore};
+        use execlaw_core::ids::AttachmentId;
+        use sha2::{Digest, Sha256};
+
+        let state = crate::routes::test_app_state();
+        let conversation_id = ConversationId::from("approved-attachment-export");
+        state
+            .db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO state_conversations (conversation_id,kind,phase,trust_class,modality) VALUES (?1,'ControllerDM','idle','Controller','Text')",
+                    [conversation_id.as_str()],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("report.txt");
+        let bytes = b"api_key=synthetic-credential-value";
+        std::fs::write(&path, bytes).unwrap();
+        let hash = hex::encode(Sha256::digest(bytes));
+        AttachmentStore::new(&state.db)
+            .insert(&AttachmentRow {
+                id: AttachmentId::from("approved-export-file"),
+                conversation_id: conversation_id.clone(),
+                mime_type: "text/plain".into(),
+                path: path.to_string_lossy().into_owned(),
+                sha256: hash.clone(),
+                received_at: 1,
+                filename: Some("report.txt".into()),
+            })
+            .unwrap();
+        let subject = execlaw_core::information_store::InformationSubject {
+            kind: "attachment".into(),
+            id: "approved-export-file".into(),
+            sha256: hash,
+        };
+        execlaw_core::information_store::InformationLabelStore::new(&state.db)
+            .declassify(
+                &subject,
+                "controller-1",
+                "transport:signal:alice",
+                "case-22",
+                2,
+            )
+            .unwrap();
+
+        assert!(
+            inspect_transport_attachment(
+                &state,
+                &conversation_id,
+                "approved-export-file",
+                "transport:signal:alice",
+            )
+            .is_ok()
+        );
+        assert!(
+            inspect_transport_attachment(
+                &state,
+                &conversation_id,
+                "approved-export-file",
+                "transport:signal:bob",
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn pending_transport_effect_is_rejected_after_principal_authority_changes() {
+        use execlaw_core::ids::PrincipalId;
+        use execlaw_core::information::{InformationLabel, Sensitivity};
+        use execlaw_core::principal::{Principal, PrincipalStore, TrustLevel};
+
+        let db = fresh_db();
+        let principal_id = PrincipalId::from("outbound-authority-test");
+        let original_trust = TrustLevel::KnownTrusted {
+            resolvers: Vec::new(),
+            approved_by: PrincipalId::from("controller"),
+            approved_at: 1,
+        };
+        let principal = Principal {
+            id: principal_id.clone(),
+            identifiers: Vec::new(),
+            trust_level: original_trust.clone(),
+            resolved_by: Vec::new(),
+            metadata: serde_json::json!({}),
+            first_seen: 1,
+            last_seen: Some(1),
+            controller_notes: None,
+        };
+        let store = PrincipalStore::new(&db);
+        store.upsert(&principal).unwrap();
+        let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&original_trust).unwrap()));
+        let label = InformationLabel::observed(
+            Sensitivity::Sensitive,
+            Some("conversation-1".into()),
+            "KnownTrusted",
+            "conversation_output",
+            "event-10",
+            ["transport:signal:recipient".to_owned()],
+        )
+        .with_authority(principal_id.as_str(), fingerprint)
+        .with_policy_revision(
+            execlaw_core::tool_access::ToolAccessStore::new(&db)
+                .latest_policy_revision_id()
+                .unwrap(),
+        );
+
+        let mut revoked = principal;
+        revoked.trust_level = TrustLevel::Blocked {
+            blocked_by: PrincipalId::from("controller"),
+            blocked_at: 2,
+            reason: None,
+        };
+        store.upsert(&revoked).unwrap();
+        assert!(matches!(
+            validate_outbound_authority(&db, Some(&label)),
+            Err(DispatchError::NotAccepted(reason)) if reason.contains("authority changed")
+        ));
+    }
+
+    #[test]
+    fn legacy_transport_payload_without_authority_is_rejected() {
+        let payload = rmp_serde::to_vec(&TransportSendEffect {
+            channel: "signal".into(),
+            recipient: "recipient".into(),
+            text: "queued before authority receipts".into(),
+            model_seq: None,
+            archive_message_id: None,
+            owner: None,
+        })
+        .unwrap();
+        assert!(decode_transport_send_effect(&payload).is_err());
+    }
+
+    #[test]
+    fn outbound_effect_without_label_or_authority_is_rejected() {
+        let db = fresh_db();
+        assert!(matches!(
+            validate_outbound_authority(&db, None),
+            Err(DispatchError::NotAccepted(reason)) if reason.contains("missing its authority receipt")
+        ));
+    }
+
+    #[test]
+    fn queued_transport_effect_is_rejected_after_policy_revision_changes() {
+        use execlaw_core::ids::PrincipalId;
+        use execlaw_core::information::{InformationLabel, Sensitivity};
+        use execlaw_core::principal::{Principal, PrincipalStore, TrustLevel};
+
+        let db = fresh_db();
+        let principal_id = PrincipalId::from("policy-revision-authority");
+        let trust = TrustLevel::KnownTrusted {
+            resolvers: Vec::new(),
+            approved_by: PrincipalId::from("controller"),
+            approved_at: 1,
+        };
+        PrincipalStore::new(&db)
+            .upsert(&Principal {
+                id: principal_id.clone(),
+                identifiers: Vec::new(),
+                trust_level: trust.clone(),
+                resolved_by: Vec::new(),
+                metadata: serde_json::json!({}),
+                first_seen: 1,
+                last_seen: Some(1),
+                controller_notes: None,
+            })
+            .unwrap();
+        let fingerprint = hex::encode(Sha256::digest(serde_json::to_vec(&trust).unwrap()));
+        let revision = execlaw_core::tool_access::ToolAccessStore::new(&db)
+            .latest_policy_revision_id()
+            .unwrap();
+        let label = InformationLabel::observed(
+            Sensitivity::Sensitive,
+            Some("conversation-1".into()),
+            "KnownTrusted",
+            "conversation_output",
+            "event-10",
+            ["transport:signal:recipient".to_owned()],
+        )
+        .with_authority(principal_id.as_str(), fingerprint)
+        .with_policy_revision(revision);
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO config_tool_access_policy_revisions \
+                 (tool_name,enabled,allowed_classes_json,revised_by,revised_at) \
+                 VALUES ('transport.send',1,'[\"KnownTrusted\"]','controller',2)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(matches!(
+            validate_outbound_authority(&db, Some(&label)),
+            Err(DispatchError::NotAccepted(reason)) if reason.contains("policy changed")
+        ));
+    }
+
+    #[test]
     fn attachment_send_is_durable_idempotent_and_waits_for_pair_commit() {
         let db = fresh_db();
         let conversation_id = ConversationId::from("attachment-outbox");
@@ -472,7 +1225,14 @@ mod tests {
                 )?)
             })
             .unwrap();
-        let effect: TransportAttachmentEffect = rmp_serde::from_slice(&payload).unwrap();
+        let labeled: LabeledTransportAttachmentEffect = rmp_serde::from_slice(&payload).unwrap();
+        assert!(
+            labeled
+                .information_label
+                .allowed_destinations
+                .contains("transport:signal:recipient")
+        );
+        let effect = labeled.effect;
         assert_eq!(effect.channel, "signal");
         assert_eq!(effect.recipient, "recipient");
         assert_eq!(effect.text, "two reports");
@@ -590,31 +1350,54 @@ impl Dispatcher for PluginTransportDispatcher {
     }
 
     async fn dispatch(&self, row: &OutboxRow) -> Result<DispatchReceipt, DispatchError> {
-        let (effect, attachments) = if self.effect_kind == ATTACHMENT_EFFECT_KIND {
-            let attachment_effect: TransportAttachmentEffect = rmp_serde::from_slice(&row.payload)
-                .map_err(|error| {
-                    DispatchError::NotAccepted(format!(
-                        "invalid transport attachment effect payload: {error}"
-                    ))
-                })?;
-            (
-                TransportSendEffect {
-                    channel: attachment_effect.channel,
-                    recipient: attachment_effect.recipient,
-                    text: attachment_effect.text,
-                    model_seq: None,
-                    archive_message_id: None,
-                    owner: None,
-                },
-                attachment_effect.attachments,
-            )
-        } else {
-            let effect: TransportSendEffect =
-                rmp_serde::from_slice(&row.payload).map_err(|error| {
-                    DispatchError::NotAccepted(format!("invalid transport effect payload: {error}"))
-                })?;
-            (effect, Vec::new())
-        };
+        let (effect, attachments, payload_information_label) =
+            if self.effect_kind == ATTACHMENT_EFFECT_KIND {
+                let (attachment_effect, information_label) =
+                    decode_transport_attachment_effect(&row.payload)
+                        .map_err(DispatchError::NotAccepted)?;
+                (
+                    TransportSendEffect {
+                        channel: attachment_effect.channel,
+                        recipient: attachment_effect.recipient,
+                        text: attachment_effect.text,
+                        model_seq: None,
+                        archive_message_id: None,
+                        owner: None,
+                    },
+                    attachment_effect.attachments,
+                    information_label,
+                )
+            } else {
+                let (effect, information_label) = decode_transport_send_effect(&row.payload)
+                    .map_err(DispatchError::NotAccepted)?;
+                (effect, Vec::new(), information_label)
+            };
+        let information_label = load_transport_information_label(
+            &self.state.db,
+            &effect.text,
+            payload_information_label,
+        )?;
+        validate_outbound_authority(&self.state.db, information_label.as_ref())?;
+        let destination = format!("transport:{}:{}", effect.channel, effect.recipient);
+        let text_check = execlaw_policy::outbound::inspect_outbound(
+            effect.text.as_bytes(),
+            information_label.as_ref(),
+            &destination,
+        );
+        if !text_check.allowed {
+            return Err(DispatchError::NotAccepted(format!(
+                "outbound data check blocked transport effect: {}",
+                text_check.findings.join(",")
+            )));
+        }
+        for attachment_id in &attachments {
+            inspect_transport_attachment(
+                &self.state,
+                &row.conversation_id,
+                attachment_id,
+                &destination,
+            )?;
+        }
         let conversation_id = row.conversation_id.clone();
         if let Some(owner) = effect.owner.as_ref() {
             let current = execlaw_core::agent_ownership::AgentOwnershipStore::new(&self.state.db)

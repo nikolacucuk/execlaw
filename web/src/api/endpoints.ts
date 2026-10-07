@@ -479,6 +479,8 @@ export interface RunCompletionContractDraft {
 
 export interface SendMessageRequest {
     text: string;
+    /// Selected permissions are persisted as a snapshot on the durable user event.
+    safety_profile_id?: "inspect_only" | "workspace_edit" | "approved_integration";
     resume_run_id?: string;
     sender_principal_id?: string;
     /// 2026-04-28 — when true, server runs the turn but skips
@@ -1792,6 +1794,7 @@ export interface ToolView {
     enabled: boolean;
     allowed_classes: string[];
     description: string | null;
+    trust_floor?: string | null;
     first_seen_at: number;
     last_seen_at: number;
     removed_at: number | null;
@@ -1821,6 +1824,133 @@ export async function updateToolPolicy(
     return apiFetch<ToolView>(
         `/api/admin/tools/${encodeURIComponent(toolName)}`,
         { method: "PATCH", body },
+        tokenAccessor,
+    );
+}
+
+export interface ToolPolicyRevision {
+    revision_id: number;
+    tool_name: string;
+    enabled: boolean;
+    allowed_classes: string[];
+    revised_by: string;
+    revised_at: number;
+    rollback_of: number | null;
+}
+
+export interface PolicySimulationChange {
+    decision_id: string;
+    tool_name: string;
+    caller_trust: string;
+    change: "newly_allowed" | "newly_denied" | "newly_approval_gated";
+    explanation: string;
+}
+
+export interface ToolPolicySimulationReport {
+    tool_name: string;
+    historical_decisions: number;
+    trust_class_fixtures: number;
+    report: {
+        evaluated_decisions: number;
+        newly_allowed: PolicySimulationChange[];
+        newly_denied: PolicySimulationChange[];
+        newly_approval_gated: PolicySimulationChange[];
+        omitted_changes: number;
+    };
+}
+
+export async function simulateToolPolicy(
+    toolName: string,
+    body: { enabled: boolean; allowed_classes: string[]; trust_floor?: string | null },
+    tokenAccessor: () => string | null,
+): Promise<ToolPolicySimulationReport> {
+    return apiFetch<ToolPolicySimulationReport>(
+        `/api/admin/tools/${encodeURIComponent(toolName)}/simulate`,
+        { method: "POST", body },
+        tokenAccessor,
+    );
+}
+
+export async function listToolPolicyRevisions(
+    toolName: string,
+    tokenAccessor: () => string | null,
+): Promise<{ revisions: ToolPolicyRevision[] }> {
+    return apiFetch<{ revisions: ToolPolicyRevision[] }>(
+        `/api/admin/tools/${encodeURIComponent(toolName)}/revisions`,
+        {},
+        tokenAccessor,
+    );
+}
+
+export async function rollbackToolPolicyRevision(
+    toolName: string,
+    revisionId: number,
+    tokenAccessor: () => string | null,
+): Promise<ToolView> {
+    return apiFetch<ToolView>(
+        `/api/admin/tools/${encodeURIComponent(toolName)}/revisions/${revisionId}/rollback`,
+        { method: "POST" },
+        tokenAccessor,
+    );
+}
+
+export type SafetyProfileId =
+    | "inspect_only"
+    | "workspace_edit"
+    | "approved_integration";
+
+export interface SafetyProfileView {
+    profile: {
+        profile_id: SafetyProfileId;
+        display_name: string;
+        capabilities: {
+            data_read: boolean;
+            workspace_read: boolean;
+            workspace_write: boolean;
+            workspace_process: boolean;
+            approved_integration: boolean;
+            approved_network: boolean;
+            brokered_secret_use: boolean;
+            approved_destinations: boolean;
+        };
+        approved_tools: string[];
+        revision: number;
+        updated_by: string;
+        updated_at: number;
+    };
+    supported: boolean;
+    unsupported_reason: string | null;
+    permissions: {
+        filesystem: string;
+        process: string;
+        network: string;
+        secrets: string;
+        destinations: string;
+    };
+    effective_tools: string[];
+}
+
+export interface SafetyProfileListResponse {
+    profiles: SafetyProfileView[];
+}
+
+export async function listSafetyProfiles(
+    tokenAccessor: () => string | null,
+): Promise<SafetyProfileListResponse> {
+    return apiFetch<SafetyProfileListResponse>(
+        "/api/admin/safety-profiles",
+        {},
+        tokenAccessor,
+    );
+}
+
+export async function setApprovedIntegrationTools(
+    toolNames: string[],
+    tokenAccessor: () => string | null,
+): Promise<SafetyProfileView["profile"]> {
+    return apiFetch<SafetyProfileView["profile"]>(
+        "/api/admin/safety-profiles/approved_integration/approved-tools",
+        { method: "PUT", body: { tool_names: toolNames } },
         tokenAccessor,
     );
 }
@@ -2323,6 +2453,13 @@ export interface PendingApprovalSummary {
     scope: string;
     reason: string;
     requested_action: string;
+    canonical_actions?: Array<{
+        operation: string;
+        target: string | null;
+        changed_fields: Array<{ name: string; value: string }>;
+        reversible: boolean;
+        approval_scope: string;
+    }>;
     approval_token?: string;
 }
 
@@ -3591,6 +3728,9 @@ export interface RoutineView {
     created_at: number;
     updated_at: number;
     completion_contract?: RunCompletionContractDraft | null;
+    missed_run_policy: "skip" | "coalesce" | "catch_up";
+    missed_run_limit: number;
+    overlap_policy: "forbid" | "queue" | "replace";
 }
 
 export interface RoutineListResponse {
@@ -3606,6 +3746,7 @@ export interface RoutineRunView {
     status: RoutineRunStatus;
     error: string | null;
     conversation_id: string | null;
+    occurrence_at: number | null;
 }
 
 export interface RoutineRunListResponse {
@@ -3620,6 +3761,9 @@ export interface UpsertRoutineBody {
     target_conversation_id?: string | null;
     enabled?: boolean;
     completion_contract?: RunCompletionContractDraft | null;
+    missed_run_policy?: "skip" | "coalesce" | "catch_up";
+    missed_run_limit?: number;
+    overlap_policy?: "forbid" | "queue" | "replace";
 }
 
 export interface RoutinePreviewResponse {
@@ -3723,6 +3867,7 @@ export async function postLogout(refreshToken: string | null): Promise<void> {
 export interface GeneralSettings {
     start_on_boot: boolean;
     bind_address: string;
+    https_only_session_cookies: boolean;
     updated_at: number;
     /// Server contract: editing `bind_address` requires
     /// `execlaw service restart` to take effect. The SPA reads
@@ -3738,6 +3883,7 @@ export interface GeneralSettings {
 export interface UpdateGeneralSettingsRequest {
     start_on_boot?: boolean;
     bind_address?: string;
+    https_only_session_cookies?: boolean;
     history_retention_days?: number;
 }
 
@@ -4195,6 +4341,25 @@ export interface ScrubbedSupportBundle {
         database_file_present: boolean;
         encryption_mode: string;
         schema_migrations_applied: number;
+        database_bytes: number;
+        wal_bytes: number;
+        shm_bytes: number;
+        journal_bytes: number;
+        referenced_blob_bytes: number;
+        available_disk_bytes: number | null;
+        storage_state: string;
+        storage_action: string | null;
+        wal_checkpoint_blocked: boolean;
+        wal_frames: number;
+        wal_frames_checkpointed: number;
+        database_queued_jobs: number;
+        database_running_jobs: number;
+        database_rejected_jobs: number;
+        database_completed_jobs: number;
+        database_queue_wait_micros_max: number;
+        database_service_micros_max: number;
+        transaction_micros_total: number;
+        transaction_micros_max: number;
     };
     hardware: {
         logical_cpu_count: number | null;
@@ -4247,6 +4412,26 @@ export async function getScrubbedSupportBundle(
     return apiFetch<ScrubbedSupportBundle>(
         "/api/admin/diagnostics/support-bundle",
         {},
+        tokenAccessor,
+    );
+}
+
+export interface WalMaintenanceResponse {
+    progress: {
+        checkpoint_blocked: boolean;
+        frames_in_wal: number;
+        frames_checkpointed: number;
+    };
+    wal_bytes_after: number;
+    action: string;
+}
+
+export async function runStorageCheckpoint(
+    tokenAccessor: () => string | null,
+): Promise<WalMaintenanceResponse> {
+    return apiFetch<WalMaintenanceResponse>(
+        "/api/admin/storage/checkpoint",
+        { method: "POST" },
         tokenAccessor,
     );
 }

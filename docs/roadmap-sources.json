@@ -1,0 +1,3075 @@
+{
+  "schemaVersion": 1,
+  "reviewDate": "2026-10-06",
+  "scope": "H001-H130; H131-H154 retain their existing pinned Paperclip references.",
+  "provenance": "Documented inspiration means prior strategy/roadmap association; supporting references were selected now and are not claimed historical origins.",
+  "verification": "Linked content and applicability reviewed through primary documentation/source pages; not proof of upstream execution, compatibility or execlaw completion.",
+  "entries": [
+    {
+      "id": "H001",
+      "roadmapAnchor": "enhancement-001",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "Ollama native chat API",
+          "url": "https://docs.ollama.com/api/chat",
+          "note": "Use the native local chat request and tool-call wire contract; retain execlaw endpoint authorization.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H002",
+      "roadmapAnchor": "enhancement-002",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "Ollama tool calling",
+          "url": "https://docs.ollama.com/capabilities/tool-calling",
+          "note": "Build text, streaming and no-effect tool-call conformance fixtures against documented native shapes.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H003",
+      "roadmapAnchor": "enhancement-003",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "HTTP Semantics: 503 Service Unavailable",
+          "url": "https://www.rfc-editor.org/rfc/rfc9110.html#section-15.6.4",
+          "note": "Use explicit temporary-unavailability semantics; never substitute a development answer in production.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H004",
+      "roadmapAnchor": "enhancement-004",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "Ollama API reference",
+          "url": "https://github.com/ollama/ollama/blob/main/docs/api.md",
+          "note": "Use version, loaded-model and model-list observations as inputs to persisted readiness; HTTP reachability alone is insufficient.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H005",
+      "roadmapAnchor": "enhancement-005",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "Timeouts, retries, and backoff with jitter",
+          "url": "https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/",
+          "note": "Adapt deadline-aware retry and jitter principles locally; no AWS runtime dependency or cloud inference.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H006",
+      "roadmapAnchor": "enhancement-006",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "JSON Schema: object validation",
+          "url": "https://json-schema.org/understanding-json-schema/reference/object",
+          "note": "Validate required properties, types and unexpected properties before tool dispatch; model output is not authority.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H007",
+      "roadmapAnchor": "enhancement-007",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "TrueForge harness repository",
+          "url": "https://github.com/truefoundry/trueforge",
+          "note": "Compare deferred tool discovery and context efficiency; execlaw's catalog caps and trust filtering remain its own requirements.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H008",
+      "roadmapAnchor": "enhancement-008",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "Meta: Agents Rule of Two",
+          "url": "https://ai.meta.com/blog/practical-ai-agent-security/",
+          "note": "Adapt capability separation around untrusted input, sensitive data and effects; execlaw's persisted two-pass handoff requires its own tests.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H009",
+      "roadmapAnchor": "enhancement-009",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "SQLite atomic commit: testing",
+          "url": "https://www.sqlite.org/atomiccommit.html#testing_atomic_commit_behavior",
+          "note": "Use interruption and recovery testing as a durability pattern; also test remote effects and process boundaries beyond SQLite transactions.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H010",
+      "roadmapAnchor": "enhancement-010",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "OWASP Transaction Authorization Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html",
+          "note": "Bind authorization to the exact action data, sequence and expiry rather than a reusable generic approval.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H011",
+      "roadmapAnchor": "enhancement-011",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "RabbitMQ acknowledgements and publisher confirms",
+          "url": "https://www.rabbitmq.com/docs/confirms",
+          "note": "Use the explicit distinction between submission, acceptance and acknowledgment; do not interpret broker acceptance as recipient delivery.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H012",
+      "roadmapAnchor": "enhancement-012",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "SQLite FTS5",
+          "url": "https://www.sqlite.org/fts5.html",
+          "note": "Implement a derived full-text index and maintenance strategy; conversation trust and HMAC verification remain execlaw responsibilities.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H013",
+      "roadmapAnchor": "enhancement-013",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "Letta Code repository",
+          "url": "https://github.com/letta-ai/letta-code",
+          "note": "Reference persistent editable memory and memory organization; add execlaw's own owner/trust/version/budget eligibility gates.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H014",
+      "roadmapAnchor": "enhancement-014",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "LangMem background memory processing",
+          "url": "https://langchain-ai.github.io/langmem/background_quickstart/",
+          "note": "Adapt background consolidation separate from foreground turns; keep lifecycle decisions approval-gated and inference local.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H015",
+      "roadmapAnchor": "enhancement-015",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "Pydantic Evals overview",
+          "url": "https://pydantic.dev/docs/ai/evals/evals/",
+          "note": "Reference repeatable test cases and evaluator contracts; evaluate local skill versions without adopting hosted judges.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H016",
+      "roadmapAnchor": "enhancement-016",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "LangGraph persistence",
+          "url": "https://docs.langchain.com/oss/python/langgraph/persistence",
+          "note": "Reference checkpoint identity and history for replay; persist execlaw-specific immutable prompt/model/catalog fingerprints.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H017",
+      "roadmapAnchor": "enhancement-017",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "OWASP LLM Prompt Injection Prevention Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html",
+          "note": "Derive attack-focused test categories; keep enforcement fixtures deterministic and offline.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H018",
+      "roadmapAnchor": "enhancement-018",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "OpenTelemetry GenAI span conventions",
+          "url": "https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md",
+          "note": "Reference phase/operation and usage telemetry semantics; retain numeric-only defaults and avoid prompt-content capture.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H019",
+      "roadmapAnchor": "enhancement-019",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "Ollama FAQ: concurrency and memory",
+          "url": "https://docs.ollama.com/faq",
+          "note": "Use documented residency/concurrency memory behavior to inform measured local resource admission; do not assume model size equals live free memory.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H020",
+      "roadmapAnchor": "enhancement-020",
+      "originNote": "Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.",
+      "refs": [
+        {
+          "label": "SQLCipher API: rekey and export",
+          "url": "https://www.zetetic.net/sqlcipher/sqlcipher-api/",
+          "note": "Use SQLCipher's explicit key rotation/export interfaces and test wrong-key rejection plus restoration.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "SQLite Online Backup API",
+          "url": "https://www.sqlite.org/backup.html",
+          "note": "Use a consistent database snapshot mechanism; independently verify encrypted vault and event-signing continuity.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H021",
+      "roadmapAnchor": "enhancement-021",
+      "originNote": "Documented inspiration: llm-harness-roadmap.md comparison explicitly maps NeMo evaluation/profiling to H021; execlaw_impr_doc.md section5.1 also associates mini-SWE-agent with benchmark discipline.",
+      "refs": [
+        {
+          "label": "NeMo Agent Toolkit evaluation",
+          "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/develop/docs/source/improve-workflows/evaluate.md",
+          "note": "Adapt curated task execution, reproducibility artifacts and per-case scoring; use local models and deterministic verifiers.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H022",
+      "roadmapAnchor": "enhancement-022",
+      "originNote": "Repository-driven completion-contract requirement; external evaluator reference supports implementation and is not evidence of an original external source.",
+      "refs": [
+        {
+          "label": "Pydantic Evals evaluators",
+          "url": "https://pydantic.dev/docs/ai/evals/evals/",
+          "note": "Separate model response generation from criteria evaluation, required artifacts and terminal task evidence.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H023",
+      "roadmapAnchor": "enhancement-023",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md section5.1 explicitly maps LangGraph checkpoints, pending writes and node-level resume to a native SQLite step machine.",
+      "refs": [
+        {
+          "label": "LangGraph persistence and durable execution",
+          "url": "https://docs.langchain.com/oss/python/langgraph/persistence",
+          "note": "Adapt persisted step boundaries and replay-safe side-effect handling across execlaw executors; do not import LangGraph as runtime authority.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H024",
+      "roadmapAnchor": "enhancement-024",
+      "originNote": "Repository-driven client submission and uncertain-effect gap; supporting idempotency reference added now.",
+      "refs": [
+        {
+          "label": "Making retries safe with idempotent APIs",
+          "url": "https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/",
+          "note": "Adapt caller request identifiers, duplicate lookup and conflicting-request semantics; do not infer exactly-once behavior from a local key.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H025",
+      "roadmapAnchor": "enhancement-025",
+      "originNote": "Repository SSRF finding and local-endpoint policy drove this item; OWASP is a supporting security reference, not an asserted original harness source.",
+      "refs": [
+        {
+          "label": "OWASP SSRF Prevention Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html",
+          "note": "Adapt address validation, allowlisting and redirect controls at connection boundaries while preserving explicitly approved private integrations.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H026",
+      "roadmapAnchor": "enhancement-026",
+      "originNote": "Repository authorization and revocation findings drove this item; supporting authorization/session references added now.",
+      "refs": [
+        {
+          "label": "OWASP Authorization Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html",
+          "note": "Use deny-by-default, centralized checks and permission validation on every request.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "OWASP Session Management Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html",
+          "note": "Specify session invalidation and sensitive-account-change behavior across tokens and active connections.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H027",
+      "roadmapAnchor": "enhancement-027",
+      "originNote": "Mixed provenance: transactional staging/panel isolation follows repository findings; execlaw_impr_doc.md section5.3 explicitly names Sigstore and SLSA for artifact provenance.",
+      "refs": [
+        {
+          "label": "Sigstore verification",
+          "url": "https://docs.sigstore.dev/cosign/verifying/verify/",
+          "note": "Verify publisher identity and artifact integrity before activation; signatures do not sandbox plugin code.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "OWASP File Upload Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html",
+          "note": "Apply bounded archive extraction and safe storage/validation principles before atomic activation.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H028",
+      "roadmapAnchor": "enhancement-028",
+      "originNote": "Repository SQLCipher packaging finding drove release qualification; provenance inspiration was explicitly associated with SLSA in execlaw_impr_doc.md section5.3.",
+      "refs": [
+        {
+          "label": "SQLCipher API",
+          "url": "https://www.zetetic.net/sqlcipher/sqlcipher-api/",
+          "note": "Verify the packaged binary actually supports encryption and key changes; retain installation/restore tests.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "SLSA 1.2 specification",
+          "url": "https://slsa.dev/spec/v1.2/",
+          "note": "Use artifact provenance and build-evidence concepts without claiming attestation proves runtime correctness.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H029",
+      "roadmapAnchor": "enhancement-029",
+      "originNote": "Repository streaming-framing findings drove this item; external protocol specifications are supporting normative references.",
+      "refs": [
+        {
+          "label": "HTML Living Standard: server-sent events",
+          "url": "https://html.spec.whatwg.org/multipage/server-sent-events.html",
+          "note": "Implement incremental UTF-8/SSE framing and legal line endings; inference completion semantics need separate protocol checks.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "MCP 2025-06-18 transports",
+          "url": "https://modelcontextprotocol.io/specification/2025-06-18/basic/transports",
+          "note": "Use the pinned MCP transport contract for matching streamed responses and connection lifecycle.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H030",
+      "roadmapAnchor": "enhancement-030",
+      "originNote": "Repository resource-admission extension; vLLM scheduler controls are supporting implementation context, not an origin claim for hierarchical fairness.",
+      "refs": [
+        {
+          "label": "vLLM engine arguments",
+          "url": "https://docs.vllm.ai/en/latest/configuration/engine_args/",
+          "note": "Understand scheduler concurrency/token controls while implementing priority, aging and parent-child budgets in the local host.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H031",
+      "roadmapAnchor": "enhancement-031",
+      "originNote": "Documented inspiration: roadmap comparison explicitly maps TrueForge result offloading and compaction to H031-H034; execlaw_impr_doc.md section8.4 separately defines context budgets.",
+      "refs": [
+        {
+          "label": "TrueForge harness repository",
+          "url": "https://github.com/truefoundry/trueforge",
+          "note": "Adapt large-result offloading and context-management patterns; preserve scoped artifact retrieval and per-round full-request accounting.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H032",
+      "roadmapAnchor": "enhancement-032",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md section5.1 names OpenCode compaction; its section8.4 specifies compaction receipts. The provenance/trust contract is execlaw's adaptation.",
+      "refs": [
+        {
+          "label": "OpenCode compaction implementation",
+          "url": "https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/compaction.ts",
+          "note": "Inspect summarization/pruning boundaries and retain execlaw's own source ranges, trust labels and quality receipts.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H033",
+      "roadmapAnchor": "enhancement-033",
+      "originNote": "Documented inspiration: roadmap comparison maps TrueForge deferred tools and Pi's extensible small core to H033.",
+      "refs": [
+        {
+          "label": "TrueForge harness repository",
+          "url": "https://github.com/truefoundry/trueforge",
+          "note": "Adapt deferred tool discovery and schema loading; recheck capability scope and pin the dispatched schema version.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H034",
+      "roadmapAnchor": "enhancement-034",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md sections5.4 and8.6 explicitly identify vLLM structured outputs and native Ollama format support.",
+      "refs": [
+        {
+          "label": "vLLM structured outputs",
+          "url": "https://docs.vllm.ai/en/latest/features/structured_outputs/",
+          "note": "Qualify actual backend/model/template structured-decoding behavior and retain host-side validation.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Ollama structured outputs",
+          "url": "https://docs.ollama.com/capabilities/structured-outputs",
+          "note": "Use native JSON-schema formatting for approved local models; do not assume support across every model.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H035",
+      "roadmapAnchor": "enhancement-035",
+      "originNote": "Documented inspiration: roadmap comparison maps NeMo profiling to H035; execlaw_impr_doc.md section5.3 names OpenTelemetry GenAI as a replaceable adapter.",
+      "refs": [
+        {
+          "label": "NeMo Agent Toolkit profiler",
+          "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/develop/docs/source/improve-workflows/profiler.md",
+          "note": "Adapt correlated workflow/phase artifacts and bottleneck inspection, with sensitive content disabled by default.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "OpenTelemetry GenAI span conventions",
+          "url": "https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md",
+          "note": "Map trace IDs and operations through an optional local exporter; evolving conventions must not become the canonical database schema.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H036",
+      "roadmapAnchor": "enhancement-036",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md section5.1 explicitly associates mini-SWE-agent trajectory files with deterministic evaluation export.",
+      "refs": [
+        {
+          "label": "mini-SWE-agent repository",
+          "url": "https://github.com/SWE-agent/mini-swe-agent",
+          "note": "Adapt inspectable trajectory artifacts into consented redacted fixtures and offline effect-disabled regression replay.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H037",
+      "roadmapAnchor": "enhancement-037",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md sections5.1-5.2 associate Letta revision UX and Graphiti evidence/temporal facts with memory inspection.",
+      "refs": [
+        {
+          "label": "Letta Code repository",
+          "url": "https://github.com/letta-ai/letta-code",
+          "note": "Adapt editable persistent-memory inspection while retaining Controller-governed correction and evidence lineage.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Graphiti repository",
+          "url": "https://github.com/getzep/graphiti",
+          "note": "Adapt episodic provenance and temporal fact semantics; keep SQLite authoritative and Graphiti optional.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H038",
+      "roadmapAnchor": "enhancement-038",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md section5.2 explicitly associates Graphiti temporal retrieval and Mem0 fused retrieval/benchmark discipline.",
+      "refs": [
+        {
+          "label": "Graphiti repository",
+          "url": "https://github.com/getzep/graphiti",
+          "note": "Reference temporal validity and hybrid retrieval, then enforce scope/trust before ranking in execlaw.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Mem0 repository",
+          "url": "https://github.com/mem0ai/mem0",
+          "note": "Reference memory retrieval and evaluation patterns; qualify gains locally and do not copy hosted defaults or benchmark claims.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H039",
+      "roadmapAnchor": "enhancement-039",
+      "originNote": "Documented inspiration: roadmap Hermes comparison explicitly maps experience-derived skills to H037-H039. Executable held-out promotion gates are execlaw's proposed extension, not a claim that Hermes already supplies them.",
+      "refs": [
+        {
+          "label": "Hermes Agent repository",
+          "url": "https://github.com/NousResearch/hermes-agent",
+          "note": "Adapt experience-derived reusable skills while requiring executable held-out verification, approval and rollback in execlaw.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H040",
+      "roadmapAnchor": "enhancement-040",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md section5.1 and roadmap comparison explicitly associate OpenHands with workspace-oriented coding agents.",
+      "refs": [
+        {
+          "label": "OpenHands Software Agent SDK",
+          "url": "https://github.com/OpenHands/software-agent-sdk",
+          "note": "Adapt isolated workspace tools, execution interfaces and agent-server separation through an execlaw plugin; keep local inference and host policy.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H041",
+      "roadmapAnchor": "enhancement-041",
+      "originNote": "Documented inspiration: roadmap comparison explicitly maps Claude Code checkpointing to H040-H041; execlaw_impr_doc.md also cites Goose forkable sessions.",
+      "refs": [
+        {
+          "label": "Claude Code checkpointing",
+          "url": "https://code.claude.com/docs/en/checkpointing",
+          "note": "Adapt explicit rewind boundaries and inspectable restores; do not assume checkpoints undo arbitrary shell changes or external effects.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H042",
+      "roadmapAnchor": "enhancement-042",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md section5.1 explicitly associates OpenCode parent/child session navigation with first-class run trees.",
+      "refs": [
+        {
+          "label": "OpenCode agents",
+          "url": "https://opencode.ai/docs/agents/",
+          "note": "Adapt visible parent/subagent navigation and scoped roles; execlaw adds durable joins, inherited ceilings and aggregate budgets.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H043",
+      "roadmapAnchor": "enhancement-043",
+      "originNote": "Documented inspiration: roadmap Cursor comparison explicitly maps queued/immediate steering to H043.",
+      "refs": [
+        {
+          "label": "Cursor Agent overview",
+          "url": "https://cursor.com/docs/agent/overview",
+          "note": "Adapt queue/steering and stop interaction concepts; persist intent and safe execution boundaries in execlaw rather than copying cloud runtime assumptions.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H044",
+      "roadmapAnchor": "enhancement-044",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md section5.3 specifies ACP as an optional editor adapter; roadmap comparison associates Pi RPC/SDK with H044. The originally documented badlogic/pi-mono URL now redirects to earendil-works/pi; the reference uses that verified destination.",
+      "refs": [
+        {
+          "label": "Agent Client Protocol overview",
+          "url": "https://agentclientprotocol.com/protocol/v1/overview",
+          "note": "Map editor sessions, permissions, files and terminals to the existing local authority; do not replace runner protocol.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Pi coding agent README",
+          "url": "https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md",
+          "note": "Adapt a thin terminal/RPC/SDK surface over the harness rather than duplicating execution state in clients.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H045",
+      "roadmapAnchor": "enhancement-045",
+      "originNote": "Documented inspiration: execlaw_impr_doc.md section5.3 names MCP interoperability; H045 explicitly selects the 2025-06-18 transport baseline. Later protocol versions require separate qualification.",
+      "refs": [
+        {
+          "label": "MCP 2025-06-18 transports",
+          "url": "https://modelcontextprotocol.io/specification/2025-06-18/basic/transports",
+          "note": "Implement and test the pinned stdio/Streamable HTTP lifecycle, matching response IDs, cancellation and bounded streaming.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H046",
+      "roadmapAnchor": "enhancement-046",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "W3C PROV-O",
+          "url": "https://www.w3.org/TR/prov-o/",
+          "note": "Represent derivation and source identity explicitly; execlaw adds snapshots, hashes and citation acceptance tests.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://www.w3.org/TR/prov-o/",
+            "title": "PROV-O: The PROV Ontology",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Playwright Trace Viewer",
+          "url": "https://playwright.dev/docs/trace-viewer",
+          "note": "Inspectable browser snapshots and action traces support evidence capture; traces do not independently prove a research claim.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://playwright.dev/docs/trace-viewer",
+            "title": "Trace viewer | Playwright",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H047",
+      "roadmapAnchor": "enhancement-047",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "whisper.cpp streaming example",
+          "url": "https://github.com/ggml-org/whisper.cpp/tree/master/examples/stream",
+          "note": "A local incremental audio/transcription example to benchmark; continuous session cancellation remains execlaw design.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://github.com/ggml-org/whisper.cpp/tree/master/examples/stream",
+            "title": "whisper.cpp/examples/stream at master · ggml-org/whisper.cpp · GitHub",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Tokio graceful shutdown",
+          "url": "https://tokio.rs/tokio/topics/shutdown",
+          "note": "Propagate cancellation and wait for owned tasks to finish instead of retaining global locks during I/O.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://tokio.rs/tokio/topics/shutdown",
+            "title": "Graceful Shutdown | Tokio - An asynchronous Rust runtime",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H048",
+      "roadmapAnchor": "enhancement-048",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "SQLite PRAGMA secure_delete",
+          "url": "https://sqlite.org/pragma.html#pragma_secure_delete",
+          "note": "SQLite documents limits of deleting recoverable bytes, including virtual-table traces; live projection deletion is not backup erasure.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://sqlite.org/pragma.html",
+            "title": "Pragma statements supported by SQLite",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "W3C PROV-O",
+          "url": "https://www.w3.org/TR/prov-o/",
+          "note": "Derivation relationships inform which projections must receive tombstones.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://www.w3.org/TR/prov-o/",
+            "title": "PROV-O: The PROV Ontology",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H049",
+      "roadmapAnchor": "enhancement-049",
+      "originNote": "Earlier strategy documents local backend optimization capabilities; Criterion gating is execlaw-specific engineering rather than a competitor feature copied verbatim.",
+      "refs": [
+        {
+          "label": "Criterion saved baselines",
+          "url": "https://bheisler.github.io/criterion.rs/book/user_guide/command_line_options.html",
+          "note": "Save/compare benchmark baselines; execlaw must define noise tolerance and release failure policy.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://bheisler.github.io/criterion.rs/book/user_guide/command_line_options.html",
+            "title": "Command-Line Options - Criterion.rs Documentation",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "vLLM automatic prefix caching",
+          "url": "https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/",
+          "note": "Candidate local prefill optimization, subject to equal task-quality benchmarks.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/",
+            "title": "Automatic Prefix Caching - vLLM",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H050",
+      "roadmapAnchor": "enhancement-050",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "W3C WCAG 2.2",
+          "url": "https://www.w3.org/TR/WCAG22/",
+          "note": "Keyboard access, focus, error identification and status messages provide testable accessibility requirements.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://www.w3.org/TR/WCAG22/",
+            "title": "Web Content Accessibility Guidelines (WCAG) 2.2",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Playwright accessibility testing",
+          "url": "https://playwright.dev/docs/accessibility-testing",
+          "note": "Browser accessibility checks supplement manual assistive-technology qualification.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://playwright.dev/docs/accessibility-testing",
+            "title": "Accessibility testing | Playwright",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H051",
+      "roadmapAnchor": "enhancement-051",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "CaMeL paper",
+          "url": "https://arxiv.org/abs/2503.18813",
+          "note": "Research reference for explicit data/control separation and capability-governed data flow; not a claim of universal injection prevention.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://arxiv.org/abs/2503.18813",
+            "title": "[2503.18813] Defeating Prompt Injections by Design",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "W3C PROV-O",
+          "url": "https://www.w3.org/TR/prov-o/",
+          "note": "Formal provenance vocabulary supports derivation receipts; sensitivity labels and enforcement are execlaw-specific.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://www.w3.org/TR/prov-o/",
+            "title": "PROV-O: The PROV Ontology",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H052",
+      "roadmapAnchor": "enhancement-052",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "OWASP Authorization Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html",
+          "note": "Validate permissions on every request and enforce deny-by-default; recheck queued effects at dispatch.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html",
+            "title": "Authorization - OWASP Cheat Sheet Series",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H053",
+      "roadmapAnchor": "enhancement-053",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "OWASP Transaction Authorization Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html",
+          "note": "Show significant transaction data and bind authorization to the actual operation, not untrusted explanatory prose.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html",
+            "title": "Transaction Authorization - OWASP Cheat Sheet Series",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H054",
+      "roadmapAnchor": "enhancement-054",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "OWASP Secrets Management Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html",
+          "note": "Least privilege, short-lived credentials, rotation and auditing support host-side credential brokerage.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html",
+            "title": "Secrets Management - OWASP Cheat Sheet Series",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H055",
+      "roadmapAnchor": "enhancement-055",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "OWASP LLM Prompt Injection Prevention Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html",
+          "note": "Output monitoring and exfiltration controls are layered defenses; sink labels/recipient enforcement remain execlaw-specific.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html",
+            "title": "LLM Prompt Injection Prevention - OWASP Cheat Sheet Series",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H056",
+      "roadmapAnchor": "enhancement-056",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Docker seccomp profiles",
+          "url": "https://docs.docker.com/engine/security/seccomp/",
+          "note": "Effective syscall restrictions must be enforced outside prompts; execlaw combines them with task-scoped capability profiles.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.docker.com/engine/security/seccomp/",
+            "title": "Seccomp security profiles for Docker | Docker Docs",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H057",
+      "roadmapAnchor": "enhancement-057",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Open Policy Agent policy testing",
+          "url": "https://www.openpolicyagent.org/docs/policy-testing",
+          "note": "Evaluate candidate policy against explicit fixtures without issuing production effects; no OPA runtime dependency is implied.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://www.openpolicyagent.org/docs/policy-testing",
+            "title": "Policy Testing | Open Policy Agent",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H058",
+      "roadmapAnchor": "enhancement-058",
+      "originNote": "The roadmap already links SQLite WAL durability documentation; the effect-critical commit contract and qualification matrix are execlaw-specific.",
+      "refs": [
+        {
+          "label": "SQLite WAL durability",
+          "url": "https://sqlite.org/wal.html",
+          "note": "Distinguish WAL NORMAL and FULL sync behavior and storage assumptions.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://sqlite.org/wal.html",
+            "title": "Write-Ahead Logging",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "SQLite PRAGMA synchronous",
+          "url": "https://sqlite.org/pragma.html#pragma_synchronous",
+          "note": "Defines synchronous modes and their durability tradeoffs; process-crash tests cannot prove hard-reset durability.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://sqlite.org/pragma.html",
+            "title": "Pragma statements supported by SQLite",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H059",
+      "roadmapAnchor": "enhancement-059",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Tokio spawn_blocking",
+          "url": "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html",
+          "note": "Blocking work needs explicit concurrency/backpressure bounds; spawned blocking tasks cannot generally be aborted once running.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html",
+            "title": "spawn_blocking in tokio::task - Rust",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H060",
+      "roadmapAnchor": "enhancement-060",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "SQLite WAL checkpointing",
+          "url": "https://sqlite.org/wal.html#checkpointing",
+          "note": "Long-lived readers and checkpoint progress affect WAL growth; monitor separately from database size.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://sqlite.org/wal.html",
+            "title": "Write-Ahead Logging",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "SQLite checkpoint API",
+          "url": "https://sqlite.org/c3ref/wal_checkpoint_v2.html",
+          "note": "Use documented checkpoint modes and busy/progress results rather than treating checkpoint invocation as completion.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://sqlite.org/c3ref/wal_checkpoint_v2.html",
+            "title": "Checkpoint a database",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H061",
+      "roadmapAnchor": "enhancement-061",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Microsoft Event Sourcing pattern",
+          "url": "https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing",
+          "note": "Event-version compatibility and replay projections inform schema evolution; signed-byte preservation is execlaw-specific, with no Azure dependency.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing",
+            "title": "Event Sourcing Pattern - Azure Architecture Center | Microsoft Learn",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H062",
+      "roadmapAnchor": "enhancement-062",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Microsoft Materialized View pattern",
+          "url": "https://learn.microsoft.com/en-us/azure/architecture/patterns/materialized-view",
+          "note": "Derived views can be rebuilt from authoritative data; watermarks, tombstones and atomic activation are execlaw requirements.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://learn.microsoft.com/en-us/azure/architecture/patterns/materialized-view",
+            "title": "Materialized View Pattern - Azure Architecture Center | Microsoft Learn",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "SQLite transactions",
+          "url": "https://sqlite.org/lang_transaction.html",
+          "note": "Atomic activation and consistent reader behavior must follow SQLite transaction semantics.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://sqlite.org/lang_transaction.html",
+            "title": "Transaction",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H063",
+      "roadmapAnchor": "enhancement-063",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "The Update Framework specification",
+          "url": "https://theupdateframework.github.io/specification/latest/",
+          "note": "Rollback/freeze resistance depends on version/freshness metadata and trusted retained state; applying this to signed database heads is an execlaw synthesis.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://theupdateframework.github.io/specification/latest/",
+            "title": "The Update Framework Specification",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H064",
+      "roadmapAnchor": "enhancement-064",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "SQLite ALTER TABLE",
+          "url": "https://sqlite.org/lang_altertable.html",
+          "note": "SQLite's supported schema-change procedures and compatibility caveats guide upgrade fixtures.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://sqlite.org/lang_altertable.html",
+            "title": "ALTER TABLE",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "SQLite atomic commit",
+          "url": "https://sqlite.org/atomiccommit.html",
+          "note": "Failure and storage assumptions must be tested during migration, not inferred from a successful schema edit.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://sqlite.org/atomiccommit.html",
+            "title": "Atomic Commit In SQLite",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H065",
+      "roadmapAnchor": "enhancement-065",
+      "originNote": "Earlier strategy links MCP and warns that annotations are not authority; execlaw's expanded effect/concurrency contract is its own design.",
+      "refs": [
+        {
+          "label": "MCP tools specification",
+          "url": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools",
+          "note": "Read-only/destructive/idempotent annotations inform vocabulary but remain untrusted hints, not permissions.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://modelcontextprotocol.io/specification/2025-06-18/server/tools",
+            "title": "Tools - Model Context Protocol",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H066",
+      "roadmapAnchor": "enhancement-066",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "RFC 9110 conditional requests",
+          "url": "https://www.rfc-editor.org/rfc/rfc9110.html#section-13",
+          "note": "If-Match and other preconditions prevent applying a change to a resource version different from the approved preview.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://www.rfc-editor.org/rfc/rfc9110.html",
+            "title": "RFC 9110: HTTP Semantics",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H067",
+      "roadmapAnchor": "enhancement-067",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Microsoft Compensating Transaction pattern",
+          "url": "https://learn.microsoft.com/en-us/azure/architecture/patterns/compensating-transaction",
+          "note": "Compensation is application-specific and may not restore the original state; record its own failures and authority.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://learn.microsoft.com/en-us/azure/architecture/patterns/compensating-transaction",
+            "title": "Compensating Transaction Pattern - Azure Architecture Center | Microsoft Learn",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H068",
+      "roadmapAnchor": "enhancement-068",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Tokio JoinSet",
+          "url": "https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html",
+          "note": "Track and settle spawned work as a group; independence detection and resource-conflict scheduling remain host responsibilities.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html",
+            "title": "JoinSet in tokio::task - Rust",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Tokio Semaphore",
+          "url": "https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html",
+          "note": "Bound concurrency and retain permits for actual work lifetimes, including descendants.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html",
+            "title": "Semaphore in tokio::sync - Rust",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H069",
+      "roadmapAnchor": "enhancement-069",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Rust Instant",
+          "url": "https://doc.rust-lang.org/std/time/struct.Instant.html",
+          "note": "Monotonic elapsed time has platform/suspend caveats and cannot substitute for persisted UTC deadlines.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://doc.rust-lang.org/std/time/struct.Instant.html",
+            "title": "Instant in std::time - Rust",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Tokio time testing",
+          "url": "https://docs.rs/tokio/latest/tokio/time/fn.pause.html",
+          "note": "Paused test time enables deterministic timeout tests; wall-clock rollback and restart need separate injected-clock fixtures.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.rs/tokio/latest/tokio/time/fn.pause.html",
+            "title": "pause in tokio::time - Rust",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H070",
+      "roadmapAnchor": "enhancement-070",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Kubernetes CronJob semantics",
+          "url": "https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/",
+          "note": "Explicit concurrency policy, starting deadlines and time zones illustrate scheduler contracts; execlaw implements them in SQLite rather than requiring Kubernetes.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/",
+            "title": "CronJob | Kubernetes",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H071",
+      "roadmapAnchor": "enhancement-071",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "RabbitMQ dead-letter exchanges",
+          "url": "https://www.rabbitmq.com/docs/dlx",
+          "note": "Dead-letter routing, cycles and delivery safety illustrate why redrive needs explicit identity/reconciliation rather than blind retries.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://www.rabbitmq.com/docs/dlx",
+            "title": "Dead Letter Exchanges | RabbitMQ",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H072",
+      "roadmapAnchor": "enhancement-072",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Docker seccomp profiles",
+          "url": "https://docs.docker.com/engine/security/seccomp/",
+          "note": "Constrain syscalls per runtime job.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.docker.com/engine/security/seccomp/",
+            "title": "Seccomp security profiles for Docker | Docker Docs",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Docker rootless mode",
+          "url": "https://docs.docker.com/engine/security/rootless/",
+          "note": "Document privilege-reduction prerequisites and limitations; containers are not permission grants.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.docker.com/engine/security/rootless/",
+            "title": "Rootless mode | Docker Docs",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H073",
+      "roadmapAnchor": "enhancement-073",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Windows container isolation",
+          "url": "https://learn.microsoft.com/en-us/virtualization/windowscontainers/manage-containers/hyperv-container",
+          "note": "Process and Hyper-V isolation have different boundaries; qualify the actual configured platform.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://learn.microsoft.com/en-us/virtualization/windowscontainers/manage-containers/hyperv-container",
+            "title": "Isolation modes | Microsoft Learn",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Docker Desktop VM isolation",
+          "url": "https://docs.docker.com/desktop/enterprise/hardened-desktop/enhanced-container-isolation/",
+          "note": "Desktop VM/container boundaries differ from native Linux; optional product controls must not be assumed universally available.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.docker.com/desktop/enterprise/hardened-desktop/enhanced-container-isolation/",
+            "title": "Enhanced Container Isolation | Docker Docs",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H074",
+      "roadmapAnchor": "enhancement-074",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Linux cgroup v2",
+          "url": "https://docs.kernel.org/admin-guide/cgroup-v2.html",
+          "note": "Hierarchical process/memory/I/O controllers inform aggregate descendant limits; output and artifact quotas need additional host enforcement.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.kernel.org/admin-guide/cgroup-v2.html",
+            "title": "Control Group v2 &#8212; The Linux Kernel documentation",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Windows Job Objects",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects",
+          "note": "Group process lifetime and resource limits on Windows; handle platform-specific escape and cleanup semantics.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects",
+            "title": "Job Objects - Win32 apps | Microsoft Learn",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H075",
+      "roadmapAnchor": "enhancement-075",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "Tokio graceful shutdown",
+          "url": "https://tokio.rs/tokio/topics/shutdown",
+          "note": "Stop admission, notify tasks and await completion; durable checkpoints and effect uncertainty require additional execlaw handling.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://tokio.rs/tokio/topics/shutdown",
+            "title": "Graceful Shutdown | Tokio - An asynchronous Rust runtime",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H076",
+      "roadmapAnchor": "enhancement-076",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "RustCrypto zeroize",
+          "url": "https://docs.rs/zeroize/latest/zeroize/",
+          "note": "Use deliberate zeroization where effective and heed documented limitations; it does not erase all historical copies or defeat host compromise.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.rs/zeroize/latest/zeroize/",
+            "title": "zeroize - Rust",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "OWASP Secrets Management Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html",
+          "note": "Minimize exposure, rotate credentials and avoid leaking through logs, temporary storage or broad process environments.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html",
+            "title": "Secrets Management - OWASP Cheat Sheet Series",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H077",
+      "roadmapAnchor": "enhancement-077",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "CNCF Distribution garbage collection",
+          "url": "https://distribution.github.io/distribution/about/garbage-collection/",
+          "note": "Content-addressed blob collection has reachability and concurrent-write hazards; execlaw must coordinate SQLite references with filesystem publication.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://distribution.github.io/distribution/about/garbage-collection/",
+            "title": "Garbage collection | CNCF Distribution",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H078",
+      "roadmapAnchor": "enhancement-078",
+      "originNote": "Earlier strategy explicitly compares llama.cpp and OpenVINO GenAI for broad local hardware support; execlaw's measured tier qualification is an added acceptance requirement.",
+      "refs": [
+        {
+          "label": "llama.cpp repository",
+          "url": "https://github.com/ggml-org/llama.cpp",
+          "note": "Local CPU/GPU/backend breadth is a starting compatibility inventory, not a benchmark result for execlaw.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://github.com/ggml-org/llama.cpp",
+            "title": "GitHub - ggml-org/llama.cpp: LLM inference in C/C++ · GitHub",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "OpenVINO GenAI repository",
+          "url": "https://github.com/openvinotoolkit/openvino.genai",
+          "note": "Intel CPU/GPU/NPU local-runtime reference; qualify exact supported hardware/model combinations.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://github.com/openvinotoolkit/openvino.genai",
+            "title": "GitHub - openvinotoolkit/openvino.genai: Run Generative AI models with simple C++/Python API and using OpenVINO Runtime · GitHub",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H079",
+      "roadmapAnchor": "enhancement-079",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "MCP conformance test suite",
+          "url": "https://github.com/modelcontextprotocol/conformance",
+          "note": "A protocol conformance suite is a useful model for reusable plugin contract fixtures; it does not certify execlaw plugins automatically.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://github.com/modelcontextprotocol/conformance",
+            "title": "GitHub - modelcontextprotocol/conformance: Conformance Tests for MCP · GitHub",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H080",
+      "roadmapAnchor": "enhancement-080",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "MCP lifecycle negotiation",
+          "url": "https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle",
+          "note": "Negotiate protocol version and capabilities explicitly before dependent operations.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle",
+            "title": "Lifecycle - Model Context Protocol",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Semantic Versioning",
+          "url": "https://semver.org/spec/v2.0.0.html",
+          "note": "Separate compatibility meaning from cosmetic version labels; security-critical feature support still needs explicit checks.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://semver.org/spec/v2.0.0.html",
+            "title": "Semantic Versioning 2.0.0 | Semantic Versioning",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H081",
+      "roadmapAnchor": "enhancement-081",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "OCI image descriptor",
+          "url": "https://github.com/opencontainers/image-spec/blob/main/descriptor.md",
+          "note": "Descriptors bind content identity by digest and size; retaining/authorizing a digest for a run is execlaw-specific.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://github.com/opencontainers/image-spec/blob/main/descriptor.md",
+            "title": "image-spec/descriptor.md at main · opencontainers/image-spec · GitHub",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H082",
+      "roadmapAnchor": "enhancement-082",
+      "originNote": "Earlier strategy documents Sigstore/SLSA artifact provenance; publisher revocation and offline response are additional execlaw-specific controls.",
+      "refs": [
+        {
+          "label": "Sigstore verification overview",
+          "url": "https://docs.sigstore.dev/cosign/verifying/verify/",
+          "note": "Verify signer identity and artifact binding; a valid signature alone is not a safety or revocation decision.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.sigstore.dev/cosign/verifying/verify/",
+            "title": "Verifying Signatures - Sigstore",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "The Update Framework specification",
+          "url": "https://theupdateframework.github.io/specification/latest/",
+          "note": "Trusted metadata/key rotation and rollback/freeze defenses inform offline revocation freshness and compromise recovery.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://theupdateframework.github.io/specification/latest/",
+            "title": "The Update Framework Specification",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H083",
+      "roadmapAnchor": "enhancement-083",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "pluggy hook specification and ordering",
+          "url": "https://pluggy.readthedocs.io/en/stable/",
+          "note": "Explicit hook ordering, wrappers, result and exception semantics provide a comparison for a predictable host contract; no Python dependency is proposed.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://pluggy.readthedocs.io/en/stable/",
+            "title": "pluggy &#8212; pluggy 0.1.dev96+gfd08ab5 documentation",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H084",
+      "roadmapAnchor": "enhancement-084",
+      "originNote": "Documented earlier in docs/execlaw_impr_doc.md section9.4 (WASI component tier); H084 already links Wasmtime's security model.",
+      "refs": [
+        {
+          "label": "Wasmtime security model",
+          "url": "https://docs.wasmtime.dev/security.html",
+          "note": "Embedding APIs, imports and capability exposure define the actual sandbox boundary.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.wasmtime.dev/security.html",
+            "title": "Security - Wasmtime",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Wasmtime interruption",
+          "url": "https://docs.wasmtime.dev/examples-interrupting-wasm.html",
+          "note": "Fuel/epoch interruption supports bounded computation; qualify memory and host-call limits separately.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.wasmtime.dev/examples-interrupting-wasm.html",
+            "title": "Interrupting Execution - Wasmtime",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H085",
+      "roadmapAnchor": "enhancement-085",
+      "originNote": "Documented earlier in docs/execlaw_impr_doc.md protocol comparison and A2A proposal; operator-owned/local-only pairing restrictions are execlaw-specific.",
+      "refs": [
+        {
+          "label": "A2A specification",
+          "url": "https://a2a-protocol.org/latest/specification/",
+          "note": "Task state, artifacts, streaming and authentication are external protocol building blocks; an Agent Card does not establish local inference or permission.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://a2a-protocol.org/latest/specification/",
+            "title": "Overview - A2A Protocol",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H086",
+      "roadmapAnchor": "enhancement-086",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "The Instruction Hierarchy research paper",
+          "url": "https://arxiv.org/abs/2404.13208",
+          "note": "Research reference for distinguishing instruction privilege; execlaw still enforces capabilities outside model behavior.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://arxiv.org/abs/2404.13208",
+            "title": "[2404.13208] The Instruction Hierarchy: Training LLMs to Prioritize Privileged Instructions",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "OWASP LLM Prompt Injection Prevention Cheat Sheet",
+          "url": "https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html",
+          "note": "Treat retrieved documents and tool outputs as untrusted input and validate consequential actions separately.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html",
+            "title": "LLM Prompt Injection Prevention - OWASP Cheat Sheet Series",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H087",
+      "roadmapAnchor": "enhancement-087",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "petgraph topological sort",
+          "url": "https://docs.rs/petgraph/latest/petgraph/algo/fn.toposort.html",
+          "note": "Detect dependency cycles deterministically; wait-for capacity edges and reclaimable reservations remain execlaw design.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.rs/petgraph/latest/petgraph/algo/fn.toposort.html",
+            "title": "toposort in petgraph::algo - Rust",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "Tokio Semaphore",
+          "url": "https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html",
+          "note": "Permit ownership/fairness semantics matter when parents and children compete for bounded capacity.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html",
+            "title": "Semaphore in tokio::sync - Rust",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H088",
+      "roadmapAnchor": "enhancement-088",
+      "originNote": "Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.",
+      "refs": [
+        {
+          "label": "RFC 9111 HTTP caching",
+          "url": "https://www.rfc-editor.org/rfc/rfc9111.html",
+          "note": "Freshness, validation and restrictions on authenticated responses guide cache safety; execlaw adds principal/tool-version/authority keys.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://www.rfc-editor.org/rfc/rfc9111.html",
+            "title": "RFC 9111: HTTP Caching",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H089",
+      "roadmapAnchor": "enhancement-089",
+      "originNote": "Earlier strategy uses Graphiti as a reference for temporal entities and provenance; reversible, trust-preserving identity merge governance is execlaw-specific.",
+      "refs": [
+        {
+          "label": "Graphiti repository",
+          "url": "https://github.com/getzep/graphiti",
+          "note": "Temporal entity resolution and evidence-backed graphs are an existing comparison point; semantic merging must not grant identity authority.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://github.com/getzep/graphiti",
+            "title": "GitHub - getzep/graphiti: Build Real-Time Knowledge Graphs for AI Agents · GitHub",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H090",
+      "roadmapAnchor": "enhancement-090",
+      "originNote": "Earlier strategy cites LangMem for typed foreground/background memory and Letta for editable memory; explicit-versus-inferred preference governance is execlaw-specific.",
+      "refs": [
+        {
+          "label": "LangMem repository",
+          "url": "https://github.com/langchain-ai/langmem",
+          "note": "Memory extraction and semantic updates are prior comparison material, not authorization to persist inferred preferences automatically.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://github.com/langchain-ai/langmem",
+            "title": "GitHub - langchain-ai/langmem · GitHub",
+            "checkedAt": "2026-10-06"
+          }
+        },
+        {
+          "label": "W3C PROV-O",
+          "url": "https://www.w3.org/TR/prov-o/",
+          "note": "Retain attribution and derivation so explicit declarations can be distinguished from extracted inferences.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06",
+          "verification": {
+            "verified": true,
+            "status": 200,
+            "resolvedUrl": "https://www.w3.org/TR/prov-o/",
+            "title": "PROV-O: The PROV Ontology",
+            "checkedAt": "2026-10-06"
+          }
+        }
+      ]
+    },
+    {
+      "id": "H091",
+      "roadmapAnchor": "enhancement-091",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Docling document model",
+          "url": "https://docling-project.github.io/docling/reference/docling_document/",
+          "note": "Adapt page provenance, bounding boxes and document-item references into bounded local extraction artifacts.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H092",
+      "roadmapAnchor": "enhancement-092",
+      "originNote": "H092 explicitly builds on execlaw's existing CodeGraph/wiki and Graphify work; SCIP is a supporting schema reference added now.",
+      "refs": [
+        {
+          "label": "SCIP code-intelligence schema",
+          "url": "https://github.com/scip-code/scip/blob/main/scip.proto",
+          "note": "Adapt document/symbol/occurrence identities and retain a separate workspace revision and coverage receipt.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H093",
+      "roadmapAnchor": "enhancement-093",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Git apply validation and index preconditions",
+          "url": "https://git-scm.com/docs/git-apply",
+          "note": "Adapt check/index preconditions and fail-before-apply behavior; add execlaw-owned crash recovery and containment.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H094",
+      "roadmapAnchor": "enhancement-094",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Rust Command argument and environment semantics",
+          "url": "https://doc.rust-lang.org/std/process/struct.Command.html",
+          "note": "Adapt argument arrays, cwd and cleared environments; preserve documented Windows argument-escaping limitations.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H095",
+      "roadmapAnchor": "enhancement-095",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Playwright managed web servers",
+          "url": "https://playwright.dev/docs/test-webserver",
+          "note": "Adapt readiness URLs, server ownership, reuse policy and graceful shutdown for run-owned previews.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H096",
+      "roadmapAnchor": "enhancement-096",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "in-toto attestation statement",
+          "url": "https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md",
+          "note": "Bind executor-produced evidence to identified artifacts and typed predicates; a statement alone does not prove a test passed.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H097",
+      "roadmapAnchor": "enhancement-097",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "npm ci lifecycle-script policy",
+          "url": "https://docs.npmjs.com/cli/v11/commands/npm-ci/",
+          "note": "Adapt lockfile-consistent installs and explicit script policy; sandbox executed dependency code separately.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Cargo build scripts",
+          "url": "https://doc.rust-lang.org/cargo/reference/build-scripts.html",
+          "note": "Treat build.rs and native build tooling as code execution, not a harmless download.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H098",
+      "roadmapAnchor": "enhancement-098",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Sqitch verify command",
+          "url": "https://sqitch.org/docs/manual/sqitch-verify/",
+          "note": "Adapt explicit migration verification on disposable targets with a pinned database identity.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H099",
+      "roadmapAnchor": "enhancement-099",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Playwright browser isolation",
+          "url": "https://playwright.dev/docs/browser-contexts",
+          "note": "Use separate browser contexts for task cookies/storage and explicit test isolation.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Playwright trace viewer",
+          "url": "https://playwright.dev/docs/trace-viewer",
+          "note": "Adapt attributable action traces, snapshots and network evidence, with execlaw redaction and revision binding.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H100",
+      "roadmapAnchor": "enhancement-100",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "MLS group epochs",
+          "url": "https://www.rfc-editor.org/rfc/rfc9420.html#section-3",
+          "note": "Use group-state epochs as a reference for audience changes invalidating stale disclosure authority; no requirement to adopt MLS.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H101",
+      "roadmapAnchor": "enhancement-101",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Matrix event replacement and relationships",
+          "url": "https://spec.matrix.org/latest/client-server-api/#event-replacements",
+          "note": "Adapt stable relation targets, edit semantics, redaction and reply lineage into normalized transport records.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H102",
+      "roadmapAnchor": "enhancement-102",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "OpenID Connect subject identifiers",
+          "url": "https://openid.net/specs/openid-connect-core-1_0.html#SubjectIDTypes",
+          "note": "Use issuer-scoped stable subject identifiers rather than display names; linking and disclosure still require local approval.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H103",
+      "roadmapAnchor": "enhancement-103",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Inngest debouncing guide",
+          "url": "https://www.inngest.com/docs/durable-execution/flow-control/debounce",
+          "note": "Adapt keyed debounce windows and bounded burst semantics into SQLite scheduling; do not add a hosted dependency.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H104",
+      "roadmapAnchor": "enhancement-104",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Slack signed-request verification",
+          "url": "https://docs.slack.dev/authentication/verifying-requests-from-slack/",
+          "note": "Adapt exact-body HMAC verification and timestamp replay checks where the provider supports them.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Stripe webhook signature rotation",
+          "url": "https://docs.stripe.com/webhooks",
+          "note": "Adapt bounded old/new-secret overlap and timestamp verification; retain each provider's acknowledgment contract.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H105",
+      "roadmapAnchor": "enhancement-105",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Microsoft bot-to-human handoff protocol",
+          "url": "https://learn.microsoft.com/en-us/azure/bot-service/bot-service-design-pattern-handoff-human?view=azure-bot-service-4.0",
+          "note": "Adapt explicit handoff initiation/status and context transfer; implement ownership fencing locally rather than adopting Azure.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H106",
+      "roadmapAnchor": "enhancement-106",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "W3C Web Annotation selectors",
+          "url": "https://www.w3.org/TR/annotation-model/#selectors",
+          "note": "Adapt source selectors and state-specific region/text references for transformed multimodal evidence.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "W3C Media Fragments",
+          "url": "https://www.w3.org/TR/media-frags/",
+          "note": "Use spatial and temporal media fragments as an interoperable reference for crop and audio-segment coordinates.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H107",
+      "roadmapAnchor": "enhancement-107",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Stateright Rust model checking",
+          "url": "https://github.com/stateright/stateright",
+          "note": "Adapt bounded state exploration and counterexample traces for run/lease/approval invariants.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Loom concurrency model testing",
+          "url": "https://github.com/tokio-rs/loom",
+          "note": "Exercise implementation-level scheduling interleavings separately from the abstract protocol model.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H108",
+      "roadmapAnchor": "enhancement-108",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Rust Fuzz cargo-fuzz guide",
+          "url": "https://rust-fuzz.github.io/book/cargo-fuzz.html",
+          "note": "Adapt isolated fuzz targets, corpus retention and crash minimization.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "proptest state-machine testing",
+          "url": "https://docs.rs/proptest-state-machine/latest/proptest_state_machine/",
+          "note": "Generate and shrink valid/invalid protocol operation sequences against a reference model.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H109",
+      "roadmapAnchor": "enhancement-109",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "cargo-mutants result interpretation",
+          "url": "https://mutants.rs/using-results.html",
+          "note": "Adapt survived/caught/unviable mutation reporting and enforce a scoped critical-check mutation gate.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H110",
+      "roadmapAnchor": "enhancement-110",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Docker isolated network driver",
+          "url": "https://docs.docker.com/engine/network/drivers/none/",
+          "note": "Use denied-network test environments as one fixture technique; explicitly separate permitted local inference fixtures and integration endpoints.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H111",
+      "roadmapAnchor": "enhancement-111",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "SWE-bench evaluation harness",
+          "url": "https://www.swebench.com/SWE-bench/guides/evaluation/",
+          "note": "Adapt isolated executable task verification and separation of predictions from authoritative test evaluation.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Judging LLM-as-a-Judge research",
+          "url": "https://arxiv.org/abs/2306.05685",
+          "note": "Use the documented judge biases and human-agreement analysis to design calibration rather than trusting judge scores alone.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H112",
+      "roadmapAnchor": "enhancement-112",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "AmbigQA dataset and evaluation",
+          "url": "https://github.com/shmsw25/AmbigQA",
+          "note": "Adapt ambiguous-question fixtures and disambiguation evaluation, adding action-safety and unnecessary-question metrics.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Language Models (Mostly) Know What They Know",
+          "url": "https://arxiv.org/abs/2207.05221",
+          "note": "Use calibration research as a baseline; do not make self-reported confidence sufficient authority for an effect.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H113",
+      "roadmapAnchor": "enhancement-113",
+      "originNote": "The earlier strategy explicitly cites OpenCode repeated-call safeguards (docs/execlaw_impr_doc.md comparison table); H113's broader progress detection is execlaw's extension.",
+      "refs": [
+        {
+          "label": "OpenCode doom-loop permissions",
+          "url": "https://opencode.ai/docs/permissions/",
+          "note": "Extend repeated-identical-call safeguards into durable evidence-based progress detection; permissions documentation is a current supporting reference.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H114",
+      "roadmapAnchor": "enhancement-114",
+      "originNote": "The earlier strategy names SLSA/Sigstore and OCI provenance; the reproducible-build definition is an additional engineering source for H114.",
+      "refs": [
+        {
+          "label": "Reproducible Builds definition",
+          "url": "https://reproducible-builds.org/docs/definition/",
+          "note": "Define reproducibility in terms of declared build inputs and independently comparable outputs.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "SLSA build provenance",
+          "url": "https://slsa.dev/spec/v1.2/provenance",
+          "note": "Bind inputs/build identity to outputs, alongside complete dependency inventories.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H115",
+      "roadmapAnchor": "enhancement-115",
+      "originNote": "Both H115 and the earlier strategy explicitly link OpenTelemetry GenAI conventions.",
+      "refs": [
+        {
+          "label": "OpenTelemetry GenAI conventions repository",
+          "url": "https://github.com/open-telemetry/semantic-conventions-genai",
+          "note": "Retain an adapter boundary and pin the convention revision independently of SQLite.",
+          "kind": "documented-inspiration",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H116",
+      "roadmapAnchor": "enhancement-116",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Docker image save",
+          "url": "https://docs.docker.com/reference/cli/docker/image/save/",
+          "note": "Package required runtime images for offline transfer with a separately verified digest manifest.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Cargo vendor",
+          "url": "https://doc.rust-lang.org/cargo/commands/cargo-vendor.html",
+          "note": "Package locked Rust dependencies for an offline build/recovery kit.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Ollama importing a model",
+          "url": "https://docs.ollama.com/import",
+          "note": "Include locally importable model artifacts and their license/version manifests instead of runtime downloads.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H117",
+      "roadmapAnchor": "enhancement-117",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "systemd execution sandboxing manual source",
+          "url": "https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml",
+          "note": "Adapt service account, filesystem, credential and privilege boundaries with platform-specific tests.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Windows named-pipe access control",
+          "url": "https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights",
+          "note": "Authenticate and authorize Windows IPC rather than relying on local reachability.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H118",
+      "roadmapAnchor": "enhancement-118",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "restic restoration procedures",
+          "url": "https://restic.readthedocs.io/en/stable/050_restore.html",
+          "note": "Adapt clean-host restore drills and integrity verification; separately inventory execlaw encryption/signing keys.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "SQLCipher export API",
+          "url": "https://www.zetetic.net/sqlcipher/sqlcipher-api/",
+          "note": "Use supported encrypted database copy/export semantics during recovery qualification.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H119",
+      "roadmapAnchor": "enhancement-119",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "etcd transactional compare-and-swap",
+          "url": "https://etcd.io/docs/v3.6/learning/api/",
+          "note": "Adapt revision-precondition change sets to native SQLite transactions; do not add etcd as canonical configuration storage.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H120",
+      "roadmapAnchor": "enhancement-120",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Rust documentation tests",
+          "url": "https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html",
+          "note": "Make runnable examples part of documented capability evidence.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Cargo machine-readable metadata",
+          "url": "https://doc.rust-lang.org/cargo/commands/cargo-metadata.html",
+          "note": "Generate feature/package inventories from actual build metadata, then join platform test receipts.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H121",
+      "roadmapAnchor": "enhancement-121",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "tus resumable upload protocol",
+          "url": "https://tus.io/protocols/resumable-upload",
+          "note": "Adapt upload offsets, checksums, expiry and termination into authenticated quota-governed attachment sessions.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H122",
+      "roadmapAnchor": "enhancement-122",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "W3C PROV ontology",
+          "url": "https://www.w3.org/TR/prov-o/",
+          "note": "Model artifacts, generating activities, attribution and revisions; keep access and publication approval in execlaw policy.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H123",
+      "roadmapAnchor": "enhancement-123",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Jupyter nbclient execution",
+          "url": "https://nbclient.readthedocs.io/en/latest/client.html",
+          "note": "Reexecute notebooks in clean kernels with explicit parameters/timeouts and capture execution failures.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "Jupyter notebook format",
+          "url": "https://nbformat.readthedocs.io/en/latest/format_description.html",
+          "note": "Preserve cell execution order, outputs and notebook metadata in a hashed analysis capsule.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H124",
+      "roadmapAnchor": "enhancement-124",
+      "originNote": "The earlier strategy cites LangGraph checkpoints and resume; Temporal is a supporting version-pinning reference added now, not claimed historical inspiration.",
+      "refs": [
+        {
+          "label": "Temporal worker versioning",
+          "url": "https://docs.temporal.io/worker-versioning",
+          "note": "Adapt execution-version pinning and controlled promotion; persist immutable graph revisions in SQLite.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H125",
+      "roadmapAnchor": "enhancement-125",
+      "originNote": "The earlier strategy explicitly cites LangGraph graph checkpoints, interrupts, pending writes and node-level resume; these are precise supporting docs for that documented inspiration.",
+      "refs": [
+        {
+          "label": "LangGraph interrupts",
+          "url": "https://docs.langchain.com/oss/python/langgraph/interrupts",
+          "note": "Adapt durable interrupt/resume contracts and explicit approval input without adopting LangGraph as the runtime.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "LangGraph persistence",
+          "url": "https://docs.langchain.com/oss/python/langgraph/persistence",
+          "note": "Use checkpoints and pending-write semantics as references for native SQLite wait/join recovery.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H126",
+      "roadmapAnchor": "enhancement-126",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Temporal Go testing and activity mocks",
+          "url": "https://docs.temporal.io/develop/go/best-practices/testing-suite",
+          "note": "Adapt isolated workflow tests, mock activities and controlled time; require explicit rejection of live effects in execlaw simulation.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H127",
+      "roadmapAnchor": "enhancement-127",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "HTTP If-Match preconditions",
+          "url": "https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.1",
+          "note": "Adapt revision preconditions to draft edit/review/send so stale approvals and concurrent reviewers conflict.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H128",
+      "roadmapAnchor": "enhancement-128",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Prometheus Alertmanager grouping and inhibition",
+          "url": "https://prometheus.io/docs/alerting/latest/alertmanager/",
+          "note": "Adapt grouping, inhibition, silence and routing policies to SQLite-backed operator attention controls.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H129",
+      "roadmapAnchor": "enhancement-129",
+      "originNote": "Supporting engineering reference added in this review; no original external provenance claimed.",
+      "refs": [
+        {
+          "label": "Unicode locale data markup",
+          "url": "https://www.unicode.org/reports/tr35/",
+          "note": "Use standard locale/date/number rules to construct multilingual interpretation fixtures.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        },
+        {
+          "label": "W3C inline bidirectional text guidance",
+          "url": "https://www.w3.org/International/articles/inline-bidi-markup/",
+          "note": "Adapt isolation/direction handling for mixed RTL/LTR identities and tool results.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    },
+    {
+      "id": "H130",
+      "roadmapAnchor": "enhancement-130",
+      "originNote": "H130 builds on existing execlaw Wiki/memory collection work; Syncthing is a synchronization engineering reference added now.",
+      "refs": [
+        {
+          "label": "Syncthing synchronization semantics",
+          "url": "https://docs.syncthing.net/users/syncing.html",
+          "note": "Adapt scan/watch reconciliation, versioned change detection and deletion semantics for approved local collections.",
+          "kind": "supporting-reference",
+          "verified": true,
+          "checkedOn": "2026-10-06"
+        }
+      ]
+    }
+  ],
+  "repositories": [
+    {
+      "url": "https://github.com/letta-ai/letta-code",
+      "resolvedUrl": "https://github.com/letta-ai/letta-code",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/pydantic/pydantic-ai",
+      "resolvedUrl": "https://github.com/pydantic/pydantic-ai",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/OpenHands/OpenHands",
+      "resolvedUrl": "https://github.com/OpenHands/OpenHands",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/SWE-agent/mini-swe-agent",
+      "resolvedUrl": "https://github.com/SWE-agent/mini-swe-agent",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/aaif-goose/goose",
+      "resolvedUrl": "https://github.com/aaif-goose/goose",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/anomalyco/opencode",
+      "resolvedUrl": "https://github.com/anomalyco/opencode",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/huggingface/smolagents",
+      "resolvedUrl": "https://github.com/huggingface/smolagents",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/langchain-ai/langgraph",
+      "resolvedUrl": "https://github.com/langchain-ai/langgraph",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/getzep/graphiti",
+      "resolvedUrl": "https://github.com/getzep/graphiti",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/mem0ai/mem0",
+      "resolvedUrl": "https://github.com/mem0ai/mem0",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/topoteretes/cognee",
+      "resolvedUrl": "https://github.com/topoteretes/cognee",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/langchain-ai/langmem",
+      "resolvedUrl": "https://github.com/langchain-ai/langmem",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/open-telemetry/semantic-conventions-genai",
+      "resolvedUrl": "https://github.com/open-telemetry/semantic-conventions-genai",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/vllm-project/vllm",
+      "resolvedUrl": "https://github.com/vllm-project/vllm",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/ggml-org/llama.cpp",
+      "resolvedUrl": "https://github.com/ggml-org/llama.cpp",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/sgl-project/sglang",
+      "resolvedUrl": "https://github.com/sgl-project/sglang",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/openvinotoolkit/openvino.genai",
+      "resolvedUrl": "https://github.com/openvinotoolkit/openvino.genai",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/OpenHands/software-agent-sdk",
+      "resolvedUrl": "https://github.com/OpenHands/software-agent-sdk",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/ollama/ollama",
+      "resolvedUrl": "https://github.com/ollama/ollama",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/mem0ai/memory-benchmarks",
+      "resolvedUrl": "https://github.com/mem0ai/memory-benchmarks",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/NVIDIA/TensorRT-LLM",
+      "resolvedUrl": "https://github.com/NVIDIA/TensorRT-LLM",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/truefoundry/trueforge",
+      "resolvedUrl": "https://github.com/truefoundry/trueforge",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/earendil-works/pi",
+      "resolvedUrl": "https://github.com/earendil-works/pi",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/NVIDIA/NeMo-Agent-Toolkit",
+      "resolvedUrl": "https://github.com/NVIDIA/NeMo-Agent-Toolkit",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/NousResearch/hermes-agent",
+      "resolvedUrl": "https://github.com/NousResearch/hermes-agent",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/opencontainers/image-spec",
+      "resolvedUrl": "https://github.com/opencontainers/image-spec",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/modelcontextprotocol/conformance",
+      "resolvedUrl": "https://github.com/modelcontextprotocol/conformance",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/ggml-org/whisper.cpp",
+      "resolvedUrl": "https://github.com/ggml-org/whisper.cpp",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/scip-code/scip",
+      "resolvedUrl": "https://github.com/scip-code/scip",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/stateright/stateright",
+      "resolvedUrl": "https://github.com/stateright/stateright",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/tokio-rs/loom",
+      "resolvedUrl": "https://github.com/tokio-rs/loom",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/in-toto/attestation",
+      "resolvedUrl": "https://github.com/in-toto/attestation",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/shmsw25/AmbigQA",
+      "resolvedUrl": "https://github.com/shmsw25/AmbigQA",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    },
+    {
+      "url": "https://github.com/systemd/systemd",
+      "resolvedUrl": "https://github.com/systemd/systemd",
+      "status": 200,
+      "verified": true,
+      "checkedOn": "2026-10-06"
+    }
+  ]
+}

@@ -92,7 +92,7 @@ and accessibility. The existing Classic/Nexus selector remains the master
 control; NX01 requires complete Classic restoration from collapsed states.
 The proposals are not implemented by this documentation update.
 
-All 130 enhancements are committed implementation scope under the
+All 154 enhancements are committed implementation scope under the
 [implementation plan](../docs/implementation-plan.md). This commitment is not a
 claim that they have shipped: the plan owns implementation status, and the
 [roadmap](../docs/llm-harness-roadmap.md) owns acceptance criteria.

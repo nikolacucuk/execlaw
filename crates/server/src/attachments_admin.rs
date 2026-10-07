@@ -377,7 +377,7 @@ mod tests {
                 conversation_id: cid.clone(),
                 mime_type: "application/pdf".into(),
                 path: path.to_string_lossy().into_owned(),
-                sha256: "x".into(),
+                sha256: "a".repeat(64),
                 received_at: 0,
                 filename: None,
             })

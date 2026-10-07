@@ -1004,13 +1004,16 @@ impl<'db> MemoryAssertionStore<'db> {
                         "candidate evidence is outside the committed job range or malformed".into(),
                     ));
                 }
-                let payload: Vec<u8> = tx.query_row(
-                    "SELECT payload FROM state_events WHERE conversation_id = ?1 AND seq = ?2",
+                let (event_kind, payload): (String, Vec<u8>) = tx.query_row(
+                    "SELECT kind,payload FROM state_events WHERE conversation_id = ?1 AND seq = ?2",
                     params![job.conversation_id.as_str(), item.event_seq],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )?;
-                let payload: serde_json::Value = rmp_serde::from_slice(&payload)
-                    .map_err(|error| DbError::Serde(format!("decode evidence payload: {error}")))?;
+                let payload: serde_json::Value = crate::events::decode_payload_bytes(
+                    crate::events::EventKind::parse(&event_kind),
+                    &payload,
+                )
+                .map_err(|error| DbError::Serde(format!("decode evidence payload: {error}")))?;
                 let value = value_at_path(&payload, &item.payload_path).ok_or_else(|| {
                     DbError::Serde(format!("evidence path not found: {}", item.payload_path))
                 })?;

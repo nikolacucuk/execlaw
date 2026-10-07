@@ -1,11 +1,12 @@
 # execlaw-policy
 
-Rule of Two, input-guard helpers, capability-token claim shape. The full
+Rule of Two, input-guard helpers, capability-token claim shape, conservative
+information-label joins, and deterministic outbound secret indicators. The full
 rules-table evaluator from §7.3 lands in Phase 3.
 
 ## Implementation plan
 
-All 130 enhancements are committed implementation scope under the
+All 154 enhancements are committed implementation scope under the
 [implementation plan](../../docs/implementation-plan.md). This commitment is not a
 claim that they have shipped: the plan owns implementation status, and the
 [roadmap](../../docs/llm-harness-roadmap.md) owns acceptance criteria.

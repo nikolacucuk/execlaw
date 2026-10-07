@@ -1,11 +1,13 @@
-# Implementation plan: all 130 enhancements
+# Implementation plan: all 154 enhancements
 
-Accepted scope: **H001-H130**, 2026-09-27. The operator intends to implement
-all 130 items. This is the delivery ledger, not a request to implement every
+Accepted scope: **H001-H154**, updated 2026-10-06 (initial H001-H130 scope: 2026-09-27). The operator intends to implement
+all 154 items. This is the delivery ledger, not a request to implement every
 item in a single change. No item may be silently dropped, marked complete
 for lack of time, or described as shipped solely because it appears here.
 
-The [Nexus visual extension](#nexus-visual-extension) separately tracks NX01-NX30 and NXF01-NXF11. These additional chat-appearance proposals do not renumber the core H001-H130 baseline or alter its status totals.
+The [Nexus visual extension](#nexus-visual-extension) separately tracks NX01-NX30 and NXF01-NXF11. These additional chat-appearance proposals do not renumber the core H001-H154 baseline or alter its status totals.
+
+The [Paperclip extension](#paperclip-coordination-and-interoperability), reviewed 2026-10-06, covers H131-H154 in the main item ledger for native management and optional worker/lead/executive interoperability. Existing H/NX progress and qualification remain unchanged.
 
 ## Sources of truth
 
@@ -34,13 +36,13 @@ results. No item is release-qualified by this documentation change.
 
 | Status | Items | Meaning |
 |---|---:|---|
-| Planned | 74 | Accepted items without delivery evidence attached yet |
-| Implemented; revalidate | 36 | Implementation is recorded; current acceptance and supported-platform evidence remains to be executed |
-| Partial | 19 | H022-H025, H038-H043, H046-H050, H100, H103, H105, and H126-H128 have implemented slices with open acceptance gates; see the individual rows below |
+| Planned | 88 | Accepted items without delivery evidence attached yet |
+| Implemented; revalidate | 42 | Implementation is recorded; current acceptance and supported-platform evidence remains to be executed |
+| Partial | 23 | Implemented slices with open acceptance gates; see the individual rows below |
 | Reopened | 0 | No reopened enhancement items |
 | Verification blocked | 1 | H020 requires production SQLCipher qualification and reconciliation of F04/F16 |
 | Qualified | 0 | All applicable acceptance, security, and supported-platform evidence passes |
-| **Total** | **130** | Every accepted requirement is represented below |
+| **Total** | **154** | Every accepted requirement is represented below |
 
 Set an owner before changing Planned to In progress. Use Partial when a slice
 lands without the entire acceptance contract. Use Verification blocked when
@@ -103,7 +105,7 @@ unchecked and verification-blocked.
 Lab items H084/H085 remain accepted work. Implement the specified trial and
 evaluate its acceptance gate before production activation. A failed trial
 requires redesign or an explicit recorded operator decision to change scope;
-it is not an automatic exemption from the 130-item plan.
+it is not an automatic exemption from the 154-item plan.
 
 ## Workstreams and delivery order
 
@@ -120,6 +122,7 @@ record any additional dependencies before implementation begins.
 | S4 | Coding and orchestration | 19 | Runner, workspace plugins, run APIs, SPA and client contracts |
 | S5 | Knowledge and deliverables | 18 | Memory/skills, attachments, research/Python, memory and evaluation docs |
 | S6 | Plugins, communication, and workflows | 18 | Plugin SDK/host, transport, automation/voice, plugin/operator docs |
+| S7 | Agent work management and Paperclip interoperability | 24 | Core work/run contracts, scoped worker API, bridge plugin and external adapter |
 
 Start with the [immediate queue](remaining-improvements-todo.md): prevent
 unauthorized effects and unsafe installation/test execution, qualify shipped
@@ -193,21 +196,21 @@ parallel list with its own status.
 | H048 | [Make privacy retention and deletion cover every projection](llm-harness-roadmap.md#enhancement-048) | S5 | Partial | Research deletion, governed assets, memory evidence, and skill forgetting use persistent tombstones and hide or scrub live projections. Forced database restore now reapplies current research, memory-asset, memory-source, and skill-name tombstones to the restored snapshot; completed research rows are removed and absent forgotten skills receive a content-free tombstone shell. Exports/diagnostics, plugin storage, tombstone recovery when restoring to a new empty database, and full seeded-projection qualification remain |
 | H049 | [Enforce performance budgets and benchmark local optimizations](llm-harness-roadmap.md#enhancement-049) | S2 | Partial | Unassigned | Added a stable `execlaw-bench` self-hosted Criterion gate with stored per-run estimates, same-runner/compiler fingerprint checks, 95% confidence-interval comparison plus per-case noise tolerances, and benchmark coverage for replay, trust-filtered memory search, catalog assembly, runner framing, contended inference queue wait, and 4 MiB artifact publishing. Three new gate tests prove a deliberate regression fails, a noisy in-tolerance change passes, and runner identity mismatches are rejected. A qualified runner baseline and optimization trials with identical task-quality/policy checks remain |
 | H050 | [Make first success and recovery accessible and diagnosable](llm-harness-roadmap.md#enhancement-050) | S2 | Partial | Unassigned | Added a Controller-only scrubbed support-bundle endpoint and Backends download/summary UI covering database encryption mode, schema migration count, backend readiness, per-capability qualification counts, plugin/tool-policy authority counts, and recovery queue statuses. Tests verify capability summaries and the full serialized bundle omit raw model identity, prompt, token, and observation values. Hardware capacity is a heuristic, not measured model performance; disposable-backend browser journeys, accessibility checks, and per-OS first-task measurements remain pending |
-| H051 | [Carry typed sensitivity and provenance through the entire run](llm-harness-roadmap.md#enhancement-051) | S1 | Planned | Unassigned | Pending |
-| H052 | [Recheck live authority immediately before dispatch](llm-harness-roadmap.md#enhancement-052) | S1 | Planned | Unassigned | Pending |
-| H053 | [Render approvals from canonical typed actions](llm-harness-roadmap.md#enhancement-053) | S1 | Planned | Unassigned | Pending |
-| H054 | [Broker secrets without placing credentials in model context](llm-harness-roadmap.md#enhancement-054) | S1 | Planned | Unassigned | Pending |
-| H055 | [Check outbound data at the actual delivery boundary](llm-harness-roadmap.md#enhancement-055) | S1 | Planned | Unassigned | Pending |
-| H056 | [Offer task-scoped safety profiles with visible enforcement](llm-harness-roadmap.md#enhancement-056) | S1 | Planned | Unassigned | Pending |
-| H057 | [Simulate policy changes before enabling them](llm-harness-roadmap.md#enhancement-057) | S1 | Planned | Unassigned | Pending |
-| H058 | [Define and test power-loss durability separately from crash recovery](llm-harness-roadmap.md#enhancement-058) | S1 | Planned | Unassigned | Pending |
-| H059 | [Move blocking database work behind a bounded execution service](llm-harness-roadmap.md#enhancement-059) | S2 | Planned | Unassigned | Pending |
-| H060 | [Manage disk pressure and WAL growth as first-class health states](llm-harness-roadmap.md#enhancement-060) | S2 | Planned | Unassigned | Pending |
-| H061 | [Version event payloads and replay transformations explicitly](llm-harness-roadmap.md#enhancement-061) | S2 | Planned | Unassigned | Pending |
-| H062 | [Rebuild derived projections safely while the service runs](llm-harness-roadmap.md#enhancement-062) | S2 | Planned | Unassigned | Pending |
-| H063 | [Detect rollback of an otherwise valid database snapshot](llm-harness-roadmap.md#enhancement-063) | S2 | Planned | Unassigned | Pending |
-| H064 | [Test schema evolution across supported release histories](llm-harness-roadmap.md#enhancement-064) | S2 | Planned | Unassigned | Pending |
-| H065 | [Describe tool effects and concurrency semantics in manifests](llm-harness-roadmap.md#enhancement-065) | S1 | Planned | Unassigned | Pending |
+| H051 | [Carry typed sensitivity and provenance through the entire run](llm-harness-roadmap.md#enhancement-051) | S1 | Implemented; revalidate | Unassigned | Added migration 0074 and append-only, content-digest-bound information-label events. Durable run inputs, memory writes/reads, history compaction summaries, skills, general artifacts, and child-result artifacts carry conservative labels and provenance; transport staging joins the current run label and delivery reloads it before checking recipient policy. Controller-only declassification records actor, destination, and scope and permits one matching export. Core, skills, and server regressions plus the workspace suite pass |
+| H052 | [Recheck live authority immediately before dispatch](llm-harness-roadmap.md#enhancement-052) | S1 | Partial | Unassigned | Direct tool dispatch snapshots the append-only policy revision and rechecks it together with the persisted principal before invocation. Queued transport payloads bind principal and policy receipts, reject legacy unstamped rows, and are revalidated against current principal state and policy revision; MCP calls also fingerprint target and credential version. Revocation, policy-change, and transport regressions pass. Script HTTP sinks and remaining non-transport effect adapters still need final-boundary authority binding |
+| H053 | [Render approvals from canonical typed actions](llm-harness-roadmap.md#enhancement-053) | S1 | Partial | Unassigned | Effectful chain approvals include structured operation, target, changed fields, reversibility, and scope from the saved plan; cold-contact approvals now expose typed trust/block/ignore/claim actions and their persistent scope. Secret-like values are redacted and the SPA renders every supplied action with semantic list/detail markup. Existing effect hashes bind approvals to saved actions. Manual keyboard/screen-reader review and any newly added approval kind remain |
+| H054 | [Broker secrets without placing credentials in model context](llm-harness-roadmap.md#enhancement-054) | S1 | Partial | Unassigned | MCP bearer references are moved into per-server vault namespaces; legacy referenced rows migrate; missing or invalid credentials fail closed; secret versions invalidate stale clients on rotation; and configured bearer values are redacted from returned MCP text/errors. MCP scope, rotation, and redaction tests pass. General plugin/provider credential brokerage with request-method grants and active-request cancellation remains |
+| H055 | [Check outbound data at the actual delivery boundary](llm-harness-roadmap.md#enhancement-055) | S1 | Partial | Unassigned | Deterministic credential patterns and host-owned destination labels are enforced at transport text/attachment delivery, MCP tool arguments, Rhai sidecar POST/PUT, and general Rhai HTTP POST/PATCH plus query-bearing GET/DELETE requests. Attachment bytes are hash-checked and scoped to the sending conversation; Controller declassification enables a single destination-scoped export. Policy, script, transport, MCP, and workspace tests pass. Browser-form sinks and false-positive/missed-detection feedback telemetry remain |
+| H056 | [Offer task-scoped safety profiles with visible enforcement](llm-harness-roadmap.md#enhancement-056) | S1 | Implemented; revalidate | Unassigned | SQLite-backed inspect-only, workspace-edit, and approved-integration capability profiles are shown before chat submission and snapshotted into the immutable user event. Catalog visibility and host dispatch enforce the snapshot; imported plugin tools cannot widen it, and unavailable workspace isolation blocks that profile. Permission-matrix and recovery regressions are present; adversarial integration and supported-platform host/OS qualification remain |
+| H057 | [Simulate policy changes before enabling them](llm-harness-roadmap.md#enhancement-057) | S1 | Implemented; revalidate | Unassigned | Controller-only endpoint and UI stage policy edits against append-only decision metadata plus fixtures for all six trust classes; previews report allow/deny/approval-gated changes without effects. Policy revisions and decisions are append-only; rollback creates a fresh revision and does not revive expired approval tokens. Broad historical-volume and supported-release recovery qualification remain |
+| H058 | [Define and test power-loss durability separately from crash recovery](llm-harness-roadmap.md#enhancement-058) | S1 | Implemented; revalidate | Unassigned | New connections use WAL with `synchronous=FULL`; subprocess-abort recovery and injected `SQLITE_FULL` recovery tests pass. Criterion 256-byte commit: NORMAL 109.70 µs, FULL 1.0315 ms (9.4× on this Windows/OneDrive run). A real hard-reset test on disposable supported storage remains; durability assumes the OS/filesystem/device honor flushes |
+| H059 | [Move blocking database work behind a bounded execution service](llm-harness-roadmap.md#enhancement-059) | S2 | Implemented; revalidate | Unassigned | Added one FIFO database worker with 16 pending slots, typed 503 backpressure, queue/service/transaction metrics, and serialized transaction-load tests. Message search uses 128-event transaction batches on the worker; support-bundle collection and memory-embedding reads/writes are also offloaded. Live streaming/approval contention and full async-call-site qualification remain |
+| H060 | [Manage disk pressure and WAL growth as first-class health states](llm-harness-roadmap.md#enhancement-060) | S2 | Implemented; revalidate | Unassigned | Support diagnostics and Backends UI show DB/WAL/SHM/journal/reference-blob sizes, free space, queue/transaction metrics, and checkpoint progress. Warning/critical reserves are 2 GiB/512 MiB; a backlog of 1,000 uncheckpointed frames also warns. Embedding rebuilds and HF model downloads pause below the warning reserve or above a 1 GiB WAL. Controller passive checkpoint, long-reader progress, injected SQLite-full recovery, and retained-row checks pass. Pressure response does not delete content; existing retention sweepers remain the content-cleanup path. Supported-volume and managed-container download qualification remain |
+| H061 | [Version event payloads and replay transformations explicitly](llm-harness-roadmap.md#enhancement-061) | S2 | Partial | Unassigned | New payloads carry a schema identity inside HMAC-covered bytes; legacy payloads remain readable and unknown versions fail clearly. Focused replay and tamper tests added. Deterministic transformations for every historical event generation and a documented reader-version matrix remain |
+| H062 | [Rebuild derived projections safely while the service runs](llm-harness-roadmap.md#enhancement-062) | S2 | Partial | Unassigned | Added resumable generation checkpoints and validation-gated atomic activation. Search/archive/memory/graph rebuild workers, live-write and tombstone reconciliation, and reference-corpus equivalence remain |
+| H063 | [Detect rollback of an otherwise valid database snapshot](llm-harness-roadmap.md#enhancement-063) | S2 | Partial | Unassigned | Added HMAC-signed external conversation-head manifests and comparison that reports rollback, divergence, or advancement; focused tamper/old-snapshot tests added. Operator-facing independent export, retention, and explicit reconciliation workflow remain |
+| H064 | [Test schema evolution across supported release histories](llm-harness-roadmap.md#enhancement-064) | S2 | Partial | Unassigned | Added synthetic upgrade coverage from schema prefixes 1, 20, 35, 50, 68, 74, and 75, with 512 seeded events and an interrupted/retried migration. Released database fixtures, realistic multi-table scale, duration/disk measurements, and recovery-snapshot verification remain |
+| H065 | [Describe tool effects and concurrency semantics in manifests](llm-harness-roadmap.md#enhancement-065) | S1 | Partial | Unassigned | Added a shared manifest contract for resources, effects, idempotency, reconciliation, cancellation, sensitivity, and concurrency. Omitted fields normalize to unknown and retry/parallel helpers fail closed. Runtime enforcement in dispatch/retry paths and false-declaration conformance fixtures remain |
 | H066 | [Support prepare/preview/execute with resource preconditions](llm-harness-roadmap.md#enhancement-066) | S1 | Planned | Unassigned | Pending |
 | H067 | [Model compensating actions for partially completed workflows](llm-harness-roadmap.md#enhancement-067) | S6 | Planned | Unassigned | Pending |
 | H068 | [Parallelize only independent tool work](llm-harness-roadmap.md#enhancement-068) | S4 | Planned | Unassigned | Pending |
@@ -273,6 +276,30 @@ parallel list with its own status.
 | H128 | [Manage operator attention with quiet hours and actionable digests](llm-harness-roadmap.md#enhancement-128) | S6 | Partial | Unassigned | Timed agents accept IANA-zone cron, overlap, catch-up, and quiet-hours policy with durable fire receipts. Alert aggregation, snooze/acknowledgment, escalation, and cross-channel digest behavior remain planned |
 | H129 | [Qualify multilingual behavior beyond translated UI strings](llm-harness-roadmap.md#enhancement-129) | S5 | Planned | Unassigned | Pending |
 | H130 | [Offer incrementally synchronized local knowledge collections](llm-harness-roadmap.md#enhancement-130) | S5 | Planned | Unassigned | Pending |
+| H131 | [Persistent goals, projects and work items above runs](llm-harness-roadmap.md#enhancement-131) | S7 | Planned | Unassigned | Pending; related H022/H042/H124 |
+| H132 | [Reporting structure and versioned operating charters](llm-harness-roadmap.md#enhancement-132) | S7 | Planned | Unassigned | Pending; related H042/H052/H086/H087 |
+| H133 | [Atomic work checkout and reassignment fencing](llm-harness-roadmap.md#enhancement-133) | S7 | Planned | Unassigned | Pending; related H023/H024/H042/H052/H069 |
+| H134 | [Evidence-based task disposition, review and structured blockers](llm-harness-roadmap.md#enhancement-134) | S7 | Planned | Unassigned | Pending; related H022/H053/H096/H105/H112/H127 |
+| H135 | [Durable continuation and stranded-work reconciliation](llm-harness-roadmap.md#enhancement-135) | S7 | Planned | Unassigned | Pending; related H023/H043/H069/H103/H113 |
+| H136 | [Portfolio allocation for local execution resources](llm-harness-roadmap.md#enhancement-136) | S7 | Planned | Unassigned | Pending; related H030/H049/H074/H119 |
+| H137 | [Governed staffing, specialization and retirement](llm-harness-roadmap.md#enhancement-137) | S7 | Planned | Unassigned | Pending; related H013/H026/H056/H075/H105/H119 |
+| H138 | [Management dashboard and evidence-backed executive briefings](llm-harness-roadmap.md#enhancement-138) | S7 | Planned | Unassigned | Pending; related H035/H042/H115/H128; NX20 |
+| H139 | [Explicit analysis, coding-worker and manager execution profiles](llm-harness-roadmap.md#enhancement-139) | S7 | Planned | Unassigned | Pending; related H040/H042/H051/H052/H056 |
+| H140 | [A generic scoped worker admission and lifecycle API](llm-harness-roadmap.md#enhancement-140) | S7 | Planned | Unassigned | Pending; related H024/H026/H044/H052 |
+| H141 | [A first-class external Paperclip adapter for execlaw](llm-harness-roadmap.md#enhancement-141) | S7 | Planned | Unassigned | Pending; related H043/H044/H079/H080 |
+| H142 | [An optional manifest-driven Paperclip bridge plugin](llm-harness-roadmap.md#enhancement-142) | S7 | Planned | Unassigned | Pending; related H027/H044/H065/H079/H080/H081 |
+| H143 | [Pairing and least-privilege credentials at both boundaries](llm-harness-roadmap.md#enhancement-143) | S7 | Planned | Unassigned | Pending; related H026/H052/H054/H056 |
+| H144 | [Durable wake normalization with one scheduling owner](llm-harness-roadmap.md#enhancement-144) | S7 | Planned | Unassigned | Pending; related H024/H043/H070/H103/H104 |
+| H145 | [Explicit external task, invocation and local-run state mapping](llm-harness-roadmap.md#enhancement-145) | S7 | Planned | Unassigned | Pending; related H022/H024/H035 |
+| H146 | [Cross-system cancellation, restart and session resumption](llm-harness-roadmap.md#enhancement-146) | S7 | Planned | Unassigned | Pending; related H023/H043/H052 |
+| H147 | [Outbox-mediated Paperclip mutations and reconciliation](llm-harness-roadmap.md#enhancement-147) | S7 | Planned | Unassigned | Pending; related H024/H065/H066/H071 |
+| H148 | [Isolated task context, memory and workspace binding](llm-harness-roadmap.md#enhancement-148) | S7 | Planned | Unassigned | Pending; related H037/H041/H048/H051/H086 |
+| H149 | [Safe work-product, progress and usage reporting](llm-harness-roadmap.md#enhancement-149) | S7 | Planned | Unassigned | Pending; related H035/H049/H054/H055/H077/H122 |
+| H150 | [Revision-bound approvals and questions without authority laundering](llm-harness-roadmap.md#enhancement-150) | S7 | Planned | Unassigned | Pending; related H010/H053/H105/H112 |
+| H151 | [Qualified local networking and local-only delegated inference](llm-harness-roadmap.md#enhancement-151) | S7 | Planned | Unassigned | Pending; related H025/H034/H054/H085/H110 |
+| H152 | [Qualified Paperclip worker, lead and executive operating profiles](llm-harness-roadmap.md#enhancement-152) | S7 | Planned | Unassigned | Pending; related H022/H042/H053/H119 |
+| H153 | [Pinned compatibility, upgrade and supply-chain qualification](llm-harness-roadmap.md#enhancement-153) | S7 | Planned | Unassigned | Pending; related H028/H079/H080/H081/H082/H114 |
+| H154 | [Staged integration drills and management-quality evaluation](llm-harness-roadmap.md#enhancement-154) | S7 | Planned | Unassigned | Pending; related H021/H023/H049/H107/H110/H111 |
 
 ## Finding closure ledger
 
@@ -347,6 +374,11 @@ operator-state changes by itself.
 
 ## Change record
 
+- 2026-10-06: continued the main numbering with H131-H154 for the 24
+  Paperclip-related enhancements; merged their rows into the item ledger and
+  updated links/totals. Requirements, GitHub references and existing status
+  evidence are preserved.
+
 - 2026-09-27: accepted all H001-H130, created the full ledger and F01-F19
   closure map, reconciled H009/H018/H020, and linked subsystem documentation.
   Documentation validation only; no implementation or runtime qualification
@@ -359,7 +391,7 @@ backlog. The [Nexus roadmap section](llm-harness-roadmap.md#nexus-visual-roadmap
 owns the design, settings/off contract, acceptance criteria, and NXF01-NXF11
 findings. These 30 proposals are separately tracked as Planned; this update
 does not implement the visual redesign or close a UI/security finding.
-The core ledger above still covers exactly H001-H130.
+The main ledger above covers H001-H154.
 
 Retain Settings -> General -> Chat appearance -> Classic / Nexus as the
 master selector. Enabling a lens, map, or richer preview must be optional;
@@ -449,3 +481,53 @@ reading, identity, and rendering foundations.
 When implementation starts, assign owners, record evidence per NX item, and
 update related H/F rows only where their own acceptance criteria are met.
 Keep the Nexus proposals and core status totals distinct.
+
+## Paperclip coordination and interoperability
+
+Added 2026-10-06. The [Paperclip roadmap section](llm-harness-roadmap.md#paperclip-roadmap)
+owns the current-code comparison, pinned upstream evidence, two-way architecture,
+compatibility findings and H131-H154 acceptance criteria. These 24 enhancements continue the numbering at H131-H154 and are Planned.
+Their main-ledger rows have no assigned owner or integration-test evidence.
+Existing H001-H130 and NX01-NX30 progress remains unchanged.
+
+Two tracks can proceed independently: H131-H139 extend native work management;
+H140-H154 qualify optional Paperclip participation. Reuse current durable
+children, mailboxes, ownership/review, workspace, budget and client contracts.
+The analysis was pinned to Paperclip commit
+`f77fcbf4bfc2bf1fb995abda63f2345a34652dd4`; upstream code was read, not executed.
+Prior execlaw test reports were not rerun or promoted to fresh qualification.
+
+H131-H154 are listed in the [main item ledger](#item-ledger), with the same
+status, owner and evidence fields as all earlier enhancements. Priority, effort,
+acceptance criteria and pinned GitHub references remain in the roadmap.
+
+### Paperclip delivery gates
+
+| Stage | Scope | Required evidence before advancing |
+|---|---|---|
+| Native management | H131-H139 | Durable task ownership across runs; evidence-based disposition; no privilege inherited from an org title; bounded continuation and aggregate resource accounting |
+| Paired observer | H140-H143, H148, H151, H153 | Scoped credentials, exact paired identities, approved local connectivity; observation only, with no issue checkout, assigned-task execution or progress/status writes |
+| Bounded worker, including locally read-only tasks | H144-H150, H154 and observer gates | Actual adapter/plugin restart and acknowledged cancellation; outbox attribution and reconciliation before any checkout/release/report; scoped artifacts/usage, independent approval gates and verified local artifact |
+| Lead/executive | H152 and prior worker gates | Parent/goal-linked bounded delegation; board staffing/budget proposals; review and escalation tests; no self-approval or cloud delegation |
+
+Keep H154 tests alongside every stage. A generic HTTP success or CLI exit is
+not evidence that issue work is complete. The external-task Draft v1 is not
+the worker execution contract. Production compatibility requires the pinned
+adapter types and actual upstream API behavior to pass, including cancellation
+and unknown-outcome cases.
+
+H146/H147 are prerequisites for the first assigned-worker pilot, not only for
+local tool writes: Paperclip checkout and progress reporting already mutate
+external state. Enabling coding or other local effects additionally requires
+the corresponding H040/executor/policy qualification gates.
+
+Assign an owner and record revision, tested Paperclip/bridge versions, models,
+hardware/platform, fixture/live scope, results and open limitations when a
+slice begins. Related enhancement qualification remains binding; successful Paperclip work
+does not automatically qualify its parent H item. All external mutations in
+future tests must use disposable operator-approved instances and scoped test
+credentials, never the operator's live task board.
+
+Review record: documentation and source/contract analysis only. No Paperclip
+installation, company/agent/task creation, live callbacks, inference, commit,
+or deployment was performed for this addition.

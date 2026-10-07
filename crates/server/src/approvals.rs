@@ -1202,23 +1202,166 @@ pub struct PendingApprovalSummary {
     pub reason: String,
     /// A controller-readable description of the exact action being authorized.
     pub requested_action: String,
+    /// Canonical, structured effect details derived from validated persisted
+    /// arguments. The prose field remains for older clients only.
+    #[serde(default)]
+    pub canonical_actions: Vec<CanonicalActionPreview>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub approval_token: Option<String>,
 }
 
-fn chain_effect_action(plan_json: &[u8]) -> String {
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct CanonicalActionPreview {
+    pub operation: String,
+    pub target: Option<String>,
+    pub changed_fields: Vec<CanonicalActionField>,
+    pub reversible: bool,
+    pub approval_scope: String,
+}
+
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct CanonicalActionField {
+    pub name: String,
+    pub value: String,
+}
+
+fn chain_effect_actions(plan_json: &[u8]) -> Vec<CanonicalActionPreview> {
     let Ok(plan) = serde_json::from_slice::<serde_json::Value>(plan_json) else {
-        return "Effect details are unavailable; reject until the plan can be inspected.".into();
+        return Vec::new();
     };
-    let effects: Vec<serde_json::Value> = plan
-        .get("steps")
+    plan.get("steps")
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .filter(|step| step.get("effect_kind").is_some_and(|kind| !kind.is_null()))
-        .cloned()
-        .collect();
-    serde_json::to_string_pretty(&effects).unwrap_or_else(|_| "[]".into())
+        .map(|step| {
+            let operation = step
+                .get("effect_kind")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown_effect")
+                .to_owned();
+            let payload = step.get("payload").and_then(serde_json::Value::as_object);
+            let target = payload.and_then(|fields| {
+                ["to", "target", "url", "path", "resource", "id"]
+                    .iter()
+                    .find_map(|key| fields.get(*key).map(|value| safe_action_value(key, value)))
+            });
+            let changed_fields = payload
+                .into_iter()
+                .flat_map(|fields| fields.iter())
+                .map(|(name, value)| CanonicalActionField {
+                    name: name.clone(),
+                    value: safe_action_value(name, value),
+                })
+                .collect();
+            CanonicalActionPreview {
+                operation,
+                target,
+                changed_fields,
+                reversible: false,
+                approval_scope: "this exact persisted action".into(),
+            }
+        })
+        .collect()
+}
+
+fn cold_contact_actions(principal_id: &str) -> Vec<CanonicalActionPreview> {
+    [
+        ("trust", "trust_principal", "KnownTrusted", true),
+        (
+            "limited trust",
+            "trust_principal_with_topics",
+            "KnownLimited",
+            true,
+        ),
+        ("block", "block_principal", "Blocked", true),
+        (
+            "ignore once",
+            "dismiss_pending_message",
+            "UnknownPending",
+            true,
+        ),
+        (
+            "claim as me",
+            "merge_into_controller_identity",
+            "Controller",
+            false,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(choice, operation, trust, reversible)| CanonicalActionPreview {
+            operation: operation.into(),
+            target: Some(principal_id.into()),
+            changed_fields: vec![
+                CanonicalActionField {
+                    name: "before_trust_class".into(),
+                    value: "UnknownPending".into(),
+                },
+                CanonicalActionField {
+                    name: "operator_choice".into(),
+                    value: choice.into(),
+                },
+                CanonicalActionField {
+                    name: "resulting_trust_class".into(),
+                    value: trust.into(),
+                },
+                CanonicalActionField {
+                    name: "parked_message".into(),
+                    value: if matches!(choice, "trust" | "limited trust") {
+                        "replayed after trust change".into()
+                    } else if choice == "claim as me" {
+                        "reconciled into Controller identity".into()
+                    } else if choice == "block" {
+                        "retained for audit; future messages denied".into()
+                    } else {
+                        "dismissed; future messages prompt again".into()
+                    },
+                },
+            ],
+            reversible,
+            approval_scope: if choice == "limited trust" {
+                "persistent trust grant limited by the topic scope entered by the Controller".into()
+            } else if choice == "trust" || choice == "block" {
+                "persistent principal trust change plus this parked message".into()
+            } else {
+                "this principal and parked message only".into()
+            },
+        },
+    )
+    .collect()
+}
+
+fn safe_action_value(name: &str, value: &serde_json::Value) -> String {
+    let lower = name.to_ascii_lowercase();
+    if ["secret", "token", "password", "api_key", "credential"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return "[redacted]".into();
+    }
+    let rendered = match value {
+        serde_json::Value::String(text) => text.clone(),
+        _ => value.to_string(),
+    };
+    if !execlaw_policy::outbound::secret_indicators(&rendered).is_empty() {
+        return "[redacted]".into();
+    }
+    if rendered.chars().count() > 512 {
+        format!(
+            "{}… [truncated]",
+            rendered.chars().take(512).collect::<String>()
+        )
+    } else {
+        rendered
+    }
+}
+
+fn chain_effect_action(plan_json: &[u8]) -> String {
+    let actions = chain_effect_actions(plan_json);
+    serde_json::to_string_pretty(&actions).unwrap_or_else(|_| {
+        "Effect details are unavailable; reject until the plan can be inspected.".into()
+    })
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -1286,6 +1429,78 @@ pub struct MemoryPromotionDecisionBody {
     pub decision: MemoryPromotionDecisionRequest,
     #[serde(default)]
     pub note: Option<String>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct InformationDeclassificationBody {
+    pub sha256: String,
+    pub destination: String,
+    pub scope: String,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/information-labels/{subject_kind}/{subject_id}/declassify",
+    params(
+        ("subject_kind" = String, Path, description = "Host-owned information subject kind"),
+        ("subject_id" = String, Path, description = "Host-owned information subject id")
+    ),
+    request_body = InformationDeclassificationBody,
+    responses(
+        (status = 200, description = "Destination-scoped declassification recorded"),
+        (status = 403, description = "Caller is not a Controller"),
+        (status = 404, description = "Information label not found")
+    ),
+    security(("bearer_jwt" = [])),
+    tag = "approvals"
+)]
+pub async fn declassify_information_handler(
+    State(state): State<AppState>,
+    user: crate::auth_extract::AuthedUser,
+    Path((subject_kind, subject_id)): Path<(String, String)>,
+    Json(body): Json<InformationDeclassificationBody>,
+) -> impl IntoResponse {
+    if user.role != UserRole::Controller {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error":{"code":"forbidden","message":"only Controllers can authorize information exports"}})),
+        )
+            .into_response();
+    }
+    let subject = execlaw_core::information_store::InformationSubject {
+        kind: subject_kind,
+        id: subject_id,
+        sha256: body.sha256,
+    };
+    match execlaw_core::information_store::InformationLabelStore::new(&state.db).declassify(
+        &subject,
+        &user.user_id,
+        &body.destination,
+        &body.scope,
+        chrono::Utc::now().timestamp(),
+    ) {
+        Ok(label) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "subject": subject,
+                "destination": body.destination,
+                "scope": body.scope,
+                "actor_id": user.user_id,
+                "authorized_at": label.declassification.as_ref().map(|record| record.authorized_at),
+            })),
+        )
+            .into_response(),
+        Err(execlaw_core::db::DbError::Invariant(message))
+            if message == "information label does not exist" =>
+        {
+            (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error":{"code":"information_label_not_found","message":"information label not found"}})),
+            )
+                .into_response()
+        }
+        Err(error) => internal_error(&format!("information declassification: {error}")),
+    }
 }
 
 #[utoipa::path(
@@ -1431,6 +1646,7 @@ pub async fn list_pending_approvals_handler(
                 scope: format!("Trust record for principal {}", p.sender_principal_id),
                 reason: "A new sender has no approved trust level.".into(),
                 requested_action: "Choose a trust decision. Trust or limited trust also replays the queued first message; Block prevents future messages; Ignore once only dismisses this message.".into(),
+                canonical_actions: cold_contact_actions(&p.sender_principal_id),
                 approval_token: None,
             });
         }
@@ -1476,6 +1692,7 @@ pub async fn list_pending_approvals_handler(
                         Some(hash),
                     )
                 });
+                let canonical_actions = chain_effect_actions(&plan_json);
                 approvals.push(PendingApprovalSummary {
                     kind: "effectful_chain".into(),
                     approval_id,
@@ -1486,6 +1703,7 @@ pub async fn list_pending_approvals_handler(
                     reason: "The plan contains external effects that require Controller approval."
                         .into(),
                     requested_action: chain_effect_action(&plan_json),
+                    canonical_actions,
                     approval_token,
                 });
             }
@@ -1516,6 +1734,10 @@ pub async fn list_pending_approvals_handler(
 pub fn approvals_router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/approvals", get(list_pending_approvals_handler))
+        .route(
+            "/api/admin/information-labels/{subject_kind}/{subject_id}/declassify",
+            post(declassify_information_handler),
+        )
         .route("/api/admin/principals", get(list_principals_handler))
         .route(
             "/api/admin/approvals/{approval_id}/respond",
@@ -1551,12 +1773,142 @@ mod tests {
                 {"label": "send report", "effect_kind": "email.send", "payload": {"to": "operator@example.test", "subject": "Weekly report"}}
             ]
         });
-        let summary = chain_effect_action(&serde_json::to_vec(&plan).unwrap());
-        let effects: serde_json::Value = serde_json::from_str(&summary).unwrap();
-        assert_eq!(effects.as_array().unwrap().len(), 1);
-        assert_eq!(effects[0]["label"], "send report");
-        assert_eq!(effects[0]["effect_kind"], "email.send");
-        assert_eq!(effects[0]["payload"]["to"], "operator@example.test");
+        let actions = chain_effect_actions(&serde_json::to_vec(&plan).unwrap());
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].operation, "email.send");
+        assert_eq!(actions[0].target.as_deref(), Some("operator@example.test"));
+        assert!(
+            actions[0]
+                .changed_fields
+                .iter()
+                .any(|field| field.name == "to" && field.value == "operator@example.test")
+        );
+        assert!(!actions[0].reversible);
+    }
+
+    #[test]
+    fn canonical_approval_fields_ignore_model_prose_and_redact_credential_arguments() {
+        let plan = serde_json::json!({
+            "objective": "Nothing will be sent",
+            "steps": [{
+                "effect_kind": "email.send",
+                "payload": {
+                    "to": "external@example.test",
+                    "subject": "Report",
+                    "api_key": "synthetic-secret-value"
+                }
+            }]
+        });
+        let actions = chain_effect_actions(&serde_json::to_vec(&plan).unwrap());
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].operation, "email.send");
+        assert_eq!(actions[0].target.as_deref(), Some("external@example.test"));
+        let key = actions[0]
+            .changed_fields
+            .iter()
+            .find(|field| field.name == "api_key")
+            .unwrap();
+        assert_eq!(key.value, "[redacted]");
+        assert!(
+            !serde_json::to_string(&actions)
+                .unwrap()
+                .contains("synthetic-secret-value")
+        );
+    }
+
+    #[test]
+    fn cold_contact_approval_lists_persistent_trust_actions_and_their_scope() {
+        let actions = cold_contact_actions("principal-1");
+        assert_eq!(actions.len(), 5);
+        assert!(
+            actions
+                .iter()
+                .all(|action| action.target.as_deref() == Some("principal-1"))
+        );
+        let limited = actions
+            .iter()
+            .find(|action| action.operation == "trust_principal_with_topics")
+            .unwrap();
+        assert!(limited.approval_scope.contains("persistent trust grant"));
+        assert!(
+            limited.changed_fields.iter().any(|field| {
+                field.name == "parked_message" && field.value.contains("replayed")
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn only_controller_can_record_scoped_information_declassification() {
+        let state = crate::routes::test_app_state();
+        let subject = execlaw_core::information_store::InformationSubject {
+            kind: "artifact".into(),
+            id: "declassify-route-artifact".into(),
+            sha256: "a".repeat(64),
+        };
+        let label = execlaw_core::information::InformationLabel::observed(
+            execlaw_core::information::Sensitivity::Sensitive,
+            Some("owner-1".into()),
+            "Controller",
+            "artifact",
+            "artifact-1",
+            std::iter::empty(),
+        );
+        execlaw_core::information_store::InformationLabelStore::new(&state.db)
+            .observe(&subject, &label, "host:test", 1)
+            .unwrap();
+        let operator = crate::auth_extract::AuthedUser {
+            user_id: "operator-1".into(),
+            session_id: None,
+            username: "operator".into(),
+            display_name: "Operator".into(),
+            email: None,
+            role: UserRole::Operator,
+            last_login_at: None,
+        };
+        let body = || InformationDeclassificationBody {
+            sha256: subject.sha256.clone(),
+            destination: "transport:signal:alice".into(),
+            scope: "case-17".into(),
+        };
+        let denied = declassify_information_handler(
+            State(state.clone()),
+            operator,
+            Path((subject.kind.clone(), subject.id.clone())),
+            Json(body()),
+        )
+        .await
+        .into_response();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+        let controller = crate::auth_extract::AuthedUser {
+            user_id: "controller-1".into(),
+            session_id: None,
+            username: "controller".into(),
+            display_name: "Controller".into(),
+            email: None,
+            role: UserRole::Controller,
+            last_login_at: None,
+        };
+        let accepted = declassify_information_handler(
+            State(state.clone()),
+            controller,
+            Path((subject.kind.clone(), subject.id.clone())),
+            Json(body()),
+        )
+        .await
+        .into_response();
+        assert_eq!(accepted.status(), StatusCode::OK);
+        let audit: (String, String) = state
+            .db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT actor_id,scope FROM state_information_label_events ORDER BY rowid DESC LIMIT 1",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(audit, ("controller-1".into(), "case-17".into()));
     }
 
     async fn setup_get_token(app: &axum::Router) -> String {

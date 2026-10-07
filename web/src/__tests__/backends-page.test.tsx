@@ -57,6 +57,55 @@ function hardwareWithGpu() {
     );
 }
 
+function supportBundleResponse() {
+    return new Response(JSON.stringify({
+        schema_version: 2,
+        generated_at: 1_800_000_000,
+        application: { version: "test", operating_system: "test", architecture: "test" },
+        database: {
+            database_file_present: true,
+            encryption_mode: "sqlcipher_keyed_connection",
+            schema_migrations_applied: 75,
+            database_bytes: 2 * 1048576,
+            wal_bytes: 3 * 1048576,
+            shm_bytes: 65536,
+            journal_bytes: 0,
+            referenced_blob_bytes: 4 * 1048576,
+            available_disk_bytes: 3 * 1073741824,
+            storage_state: "warning",
+            storage_action: "Review the free-space reserve.",
+            wal_checkpoint_blocked: false,
+            wal_frames: 1200,
+            wal_frames_checkpointed: 100,
+            database_queued_jobs: 2,
+            database_running_jobs: 1,
+            database_rejected_jobs: 3,
+            database_completed_jobs: 20,
+            database_queue_wait_micros_max: 12000,
+            database_service_micros_max: 60000,
+            transaction_micros_total: 90000,
+            transaction_micros_max: 22000,
+        },
+        hardware: {
+            logical_cpu_count: 8,
+            available_ram_mb: 4096,
+            total_detected_gpu_memory_mb: 0,
+            gpus: [],
+            capacity_class: "test",
+            capacity_note: "test",
+        },
+        protocols: { backends: [], active_model_profiles: 0, qualified_capabilities: [] },
+        authority: {
+            installed_plugins: 0,
+            enabled_plugins: 0,
+            quarantined_plugins: 0,
+        },
+        recovery: { recoverable_runs_by_status: [], pending_research_deletions: 0 },
+        corrective_actions: [],
+        content_policy: "Counts and statuses only.",
+    }), { status: 200 });
+}
+
 /// Phase 13.B.1 — minimal preset list the wizard fetches when an
 /// "Add backend" click opens it. Tests that target the raw form
 /// reuse this then click "I'll type the JSON" to skip the wizard.
@@ -147,6 +196,34 @@ afterEach(() => {
 });
 
 describe("BackendsPage", () => {
+    it("shows storage pressure and bounded WAL maintenance results", async () => {
+        fetchMock.mockImplementation(async (url: string) => {
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/backends") return emptyListResponse();
+            if (url === "/api/admin/hardware") return hardwareNoGpu();
+            if (url === "/api/admin/storage/checkpoint") {
+                return new Response(JSON.stringify({
+                    progress: { checkpoint_blocked: false, frames_in_wal: 1200, frames_checkpointed: 100 },
+                    wal_bytes_after: 3 * 1048576,
+                    action: "checkpoint status",
+                }), { status: 200 });
+            }
+            if (url === "/api/admin/diagnostics/support-bundle") return supportBundleResponse();
+            return new Response("{}", { status: 200 });
+        });
+        mountPage();
+        fireEvent.click(await screen.findByTestId("backends-storage-checkpoint"));
+        expect(await screen.findByTestId("support-storage-state")).toHaveTextContent(
+            "Storage: warning",
+        );
+        expect(screen.getByTestId("support-storage-state")).toHaveTextContent(
+            "3.00 GiB",
+        );
+        expect(await screen.findByTestId("storage-checkpoint-result")).toHaveTextContent(
+            "100/1200 WAL frames checkpointed",
+        );
+    });
+
     it("shows text, streaming, and tool-call conformance independently", async () => {
         fetchMock.mockImplementation(async (url: string) => {
             if (url === "/api/admin/me") return meResponse();

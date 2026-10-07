@@ -13,6 +13,89 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+const VERSIONED_PAYLOAD_MAGIC: &[u8] = b"EXECLAW-EVENT\0";
+
+/// Stable identity for the payload representation stored in a signed event.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventPayloadSchemaId(String);
+
+impl EventPayloadSchemaId {
+    fn current(_kind: EventKind) -> Self {
+        Self("execlaw.event_payload.v1".into())
+    }
+
+    fn legacy(_kind: EventKind) -> Self {
+        Self("execlaw.event_payload.legacy".into())
+    }
+
+    /// Return the stable identifier carried by this payload.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+fn encode_versioned_payload<P: Serialize>(
+    kind: EventKind,
+    payload: &P,
+) -> Result<Vec<u8>, DbError> {
+    let body = rmps::to_vec_named(payload)
+        .map_err(|e| DbError::Serde(format!("encoding event payload: {e}")))?;
+    let schema = EventPayloadSchemaId::current(kind);
+    let schema_bytes = schema.0.as_bytes();
+    let schema_len = u16::try_from(schema_bytes.len())
+        .map_err(|_| DbError::Serde("event payload schema id is too long".into()))?;
+    let mut encoded =
+        Vec::with_capacity(VERSIONED_PAYLOAD_MAGIC.len() + 2 + schema_bytes.len() + body.len());
+    encoded.extend_from_slice(VERSIONED_PAYLOAD_MAGIC);
+    encoded.extend_from_slice(&schema_len.to_le_bytes());
+    encoded.extend_from_slice(schema_bytes);
+    encoded.extend_from_slice(&body);
+    Ok(encoded)
+}
+
+fn decode_versioned_payload<'de>(
+    kind: EventKind,
+    payload: &'de [u8],
+) -> Result<(EventPayloadSchemaId, &'de [u8]), DbError> {
+    if !payload.starts_with(VERSIONED_PAYLOAD_MAGIC) {
+        // Pre-H061 rows contain the original MessagePack value directly.
+        return Ok((EventPayloadSchemaId::legacy(kind), payload));
+    }
+    let header = VERSIONED_PAYLOAD_MAGIC.len();
+    if payload.len() < header + 2 {
+        return Err(DbError::Serde(
+            "truncated event payload schema header".into(),
+        ));
+    }
+    let schema_len = u16::from_le_bytes([payload[header], payload[header + 1]]) as usize;
+    let body_start = header + 2 + schema_len;
+    if body_start > payload.len() {
+        return Err(DbError::Serde("truncated event payload schema id".into()));
+    }
+    let schema = std::str::from_utf8(&payload[header + 2..body_start])
+        .map_err(|e| DbError::Serde(format!("event payload schema id is not UTF-8: {e}")))?;
+    let expected = EventPayloadSchemaId::current(kind);
+    if schema != expected.as_str() {
+        return Err(DbError::Serde(format!(
+            "unsupported required event payload schema '{schema}' for kind '{}' (reader supports '{}')",
+            kind.as_str(),
+            expected.as_str()
+        )));
+    }
+    Ok((expected, &payload[body_start..]))
+}
+
+/// Decode either a versioned payload envelope or a legacy unversioned payload.
+/// Callers must verify the containing event's integrity before using this
+/// helper for replay or derived-state reconstruction.
+pub fn decode_payload_bytes<P: for<'de> Deserialize<'de>>(
+    kind: EventKind,
+    payload: &[u8],
+) -> Result<P, DbError> {
+    let (_, body) = decode_versioned_payload(kind, payload)?;
+    rmps::from_slice(body).map_err(|e| DbError::Serde(format!("decoding event payload: {e}")))
+}
+
 /// The set of event kinds a replay must be able to reconstruct.
 ///
 /// This is **additive** — new kinds land without breaking existing consumers
@@ -237,8 +320,7 @@ impl EventRecord {
         payload: &P,
         actor: Option<String>,
     ) -> Result<Self, DbError> {
-        let payload = rmps::to_vec_named(payload)
-            .map_err(|e| DbError::Serde(format!("encoding event payload: {e}")))?;
+        let payload = encode_versioned_payload(kind, payload)?;
         Ok(Self {
             conversation_id,
             seq,
@@ -251,8 +333,13 @@ impl EventRecord {
 
     /// Decode the MessagePack payload into a typed struct.
     pub fn decode_payload<P: for<'de> Deserialize<'de>>(&self) -> Result<P, DbError> {
-        rmps::from_slice(&self.payload)
-            .map_err(|e| DbError::Serde(format!("decoding event payload: {e}")))
+        decode_payload_bytes(self.kind, &self.payload)
+    }
+
+    /// Return the payload schema identity after validating that this reader
+    /// understands the event generation. Legacy rows are identified by kind.
+    pub fn payload_schema_id(&self) -> Result<EventPayloadSchemaId, DbError> {
+        decode_versioned_payload(self.kind, &self.payload).map(|(schema, _)| schema)
     }
 }
 
@@ -350,6 +437,55 @@ pub struct KeyRing {
     current_id: i64,
 }
 
+/// Portable freshness record to retain outside the database snapshot.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FreshnessManifest {
+    pub format_version: u32,
+    pub generated_at: i64,
+    pub key_id: i64,
+    pub heads: Vec<FreshnessHead>,
+    pub signature: Vec<u8>,
+}
+
+/// Signed terminal head for one conversation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FreshnessHead {
+    pub conversation_id: String,
+    pub sequence: i64,
+    pub tag: Vec<u8>,
+}
+
+/// Result of comparing an authenticated external reference to this database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FreshnessComparison {
+    Matches,
+    DatabaseAdvanced { conversations: Vec<String> },
+    RollbackDetected { conversations: Vec<String> },
+    Diverged { conversations: Vec<String> },
+}
+
+fn canonical_freshness(
+    format_version: u32,
+    generated_at: i64,
+    key_id: i64,
+    heads: &[FreshnessHead],
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"execlaw/external-freshness/v1\0");
+    bytes.extend_from_slice(&format_version.to_le_bytes());
+    bytes.extend_from_slice(&generated_at.to_le_bytes());
+    bytes.extend_from_slice(&key_id.to_le_bytes());
+    bytes.extend_from_slice(&(heads.len() as u64).to_le_bytes());
+    for head in heads {
+        bytes.extend_from_slice(&(head.conversation_id.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(head.conversation_id.as_bytes());
+        bytes.extend_from_slice(&head.sequence.to_le_bytes());
+        bytes.extend_from_slice(&(head.tag.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&head.tag);
+    }
+    bytes
+}
+
 impl KeyRing {
     /// Build a ring starting with one key. The id is the operator's
     /// choice; Phase-1 single-key deployments used `0`.
@@ -409,6 +545,185 @@ impl KeyRing {
 }
 
 impl<'db> EventLog<'db> {
+    /// Export signed conversation heads for storage outside the database.
+    /// Keep the resulting record in a separately retained local/offline
+    /// location; a database snapshot cannot prove its own freshness.
+    pub fn export_freshness_manifest(
+        &self,
+        generated_at: i64,
+    ) -> Result<FreshnessManifest, DbError> {
+        let ring = self.key_ring.as_ref().ok_or_else(|| {
+            DbError::Config("freshness export requires the event integrity key ring".into())
+        })?;
+        let conversation_ids = self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT DISTINCT conversation_id FROM state_events ORDER BY conversation_id",
+            )?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })?;
+        for id in &conversation_ids {
+            let conversation_id = ConversationId::from(id.as_str());
+            let rows = self
+                .db
+                .with_conn(|conn| Self::load_integrity_rows(conn, &conversation_id))?;
+            let head = self
+                .db
+                .with_conn(|conn| Self::load_integrity_head(conn, &conversation_id))?;
+            self.verify_integrity(&conversation_id, &rows, head.as_ref())?;
+        }
+        let heads = self.db.with_conn(|conn| {
+            let mut stmt = conn.prepare(
+                "SELECT conversation_id, head_seq, head_tag FROM state_event_integrity_heads \
+                 ORDER BY conversation_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok(FreshnessHead {
+                    conversation_id: row.get(0)?,
+                    sequence: row.get(1)?,
+                    tag: row.get(2)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })?;
+        let event_conversations: i64 = self.db.with_conn(|conn| {
+            Ok(conn.query_row(
+                "SELECT COUNT(DISTINCT conversation_id) FROM state_events",
+                [],
+                |row| row.get(0),
+            )?)
+        })?;
+        if heads.len() as i64 != event_conversations {
+            return Err(DbError::Invariant(
+                "freshness export refused because one or more event chains lack a signed head"
+                    .into(),
+            ));
+        }
+        let key_id = ring.current_id;
+        let key = ring.current_key().ok_or_else(|| {
+            DbError::Config("freshness export key ring has no current key".into())
+        })?;
+        let canonical = canonical_freshness(1, generated_at, key_id, &heads);
+        let signature = crate::event_hmac::sign_event(key, &canonical).to_vec();
+        Ok(FreshnessManifest {
+            format_version: 1,
+            generated_at,
+            key_id,
+            heads,
+            signature,
+        })
+    }
+
+    /// Authenticate an externally retained freshness manifest with the
+    /// event key ring. A copied old database cannot authenticate a newer
+    /// manifest unless it also retains the corresponding key.
+    pub fn verify_freshness_manifest(&self, manifest: &FreshnessManifest) -> Result<(), DbError> {
+        if manifest.format_version != 1 {
+            return Err(DbError::Config(format!(
+                "unsupported freshness manifest version {}",
+                manifest.format_version
+            )));
+        }
+        if manifest.signature.len() != 32
+            || manifest
+                .heads
+                .windows(2)
+                .any(|pair| pair[0].conversation_id >= pair[1].conversation_id)
+            || manifest
+                .heads
+                .iter()
+                .any(|head| head.sequence < 0 || head.tag.len() != 32)
+        {
+            return Err(DbError::TamperDetected(
+                "malformed freshness manifest".into(),
+            ));
+        }
+        let ring = self.key_ring.as_ref().ok_or_else(|| {
+            DbError::Config("freshness verification requires the event integrity key ring".into())
+        })?;
+        let key = ring.key_for(manifest.key_id).ok_or_else(|| {
+            DbError::TamperDetected(format!(
+                "freshness manifest uses unknown key_id {}",
+                manifest.key_id
+            ))
+        })?;
+        let canonical = canonical_freshness(
+            manifest.format_version,
+            manifest.generated_at,
+            manifest.key_id,
+            &manifest.heads,
+        );
+        let expected = crate::event_hmac::sign_event(key, &canonical);
+        if expected.as_slice() != manifest.signature.as_slice() {
+            return Err(DbError::TamperDetected(
+                "freshness manifest signature mismatch".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Compare this database with a previously exported external reference.
+    /// Callers must make reconciliation explicit by exporting and retaining a
+    /// new manifest after recovery has been reviewed.
+    pub fn compare_freshness_manifest(
+        &self,
+        manifest: &FreshnessManifest,
+    ) -> Result<FreshnessComparison, DbError> {
+        self.verify_freshness_manifest(manifest)?;
+        let current = self.export_freshness_manifest(manifest.generated_at)?;
+        let current_by_id = current
+            .heads
+            .iter()
+            .map(|head| (head.conversation_id.as_str(), head))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut rollback = Vec::new();
+        let mut diverged = Vec::new();
+        let mut advanced = Vec::new();
+        for reference in &manifest.heads {
+            match current_by_id.get(reference.conversation_id.as_str()) {
+                None => rollback.push(reference.conversation_id.clone()),
+                Some(head) if head.sequence < reference.sequence => {
+                    rollback.push(reference.conversation_id.clone())
+                }
+                Some(head) if head.sequence == reference.sequence && head.tag != reference.tag => {
+                    diverged.push(reference.conversation_id.clone())
+                }
+                Some(head) if head.sequence > reference.sequence => {
+                    advanced.push(reference.conversation_id.clone())
+                }
+                Some(_) => {}
+            }
+        }
+        let referenced_ids = manifest
+            .heads
+            .iter()
+            .map(|head| head.conversation_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        advanced.extend(
+            current
+                .heads
+                .iter()
+                .filter(|head| !referenced_ids.contains(head.conversation_id.as_str()))
+                .map(|head| head.conversation_id.clone()),
+        );
+        if !rollback.is_empty() {
+            return Ok(FreshnessComparison::RollbackDetected {
+                conversations: rollback,
+            });
+        }
+        if !diverged.is_empty() {
+            return Ok(FreshnessComparison::Diverged {
+                conversations: diverged,
+            });
+        }
+        if !advanced.is_empty() {
+            return Ok(FreshnessComparison::DatabaseAdvanced {
+                conversations: advanced,
+            });
+        }
+        Ok(FreshnessComparison::Matches)
+    }
+
     pub fn new(db: &'db Database) -> Self {
         Self {
             db,
@@ -1442,13 +1757,16 @@ impl PendingEvent {
         payload: &P,
         actor: Option<String>,
     ) -> Result<Self, DbError> {
-        let payload = rmps::to_vec_named(payload)
-            .map_err(|e| DbError::Serde(format!("encoding event payload: {e}")))?;
+        let payload = encode_versioned_payload(kind, payload)?;
         Ok(Self {
             kind,
             payload,
             actor,
         })
+    }
+
+    fn decode_payload<P: for<'de> Deserialize<'de>>(&self) -> Result<P, DbError> {
+        decode_payload_bytes(self.kind, &self.payload)
     }
 }
 
@@ -1508,7 +1826,8 @@ fn enforce_tool_pairing(
     let mut results_by_ordinal: std::collections::HashSet<u32> = Default::default();
     for ev in &events {
         if ev.kind == EventKind::ToolResult {
-            let decoded: ToolResultPayload = rmps::from_slice(&ev.payload)
+            let decoded: ToolResultPayload = ev
+                .decode_payload()
                 .map_err(|e| DbError::Serde(format!("decoding tool_result: {e}")))?;
             results_by_ordinal.insert(decoded.ordinal);
         }
@@ -1520,7 +1839,8 @@ fn enforce_tool_pairing(
 
     for ev in events {
         if ev.kind == EventKind::ToolUse {
-            let parsed: ToolUsePayload = rmps::from_slice(&ev.payload)
+            let parsed: ToolUsePayload = ev
+                .decode_payload()
                 .map_err(|e| DbError::Serde(format!("decoding tool_use: {e}")))?;
 
             // Write the tool_use.
@@ -1543,7 +1863,7 @@ fn enforce_tool_pairing(
                         parsed.ordinal
                     )),
                 };
-                let payload = rmps::to_vec_named(&synthetic)
+                let payload = encode_versioned_payload(EventKind::ToolResult, &synthetic)
                     .map_err(|e| DbError::Serde(format!("encoding synthetic tool_result: {e}")))?;
                 out.push(EventRecord {
                     conversation_id: conversation_id.clone(),
@@ -1582,6 +1902,171 @@ mod tests {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
         db
+    }
+
+    #[test]
+    fn payload_schema_identity_is_inside_the_signed_payload_and_roundtrips() {
+        let event = EventRecord::new(
+            ConversationId::from("payload-schema"),
+            EventSeq(1),
+            EventKind::UserMsg,
+            &json!({"text":"hello"}),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            event.payload_schema_id().unwrap().as_str(),
+            "execlaw.event_payload.v1"
+        );
+        assert_eq!(
+            event.decode_payload::<serde_json::Value>().unwrap(),
+            json!({"text":"hello"})
+        );
+    }
+
+    #[test]
+    fn legacy_unversioned_payloads_remain_readable() {
+        let event = EventRecord {
+            conversation_id: ConversationId::from("legacy-payload"),
+            seq: EventSeq(1),
+            kind: EventKind::UserMsg,
+            payload: rmps::to_vec_named(&json!({"text":"legacy"})).unwrap(),
+            committed_at: 0,
+            actor: None,
+        };
+
+        assert_eq!(
+            event.payload_schema_id().unwrap().as_str(),
+            "execlaw.event_payload.legacy"
+        );
+        assert_eq!(
+            event.decode_payload::<serde_json::Value>().unwrap(),
+            json!({"text":"legacy"})
+        );
+    }
+
+    #[test]
+    fn unknown_required_payload_schema_fails_clearly() {
+        let mut payload = VERSIONED_PAYLOAD_MAGIC.to_vec();
+        let schema = b"execlaw.event_payload.v99";
+        payload.extend_from_slice(&(schema.len() as u16).to_le_bytes());
+        payload.extend_from_slice(schema);
+        payload.extend_from_slice(&rmps::to_vec_named(&json!({"text":"future"})).unwrap());
+        let event = EventRecord {
+            conversation_id: ConversationId::from("future-payload"),
+            seq: EventSeq(1),
+            kind: EventKind::UserMsg,
+            payload,
+            committed_at: 0,
+            actor: None,
+        };
+
+        let error = event
+            .decode_payload::<serde_json::Value>()
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("unsupported required event payload schema"));
+        assert!(error.contains("event_payload.v99"));
+    }
+
+    #[test]
+    fn external_freshness_reference_detects_valid_older_snapshot() {
+        let key = vec![0x73; 32];
+        let old_db = fresh_db();
+        let current_db = fresh_db();
+        let old_log = EventLog::new(&old_db).with_hmac_key(key.clone());
+        let current_log = EventLog::new(&current_db).with_hmac_key(key);
+        let cid = ConversationId::from("freshness-conversation");
+        let first = EventRecord::new(
+            cid.clone(),
+            EventSeq(1),
+            EventKind::UserMsg,
+            &json!({"text":"one"}),
+            None,
+        )
+        .unwrap();
+        old_log.append(&first).unwrap();
+        current_log.append(&first).unwrap();
+        current_log
+            .append(
+                &EventRecord::new(
+                    cid,
+                    EventSeq(2),
+                    EventKind::ModelTurn,
+                    &json!({"text":"two"}),
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap();
+
+        let reference = current_log.export_freshness_manifest(100).unwrap();
+        assert!(matches!(
+            old_log.compare_freshness_manifest(&reference).unwrap(),
+            FreshnessComparison::RollbackDetected { .. }
+        ));
+    }
+
+    #[test]
+    fn external_freshness_reference_rejects_signature_tampering() {
+        let db = fresh_db();
+        let log = EventLog::new(&db).with_hmac_key(vec![0x74; 32]);
+        let cid = ConversationId::from("freshness-tamper");
+        log.append(
+            &EventRecord::new(
+                cid,
+                EventSeq(1),
+                EventKind::UserMsg,
+                &json!({"text":"one"}),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut reference = log.export_freshness_manifest(100).unwrap();
+        reference.heads[0].sequence += 1;
+        assert!(matches!(
+            log.verify_freshness_manifest(&reference),
+            Err(DbError::TamperDetected(_))
+        ));
+    }
+
+    #[test]
+    fn changing_payload_schema_bytes_invalidates_the_event_hmac() {
+        let db = fresh_db();
+        let key = vec![0x75; 32];
+        let log = EventLog::new(&db).with_hmac_key(key);
+        let cid = ConversationId::from("signed-payload-schema");
+        log.append(
+            &EventRecord::new(
+                cid.clone(),
+                EventSeq(1),
+                EventKind::UserMsg,
+                &json!({"text":"signed"}),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        db.with_conn(|conn| {
+            let mut payload: Vec<u8> = conn.query_row(
+                "SELECT payload FROM state_events WHERE conversation_id=?1 AND seq=1",
+                [cid.as_str()],
+                |row| row.get(0),
+            )?;
+            payload.push(0);
+            conn.execute(
+                "UPDATE state_events SET payload=?1 WHERE conversation_id=?2 AND seq=1",
+                params![payload, cid.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(matches!(
+            log.replay_since(&cid, EventSeq(0)),
+            Err(DbError::TamperDetected(_))
+        ));
     }
 
     #[test]

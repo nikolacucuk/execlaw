@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod input_guard;
+pub mod outbound;
 pub mod rule_of_two;
 pub mod sideband;
 pub mod spotlighting;

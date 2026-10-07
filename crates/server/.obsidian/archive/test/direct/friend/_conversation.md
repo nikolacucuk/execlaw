@@ -4,7 +4,7 @@ archive_id: archive-a7e35ddc67d4b3282b9442ae19a329e7bc936727f79c5a4e4c5c85211867
 transport: test
 conversation_kind: direct
 remote_id: friend
-conversation_id: 3783e0fc-59b2-4147-a1c0-ab13f9b5614a
+conversation_id: a96bbd10-d301-423d-9d64-4080cc20a805
 tags:
   - archive/social
   - archive/test
@@ -13,6 +13,6 @@ tags:
 
 # friend
 
-- First seen: 2026-10-01T15:27:48+00:00
-- Last seen: 2026-10-01T15:27:48+00:00
+- First seen: 2026-10-07T00:03:49+00:00
+- Last seen: 2026-10-07T00:03:49+00:00
 - Monthly archive: [[2026/2026-10]]

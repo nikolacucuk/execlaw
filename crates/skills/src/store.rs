@@ -508,6 +508,46 @@ impl SkillStore {
             Ok(skill_id)
         })?;
 
+        let subject = execlaw_core::information_store::InformationSubject {
+            kind: "skill".into(),
+            id: result.to_string(),
+            sha256: version_sha,
+        };
+        let labels = execlaw_core::information_store::InformationLabelStore::new(&self.db);
+        let source_run = new.source.strip_prefix("agent:");
+        let source_subject =
+            source_run.map(
+                |run_id| execlaw_core::information_store::InformationSubject {
+                    kind: "run".into(),
+                    id: run_id.into(),
+                    sha256: sha256_hex(run_id.as_bytes()),
+                },
+            );
+        let inherited = source_subject
+            .as_ref()
+            .map(|source| labels.get(source))
+            .transpose()?
+            .flatten();
+        if let (Some(source), Some(_)) = (source_subject.as_ref(), inherited.as_ref()) {
+            labels.transform(
+                &subject,
+                std::slice::from_ref(source),
+                "capture_skill",
+                "skills:store",
+                now_ms / 1000,
+            )?;
+        } else {
+            let label = execlaw_core::information::InformationLabel::observed(
+                execlaw_core::information::Sensitivity::Sensitive,
+                source_run.map(str::to_owned),
+                "UnknownPending",
+                "skill_capture",
+                new.source.as_str(),
+                std::iter::empty(),
+            );
+            labels.observe(&subject, &label, "skills:store", now_ms / 1000)?;
+        }
+
         tracing::info!(
             event = "skill.created",
             name = %new.name,
@@ -1973,17 +2013,31 @@ mod tests {
     #[test]
     fn create_and_view_roundtrip() {
         let s = fresh_store();
-        s.create(
-            sample_new("test/foo", "hello world"),
-            Strictness::Strict,
-            1000,
-        )
-        .unwrap();
+        let skill_id = s
+            .create(
+                sample_new("test/foo", "hello world"),
+                Strictness::Strict,
+                1000,
+            )
+            .unwrap();
         let v = s.view("test/foo").unwrap().unwrap();
         assert_eq!(v.name, "test/foo");
         assert_eq!(v.body_md, "hello world");
         assert_eq!(v.version, 1);
         assert_eq!(v.state, SkillState::Trial);
+        let label = execlaw_core::information_store::InformationLabelStore::new(s.db())
+            .get(&execlaw_core::information_store::InformationSubject {
+                kind: "skill".into(),
+                id: skill_id.0.to_string(),
+                sha256: sha256_hex(b"hello world"),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            label.sensitivity,
+            execlaw_core::information::Sensitivity::Sensitive
+        );
+        assert!(label.allowed_destinations.is_empty());
     }
 
     #[test]

@@ -5,7 +5,7 @@
 //! retrieve byte blobs from the table.
 
 use crate::db::{Database, DbError};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 
 pub struct VaultRowStore<'db> {
     db: &'db Database,
@@ -29,7 +29,7 @@ impl<'db> VaultRowStore<'db> {
                  VALUES (?1, ?2, ?3, ?4, ?4) \
                  ON CONFLICT(plugin_id, name) DO UPDATE SET \
                     value_blob = excluded.value_blob, \
-                    updated_at = excluded.updated_at",
+                    updated_at = MAX(excluded.updated_at, vault_secrets.updated_at + 1)",
                 params![name, plugin_id, value, at],
             )?;
             Ok(())
@@ -93,6 +93,29 @@ impl<'db> VaultRowStore<'db> {
             Ok(got)
         })
     }
+
+    /// Return the last update time without exposing the stored credential.
+    pub fn updated_at(&self, plugin_id: Option<&str>, name: &str) -> Result<Option<i64>, DbError> {
+        self.db.with_conn(|c| {
+            let row = match plugin_id {
+                Some(scope) => c
+                    .query_row(
+                        "SELECT updated_at FROM vault_secrets WHERE plugin_id = ?1 AND name = ?2",
+                        params![scope, name],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+                None => c
+                    .query_row(
+                        "SELECT updated_at FROM vault_secrets WHERE plugin_id IS NULL AND name = ?1",
+                        [name],
+                        |row| row.get(0),
+                    )
+                    .optional()?,
+            };
+            Ok(row)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -111,6 +134,33 @@ mod tests {
         assert_eq!(
             s.get(None, "admin_password_hash").unwrap().as_deref(),
             Some(&b"argon2-thingy"[..])
+        );
+    }
+
+    #[test]
+    fn credential_version_advances_even_when_rotation_uses_same_timestamp() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let store = VaultRowStore::new(&db);
+        store
+            .put(Some("mcp:server-a"), "credential", b"first", 10)
+            .unwrap();
+        let first_version = store
+            .updated_at(Some("mcp:server-a"), "credential")
+            .unwrap();
+        store
+            .put(Some("mcp:server-a"), "credential", b"second", 10)
+            .unwrap();
+        let second_version = store
+            .updated_at(Some("mcp:server-a"), "credential")
+            .unwrap();
+        assert!(second_version > first_version);
+        assert_eq!(
+            store
+                .get(Some("mcp:server-a"), "credential")
+                .unwrap()
+                .as_deref(),
+            Some(&b"second"[..])
         );
     }
 

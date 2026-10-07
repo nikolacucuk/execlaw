@@ -11,6 +11,10 @@
 //                     "Restart required" hint and the operator
 //                     runs `execlaw service restart` from a
 //                     terminal.
+//   * https_only_session_cookies — controls the Secure attribute on
+//                     access cookies. Defaults on; HTTP-only LAN
+//                     deployments can opt out so the event WebSocket
+//                     receives its session cookie.
 //
 // The page is intentionally small — most settings have their own
 // page already (Backends, Personality, Trust Policy). This is the
@@ -52,6 +56,7 @@ export function GeneralPage() {
     const [chatAppearance, setChatAppearance] = useChatAppearance();
     const [bindAddress, setBindAddress] = useState("");
     const [startOnBoot, setStartOnBoot] = useState(true);
+    const [httpsOnlySessionCookies, setHttpsOnlySessionCookies] = useState(true);
     const [retentionDays, setRetentionDays] = useState(30);
     const [showGraphifyPreview, setShowGraphifyPreview] = useState(
         () => localStorage.getItem(GRAPHIFY_PREVIEW_STORAGE_KEY) === "1",
@@ -74,6 +79,7 @@ export function GeneralPage() {
             setSettings(r);
             setBindAddress(r.bind_address);
             setStartOnBoot(r.start_on_boot);
+            setHttpsOnlySessionCookies(r.https_only_session_cookies);
             setRetentionDays(r.history_retention_days);
             setBindDirty(false);
             setBootDirty(false);
@@ -98,6 +104,7 @@ export function GeneralPage() {
             const body: {
                 start_on_boot?: boolean;
                 bind_address?: string;
+                https_only_session_cookies?: boolean;
                 history_retention_days?: number;
             } = {};
             if (settings && settings.start_on_boot !== startOnBoot) {
@@ -105,6 +112,12 @@ export function GeneralPage() {
             }
             if (settings && settings.bind_address !== bindAddress.trim()) {
                 body.bind_address = bindAddress.trim();
+            }
+            if (
+                settings &&
+                settings.https_only_session_cookies !== httpsOnlySessionCookies
+            ) {
+                body.https_only_session_cookies = httpsOnlySessionCookies;
             }
             if (settings && settings.history_retention_days !== retentionDays) {
                 body.history_retention_days = retentionDays;
@@ -117,6 +130,7 @@ export function GeneralPage() {
             setSettings(r);
             setBindAddress(r.bind_address);
             setStartOnBoot(r.start_on_boot);
+            setHttpsOnlySessionCookies(r.https_only_session_cookies);
             setRetentionDays(r.history_retention_days);
             setBindDirty(false);
             setBootDirty(false);
@@ -126,12 +140,13 @@ export function GeneralPage() {
         } finally {
             setBusy(false);
         }
-    }, [settings, startOnBoot, bindAddress, retentionDays, getToken]);
+    }, [settings, startOnBoot, bindAddress, httpsOnlySessionCookies, retentionDays, getToken]);
 
     const dirty =
         !!settings &&
         (settings.start_on_boot !== startOnBoot ||
             settings.bind_address !== bindAddress.trim() ||
+            settings.https_only_session_cookies !== httpsOnlySessionCookies ||
             settings.history_retention_days !== retentionDays);
 
     /// Whether the operator's pending change shrinks the retention
@@ -264,6 +279,34 @@ export function GeneralPage() {
                             </div>
                         )}
                     </Form.Group>
+
+                    <fieldset className="mb-4">
+                        <legend className="h6">
+                            {t("general.sessionSecurity", "Session security")}
+                        </legend>
+                        <Form.Group>
+                            <Form.Check
+                                type="switch"
+                                id="general-https-only-session-cookies"
+                                label={t(
+                                    "general.httpsOnlySessionCookies",
+                                    "Require HTTPS for session cookies",
+                                )}
+                                checked={httpsOnlySessionCookies}
+                                disabled={!canMutate || busy}
+                                onChange={(event) =>
+                                    setHttpsOnlySessionCookies(event.target.checked)
+                                }
+                                data-testid="general-https-only-session-cookies"
+                            />
+                            <Form.Text className="execlaw-muted">
+                                {t(
+                                    "general.httpsOnlySessionCookiesHelp",
+                                    "Enabled by default. Disable only when using execlaw directly over trusted HTTP, such as a TrueNAS LAN address. Leave enabled behind an HTTPS reverse proxy. Sign out and back in after changing this setting.",
+                                )}
+                            </Form.Text>
+                        </Form.Group>
+                    </fieldset>
 
                     <Form.Group className="mb-3">
                         <Form.Label className="execlaw-muted small mb-1">

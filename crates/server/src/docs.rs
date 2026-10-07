@@ -80,11 +80,18 @@ use crate::routines::{
     RoutineView, UpsertRoutineRequest,
 };
 use crate::runners_admin::{GroupRunnerListResponse, GroupRunnerView};
+use crate::safety_profiles_admin::{
+    ApprovedToolsRequest, SafetyPermissionSummary, SafetyProfileListResponse, SafetyProfileView,
+};
 use crate::settings_general::{GeneralSettingsView, UpdateGeneralSettingsRequest};
 use crate::settings_research::{ResearchSettingsView, UpdateResearchSettingsRequest};
 use crate::setup_preflight::{DockerStatus, PreflightResponse};
 use crate::sidecars_admin::{SidecarListResponse, SidecarView};
-use crate::tools_admin::{ToolListResponse, ToolView, UpdateToolPolicyRequest};
+use crate::storage_admin::WalMaintenanceResponse;
+use crate::tools_admin::{
+    SimulateToolPolicyRequest, ToolListResponse, ToolPolicyRevisionListResponse,
+    ToolPolicySimulationResponse, ToolView, UpdateToolPolicyRequest,
+};
 use crate::trust_policy::{TrustPolicyView, UpdateTrustPolicyRequest};
 use crate::turn_controls_admin::{SubmitTurnControl, TurnControlCursor};
 use crate::users::{
@@ -206,6 +213,7 @@ impl Modify for SecurityAddon {
         crate::observability::audit_handler,
         // approvals
         crate::approvals::respond_handler,
+        crate::approvals::declassify_information_handler,
         crate::approvals::decide_memory_promotion_handler,
         crate::approvals::revoke_handler,
         crate::approvals::list_principals_handler,
@@ -255,6 +263,11 @@ impl Modify for SecurityAddon {
         // tools (Phase 8a per-tool trust-class allowlist)
         crate::tools_admin::list_handler,
         crate::tools_admin::update_handler,
+        crate::tools_admin::simulate_handler,
+        crate::tools_admin::revisions_handler,
+        crate::tools_admin::rollback_handler,
+        crate::safety_profiles_admin::list_profiles,
+        crate::safety_profiles_admin::set_approved_tools,
         // graphify graph browser API (paged + filtered)
         crate::graphify_api::graph_page_handler,
         // graphiti admin connectivity helpers
@@ -316,6 +329,7 @@ impl Modify for SecurityAddon {
         // setup preflight (Phase 14 — first-run wizard docker + gpu)
         crate::setup_preflight::get_handler,
         crate::diagnostics::support_bundle,
+        crate::storage_admin::checkpoint,
         crate::setup_preflight::dismiss_handler,
         // automations (M1-M5 — event-triggered flows)
         crate::automations_admin::list,
@@ -407,6 +421,13 @@ impl Modify for SecurityAddon {
         GraphitiTestCallResponse,
         ToolListResponse,
         UpdateToolPolicyRequest,
+        SimulateToolPolicyRequest,
+        ToolPolicyRevisionListResponse,
+        ToolPolicySimulationResponse,
+        ApprovedToolsRequest,
+        SafetyProfileListResponse,
+        SafetyProfileView,
+        SafetyPermissionSummary,
         McpServerView,
         McpServerListResponse,
         McpServerWriteRequest,
@@ -449,6 +470,7 @@ impl Modify for SecurityAddon {
         PreflightResponse,
         DockerStatus,
         SupportBundle,
+        WalMaintenanceResponse,
         ApplicationDiagnostic,
         DatabaseDiagnostic,
         GpuDiagnostic,

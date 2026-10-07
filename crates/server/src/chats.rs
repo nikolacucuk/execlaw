@@ -27,6 +27,7 @@ use execlaw_core::principal::{Principal, PrincipalStore, TrustLevel as CoreTrust
 use execlaw_inference_api::ModelId;
 use execlaw_policy::trust::{TrustLevel, TurnPolicyInput, evaluate_turn};
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 use crate::events::UiEvent;
@@ -42,6 +43,81 @@ struct ChatRequestReservation {
     reserved_run_id: String,
     finished: bool,
     heartbeat: tokio::task::JoinHandle<()>,
+}
+
+fn persist_compaction_information_label(
+    db: &execlaw_core::Database,
+    receipt: &execlaw_core::harness::CompactionReceipt,
+) -> Result<(), String> {
+    let subject = execlaw_core::information_store::InformationSubject {
+        kind: "summary".into(),
+        id: receipt.receipt_id.clone(),
+        sha256: hex::encode(Sha256::digest(receipt.summary.as_bytes())),
+    };
+    let labels = execlaw_core::information_store::InformationLabelStore::new(db);
+    if labels
+        .get(&subject)
+        .map_err(|error| format!("read summary information label: {error}"))?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let label = execlaw_core::information::InformationLabel::observed(
+        execlaw_core::information::Sensitivity::Sensitive,
+        Some(receipt.conversation_id.clone()),
+        "mixed_untrusted",
+        "history_compaction",
+        &receipt.source_fingerprint,
+        std::iter::empty(),
+    );
+    labels
+        .observe(
+            &subject,
+            &label,
+            "host:history-compaction",
+            receipt.created_at / 1000,
+        )
+        .map_err(|error| format!("persist summary information label: {error}"))
+}
+
+fn propagate_label_to_run(
+    db: &execlaw_core::Database,
+    run_id: &str,
+    source: &execlaw_core::information_store::InformationSubject,
+    operation: &str,
+    at: i64,
+) -> Result<(), String> {
+    let labels = execlaw_core::information_store::InformationLabelStore::new(db);
+    let Some((run_subject, _)) = labels
+        .latest_for_identity("run", run_id)
+        .map_err(|error| format!("read run information label: {error}"))?
+    else {
+        return Err("durable run information label is missing".into());
+    };
+    let mut digest = Sha256::new();
+    digest.update(run_subject.sha256.as_bytes());
+    digest.update(source.sha256.as_bytes());
+    let output = execlaw_core::information_store::InformationSubject {
+        kind: "run".into(),
+        id: run_id.to_owned(),
+        sha256: hex::encode(digest.finalize()),
+    };
+    if labels
+        .get(&output)
+        .map_err(|error| format!("read derived run label: {error}"))?
+        .is_none()
+    {
+        labels
+            .transform(
+                &output,
+                &[run_subject, source.clone()],
+                operation,
+                "host:history-compaction",
+                at,
+            )
+            .map_err(|error| format!("propagate run information label: {error}"))?;
+    }
+    Ok(())
 }
 
 impl ChatRequestReservation {
@@ -535,6 +611,73 @@ use types::{
 #[cfg(test)]
 use types::MAX_PREPEND_SKILL_BYTES;
 
+fn encode_user_payload_with_safety_profile(
+    payload: &UserMessagePayload,
+    profile: Option<&execlaw_core::safety_profiles::SafetyProfileSnapshot>,
+) -> Result<serde_json::Value, String> {
+    let mut value = serde_json::to_value(payload)
+        .map_err(|error| format!("encode user message payload: {error}"))?;
+    if let Some(profile) = profile {
+        let object = value
+            .as_object_mut()
+            .ok_or_else(|| "user message payload did not serialize to an object".to_owned())?;
+        object.insert(
+            "safety_profile".into(),
+            serde_json::to_value(profile)
+                .map_err(|error| format!("encode safety profile snapshot: {error}"))?,
+        );
+    }
+    Ok(value)
+}
+
+fn safety_profile_snapshot_from_event(
+    state: &AppState,
+    event: &EventRecord,
+    requested: Option<&execlaw_core::safety_profiles::SafetyProfileSnapshot>,
+) -> Result<Option<execlaw_core::safety_profiles::SafetyProfileSnapshot>, String> {
+    let payload = event
+        .decode_payload::<serde_json::Value>()
+        .map_err(|error| format!("read saved user event: {error}"))?;
+    let saved = payload
+        .get("safety_profile")
+        .cloned()
+        .map(serde_json::from_value::<execlaw_core::safety_profiles::SafetyProfileSnapshot>)
+        .transpose()
+        .map_err(|error| format!("decode saved safety profile: {error}"))?;
+    match (requested, saved) {
+        (Some(requested), Some(saved)) => {
+            if requested.profile_id != saved.profile_id {
+                return Err("retried task requested a different safety profile".into());
+            }
+            let persisted = execlaw_core::safety_profiles::SafetyProfileStore::new(&state.db)
+                .get_revision(saved.profile_id, saved.revision)
+                .map_err(|error| format!("verify saved safety profile revision: {error}"))?;
+            if persisted != saved {
+                return Err(
+                    "saved safety profile snapshot differs from its SQLite revision".into(),
+                );
+            }
+            Ok(Some(saved))
+        }
+        (Some(_), None) => Err(
+            "cannot attach a safety profile to a user event that already started without one"
+                .into(),
+        ),
+        (None, Some(saved)) => {
+            let persisted = execlaw_core::safety_profiles::SafetyProfileStore::new(&state.db)
+                .get_revision(saved.profile_id, saved.revision)
+                .map_err(|error| format!("verify recovered safety profile revision: {error}"))?;
+            if persisted != saved {
+                return Err(
+                    "recovered safety profile snapshot differs from its SQLite revision".into(),
+                );
+            }
+            Ok(Some(saved))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
 /// `POST /api/chats/:id/messages`
 #[utoipa::path(
     post,
@@ -574,6 +717,55 @@ pub async fn send_message(
         )
             .into_response();
     }
+    let safety_profile = match req.safety_profile_id.as_deref() {
+        None => None,
+        Some(_) if req.incognito => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": {
+                        "code": "safety_profile_requires_persisted_run",
+                        "message": "Safety profiles require a saved durable run; turn off Incognito before selecting one."
+                    }
+                })),
+            )
+                .into_response();
+        }
+        Some(profile_id) => {
+            let Some(profile_id) =
+                execlaw_core::safety_profiles::SafetyProfileId::parse(profile_id)
+            else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": {"code":"safety_profile_unknown","message":"Unknown safety profile."}
+                    })),
+                )
+                    .into_response();
+            };
+            let profile = match execlaw_core::safety_profiles::SafetyProfileStore::new(&state.db)
+                .get(profile_id)
+            {
+                Ok(profile) => profile,
+                Err(error) => return err_500(&format!("read task safety profile: {error}")),
+            };
+            let (supported, reason) =
+                crate::safety_profiles_admin::profile_support(&state, &profile).await;
+            if !supported {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": {
+                            "code": "safety_profile_unsupported",
+                            "message": reason.unwrap_or_else(|| "Required safety enforcement is unavailable on this host.".into())
+                        }
+                    })),
+                )
+                    .into_response();
+            }
+            Some(execlaw_core::safety_profiles::SafetyProfileSnapshot::from_profile(&profile))
+        }
+    };
     let completion_contract: Option<execlaw_core::runs::RunCompletionContractDraft> = match req
         .completion_contract
         .clone()
@@ -1377,6 +1569,7 @@ pub async fn send_message(
                     attachment_ids: persisted_attachments.clone(),
                     applied_skill_names: applied_skill_names.clone(),
                     completion_contract: completion_contract.clone(),
+                    safety_profile: safety_profile.clone(),
                     asset_scope: "default",
                 })
                 .await
@@ -1442,6 +1635,7 @@ pub async fn send_message(
                     applied_skill_names.clone(),
                     "default",
                     completion_contract.clone(),
+                    safety_profile.clone(),
                 )
                 .await
                 {
@@ -1477,6 +1671,7 @@ pub async fn send_message(
                     applied_skill_names.clone(),
                     "default",
                     voice_stream_request_id.clone(),
+                    safety_profile.clone(),
                 )
                 .await
                 {
@@ -1503,6 +1698,7 @@ pub async fn send_message(
                     None,
                     persisted_attachments.clone(),
                     applied_skill_names.clone(),
+                    safety_profile.clone(),
                 ) {
                     Ok(out) => out,
                     Err(e) => {
@@ -1665,6 +1861,7 @@ fn run_stub_turn(
     transport_recipient: Option<&str>,
     attachment_ids: Vec<String>,
     applied_skill_names: Vec<String>,
+    safety_profile: Option<execlaw_core::safety_profiles::SafetyProfileSnapshot>,
 ) -> Result<(i64, String, i64), String> {
     if !dev_stub_allowed(state) {
         return Err("inference_unavailable: configured inference backend is unavailable".into());
@@ -1675,8 +1872,7 @@ fn run_stub_turn(
         user_text.chars().count()
     );
 
-    let user_pending = PendingEvent::encode(
-        EventKind::UserMsg,
+    let user_payload = encode_user_payload_with_safety_profile(
         &UserMessagePayload {
             text: user_text.to_owned(),
             sender_principal_id,
@@ -1686,9 +1882,10 @@ fn run_stub_turn(
             attachment_ids,
             applied_skill_names,
         },
-        None,
-    )
-    .map_err(|e| format!("encode user_msg: {e}"))?;
+        safety_profile.as_ref(),
+    )?;
+    let user_pending = PendingEvent::encode(EventKind::UserMsg, &user_payload, None)
+        .map_err(|e| format!("encode user_msg: {e}"))?;
     let reply_pending = PendingEvent::encode(
         EventKind::ModelTurn,
         &StubModelTurnPayload {
@@ -1848,6 +2045,7 @@ async fn run_real_turn(
     applied_skill_names: Vec<String>,
     asset_scope: &str,
     stream_request_id: Option<String>,
+    safety_profile: Option<execlaw_core::safety_profiles::SafetyProfileSnapshot>,
 ) -> Result<(i64, String, i64), String> {
     // 2026-05-13 — `resolved` carries the InferenceClient + the
     // model_id paired from the SAME `config_backends` row read.
@@ -1867,7 +2065,7 @@ async fn run_real_turn(
     let prompt_assembly_started = std::time::Instant::now();
 
     // Step 1 — user_msg append.
-    let user_seq = if let Some(existing) = find_recoverable_runner_input(
+    let recoverable = find_recoverable_runner_input(
         &state.db,
         &log,
         cid,
@@ -1877,15 +2075,21 @@ async fn run_real_turn(
         transport_recipient,
         caller_timezone,
         &applied_skill_names,
-    )? {
+    )?;
+    let safety_profile_snapshot = safety_profile.clone();
+    let user_seq = if let Some(existing) = recoverable {
+        let event = log
+            .replay_since(cid, EventSeq(existing.0.saturating_sub(1)))
+            .map_err(|error| format!("verify recovered user event: {error}"))?
+            .into_iter()
+            .find(|event| event.seq == existing && event.kind == EventKind::UserMsg)
+            .ok_or_else(|| "recovered user event disappeared".to_owned())?;
+        let _ = safety_profile_snapshot_from_event(state, &event, safety_profile.as_ref())?;
         existing
     } else {
         let base_seq = log.last_seq(cid).map_err(|e| format!("last_seq: {e}"))?;
         let user_seq = base_seq.next();
-        let user_event = EventRecord::new(
-            cid.clone(),
-            user_seq,
-            EventKind::UserMsg,
+        let payload = encode_user_payload_with_safety_profile(
             &UserMessagePayload {
                 text: user_text.to_owned(),
                 sender_principal_id: sender_principal_id.clone(),
@@ -1895,6 +2099,13 @@ async fn run_real_turn(
                 attachment_ids: attachment_ids.clone(),
                 applied_skill_names: applied_skill_names.clone(),
             },
+            safety_profile_snapshot.as_ref(),
+        )?;
+        let user_event = EventRecord::new(
+            cid.clone(),
+            user_seq,
+            EventKind::UserMsg,
+            &payload,
             sender_principal_id.clone(),
         )
         .map_err(|e| format!("encode user_msg: {e}"))?;
@@ -2159,6 +2370,7 @@ async fn run_real_turn(
             receipt_store
                 .save_compaction_receipt(&receipt)
                 .map_err(|error| format!("save compaction receipt: {error}"))?;
+            persist_compaction_information_label(&state.db, &receipt)?;
             receipt
         };
         messages.push(
@@ -2643,6 +2855,7 @@ pub(crate) struct RunnerTurnCtx<'a> {
     /// re-resolve them.
     pub applied_skill_names: Vec<String>,
     pub completion_contract: Option<execlaw_core::runs::RunCompletionContractDraft>,
+    pub safety_profile: Option<execlaw_core::safety_profiles::SafetyProfileSnapshot>,
     /// Agent/task scope used to resolve governed memory asset bindings.
     pub asset_scope: &'a str,
 }
@@ -2677,6 +2890,39 @@ pub(crate) struct RunnerToolView {
     pub builtin_names: Vec<String>,
     /// Names of agent-callable plugin tools that survived filtering.
     pub plugin_tool_names: Vec<String>,
+}
+
+fn safety_profile_allows_tool(
+    plugin_host: &execlaw_plugin_host::PluginHost,
+    profile: &execlaw_core::safety_profiles::SafetyProfileSnapshot,
+    tool_name: &str,
+) -> bool {
+    if matches!(tool_name, "execlaw.discover_tool" | "execlaw.read_artifact") {
+        return true;
+    }
+    if let Some(tool) = plugin_host.registry().builtin(tool_name) {
+        return profile.allows_builtin(tool_name, &tool.descriptor().capabilities);
+    }
+    if tool_name.starts_with("mcp:") {
+        return profile.allows_mcp_tool(tool_name);
+    }
+    plugin_host
+        .registry()
+        .tool(tool_name)
+        .is_some_and(|tool| profile.allows_plugin_tool(tool_name, &tool.required_capabilities))
+}
+
+fn filter_tool_view_for_safety_profile(
+    plugin_host: &execlaw_plugin_host::PluginHost,
+    profile: &execlaw_core::safety_profiles::SafetyProfileSnapshot,
+    mut view: RunnerToolView,
+) -> RunnerToolView {
+    let allows = |name: &str| safety_profile_allows_tool(plugin_host, profile, name);
+    view.declarations.retain(|tool| allows(&tool.function.name));
+    view.discoverable.retain(|tool| allows(&tool.function.name));
+    view.builtin_names.retain(|name| allows(name));
+    view.plugin_tool_names.retain(|name| allows(name));
+    view
 }
 
 const MAX_TOOL_CATALOG_BYTES: usize = 24 * 1024;
@@ -3993,6 +4239,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
         attachment_ids,
         applied_skill_names,
         completion_contract,
+        safety_profile,
         asset_scope,
     } = ctx;
     let supervisor = state
@@ -4021,7 +4268,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     }
 
     // Step 1 — append user_msg.
-    let user_seq = if let Some(existing) = find_recoverable_runner_input(
+    let recoverable = find_recoverable_runner_input(
         &state.db,
         &log,
         cid,
@@ -4031,15 +4278,22 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
         transport_recipient,
         caller_timezone,
         &applied_skill_names,
-    )? {
+    )?;
+    let mut safety_profile_snapshot = safety_profile.clone();
+    let user_seq = if let Some(existing) = recoverable {
+        let event = log
+            .replay_since(cid, EventSeq(existing.0.saturating_sub(1)))
+            .map_err(|error| format!("verify recovered user event: {error}"))?
+            .into_iter()
+            .find(|event| event.seq == existing && event.kind == EventKind::UserMsg)
+            .ok_or_else(|| "recovered user event disappeared".to_owned())?;
+        safety_profile_snapshot =
+            safety_profile_snapshot_from_event(state, &event, safety_profile.as_ref())?;
         existing
     } else {
         let base_seq = log.last_seq(cid).map_err(|e| format!("last_seq: {e}"))?;
         let user_seq = base_seq.next();
-        let user_event = EventRecord::new(
-            cid.clone(),
-            user_seq,
-            EventKind::UserMsg,
+        let payload = encode_user_payload_with_safety_profile(
             &UserMessagePayload {
                 text: user_text.to_owned(),
                 sender_principal_id: sender_principal_id.clone(),
@@ -4049,6 +4303,13 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
                 attachment_ids: attachment_ids.clone(),
                 applied_skill_names: applied_skill_names.clone(),
             },
+            safety_profile_snapshot.as_ref(),
+        )?;
+        let user_event = EventRecord::new(
+            cid.clone(),
+            user_seq,
+            EventKind::UserMsg,
+            &payload,
             sender_principal_id.clone(),
         )
         .map_err(|e| format!("encode user_msg: {e}"))?;
@@ -4072,13 +4333,16 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     // catalog was filtered, so the model's system prompt routed it
     // to tool names the catalog had stripped — confusing for the
     // model, wasteful of prompt tokens, and a policy hygiene gap.
-    let tool_view = build_runner_tool_catalog_for_durable_run(
+    let mut tool_view = build_runner_tool_catalog_for_durable_run(
         &state.db,
         &state.plugin_host,
         caller_trust,
         &caller_caps,
         planner_executor,
     );
+    if let Some(profile) = &safety_profile_snapshot {
+        tool_view = filter_tool_view_for_safety_profile(&state.plugin_host, profile, tool_view);
+    }
     if planner_executor {
         tracing::debug!(
             target: "chats::run_runner_turn",
@@ -4273,6 +4537,19 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
                 receipt_store
                     .save_compaction_receipt(&receipt)
                     .map_err(|error| error.to_string())?;
+                persist_compaction_information_label(&state.db, &receipt)?;
+                let summary_subject = execlaw_core::information_store::InformationSubject {
+                    kind: "summary".into(),
+                    id: receipt.receipt_id.clone(),
+                    sha256: hex::encode(Sha256::digest(receipt.summary.as_bytes())),
+                };
+                propagate_label_to_run(
+                    &state.db,
+                    &compaction_run_id,
+                    &summary_subject,
+                    "history_compaction",
+                    receipt.created_at / 1000,
+                )?;
                 receipt
             };
             let summary_message = execlaw_runner_local::history_summarizer::CompactionSummary {
@@ -4556,6 +4833,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
                 "planner_handoff": &req.planner_handoff,
                 "untrusted_context": &req.untrusted_context,
                 "initial_controls": &req.initial_controls,
+                "safety_profile": &safety_profile_snapshot,
             }),
             &serde_json::json!({
                 "model": &req.model,
@@ -4632,6 +4910,8 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
             crate::tool_dispatch::NoBuiltinTools,
             state.db.clone(),
         )
+        .with_live_principal_opt(sender_principal_id.as_deref())
+        .with_safety_profile(safety_profile_snapshot.clone())
         .with_mcp(state.mcp_host.clone())
         .with_conversation(cid.clone())
         // 2026-04-29 — wire the per-turn inference client + model
@@ -4648,6 +4928,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
             resolved_model_id.clone(),
         )
         .with_parent_run(durable_run_id.clone())
+        .with_policy_context(durable_run_id.clone(), cid.as_str().to_owned(), user_seq.0)
         .with_workspace_checkout_root(state.data_dir.join("workspace-checkouts"))
         .with_artifact_root(state.data_dir.join("tool-results"))
         .with_cancel_flag(cancel_flag.clone())
@@ -5873,6 +6154,7 @@ async fn run_tool_capable_turn(
     applied_skill_names: Vec<String>,
     asset_scope: &str,
     completion_contract: Option<execlaw_core::runs::RunCompletionContractDraft>,
+    safety_profile: Option<execlaw_core::safety_profiles::SafetyProfileSnapshot>,
 ) -> Result<(i64, String, i64), String> {
     use execlaw_inference_api::ToolDeclaration;
     use execlaw_policy::spotlighting::Spotlight;
@@ -5908,6 +6190,22 @@ async fn run_tool_capable_turn(
             &applied_skill_names,
         )?
     };
+    let log = event_log(state);
+    let recovered_input_event = match recoverable_input_seq {
+        Some(seq) => Some(
+            log.replay_since(cid, EventSeq(seq.0.saturating_sub(1)))
+                .map_err(|error| format!("verify recovered user event: {error}"))?
+                .into_iter()
+                .find(|event| event.seq == seq && event.kind == EventKind::UserMsg)
+                .ok_or_else(|| "recovered user event disappeared".to_owned())?,
+        ),
+        None => None,
+    };
+    let safety_profile_snapshot = if let Some(event) = &recovered_input_event {
+        safety_profile_snapshot_from_event(state, event, safety_profile.as_ref())?
+    } else {
+        safety_profile.clone()
+    };
     tracing::debug!(
         target: "agent::turn_timing",
         conversation_id = %cid_for_log,
@@ -5923,13 +6221,16 @@ async fn run_tool_capable_turn(
     // builder needs, so the system prompt and the model's tool
     // catalog stay in sync.
     let catalog_started_at = std::time::Instant::now();
-    let tool_view = build_runner_tool_catalog(
+    let mut tool_view = build_runner_tool_catalog(
         &state.db,
         &state.plugin_host,
         caller_trust,
         &caller_caps,
         planner_executor,
     );
+    if let Some(profile) = &safety_profile_snapshot {
+        tool_view = filter_tool_view_for_safety_profile(&state.plugin_host, profile, tool_view);
+    }
     if !tool_view.discoverable.is_empty()
         && !qualified_model_profile(&state.db, BackendPurpose::Standard, &resolved_model_id)
             .is_some_and(|profile| {
@@ -5947,23 +6248,16 @@ async fn run_tool_capable_turn(
     // killed during inference must rebuild the same request under this event's
     // timestamp, then reclaim its model step without appending another user
     // message or minting a second run id.
-    let log = event_log(state);
     let input_event = match recoverable_input_seq {
-        Some(seq) => log
-            .replay_since(cid, EventSeq(seq.0.saturating_sub(1)))
-            .map_err(|error| format!("verify recovered user event: {error}"))?
-            .into_iter()
-            .find(|event| event.seq == seq && event.kind == EventKind::UserMsg)
+        Some(_) => recovered_input_event
+            .clone()
             .ok_or_else(|| "recovered user event disappeared".to_owned())?,
         None => {
             let seq = log
                 .last_seq(cid)
                 .map_err(|error| format!("read next user event sequence: {error}"))?
                 .next();
-            let event = EventRecord::new(
-                cid.clone(),
-                seq,
-                EventKind::UserMsg,
+            let payload = encode_user_payload_with_safety_profile(
                 &UserMessagePayload {
                     text: user_text.to_owned(),
                     sender_principal_id: sender_principal_id.clone(),
@@ -5973,6 +6267,13 @@ async fn run_tool_capable_turn(
                     attachment_ids: attachment_ids.clone(),
                     applied_skill_names: applied_skill_names.clone(),
                 },
+                safety_profile_snapshot.as_ref(),
+            )?;
+            let event = EventRecord::new(
+                cid.clone(),
+                seq,
+                EventKind::UserMsg,
+                &payload,
                 sender_principal_id.clone(),
             )
             .map_err(|error| format!("encode user event: {error}"))?;
@@ -6020,6 +6321,13 @@ async fn run_tool_capable_turn(
             caller_trust,
             crate::tool_dispatch::NoBuiltinTools,
             state.db.clone(),
+        )
+        .with_live_principal_opt(sender_principal_id.as_deref())
+        .with_safety_profile(safety_profile_snapshot.clone())
+        .with_policy_context(
+            format!("turn:{}:{}", cid.as_str(), input_seq.0),
+            cid.as_str().to_owned(),
+            input_seq.0,
         )
         // Phase-8d: prefix-routed MCP tools land here.
         .with_mcp(state.mcp_host.clone())
@@ -6622,6 +6930,7 @@ async fn dispatch_routine_turn_inner(
                 // Routines don't surface a skill picker.
                 applied_skill_names: Vec::new(),
                 completion_contract: completion_contract.clone(),
+                safety_profile: None,
                 asset_scope: &routine_asset_scope,
             })
             .await;
@@ -6652,6 +6961,7 @@ async fn dispatch_routine_turn_inner(
                 Vec::new(),
                 &routine_asset_scope,
                 completion_contract,
+                None,
             )
             .await
         }
@@ -6689,6 +6999,7 @@ async fn dispatch_routine_turn_inner(
                 Vec::new(),
                 &routine_asset_scope,
                 None,
+                None,
             )
             .await;
             drop(cancel_guard);
@@ -6703,6 +7014,7 @@ async fn dispatch_routine_turn_inner(
             None,
             Vec::new(),
             Vec::new(),
+            None,
         ),
     };
 
@@ -7060,6 +7372,7 @@ pub async fn dispatch_external_turn(
                 // Transports don't surface a skill picker.
                 applied_skill_names: Vec::new(),
                 completion_contract: None,
+                safety_profile: None,
                 asset_scope: "default",
             })
             .await;
@@ -7094,6 +7407,7 @@ pub async fn dispatch_external_turn(
                 Vec::new(),
                 "default",
                 None,
+                None,
             )
             .await
         }
@@ -7121,6 +7435,7 @@ pub async fn dispatch_external_turn(
                 Vec::new(),
                 "default",
                 None,
+                None,
             )
             .await;
             drop(cancel_guard);
@@ -7135,6 +7450,7 @@ pub async fn dispatch_external_turn(
             transport_recipient,
             attachment_ids.clone(),
             Vec::new(),
+            None,
         ),
     };
 
@@ -7657,6 +7973,7 @@ pub async fn dispatch_clarification_turn(
                 attachment_ids: Vec::new(),
                 applied_skill_names: Vec::new(),
                 completion_contract: None,
+                safety_profile: None,
                 asset_scope: "default",
             })
             .await;
@@ -7686,6 +8003,7 @@ pub async fn dispatch_clarification_turn(
                 Vec::new(),
                 "default",
                 None,
+                None,
             )
             .await
         }
@@ -7713,6 +8031,7 @@ pub async fn dispatch_clarification_turn(
                 Vec::new(),
                 "default",
                 None,
+                None,
             )
             .await;
             drop(cancel_guard);
@@ -7727,6 +8046,7 @@ pub async fn dispatch_clarification_turn(
             None,
             Vec::new(),
             Vec::new(),
+            None,
         ),
     };
 
@@ -9843,6 +10163,77 @@ pub async fn delete_thread(
 mod tests {
     use super::*;
     use crate::runner_supervisor::TurnEvent;
+
+    #[test]
+    fn compaction_summary_label_is_host_owned_and_destination_restricted() {
+        let state = crate::routes::test_app_state();
+        let receipt = execlaw_core::harness::CompactionReceipt {
+            receipt_id: "compact:conversation-a:fingerprint".into(),
+            conversation_id: "conversation-a".into(),
+            source_start_seq: 1,
+            source_end_seq: 4,
+            source_fingerprint: "source-fingerprint".into(),
+            summary_version: 1,
+            retained_constraints: Vec::new(),
+            pending_work: Vec::new(),
+            discarded_content: Vec::new(),
+            trust_class: "mixed_untrusted".into(),
+            summary: "untrusted summary text".into(),
+            created_at: 1000,
+        };
+        persist_compaction_information_label(&state.db, &receipt).unwrap();
+        let label = execlaw_core::information_store::InformationLabelStore::new(&state.db)
+            .get(&execlaw_core::information_store::InformationSubject {
+                kind: "summary".into(),
+                id: receipt.receipt_id,
+                sha256: hex::encode(Sha256::digest(receipt.summary.as_bytes())),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(label.source_trust_class, "mixed_untrusted");
+        assert!(label.allowed_destinations.is_empty());
+    }
+
+    #[test]
+    fn safety_profile_snapshot_is_bound_to_the_immutable_user_event() {
+        let state = crate::routes::test_app_state();
+        let profile = execlaw_core::safety_profiles::SafetyProfileStore::new(&state.db)
+            .get(execlaw_core::safety_profiles::SafetyProfileId::InspectOnly)
+            .unwrap();
+        let snapshot = execlaw_core::safety_profiles::SafetyProfileSnapshot::from_profile(&profile);
+        let payload = encode_user_payload_with_safety_profile(
+            &UserMessagePayload {
+                text: "inspect this workspace".into(),
+                sender_principal_id: Some("controller".into()),
+                channel_origin: None,
+                transport_recipient: None,
+                timezone: Some("UTC".into()),
+                attachment_ids: Vec::new(),
+                applied_skill_names: Vec::new(),
+            },
+            Some(&snapshot),
+        )
+        .unwrap();
+        let event = EventRecord::new(
+            ConversationId::from("safety-profile-event"),
+            EventSeq(1),
+            EventKind::UserMsg,
+            &payload,
+            Some("controller".into()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            safety_profile_snapshot_from_event(&state, &event, None).unwrap(),
+            Some(snapshot.clone())
+        );
+        let other = execlaw_core::safety_profiles::SafetyProfileSnapshot::from_profile(
+            &execlaw_core::safety_profiles::SafetyProfileStore::new(&state.db)
+                .get(execlaw_core::safety_profiles::SafetyProfileId::WorkspaceEdit)
+                .unwrap(),
+        );
+        assert!(safety_profile_snapshot_from_event(&state, &event, Some(&other)).is_err());
+    }
 
     fn link_synthetic_memory_evidence(
         state: &AppState,
@@ -13467,6 +13858,9 @@ mod tests {
                         required_artifacts: Vec::new(),
                         delivery_required: false,
                     }),
+                    missed_run_policy: execlaw_core::routines::MissedRunPolicy::Skip,
+                    missed_run_limit: 1,
+                    overlap_policy: execlaw_core::routines::RoutineOverlapPolicy::Forbid,
                 },
                 chrono::Utc::now().timestamp(),
             )

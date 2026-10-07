@@ -199,6 +199,12 @@ sudo docker compose exec execlaw \
 The models request confirms Ollama is reachable from the control-plane
 container, not only from the TrueNAS host shell.
 
+This example exposes the control plane directly over HTTP. In **Settings ->
+General -> HTTPS-only session cookies**, disable the HTTPS-only option for this
+trusted LAN deployment, then sign out and back in so the browser receives a
+non-Secure access cookie. Keep the option enabled when accessing execlaw over
+HTTPS, including through a TLS-terminating reverse proxy.
+
 In **Settings -> Network**, add these approvals under the **Local inference**
 capability:
 

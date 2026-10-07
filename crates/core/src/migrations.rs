@@ -381,6 +381,31 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "memory_asset_assertion_links",
         sql: include_str!("../migrations/0071_memory_asset_assertion_links.sql"),
     },
+    Migration {
+        id: 72,
+        name: "mcp_secret_scopes",
+        sql: include_str!("../migrations/0072_mcp_secret_scopes.sql"),
+    },
+    Migration {
+        id: 73,
+        name: "task_safety_profiles_and_policy_decisions",
+        sql: include_str!("../migrations/0073_task_safety_profiles_and_policy_decisions.sql"),
+    },
+    Migration {
+        id: 74,
+        name: "information_label_events",
+        sql: include_str!("../migrations/0074_information_label_events.sql"),
+    },
+    Migration {
+        id: 75,
+        name: "routine_execution_policies",
+        sql: include_str!("../migrations/0075_routine_execution_policies.sql"),
+    },
+    Migration {
+        id: 76,
+        name: "projection_rebuild_generations",
+        sql: include_str!("../migrations/0076_projection_rebuild_generations.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -556,6 +581,46 @@ mod tests {
     use super::*;
     use crate::db::{Database, DbConfig};
 
+    fn database_at_migration_prefix(last_id: u32, seeded_event_count: usize) -> Database {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        db.with_conn(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE schema_version (id INTEGER PRIMARY KEY,name TEXT NOT NULL,\
+                 checksum TEXT NOT NULL,applied_at INTEGER NOT NULL);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        for migration in MIGRATIONS
+            .iter()
+            .filter(|migration| migration.id <= last_id)
+        {
+            db.transaction(|tx| {
+                tx.execute_batch(migration.sql)?;
+                tx.execute(
+                    "INSERT INTO schema_version(id,name,checksum,applied_at) VALUES (?1,?2,?3,0)",
+                    params![migration.id, migration.name, simple_checksum(migration.sql)],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        if seeded_event_count > 0 {
+            db.with_conn(|conn| {
+                for seq in 1..=seeded_event_count {
+                    conn.execute(
+                        "INSERT INTO state_events(conversation_id,seq,kind,payload,committed_at,actor) \
+                         VALUES ('history-fixture',?1,'user_msg',X'80',?1,'fixture')",
+                        [seq as i64],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap();
+        }
+        db
+    }
+
     #[test]
     fn apply_all_creates_all_tables() {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
@@ -576,6 +641,7 @@ mod tests {
             "state_alert_silences",
             "state_attachments",
             "state_artifacts",
+            "state_information_label_events",
             "state_plugins",
             "eval_flagged",
             "users",
@@ -670,6 +736,63 @@ mod tests {
             second.is_empty(),
             "rerun must not re-apply already-applied migrations"
         );
+    }
+
+    #[test]
+    fn supported_schema_history_prefixes_upgrade_without_losing_event_rows() {
+        for prefix in [1, 20, 35, 50, 68, 74, 75] {
+            let seeded_count = if prefix == 1 { 512 } else { 0 };
+            let db = database_at_migration_prefix(prefix, seeded_count);
+            let runner = MigrationRunner::new(&db);
+            runner.apply_all().unwrap_or_else(|error| {
+                panic!("upgrade from schema history {prefix} failed: {error}")
+            });
+            let final_version: u32 = db
+                .with_conn(|conn| {
+                    Ok(conn.query_row("SELECT MAX(id) FROM schema_version", [], |row| row.get(0))?)
+                })
+                .unwrap();
+            assert_eq!(final_version, MIGRATIONS.last().unwrap().id);
+            if seeded_count > 0 {
+                let preserved: i64 = db
+                    .with_conn(|conn| {
+                        Ok(conn.query_row(
+                            "SELECT COUNT(*) FROM state_events WHERE conversation_id='history-fixture'",
+                            [],
+                            |row| row.get(0),
+                        )?)
+                    })
+                    .unwrap();
+                assert_eq!(preserved, seeded_count as i64);
+            }
+        }
+    }
+
+    #[test]
+    fn interrupted_migration_keeps_a_retryable_schema_snapshot() {
+        let db = database_at_migration_prefix(75, 0);
+        let runner = MigrationRunner::new(&db);
+        db.with_conn(|conn| {
+            conn.execute_batch("CREATE TABLE state_projection_generations (injected INTEGER);")?;
+            Ok(())
+        })
+        .unwrap();
+        assert!(runner.apply_all().is_err());
+        let recorded: i64 = db
+            .with_conn(|conn| {
+                Ok(conn.query_row("SELECT MAX(id) FROM schema_version", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(
+            recorded, 75,
+            "failed migration must not advance schema_version"
+        );
+        db.with_conn(|conn| {
+            conn.execute_batch("DROP TABLE state_projection_generations;")?;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(runner.apply_all().unwrap(), vec![76]);
     }
 
     // ----------------------------------------------------------------

@@ -1110,6 +1110,20 @@ impl BackendSupervisor {
                             // Not cached + no task in flight → kick
                             // a download task and bail this tick.
                             // Next reconcile picks up progress.
+                            let cache_path =
+                                self.hf_primary_cache.as_deref().unwrap_or(self.db.path());
+                            if let Some(reason) =
+                                crate::diagnostics::optional_work_denial(&self.db, cache_path)
+                            {
+                                debug!(
+                                    purpose = %key,
+                                    model = %model_id,
+                                    %reason,
+                                    "optional model download deferred by storage admission"
+                                );
+                                slot.last_log_line = Some(reason.to_owned());
+                                continue;
+                            }
                             info!(
                                 purpose = %key,
                                 model = %model_id,

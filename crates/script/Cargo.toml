@@ -25,6 +25,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 base64.workspace = true
 rand.workspace = true
 execlaw-charting = { path = "../charting" }
+execlaw-policy = { path = "../policy" }
 
 [dev-dependencies]
 tempfile.workspace = true

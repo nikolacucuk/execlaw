@@ -15,7 +15,7 @@ hardware.
 
 ## Documentation
 
-The accepted implementation plan covers **all 130 enhancements (H001-H130)**.
+The accepted implementation plan covers **all 154 enhancements (H001-H154)**.
 Use the [delivery ledger](docs/implementation-plan.md) for status, ownership,
 sequencing, and evidence, the [roadmap](docs/llm-harness-roadmap.md) for scope
 and acceptance criteria, and the [immediate queue](docs/remaining-improvements-todo.md)
@@ -24,16 +24,24 @@ support. The roadmap's F01-F19 findings remain open until verified remediation;
 in particular, production encryption and safe automation execution require
 the recorded release checks.
 
+The [Paperclip coordination/interoperability roadmap](docs/llm-harness-roadmap.md#paperclip-roadmap)
+adds H131-H154 for native agent work management and optional Paperclip worker,
+lead, and executive roles. The [implementation guidance](docs/implementation-plan.md#paperclip-coordination-and-interoperability)
+tracks this proposed work; no Paperclip adapter is claimed shipped. Local
+inference, scoped authority, SQLite state, and outbox-mediated effects remain
+required in either mode.
+
 | Doc | What it covers |
 |---|---|
 | [`docs/README.md`](docs/README.md) | Documentation map and the relationship between requirements, delivery tracking, and implementation references. |
-| [`docs/implementation-plan.md`](docs/implementation-plan.md) | Complete H001-H130 delivery ledger, workstreams, status rules, owners, evidence, and finding-to-work mapping. |
+| [`docs/implementation-plan.md`](docs/implementation-plan.md) | Complete H001-H154 delivery ledger, workstreams, status rules, owners, evidence, and finding-to-work mapping. |
 | [`docs/remaining-improvements-todo.md`](docs/remaining-improvements-todo.md) | Immediate release-blocking work and unresolved validation; subordinate to the complete ledger. |
 | [`docs/h022-h025-qualification.md`](docs/h022-h025-qualification.md) | Local-model troubleshooting and H022-H025 acceptance evidence, process-kill safety, and remaining live/release gates. |
 | [`docs/architecture.md`](docs/architecture.md) | System topology, design principles, FSM, data model, recovery, observability — the **what**. |
 | [`docs/agent-model.md`](docs/agent-model.md) | TurnExecutor, memory layers, reflection loop, planner/executor split — the **how** of one turn. |
 | [`docs/memory-roadmap.md`](docs/memory-roadmap.md) | Governed memory assets, task/agent loadouts, hybrid retrieval, local Wiki, and CodeGraph implementation checklist. |
-| [`docs/llm-harness-roadmap.md`](docs/llm-harness-roadmap.md) | Accepted requirements and acceptance criteria for all 130 enhancements, competitive review, and F01-F19 findings. |
+| [`docs/llm-harness-roadmap.md`](docs/llm-harness-roadmap.md) | Accepted requirements and acceptance criteria for all 154 enhancements, competitive review, and F01-F19 findings. |
+| [`docs/implementation-sources.md`](docs/implementation-sources.md) | Source provenance, upstream repositories, and implementation-reference lookup for H001-H130; the roadmap links sources under each item. |
 | [`docs/adversarial-evaluations.md`](docs/adversarial-evaluations.md) | Offline deterministic attack-focused regression suite and run command. |
 | [`docs/plugins.md`](docs/plugins.md) | Plugin manifest schema, runtime tiers, sidecar model, Rhai primitives, and a step-by-step guide for writing a custom plugin. |
 | [`docs/workspace-coding.md`](docs/workspace-coding.md) | Digest-pinned workspace toolchain setup, sandbox boundaries, terminal jobs, and LSP diagnostics. |
@@ -181,7 +189,7 @@ The [Nexus visual roadmap](docs/llm-harness-roadmap.md#nexus-visual-roadmap)
 records NX01-NX30 proposals for clearer multi-source messages, relationship
 views, responsive controls, accessibility, and safe draft review. The
 [Nexus delivery ledger](docs/implementation-plan.md#nexus-visual-extension)
-tracks them separately from H001-H130. These are planned changes, not a
+tracks them separately from H001-H154. These are planned changes, not a
 shipped redesign; the current implementation is described below.
 
 Choose **Settings -> General -> Chat appearance -> Nexus** for a source-aware

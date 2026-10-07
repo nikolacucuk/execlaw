@@ -4,7 +4,16 @@ How a conversation in execlaw turns into model calls, tool calls, and durable st
 
 ## Implementation delivery plan
 
-All H001-H130 are accepted implementation scope in the
+The [Paperclip extension](llm-harness-roadmap.md#paperclip-roadmap), reviewed
+2026-10-06, proposes a provider-neutral goal/project/work-item layer above
+existing agent and run records. H131-H139 refine native management; H140-H154
+cover optional externally assigned work. Reporting lines, task dependencies,
+run parentage, and transport ownership remain distinct. Current tools-disabled
+analysis children must not silently become coding workers, and an executive
+title must never imply Controller authority. These are planned extensions,
+tracked in the [implementation ledger](implementation-plan.md#paperclip-coordination-and-interoperability).
+
+All H001-H154 are accepted implementation scope in the
 [`implementation-plan.md`](implementation-plan.md) tracker. Historical
 implementation labels below are not release qualification. This document owns
 the turn semantics for [H022 completion evidence](llm-harness-roadmap.md#enhancement-022),

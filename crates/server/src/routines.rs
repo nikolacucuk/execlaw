@@ -26,8 +26,8 @@ use axum::routing::{get, post};
 use chrono::{TimeZone, Utc};
 use execlaw_core::audit::AuditStore;
 use execlaw_core::routines::{
-    RoutineError, RoutineRow, RoutineRunRow, RoutineRunStatus, RoutineStore, RoutineUpsert,
-    next_n_fires, parse_cron, parse_timezone,
+    MissedRunPolicy, RoutineError, RoutineOverlapPolicy, RoutineRow, RoutineRunRow,
+    RoutineRunStatus, RoutineStore, RoutineUpsert, next_n_fires, parse_cron, parse_timezone,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -48,6 +48,9 @@ pub struct RoutineView {
     pub created_at: i64,
     pub updated_at: i64,
     pub completion_contract: Option<execlaw_core::runs::RunCompletionContractDraft>,
+    pub missed_run_policy: MissedRunPolicy,
+    pub missed_run_limit: u32,
+    pub overlap_policy: RoutineOverlapPolicy,
 }
 
 impl From<&RoutineRow> for RoutineView {
@@ -66,6 +69,9 @@ impl From<&RoutineRow> for RoutineView {
             created_at: r.created_at,
             updated_at: r.updated_at,
             completion_contract: r.completion_contract.clone(),
+            missed_run_policy: r.missed_run_policy,
+            missed_run_limit: r.missed_run_limit,
+            overlap_policy: r.overlap_policy,
         }
     }
 }
@@ -85,6 +91,7 @@ pub struct RoutineRunView {
     pub status: String,
     pub error: Option<String>,
     pub conversation_id: Option<String>,
+    pub occurrence_at: Option<i64>,
 }
 
 impl From<&RoutineRunRow> for RoutineRunView {
@@ -98,6 +105,7 @@ impl From<&RoutineRunRow> for RoutineRunView {
             status: r.status.as_str().to_owned(),
             error: r.error.clone(),
             conversation_id: r.conversation_id.clone(),
+            occurrence_at: r.occurrence_at,
         }
     }
 }
@@ -120,6 +128,12 @@ pub struct UpsertRoutineRequest {
     pub enabled: bool,
     #[serde(default)]
     pub completion_contract: Option<execlaw_core::runs::RunCompletionContractDraft>,
+    #[serde(default)]
+    pub missed_run_policy: MissedRunPolicy,
+    #[serde(default = "default_missed_run_limit")]
+    pub missed_run_limit: u32,
+    #[serde(default)]
+    pub overlap_policy: RoutineOverlapPolicy,
 }
 
 fn default_tz() -> String {
@@ -127,6 +141,9 @@ fn default_tz() -> String {
 }
 fn yes() -> bool {
     true
+}
+fn default_missed_run_limit() -> u32 {
+    1
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -228,6 +245,9 @@ pub async fn create_handler(
                 target_conversation_id: req.target_conversation_id.clone(),
                 enabled: req.enabled,
                 completion_contract: req.completion_contract.clone(),
+                missed_run_policy: req.missed_run_policy,
+                missed_run_limit: req.missed_run_limit,
+                overlap_policy: req.overlap_policy,
             },
             now,
         )
@@ -310,6 +330,9 @@ pub async fn update_handler(
                 target_conversation_id: req.target_conversation_id.clone(),
                 enabled: req.enabled,
                 completion_contract: req.completion_contract.clone(),
+                missed_run_policy: req.missed_run_policy,
+                missed_run_limit: req.missed_run_limit,
+                overlap_policy: req.overlap_policy,
             },
             now,
         )

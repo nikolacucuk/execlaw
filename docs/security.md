@@ -3,7 +3,7 @@
 ## Implementation commitment and current limits
 
 The [implementation plan](implementation-plan.md) tracks the committed
-H001-H130 program; the [roadmap findings](llm-harness-roadmap.md#review-findings-and-unresolved-verification)
+H001-H154 program; the [roadmap findings](llm-harness-roadmap.md#review-findings-and-unresolved-verification)
 are the authoritative record of open issues F01-F19. Planned controls are not
 current guarantees. In particular, F01/F19 identify missing authorization on
 plugin and automation routes, F02 unsafe plugin upgrades, F03 fetch SSRF,

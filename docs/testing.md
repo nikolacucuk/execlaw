@@ -7,7 +7,7 @@ process.
 ## Implementation evidence contract
 
 The [implementation plan](implementation-plan.md) tracks all committed
-H001-H130 items. Tests listed here describe available coverage or required
+H001-H154 items. Tests listed here describe available coverage or required
 acceptance work, not evidence that they passed for a particular release.
 The [roadmap findings F01-F19](llm-harness-roadmap.md#review-findings-and-unresolved-verification)
 remain open until their remediation and specified verification are recorded.

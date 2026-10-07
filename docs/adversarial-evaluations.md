@@ -2,7 +2,7 @@
 
 ## Committed enforcement work
 
-The [implementation plan](implementation-plan.md) tracks H001-H130; this page
+The [implementation plan](implementation-plan.md) tracks H001-H154; this page
 owns the adversarial-evidence view, not a separate backlog. Existing fixtures
 under [H017](llm-harness-roadmap.md#enhancement-017) remain a baseline.
 They do not close the [open roadmap findings](llm-harness-roadmap.md#review-findings-and-unresolved-verification).

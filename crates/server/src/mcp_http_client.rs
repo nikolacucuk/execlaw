@@ -146,6 +146,16 @@ impl HttpMcpClient {
         Ok(me)
     }
 
+    /// Redact this connection's configured credential from data returned to
+    /// callers. The credential never crosses into an MCP tool result or error.
+    pub fn redact_secret(&self, value: &str) -> String {
+        self.bearer
+            .as_deref()
+            .filter(|secret| !secret.is_empty())
+            .map(|secret| value.replace(secret, "[credential redacted]"))
+            .unwrap_or_else(|| value.to_owned())
+    }
+
     /// `tools/list` — same return shape as the stdio client.
     pub async fn list_tools(&self) -> McpResult<Vec<McpTool>> {
         if self.capabilities.lock().await.tools.is_none() {
@@ -657,6 +667,23 @@ fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn configured_bearer_is_redacted_from_returned_text() {
+        let client = HttpMcpClient {
+            http: reqwest::Client::new(),
+            url: "http://127.0.0.1/mcp".into(),
+            bearer: Some("synthetic-bearer-secret".into()),
+            next_id: std::sync::Arc::new(AtomicU64::new(0)),
+            session_id: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            negotiated_version: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            capabilities: std::sync::Arc::new(tokio::sync::Mutex::new(
+                ServerCapabilities::default(),
+            )),
+        };
+        let sanitized = client.redact_secret("remote tool echoed synthetic-bearer-secret");
+        assert_eq!(sanitized, "remote tool echoed [credential redacted]");
+    }
 
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> (String, Value) {
         let mut bytes = Vec::new();

@@ -46,12 +46,13 @@ const ACCESS_COOKIE_NAME: &str = "execlaw_access";
 /// browser clients that can take advantage of automatic cookie handling.
 ///
 /// `max_age_secs = 0` produces an *expiry* cookie (browser deletes it).
-pub(crate) fn build_access_cookie(token: &str, max_age_secs: i64) -> HeaderValue {
+pub(crate) fn build_access_cookie(token: &str, max_age_secs: i64, secure: bool) -> HeaderValue {
     // SameSite=Strict prevents CSRF. HttpOnly prevents XSS exfiltration.
-    // Secure is included so the browser only transmits the cookie over
-    // TLS in production; modern browsers allow localhost without TLS.
+    // Direct HTTP deployments can disable this through the persisted
+    // Settings -> General policy; HTTPS remains the default.
+    let secure_attribute = if secure { "; Secure" } else { "" };
     let cookie = format!(
-        "{name}={token}; HttpOnly; SameSite=Strict; Secure; Path=/api; Max-Age={max_age_secs}",
+        "{name}={token}; HttpOnly; SameSite=Strict{secure_attribute}; Path=/api; Max-Age={max_age_secs}",
         name = ACCESS_COOKIE_NAME,
     );
     // SAFETY: token is base64url which is always valid ASCII.
@@ -59,15 +60,29 @@ pub(crate) fn build_access_cookie(token: &str, max_age_secs: i64) -> HeaderValue
         // Fallback: clear the cookie if we somehow can't build the value
         // (e.g. the token contains unusual bytes). Not expected in normal
         // operation but we must not panic here.
-        HeaderValue::from_static(
-            "execlaw_access=; HttpOnly; SameSite=Strict; Secure; Path=/api; Max-Age=0",
-        )
+        HeaderValue::from_str(&format!(
+            "execlaw_access=; HttpOnly; SameSite=Strict{secure_attribute}; Path=/api; Max-Age=0"
+        ))
+        .unwrap_or_else(|_| HeaderValue::from_static("execlaw_access=; Max-Age=0; Path=/api"))
     })
 }
 
+/// Read the persisted session-cookie transport policy, defaulting to HTTPS-only
+/// if the setting row cannot be read.
+pub(crate) fn https_only_session_cookies_enabled(state: &AppState) -> bool {
+    match execlaw_core::general_settings::GeneralSettingsStore::new(&state.db).get() {
+        Ok(Some(settings)) => settings.https_only_session_cookies,
+        Ok(None) => true,
+        Err(error) => {
+            tracing::warn!(error = %error, "session cookie policy read failed; keeping HTTPS-only cookies");
+            true
+        }
+    }
+}
+
 /// Build a `Set-Cookie` header that clears the access cookie.
-fn clear_access_cookie() -> HeaderValue {
-    build_access_cookie("", 0)
+fn clear_access_cookie(secure: bool) -> HeaderValue {
+    build_access_cookie("", 0, secure)
 }
 
 // -----------------------------------------------------------------------
@@ -233,9 +248,14 @@ impl From<AuthError> for ApiError {
 
 impl From<execlaw_core::DbError> for ApiError {
     fn from(e: execlaw_core::DbError) -> Self {
+        let (status, code) = if matches!(&e, execlaw_core::DbError::Backpressure) {
+            (StatusCode::SERVICE_UNAVAILABLE, "db_backpressure")
+        } else {
+            (StatusCode::INTERNAL_SERVER_ERROR, "db_error")
+        };
         ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "db_error",
+            status,
+            code,
             message: e.to_string(),
         }
     }
@@ -563,7 +583,11 @@ pub async fn setup(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
-        build_access_cookie(&access, state.config.access_token_ttl_secs),
+        build_access_cookie(
+            &access,
+            state.config.access_token_ttl_secs,
+            https_only_session_cookies_enabled(&state),
+        ),
     );
     Ok((
         headers,
@@ -690,7 +714,11 @@ pub async fn login(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
-        build_access_cookie(&access, state.config.access_token_ttl_secs),
+        build_access_cookie(
+            &access,
+            state.config.access_token_ttl_secs,
+            https_only_session_cookies_enabled(&state),
+        ),
     );
     Ok((
         headers,
@@ -739,7 +767,11 @@ pub async fn refresh(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::SET_COOKIE,
-        build_access_cookie(&access, state.config.access_token_ttl_secs),
+        build_access_cookie(
+            &access,
+            state.config.access_token_ttl_secs,
+            https_only_session_cookies_enabled(&state),
+        ),
     );
     Ok((
         headers,
@@ -768,7 +800,10 @@ pub async fn logout(
         }
     }
     let mut headers = HeaderMap::new();
-    headers.insert(header::SET_COOKIE, clear_access_cookie());
+    headers.insert(
+        header::SET_COOKIE,
+        clear_access_cookie(https_only_session_cookies_enabled(&state)),
+    );
     Ok((headers, Json(GenericOk { ok: true })).into_response())
 }
 
@@ -988,6 +1023,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::users::users_router())
         .merge(crate::webauthn::webauthn_router())
         .merge(crate::tools_admin::tools_admin_router())
+        .merge(crate::safety_profiles_admin::router())
         .merge(crate::graphify_api::graphify_api_router())
         .merge(crate::graphiti_admin::graphiti_admin_router())
         .merge(crate::skills_admin::skills_admin_router())
@@ -1002,6 +1038,7 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::plugin_settings_admin::plugin_settings_admin_router())
         .merge(crate::setup_preflight::setup_preflight_router())
         .merge(crate::diagnostics::router())
+        .merge(crate::storage_admin::router())
         .merge(crate::docs::docs_router())
         .with_state(state.clone())
         // SPA fallback — merged LAST so every `/api/*` route above
@@ -1216,6 +1253,18 @@ mod tests {
     use axum::body::{self, Body};
     use axum::http::{HeaderValue, Method, Request, header};
     use tower::ServiceExt;
+
+    #[test]
+    fn access_cookie_secure_attribute_follows_persisted_policy() {
+        let http_cookie = build_access_cookie("test-token", 60, false);
+        let http_cookie = http_cookie.to_str().unwrap();
+        assert!(http_cookie.contains("HttpOnly"));
+        assert!(http_cookie.contains("SameSite=Strict"));
+        assert!(!http_cookie.contains("Secure"));
+
+        let https_cookie = build_access_cookie("test-token", 60, true);
+        assert!(https_cookie.to_str().unwrap().contains("; Secure;"));
+    }
 
     #[tokio::test]
     async fn admin_prefix_requires_auth_even_if_a_handler_omits_the_extractor() {
@@ -2020,5 +2069,12 @@ mod tests {
             !issued_tokens,
             "login must not issue tokens when webauthn credentials exist; status={status}, body={body}",
         );
+    }
+
+    #[test]
+    fn database_backpressure_maps_to_retryable_service_unavailable() {
+        let error = ApiError::from(execlaw_core::DbError::Backpressure);
+        assert_eq!(error.status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(error.code, "db_backpressure");
     }
 }

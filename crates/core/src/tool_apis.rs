@@ -15,6 +15,7 @@
 use crate::alerts::{AlertRow, AlertStatus, AlertStore, Severity};
 use crate::conversation::ConversationStore;
 use crate::db::Database;
+use crate::events::{EventKind, decode_payload_bytes};
 use crate::ids::{AlertId, ConversationId, ResearchJobId};
 use crate::memory::{MemoryEntry, MemoryStore};
 use crate::research::{ResearchJobRow, ResearchJobStore, ResearchJobSummary};
@@ -29,6 +30,7 @@ use crate::tool::{
 use async_trait::async_trait;
 use rusqlite::params;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
 // -----------------------------------------------------------------
@@ -223,16 +225,20 @@ impl ConversationApi for DbConversationApi {
             let (role, text) = match kind.as_str() {
                 "user_msg" => {
                     let p: UserMsgTextPayload =
-                        rmp_serde::from_slice(&payload).unwrap_or(UserMsgTextPayload {
-                            text: String::new(),
-                        });
+                        decode_payload_bytes(EventKind::parse(&kind), &payload).unwrap_or(
+                            UserMsgTextPayload {
+                                text: String::new(),
+                            },
+                        );
                     ("user".to_string(), p.text)
                 }
                 "model_turn" => {
                     let p: ModelTurnTextPayload =
-                        rmp_serde::from_slice(&payload).unwrap_or(ModelTurnTextPayload {
-                            text: String::new(),
-                        });
+                        decode_payload_bytes(EventKind::parse(&kind), &payload).unwrap_or(
+                            ModelTurnTextPayload {
+                                text: String::new(),
+                            },
+                        );
                     ("agent".to_string(), p.text)
                 }
                 other => (other.to_string(), String::new()),
@@ -361,6 +367,7 @@ pub struct DbMemoryApi {
     db: Database,
     caller_trust: String,
     clock_now_unix: i64,
+    run_id: Option<String>,
 }
 
 impl DbMemoryApi {
@@ -369,7 +376,14 @@ impl DbMemoryApi {
             db,
             caller_trust: caller_trust.into(),
             clock_now_unix: now_unix,
+            run_id: None,
         }
+    }
+
+    /// Bind memory reads to the durable run whose model context receives them.
+    pub fn with_run_id(mut self, run_id: impl Into<String>) -> Self {
+        self.run_id = Some(run_id.into());
+        self
     }
 }
 
@@ -394,12 +408,16 @@ impl MemoryApi for DbMemoryApi {
         // (possibly absent) caller-class row. The bump runs in the
         // same `spawn_blocking` so it stays atomic with the lookup.
         let now = self.clock_now_unix;
+        let run_id = self.run_id.clone();
         let got = tokio::task::spawn_blocking(move || {
             let store = MemoryStore::new(&db);
             for class in classes {
                 let entry = store.get(&scope, class, &key)?;
                 if let Some(entry) = entry {
                     let _ = store.bump_hit(&scope, class, &key, now);
+                    if let Some(run_id) = run_id.as_deref() {
+                        propagate_memory_read_label(&db, run_id, &entry, now)?;
+                    }
                     return Ok::<_, crate::DbError>(Some(entry));
                 }
             }
@@ -440,10 +458,59 @@ impl MemoryApi for DbMemoryApi {
             created_at: self.clock_now_unix,
         };
         let db = self.db.clone();
-        tokio::task::spawn_blocking(move || MemoryStore::new(&db).upsert(&entry))
-            .await
-            .map_err(|e| ApiError::Storage(format!("join: {e}")))?
-            .map_err(|e| ApiError::Storage(format!("memory write: {e}")))?;
+        let label_trust = self.caller_trust.clone();
+        let label_time = self.clock_now_unix;
+        tokio::task::spawn_blocking(move || {
+            let memories = MemoryStore::new(&db);
+            let previous = memories.get(&entry.scope, &entry.trust_class, &entry.key)?;
+            memories.upsert(&entry)?;
+            let subject_id = format!("{}/{}/{}", entry.scope, entry.trust_class, entry.key);
+            let output = crate::information_store::InformationSubject {
+                kind: "memory".into(),
+                id: subject_id.clone(),
+                sha256: hex::encode(Sha256::digest(&entry.value_blob)),
+            };
+            let labels = crate::information_store::InformationLabelStore::new(&db);
+            if labels.get(&output)?.is_none() {
+                let previous_subject = previous.as_ref().map(|previous| {
+                    crate::information_store::InformationSubject {
+                        kind: "memory".into(),
+                        id: subject_id,
+                        sha256: hex::encode(Sha256::digest(&previous.value_blob)),
+                    }
+                });
+                let inherited = previous_subject
+                    .as_ref()
+                    .map(|subject| labels.get(subject))
+                    .transpose()?
+                    .flatten();
+                if let (Some(previous_subject), Some(_)) =
+                    (previous_subject.as_ref(), inherited.as_ref())
+                {
+                    labels.transform(
+                        &output,
+                        std::slice::from_ref(previous_subject),
+                        "memory_update",
+                        "memory:write",
+                        label_time,
+                    )?;
+                } else {
+                    let label = crate::information::InformationLabel::observed(
+                        crate::information::Sensitivity::Sensitive,
+                        None,
+                        label_trust,
+                        "memory_write",
+                        &output.id,
+                        std::iter::empty(),
+                    );
+                    labels.observe(&output, &label, "memory:write", label_time)?;
+                }
+            }
+            Ok::<_, crate::DbError>(())
+        })
+        .await
+        .map_err(|e| ApiError::Storage(format!("join: {e}")))?
+        .map_err(|e| ApiError::Storage(format!("memory write: {e}")))?;
         Ok(())
     }
 
@@ -479,6 +546,58 @@ impl MemoryApi for DbMemoryApi {
             })
             .collect())
     }
+}
+
+fn propagate_memory_read_label(
+    db: &Database,
+    run_id: &str,
+    entry: &MemoryEntry,
+    at: i64,
+) -> Result<(), crate::DbError> {
+    let subject_id = format!("{}/{}/{}", entry.scope, entry.trust_class, entry.key);
+    let memory_subject = crate::information_store::InformationSubject {
+        kind: "memory".into(),
+        id: subject_id,
+        sha256: hex::encode(Sha256::digest(&entry.value_blob)),
+    };
+    let labels = crate::information_store::InformationLabelStore::new(db);
+    let memory_label = match labels.get(&memory_subject)? {
+        Some(label) => label,
+        None => {
+            let label = crate::information::InformationLabel::observed(
+                crate::information::Sensitivity::Sensitive,
+                None,
+                entry.trust_class.clone(),
+                "memory_read",
+                &memory_subject.id,
+                std::iter::empty(),
+            );
+            labels.observe(&memory_subject, &label, "memory:read", at)?;
+            label
+        }
+    };
+    let Some((run_subject, _)) = labels.latest_for_identity("run", run_id)? else {
+        return Ok(());
+    };
+    let mut digest = Sha256::new();
+    digest.update(run_subject.sha256.as_bytes());
+    digest.update(memory_subject.sha256.as_bytes());
+    let combined_subject = crate::information_store::InformationSubject {
+        kind: "run".into(),
+        id: run_id.to_owned(),
+        sha256: hex::encode(digest.finalize()),
+    };
+    if labels.get(&combined_subject)?.is_none() {
+        labels.transform(
+            &combined_subject,
+            &[run_subject, memory_subject],
+            "memory_read",
+            "memory:read",
+            at,
+        )?;
+    }
+    let _ = memory_label;
+    Ok(())
 }
 
 // -----------------------------------------------------------------
@@ -746,6 +865,9 @@ impl ScheduleApi for DbScheduleApi {
             target_conversation_id: target,
             enabled: true,
             completion_contract: None,
+            missed_run_policy: crate::routines::MissedRunPolicy::Skip,
+            missed_run_limit: 1,
+            overlap_policy: crate::routines::RoutineOverlapPolicy::Forbid,
         };
         let now = self.clock_now_unix;
         let db = self.db.clone();
@@ -824,6 +946,9 @@ impl ScheduleApi for DbScheduleApi {
             target_conversation_id: new_target,
             enabled: new_enabled,
             completion_contract: existing.completion_contract.clone(),
+            missed_run_policy: existing.missed_run_policy,
+            missed_run_limit: existing.missed_run_limit,
+            overlap_policy: existing.overlap_policy,
         };
         let now = self.clock_now_unix;
         let db = self.db.clone();
@@ -1521,6 +1646,79 @@ mod tests {
         let store = MemoryStore::new(&db);
         assert!(store.get("s", "KnownLimited", "k").unwrap().is_some());
         assert!(store.get("s", "Controller", "k").unwrap().is_none());
+        let subject = crate::information_store::InformationSubject {
+            kind: "memory".into(),
+            id: "s/KnownLimited/k".into(),
+            sha256: hex::encode(Sha256::digest(b"v")),
+        };
+        let label = crate::information_store::InformationLabelStore::new(&db)
+            .get(&subject)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            label.sensitivity,
+            crate::information::Sensitivity::Sensitive
+        );
+        assert_eq!(label.source_trust_class, "KnownLimited");
+        assert!(!label.permits_destination("transport:external"));
+    }
+
+    #[tokio::test]
+    async fn memory_read_propagates_its_label_into_the_receiving_durable_run() {
+        let db = fresh_db();
+        let conversation_id = ConversationId::from("memory-label-run");
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_conversations (conversation_id,kind,phase,trust_class,modality) \
+                 VALUES (?1,'ControllerDM','idle','Controller','Text')",
+                [conversation_id.as_str()],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let input_event = crate::events::EventRecord::new(
+            conversation_id.clone(),
+            crate::ids::EventSeq(1),
+            crate::events::EventKind::UserMsg,
+            b"private memory lookup",
+            Some("controller-1".into()),
+        )
+        .unwrap();
+        crate::events::EventLog::new(&db)
+            .append(&input_event)
+            .unwrap();
+        let run_id = crate::runs::RunStore::new(&db)
+            .create_run(&crate::runs::NewRun {
+                conversation_id,
+                parent_run_id: None,
+                input_event_seq: crate::ids::EventSeq(1),
+                started_at: 10,
+                deadline_at: None,
+            })
+            .unwrap();
+        DbMemoryApi::new(db.clone(), "Controller", 11)
+            .write("private", "address", "10 Example Street")
+            .await
+            .unwrap();
+        assert_eq!(
+            DbMemoryApi::new(db.clone(), "Controller", 12)
+                .with_run_id(run_id.clone())
+                .read("private", "address")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("10 Example Street")
+        );
+
+        let (_, label) = crate::information_store::InformationLabelStore::new(&db)
+            .latest_for_identity("run", &run_id)
+            .unwrap()
+            .unwrap();
+        assert!(label.provenance.iter().any(|entry| {
+            entry.source_kind == "memory_write"
+                && entry.transformation.as_deref() == Some("memory_read")
+        }));
+        assert!(label.allowed_destinations.is_empty());
     }
 
     /// Cascading reads: a Controller can read memories at every level

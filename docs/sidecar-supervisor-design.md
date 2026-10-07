@@ -4,7 +4,7 @@
 
 ## Implementation delivery plan
 
-All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+All H001-H154 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
 This memo's original phases are historical design context, not a current
 release checklist. Existing supervision must still pass the scoped gates for
 [H072 runtime profiles](llm-harness-roadmap.md#enhancement-072),

@@ -46,6 +46,7 @@ pub struct ServerAttachmentApi {
     /// attachments until the matching tool event pair commits.
     effect_turn_seq: Option<i64>,
     effect_ordinal: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
+    outbound_authority: Option<(String, String)>,
     /// Filesystem root where `create_artifact` writes its content-
     /// addressed blob files. `None` means `create_artifact` is
     /// disabled (errors with `ApiError::Storage`); set explicitly
@@ -66,6 +67,7 @@ impl ServerAttachmentApi {
             plugin_host: None,
             effect_turn_seq: None,
             effect_ordinal: None,
+            outbound_authority: None,
             artifacts_root: None,
         }
     }
@@ -94,6 +96,17 @@ impl ServerAttachmentApi {
     ) -> Self {
         self.effect_turn_seq = turn_seq;
         self.effect_ordinal = Some(ordinal);
+        self
+    }
+
+    /// Carry the originating principal's trust snapshot to the actual
+    /// transport delivery boundary.
+    pub fn with_outbound_authority(
+        mut self,
+        principal_id: Option<String>,
+        fingerprint: Option<String>,
+    ) -> Self {
+        self.outbound_authority = principal_id.zip(fingerprint);
         self
     }
 
@@ -524,7 +537,7 @@ impl ServerAttachmentApi {
             return;
         };
         let attachments = vec![attachment_id.to_owned()];
-        match crate::transport_outbox::stage_plugin_attachments(
+        match crate::transport_outbox::stage_plugin_attachments_with_authority(
             &self.db,
             &self.caller_conversation_id,
             turn_seq,
@@ -533,6 +546,9 @@ impl ServerAttachmentApi {
             &resolved.foreign_id,
             body,
             &attachments,
+            self.outbound_authority
+                .as_ref()
+                .map(|(principal, fingerprint)| (principal.as_str(), fingerprint.as_str())),
         ) {
             Ok(outbox_id) => tracing::info!(
                 target: "attachment_api::bridge",
@@ -613,7 +629,7 @@ mod tests {
                 conversation_id: cid.clone(),
                 mime_type: "application/pdf".into(),
                 path: path.to_string_lossy().into_owned(),
-                sha256: "x".into(),
+                sha256: "a".repeat(64),
                 received_at: 0,
                 filename: None,
             })

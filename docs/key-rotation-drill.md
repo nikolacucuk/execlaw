@@ -3,7 +3,7 @@
 ## Implementation and qualification scope
 
 The [implementation plan](implementation-plan.md) tracks the committed
-H001-H130 work. This drill is the current local-database baseline for
+H001-H154 work. This drill is the current local-database baseline for
 [H020](llm-harness-roadmap.md#enhancement-020); its qualification remains
 verification-blocked in the tracker. It does not prove that an installed
 desktop artifact is encrypted or that whole-machine recovery succeeds.

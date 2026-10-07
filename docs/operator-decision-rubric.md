@@ -4,7 +4,7 @@ This rubric standardizes how to decide between a plugin, MCP server, or host-cor
 
 ## Implementation commitment
 
-All H001-H130 are accepted work in the [implementation plan](implementation-plan.md).
+All H001-H154 are accepted work in the [implementation plan](implementation-plan.md).
 Apply this rubric to placement and implementation design; it does not authorize
 dropping a requirement from that plan. A poor placement score means redesign
 the placement while retaining the intended outcome and acceptance gate.

@@ -28,6 +28,9 @@ function routine(
         last_run_status: string | null;
         enabled: boolean;
         next_run_at: number | null;
+        missed_run_policy: "skip" | "coalesce" | "catch_up";
+        missed_run_limit: number;
+        overlap_policy: "forbid" | "queue" | "replace";
     }> = {},
 ) {
     return {
@@ -38,6 +41,9 @@ function routine(
         prompt: "do",
         target_conversation_id: null,
         enabled: overrides.enabled ?? true,
+        missed_run_policy: overrides.missed_run_policy ?? "skip",
+        missed_run_limit: overrides.missed_run_limit ?? 1,
+        overlap_policy: overrides.overlap_policy ?? "forbid",
         last_run_at: null,
         last_run_status: overrides.last_run_status ?? null,
         next_run_at: overrides.next_run_at ?? 1_900_000_000,
@@ -140,6 +146,9 @@ describe("RoutinesPage", () => {
             target: { value: "Review report" },
         });
         fireEvent.click(screen.getByLabelText("Require delivery confirmation"));
+        fireEvent.change(screen.getByLabelText("Missed runs"), { target: { value: "catch_up" } });
+        fireEvent.change(screen.getByLabelText("Catch-up limit"), { target: { value: "4" } });
+        fireEvent.change(screen.getByLabelText("When a run is active"), { target: { value: "queue" } });
         // Wait for preview to land (debounced 250ms).
         await waitFor(
             () => {
@@ -172,6 +181,9 @@ describe("RoutinesPage", () => {
         expect(body.name).toBe("morning");
         expect(body.schedule_cron).toBe("0 8 * * *");
         expect(body.prompt).toBe("do the thing");
+        expect(body.missed_run_policy).toBe("catch_up");
+        expect(body.missed_run_limit).toBe(4);
+        expect(body.overlap_policy).toBe("queue");
         expect(body.completion_contract).toEqual({
             acceptance_criteria: [{ criterion_id: "criterion-1", description: "Required tests pass", required: true }],
             required_artifacts: [{ artifact_id: "artifact-1", description: "Review report" }],
@@ -199,6 +211,7 @@ describe("RoutinesPage", () => {
                         status: "Skipped",
                         error: "stub",
                         conversation_id: null,
+                        occurrence_at: 1_700_000_400,
                     }),
                     { status: 200 },
                 );
@@ -238,6 +251,7 @@ describe("RoutinesPage", () => {
                                 status: "Skipped",
                                 error: "scheduler stub",
                                 conversation_id: null,
+                                occurrence_at: 1_700_000_400,
                             },
                         ],
                     }),

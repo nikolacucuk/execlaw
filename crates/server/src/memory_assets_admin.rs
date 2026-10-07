@@ -586,6 +586,20 @@ fn failure(error: impl std::fmt::Display) -> axum::response::Response {
         .into_response()
 }
 
+fn database_failure(error: execlaw_core::DbError) -> axum::response::Response {
+    if matches!(&error, execlaw_core::DbError::Backpressure) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "database is busy; retry shortly",
+                "code": "db_backpressure"
+            })),
+        )
+            .into_response();
+    }
+    failure(error)
+}
+
 fn evidence_source_quote(
     state: &AppState,
     evidence: &MemoryEvidenceRecord,
@@ -827,7 +841,7 @@ pub async fn retract_assertion(
     let log = review_log(&state);
     let base = match log.last_seq(&conversation) {
         Ok(base) => base,
-        Err(error) => return failure(error),
+        Err(error) => return database_failure(error),
     };
     let pending = match execlaw_core::events::PendingEvent::encode(
         execlaw_core::events::EventKind::Other,
@@ -835,7 +849,7 @@ pub async fn retract_assertion(
         Some(user.user_id.clone()),
     ) {
         Ok(pending) => pending,
-        Err(error) => return failure(error),
+        Err(error) => return database_failure(error),
     };
     let now = chrono::Utc::now().timestamp();
     let committed =
@@ -1050,17 +1064,29 @@ pub async fn rebuild_embeddings(
     if let Err(response) = controller(&user) {
         return response;
     }
-    let store = MemoryAssetStore::new(&state.db);
-    let config = match store.retrieval_config() {
-        Ok(Some(config)) => config,
-        Ok(None) => {
+    if let Some(reason) = crate::diagnostics::optional_work_denial(&state.db, state.db.path()) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error":"optional indexing is paused by storage pressure", "reason":reason})),
+        )
+            .into_response();
+    }
+    let config_executor = state.db.clone();
+    let config_db = state.db.clone();
+    let config = match config_executor
+        .run_blocking(move || MemoryAssetStore::new(&config_db).retrieval_config())
+        .await
+    {
+        Ok(Ok(Some(config))) => config,
+        Ok(Ok(None)) => {
             return (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({"error":"configure a local embedding model first"})),
             )
                 .into_response();
         }
-        Err(error) => return failure(error),
+        Ok(Err(error)) => return failure(error),
+        Err(error) => return database_failure(error),
     };
     let resolved = match state
         .inference
@@ -1080,12 +1106,22 @@ pub async fn rebuild_embeddings(
         resolved.client.engine,
     );
     let batch_limit = request.limit.clamp(1, 128) as usize;
-    let candidates = match store.embedding_rebuild_candidates(&index_id, (batch_limit + 1) as u32) {
-        Ok(mut candidates) => {
+    let candidate_executor = state.db.clone();
+    let candidate_db = state.db.clone();
+    let candidate_index_id = index_id.clone();
+    let candidates = match candidate_executor
+        .run_blocking(move || {
+            MemoryAssetStore::new(&candidate_db)
+                .embedding_rebuild_candidates(&candidate_index_id, (batch_limit + 1) as u32)
+        })
+        .await
+    {
+        Ok(Ok(mut candidates)) => {
             candidates.truncate(batch_limit + 1);
             candidates
         }
-        Err(error) => return failure(error),
+        Ok(Err(error)) => return failure(error),
+        Err(error) => return database_failure(error),
     };
     let has_more = candidates.len() > batch_limit;
     let mut embedded = 0usize;
@@ -1101,14 +1137,26 @@ pub async fn rebuild_embeddings(
                 return (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error":"local embedding request failed", "embedded":embedded}))).into_response();
             }
         };
-        if let Err(error) = store.upsert_embedding(
-            &candidate.asset_id,
-            &index_id,
-            &vector,
-            &candidate.source_hash,
-            chrono::Utc::now().timestamp(),
-        ) {
-            return failure(error);
+        let update_executor = state.db.clone();
+        let update_db = state.db.clone();
+        let asset_id = candidate.asset_id.clone();
+        let source_hash = candidate.source_hash.clone();
+        let update_index_id = index_id.clone();
+        let update = update_executor
+            .run_blocking(move || {
+                MemoryAssetStore::new(&update_db).upsert_embedding(
+                    &asset_id,
+                    &update_index_id,
+                    &vector,
+                    &source_hash,
+                    chrono::Utc::now().timestamp(),
+                )
+            })
+            .await;
+        match update {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => return failure(error),
+            Err(error) => return database_failure(error),
         }
         embedded += 1;
     }

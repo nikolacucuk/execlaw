@@ -464,17 +464,25 @@ pub fn voice_turn_budget() -> VoiceTurnBudget {
 }
 
 /// Cut a block of text at sentence boundaries for TTS streaming.
-/// Naive splitter — full-stops and new-lines. Good enough for
-/// Phase-4 pipeline correctness; real text processing in Phase 8
-/// can swap in a proper sentence segmenter.
+/// Split at terminal punctuation before whitespace or end of input; preserve numeric dots.
 pub fn chunk_at_sentence_boundaries(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut buf = String::new();
-    for ch in text.chars() {
+    let mut previous = None;
+    for (index, ch) in text.char_indices() {
         buf.push(ch);
-        if matches!(ch, '.' | '!' | '?' | '\n') && !buf.trim().is_empty() {
+        let next = text[index + ch.len_utf8()..].chars().next();
+        let numeric_dot = ch == '.'
+            && previous.is_some_and(|before: char| before.is_ascii_digit())
+            && next.is_some_and(|after| after.is_ascii_digit());
+        let sentence_end = ch == '\n'
+            || (matches!(ch, '.' | '!' | '?')
+                && !numeric_dot
+                && next.is_none_or(char::is_whitespace));
+        if sentence_end && !buf.trim().is_empty() {
             out.push(std::mem::take(&mut buf).trim().to_owned());
         }
+        previous = Some(ch);
     }
     let tail = buf.trim();
     if !tail.is_empty() {
@@ -509,6 +517,20 @@ mod tests {
     fn sentence_splitter_emits_trailing_fragment() {
         let out = chunk_at_sentence_boundaries("ok ");
         assert_eq!(out, vec!["ok".to_string()]);
+    }
+
+    #[test]
+    fn sentence_splitter_preserves_numeric_addresses_and_decimals() {
+        let out = chunk_at_sentence_boundaries(
+            "The service binds to 127.0.0.1 and version 1.2.3. It is local.",
+        );
+        assert_eq!(
+            out,
+            vec![
+                "The service binds to 127.0.0.1 and version 1.2.3.".to_owned(),
+                "It is local.".to_owned(),
+            ]
+        );
     }
 
     #[test]

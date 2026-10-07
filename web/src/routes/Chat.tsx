@@ -19,6 +19,7 @@ import {
     listCards,
     listMessages,
     listSkills,
+    listSafetyProfiles,
     listAvailableTransports,
     listThreads,
     listUiPanels,
@@ -37,6 +38,7 @@ import {
     type SkillListEntry,
     type UiPanelSummary,
     type AvailableTransportView,
+    type SafetyProfileView,
 } from "../api/endpoints";
 import { useBackendCapabilities } from "../chat/useBackendCapabilities";
 import { useToolResultsVisible } from "../chat/useToolResultsVisible";
@@ -107,6 +109,7 @@ export function Chat() {
         text: string;
         attachments: InlineAttachment[];
         skillNames: string[];
+        safetyProfileId?: SafetyProfileView["profile"]["profile_id"];
     } | null>(null);
     const unknownRetryPending = useRef(false);
     const [availableTransports, setAvailableTransports] = useState<AvailableTransportView[]>([]);
@@ -354,10 +357,16 @@ export function Chat() {
             attachments: InlineAttachment[] = [],
             skillNames: string[] = [],
             completionContract?: RunCompletionContractDraft,
+            safetyProfileId?: SafetyProfileView["profile"]["profile_id"],
             retryConversationId?: string,
         ) => {
             if (incognito && completionContract) {
                 const error = new Error("Task completion tracking requires a saved conversation. Turn off Incognito before sending.");
+                setTopError(error.message);
+                throw error;
+            }
+            if (incognito && safetyProfileId) {
+                const error = new Error("Safety profiles require a saved run. Turn off Incognito before selecting a task profile.");
                 setTopError(error.message);
                 throw error;
             }
@@ -484,6 +493,7 @@ export function Chat() {
                               skill_names:
                                   skillNames.length > 0 ? skillNames : undefined,
                               completion_contract: completionContract,
+                              safety_profile_id: safetyProfileId,
                           },
                     getToken,
                     clientRequestId,
@@ -540,7 +550,13 @@ export function Chat() {
                 void resp;
             } catch (e) {
                 if (e instanceof ApiError && e.serverCode === "unknown_outcome" && !incognito) {
-                    setUnknownOutcomeRetry({ conversationId: targetId, text, attachments, skillNames });
+                    setUnknownOutcomeRetry({
+                        conversationId: targetId,
+                        text,
+                        attachments,
+                        skillNames,
+                        safetyProfileId,
+                    });
                 }
                 setTopError(
                     e instanceof Error ? e.message : "send failed",
@@ -940,7 +956,14 @@ export function Chat() {
                         navigate(`/chat/${encodeURIComponent(retry.conversationId)}`);
                         setUnknownOutcomeRetry(null);
                         setTopError(null);
-                        void onSend(retry.text, retry.attachments, retry.skillNames, undefined, retry.conversationId)
+                        void onSend(
+                            retry.text,
+                            retry.attachments,
+                            retry.skillNames,
+                            undefined,
+                            retry.safetyProfileId,
+                            retry.conversationId,
+                        )
                             .finally(() => { unknownRetryPending.current = false; });
                     }}>Retry as a new request</button>
                     <button type="button" className="btn btn-sm btn-link" onClick={() => setUnknownOutcomeRetry(null)}>Dismiss</button>
@@ -1037,6 +1060,7 @@ function ChatPane({
         attachments: InlineAttachment[],
         skillNames: string[],
         completionContract?: RunCompletionContractDraft,
+        safetyProfileId?: SafetyProfileView["profile"]["profile_id"],
     ) => Promise<void> | void;
     getToken: () => string | null;
     onStop: () => void;
@@ -1105,11 +1129,14 @@ function ChatPane({
             attachments: InlineAttachment[],
             skillNames: string[],
             completionContract?: RunCompletionContractDraft,
+            safetyProfileId?: SafetyProfileView["profile"]["profile_id"],
         ) => {
             if (!hasContent) {
                 captureBeforeFirstSend();
             }
-            return onSend(text, attachments, skillNames, completionContract);
+            return safetyProfileId
+                ? onSend(text, attachments, skillNames, completionContract, safetyProfileId)
+                : onSend(text, attachments, skillNames, completionContract);
         },
         [hasContent, captureBeforeFirstSend, onSend],
     );
@@ -1124,6 +1151,10 @@ function ChatPane({
     const getSkills = useCallback(
         (): Promise<SkillListEntry[]> =>
             listSkills(getToken).then((r) => r.skills),
+        [getToken],
+    );
+    const getSafetyProfiles = useCallback(
+        async () => (await listSafetyProfiles(getToken)).profiles,
         [getToken],
     );
     const username = (auth.user?.username ?? "").toLowerCase();
@@ -1174,6 +1205,7 @@ function ChatPane({
                     multimodal={caps.multimodal}
                     recommendedImageEdge={caps.recommendedImageEdge}
                     getSkills={getSkills}
+                    getSafetyProfiles={getSafetyProfiles}
                     skillDefaultsStorageKey={skillDefaultsStorageKey}
                     defaultSkillNames={defaultSkillNames}
                 />
@@ -1197,6 +1229,7 @@ function ChatPane({
                 multimodal={caps.multimodal}
                 recommendedImageEdge={caps.recommendedImageEdge}
                 getSkills={getSkills}
+                getSafetyProfiles={getSafetyProfiles}
                 skillDefaultsStorageKey={skillDefaultsStorageKey}
                 defaultSkillNames={defaultSkillNames}
             />
@@ -1215,6 +1248,7 @@ function ActiveThreadPane({
     multimodal,
     recommendedImageEdge,
     getSkills,
+    getSafetyProfiles,
     skillDefaultsStorageKey,
     defaultSkillNames,
 }: {
@@ -1225,6 +1259,7 @@ function ActiveThreadPane({
         attachments: InlineAttachment[],
         skillNames: string[],
         completionContract?: RunCompletionContractDraft,
+        safetyProfileId?: SafetyProfileView["profile"]["profile_id"],
     ) => Promise<void> | void;
     sendVoiceFrame: (bytes: ArrayBuffer) => boolean;
     sendVoiceControl: (payload: object) => boolean;
@@ -1237,6 +1272,7 @@ function ActiveThreadPane({
     multimodal?: boolean;
     recommendedImageEdge?: number;
     getSkills?: () => Promise<SkillListEntry[]>;
+    getSafetyProfiles?: () => Promise<SafetyProfileView[]>;
     skillDefaultsStorageKey?: string;
     defaultSkillNames?: string[];
 }) {
@@ -1539,6 +1575,8 @@ function ActiveThreadPane({
                 />
                 <Composer
                     onSend={onSend}
+                    getSafetyProfiles={getSafetyProfiles}
+                    incognito={isIncognito}
                     sendVoiceFrame={sendVoiceFrame}
                     sendVoiceControl={sendVoiceControl}
                     getVoiceConversationId={getVoiceConversationId}

@@ -1696,6 +1696,7 @@ dependencies = [
  "chrono",
  "criterion",
  "execlaw-charting",
+ "execlaw-policy",
  "futures",
  "rand 0.8.6",
  "rhai",

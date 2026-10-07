@@ -347,7 +347,8 @@ fn load_exact_events(db: &Database, job: &MemoryJob) -> Result<Vec<PromptEvent>,
     records
         .into_iter()
         .map(|event| {
-            let payload = rmp_serde::from_slice(&event.payload)
+            let payload = event
+                .decode_payload()
                 .map_err(|error| format!("decode committed event {}: {error}", event.seq.0))?;
             Ok(PromptEvent {
                 seq: event.seq.0,

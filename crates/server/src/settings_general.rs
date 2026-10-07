@@ -13,6 +13,10 @@
 //!     Edits don't restart the running process; the SPA prompts the
 //!     operator to run `execlaw service restart`.
 //!
+//!   * `https_only_session_cookies` — controls whether access cookies
+//!     carry the Secure attribute. Defaults on; Controller may disable
+//!     it for an HTTP-only trusted LAN deployment.
+//!
 //! Routes:
 //!   * `GET  /api/admin/settings/general` — read (any authed user).
 //!   * `PUT  /api/admin/settings/general` — write (Controller only).
@@ -36,6 +40,7 @@ use utoipa::ToSchema;
 pub struct GeneralSettingsView {
     pub start_on_boot: bool,
     pub bind_address: String,
+    pub https_only_session_cookies: bool,
     pub updated_at: i64,
     /// Whether changing `bind_address` will take effect on the next
     /// `service restart`. Always true today; the field documents the
@@ -52,6 +57,7 @@ impl From<GeneralSettings> for GeneralSettingsView {
         Self {
             start_on_boot: s.start_on_boot,
             bind_address: s.bind_address,
+            https_only_session_cookies: s.https_only_session_cookies,
             updated_at: s.updated_at,
             bind_address_requires_restart: true,
             history_retention_days: s.history_retention_days,
@@ -67,6 +73,8 @@ pub struct UpdateGeneralSettingsRequest {
     pub start_on_boot: Option<bool>,
     #[serde(default)]
     pub bind_address: Option<String>,
+    #[serde(default)]
+    pub https_only_session_cookies: Option<bool>,
     /// Optional. Legal values: 0 (infinite), 30, 60, 90, 120. The
     /// store rejects anything else with `InvalidBindAddress` (the
     /// shared validation-error variant — message names the actual
@@ -153,6 +161,7 @@ pub async fn put_handler(
                 // settings page.
                 setup_wizard_dismissed: None,
                 history_retention_days: req.history_retention_days,
+                https_only_session_cookies: req.https_only_session_cookies,
             },
             now,
         )
@@ -168,12 +177,14 @@ pub async fn put_handler(
                 serde_json::json!({
                     "start_on_boot": p.start_on_boot,
                     "bind_address": p.bind_address,
+                    "https_only_session_cookies": p.https_only_session_cookies,
                 })
             })
             .as_ref(),
         Some(&serde_json::json!({
             "start_on_boot": saved.start_on_boot,
             "bind_address": saved.bind_address,
+            "https_only_session_cookies": saved.https_only_session_cookies,
         })),
     );
 

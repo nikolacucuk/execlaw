@@ -8,14 +8,131 @@
 //! - `PRAGMA journal_mode = WAL` so readers don't block the writer.
 //! - `PRAGMA foreign_keys = ON` **per connection** (the default is OFF in
 //!   SQLite and is easy to forget — so we enforce it here).
-//! - `PRAGMA synchronous = NORMAL` for the main DB (good durability/speed
-//!   tradeoff with WAL). The vault tables live in the same DB, so the whole
+//! - `PRAGMA synchronous = FULL` for the main DB. The vault tables live in the same DB, so the whole
 //!   file is encrypted; operator can re-key with `execlaw vault rekey`.
 
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
+use std::time::Instant;
 use thiserror::Error;
+
+const DB_EXECUTION_QUEUE_CAPACITY: usize = 16;
+type DbJob = Box<dyn FnOnce() + Send + 'static>;
+
+struct DbExecutionMetricsInner {
+    queued: AtomicUsize,
+    running: AtomicUsize,
+    rejected: AtomicU64,
+    completed: AtomicU64,
+    queue_wait_micros_total: AtomicU64,
+    queue_wait_micros_max: AtomicU64,
+    operation_micros_total: AtomicU64,
+    operation_micros_max: AtomicU64,
+    service_micros_total: AtomicU64,
+    service_micros_max: AtomicU64,
+    transaction_micros_total: AtomicU64,
+    transaction_micros_max: AtomicU64,
+}
+
+impl DbExecutionMetricsInner {
+    fn new() -> Self {
+        Self {
+            queued: AtomicUsize::new(0),
+            running: AtomicUsize::new(0),
+            rejected: AtomicU64::new(0),
+            completed: AtomicU64::new(0),
+            queue_wait_micros_total: AtomicU64::new(0),
+            queue_wait_micros_max: AtomicU64::new(0),
+            operation_micros_total: AtomicU64::new(0),
+            operation_micros_max: AtomicU64::new(0),
+            service_micros_total: AtomicU64::new(0),
+            service_micros_max: AtomicU64::new(0),
+            transaction_micros_total: AtomicU64::new(0),
+            transaction_micros_max: AtomicU64::new(0),
+        }
+    }
+
+    fn record_duration(total: &AtomicU64, max: &AtomicU64, elapsed_micros: u64) {
+        total.fetch_add(elapsed_micros, Ordering::Relaxed);
+        max.fetch_max(elapsed_micros, Ordering::Relaxed);
+    }
+}
+
+struct DbExecutionService {
+    sender: mpsc::SyncSender<DbJob>,
+    metrics: Arc<DbExecutionMetricsInner>,
+}
+
+static DB_EXECUTION_SERVICE: OnceLock<Result<DbExecutionService, String>> = OnceLock::new();
+
+fn db_execution_service() -> Result<&'static DbExecutionService, DbError> {
+    DB_EXECUTION_SERVICE
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel::<DbJob>(DB_EXECUTION_QUEUE_CAPACITY);
+            let metrics = Arc::new(DbExecutionMetricsInner::new());
+            let worker_metrics = Arc::clone(&metrics);
+            std::thread::Builder::new()
+                .name("execlaw-db-executor".into())
+                .spawn(move || {
+                    while let Ok(job) = receiver.recv() {
+                        worker_metrics.queued.fetch_sub(1, Ordering::Relaxed);
+                        worker_metrics.running.fetch_add(1, Ordering::Relaxed);
+                        let started = Instant::now();
+                        // A bad caller closure must not terminate the shared
+                        // process-wide worker and strand every queued DB job.
+                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job));
+                        let elapsed = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+                        DbExecutionMetricsInner::record_duration(
+                            &worker_metrics.service_micros_total,
+                            &worker_metrics.service_micros_max,
+                            elapsed,
+                        );
+                        worker_metrics.completed.fetch_add(1, Ordering::Relaxed);
+                        worker_metrics.running.fetch_sub(1, Ordering::Relaxed);
+                    }
+                })
+                .map_err(|error| error.to_string())?;
+            Ok(DbExecutionService { sender, metrics })
+        })
+        .as_ref()
+        .map_err(|error| DbError::ExecutorUnavailable(error.clone()))
+}
+
+/// Snapshot of the bounded database executor and SQLite operation timings.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DbExecutionMetrics {
+    pub queued_jobs: usize,
+    pub running_jobs: usize,
+    pub rejected_jobs: u64,
+    pub completed_jobs: u64,
+    pub queue_wait_micros_total: u64,
+    pub queue_wait_micros_max: u64,
+    pub operation_micros_total: u64,
+    pub operation_micros_max: u64,
+    pub service_micros_total: u64,
+    pub service_micros_max: u64,
+    pub transaction_micros_total: u64,
+    pub transaction_micros_max: u64,
+}
+
+/// Main database and SQLite side-file sizes at one sample time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DbFileSizes {
+    pub database_bytes: u64,
+    pub wal_bytes: u64,
+    pub shm_bytes: u64,
+    pub journal_bytes: u64,
+}
+
+/// Progress reported by a non-blocking SQLite WAL checkpoint attempt.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct WalCheckpointProgress {
+    pub checkpoint_blocked: bool,
+    pub frames_in_wal: i64,
+    pub frames_checkpointed: i64,
+}
 
 /// Configuration for opening the database.
 #[derive(Debug, Clone)]
@@ -86,15 +203,18 @@ pub enum DbError {
     Serde(String),
     #[error("event log tamper detected: {0}")]
     TamperDetected(String),
+    #[error("database execution queue is full; retry shortly")]
+    Backpressure,
+    #[error("database execution worker is unavailable: {0}")]
+    ExecutorUnavailable(String),
+    #[error("database execution operation panicked")]
+    WorkerPanicked,
 }
 
-/// Thin wrapper around a single writer-thread SQLite connection.
-///
-/// The writer-per-DB pattern from §6.3: one writer, many readers. For the
-/// scope of Phase 0 we keep a single `Arc<Mutex<Connection>>` and let
-/// readers share it — simpler than a pool and adequate for the kind of
-/// workload the control plane generates. We can swap in `r2d2` later
-/// without changing consumers.
+/// Synchronous stores retain the existing API. Long async database work
+/// should use [`Database::run_blocking`], which has one FIFO worker and a
+/// bounded queue. SQLite mutations remain serialized on the shared connection;
+/// no read pool is enabled without benchmark evidence.
 #[derive(Clone)]
 pub struct Database {
     inner: Arc<std::sync::Mutex<Connection>>,
@@ -106,7 +226,7 @@ impl Database {
     /// Open (or create) the database at the given config.
     ///
     /// Applies `PRAGMA key` (when `key` is Some), `journal_mode = WAL`,
-    /// `foreign_keys = ON`, and `synchronous = NORMAL`.
+    /// `foreign_keys = ON`, and `synchronous = FULL`.
     pub fn open(config: &DbConfig) -> Result<Self, DbError> {
         #[cfg(not(feature = "sqlcipher"))]
         if config.key.is_some() {
@@ -183,8 +303,9 @@ impl Database {
         // Foreign keys default OFF in SQLite; force ON every connection.
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
-        // NORMAL is the right tradeoff with WAL (§6.3).
-        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        // FULL syncs the WAL at each commit. Durability still depends on the
+        // storage stack honoring flush requests.
+        conn.pragma_update(None, "synchronous", "FULL")?;
 
         Ok(())
     }
@@ -192,6 +313,69 @@ impl Database {
     /// Path the DB was opened at (for log/display purposes).
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Sample the database and side-file sizes without following symlinks.
+    pub fn file_sizes(&self) -> DbFileSizes {
+        let size = |path: PathBuf| {
+            std::fs::symlink_metadata(path)
+                .ok()
+                .filter(|metadata| metadata.file_type().is_file())
+                .map(|metadata| metadata.len())
+                .unwrap_or(0)
+        };
+        DbFileSizes {
+            database_bytes: size(self.path.clone()),
+            wal_bytes: size(sibling_with_suffix(&self.path, "-wal")),
+            shm_bytes: size(sibling_with_suffix(&self.path, "-shm")),
+            journal_bytes: size(sibling_with_suffix(&self.path, "-journal")),
+        }
+    }
+
+    /// Attempt a passive WAL checkpoint and report progress without waiting
+    /// for readers to finish. SQLite may leave frames for a later retry.
+    pub fn checkpoint_passive(&self) -> Result<WalCheckpointProgress, DbError> {
+        self.with_conn(|connection| {
+            let (checkpoint_blocked, frames_in_wal, frames_checkpointed) =
+                connection.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?;
+            Ok(WalCheckpointProgress {
+                checkpoint_blocked: checkpoint_blocked != 0,
+                frames_in_wal,
+                frames_checkpointed,
+            })
+        })
+    }
+
+    /// Read WAL checkpoint progress without performing maintenance work.
+    pub fn wal_checkpoint_status(&self) -> Result<WalCheckpointProgress, DbError> {
+        self.with_conn(|connection| {
+            let (checkpoint_blocked, frames_in_wal, frames_checkpointed) =
+                connection.query_row("PRAGMA wal_checkpoint(NOOP)", [], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                })?;
+            Ok(WalCheckpointProgress {
+                checkpoint_blocked: checkpoint_blocked != 0,
+                frames_in_wal,
+                frames_checkpointed,
+            })
+        })
+    }
+
+    /// Report SQLite's per-connection synchronous setting (FULL is 2).
+    pub fn synchronous_level(&self) -> Result<i64, DbError> {
+        self.with_conn(|connection| {
+            Ok(connection.query_row("PRAGMA synchronous", [], |row| row.get(0))?)
+        })
     }
 
     /// Attach the process's event signing key to all event-log views of this
@@ -224,11 +408,21 @@ impl Database {
     where
         F: FnOnce(&Connection) -> Result<R, DbError>,
     {
+        let started = Instant::now();
         let guard = self
             .inner
             .lock()
             .map_err(|e| DbError::Config(format!("connection mutex poisoned: {e}")))?;
-        f(&guard)
+        let result = f(&guard);
+        if let Ok(service) = db_execution_service() {
+            let elapsed = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            DbExecutionMetricsInner::record_duration(
+                &service.metrics.operation_micros_total,
+                &service.metrics.operation_micros_max,
+                elapsed,
+            );
+        }
+        result
     }
 
     /// Execute a transactional closure.
@@ -236,14 +430,105 @@ impl Database {
     where
         F: FnOnce(&rusqlite::Transaction<'_>) -> Result<R, DbError>,
     {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|e| DbError::Config(format!("connection mutex poisoned: {e}")))?;
-        let tx = guard.transaction()?;
-        let result = f(&tx)?;
-        tx.commit()?;
-        Ok(result)
+        let started = Instant::now();
+        let outcome = (|| {
+            let mut guard = self
+                .inner
+                .lock()
+                .map_err(|e| DbError::Config(format!("connection mutex poisoned: {e}")))?;
+            let tx = guard.transaction()?;
+            let result = f(&tx)?;
+            tx.commit()?;
+            Ok(result)
+        })();
+        if let Ok(service) = db_execution_service() {
+            let elapsed = started.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            DbExecutionMetricsInner::record_duration(
+                &service.metrics.transaction_micros_total,
+                &service.metrics.transaction_micros_max,
+                elapsed,
+            );
+        }
+        outcome
+    }
+
+    /// Run blocking database work through the process-wide bounded FIFO
+    /// executor. The worker queue holds at most 16 pending operations.
+    /// Saturation returns [`DbError::Backpressure`] immediately. Accepted
+    /// work continues if the requesting future is cancelled, so callers
+    /// should use this for bounded database work with durable retry semantics.
+    pub async fn run_blocking<T, F>(&self, operation: F) -> Result<T, DbError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        let service = db_execution_service()?;
+        let (result_sender, result_receiver) = tokio::sync::oneshot::channel();
+        let queued_at = Instant::now();
+        let metrics = Arc::clone(&service.metrics);
+        metrics.queued.fetch_add(1, Ordering::Relaxed);
+        let job: DbJob = Box::new(move || {
+            let queue_wait = queued_at.elapsed().as_micros().min(u64::MAX as u128) as u64;
+            DbExecutionMetricsInner::record_duration(
+                &metrics.queue_wait_micros_total,
+                &metrics.queue_wait_micros_max,
+                queue_wait,
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(operation))
+                .map_err(|_| DbError::WorkerPanicked);
+            let _ = result_sender.send(result);
+        });
+        match service.sender.try_send(job) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {
+                service.metrics.queued.fetch_sub(1, Ordering::Relaxed);
+                service.metrics.rejected.fetch_add(1, Ordering::Relaxed);
+                return Err(DbError::Backpressure);
+            }
+            Err(mpsc::TrySendError::Disconnected(_)) => {
+                service.metrics.queued.fetch_sub(1, Ordering::Relaxed);
+                return Err(DbError::ExecutorUnavailable("worker channel closed".into()));
+            }
+        }
+        result_receiver
+            .await
+            .map_err(|_| DbError::ExecutorUnavailable("worker dropped an operation".into()))?
+    }
+
+    /// Read queueing, rejection, operation, and transaction metrics.
+    pub fn execution_metrics(&self) -> DbExecutionMetrics {
+        let Ok(service) = db_execution_service() else {
+            return DbExecutionMetrics::default();
+        };
+        DbExecutionMetrics {
+            queued_jobs: service.metrics.queued.load(Ordering::Relaxed),
+            running_jobs: service.metrics.running.load(Ordering::Relaxed),
+            rejected_jobs: service.metrics.rejected.load(Ordering::Relaxed),
+            completed_jobs: service.metrics.completed.load(Ordering::Relaxed),
+            queue_wait_micros_total: service
+                .metrics
+                .queue_wait_micros_total
+                .load(Ordering::Relaxed),
+            queue_wait_micros_max: service
+                .metrics
+                .queue_wait_micros_max
+                .load(Ordering::Relaxed),
+            operation_micros_total: service
+                .metrics
+                .operation_micros_total
+                .load(Ordering::Relaxed),
+            operation_micros_max: service.metrics.operation_micros_max.load(Ordering::Relaxed),
+            service_micros_total: service.metrics.service_micros_total.load(Ordering::Relaxed),
+            service_micros_max: service.metrics.service_micros_max.load(Ordering::Relaxed),
+            transaction_micros_total: service
+                .metrics
+                .transaction_micros_total
+                .load(Ordering::Relaxed),
+            transaction_micros_max: service
+                .metrics
+                .transaction_micros_max
+                .load(Ordering::Relaxed),
+        }
     }
 
     /// Read a single PRAGMA value as text. Intended for sanity tests.
@@ -423,6 +708,343 @@ mod tests {
             })
             .unwrap();
         assert_eq!(val, 1, "foreign_keys must be ON on every new connection");
+    }
+
+    #[test]
+    fn wal_connections_use_full_synchronous_mode() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        assert_eq!(db.synchronous_level().unwrap(), 2);
+    }
+
+    #[test]
+    fn passive_checkpoint_reports_frames_held_by_a_long_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("checkpoint-probe.db");
+        let db = Database::open(&DbConfig {
+            path: path.clone(),
+            key: None,
+        })
+        .unwrap();
+        db.with_conn(|connection| {
+            connection.execute_batch(
+                "CREATE TABLE checkpoint_probe (id INTEGER PRIMARY KEY, value BLOB NOT NULL)",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        db.transaction(|transaction| {
+            transaction.execute(
+                "INSERT INTO checkpoint_probe (id, value) VALUES (1, zeroblob(4096))",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .execute_batch("PRAGMA journal_mode=WAL; BEGIN DEFERRED;")
+            .unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM checkpoint_probe", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        db.transaction(|transaction| {
+            transaction.execute(
+                "INSERT INTO checkpoint_probe (id, value) VALUES (2, zeroblob(4096))",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let progress = db.checkpoint_passive().unwrap();
+        assert!(progress.frames_in_wal > 0);
+        assert!(progress.frames_checkpointed < progress.frames_in_wal);
+        reader.execute_batch("ROLLBACK;").unwrap();
+        let resumed = db.checkpoint_passive().unwrap();
+        assert_eq!(resumed.frames_checkpointed, resumed.frames_in_wal);
+    }
+
+    #[test]
+    fn wal_status_probe_does_not_checkpoint_frames() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&DbConfig {
+            path: directory.path().join("wal-status-probe.db"),
+            key: None,
+        })
+        .unwrap();
+        db.with_conn(|connection| {
+            connection.execute_batch("CREATE TABLE wal_status_probe (value TEXT NOT NULL)")?;
+            Ok(())
+        })
+        .unwrap();
+        db.transaction(|transaction| {
+            transaction.execute(
+                "INSERT INTO wal_status_probe VALUES ('pending-checkpoint')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let reader = Connection::open(db.path()).unwrap();
+        reader
+            .execute_batch("PRAGMA journal_mode=WAL; BEGIN DEFERRED;")
+            .unwrap();
+        let _: i64 = reader
+            .query_row("SELECT COUNT(*) FROM wal_status_probe", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        db.transaction(|transaction| {
+            transaction.execute(
+                "INSERT INTO wal_status_probe VALUES ('after-reader-start')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let wal_before = db.file_sizes().wal_bytes;
+        let status = db.wal_checkpoint_status().unwrap();
+        assert!(status.frames_in_wal >= 1);
+        assert!(status.frames_checkpointed < status.frames_in_wal);
+        assert_eq!(db.wal_checkpoint_status().unwrap(), status);
+        assert!(db.file_sizes().wal_bytes >= wal_before);
+        reader.execute_batch("ROLLBACK;").unwrap();
+    }
+
+    #[test]
+    fn injected_sqlite_full_preserves_committed_rows_and_allows_recovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&DbConfig {
+            path: directory.path().join("disk-full-probe.db"),
+            key: None,
+        })
+        .unwrap();
+        db.with_conn(|connection| {
+            connection.execute_batch(
+                "CREATE TABLE durable_marker (id INTEGER PRIMARY KEY, value TEXT NOT NULL); \
+                 CREATE TABLE pending_effect_marker (id INTEGER PRIMARY KEY, status TEXT NOT NULL); \
+                 CREATE TABLE growing_payload (value BLOB NOT NULL); \
+                 INSERT INTO durable_marker VALUES (1, 'event-committed'); \
+                 INSERT INTO pending_effect_marker VALUES (1, 'pending');",
+            )?;
+            let pages: i64 = connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+            connection.pragma_update(None, "max_page_count", pages + 2)?;
+            Ok(())
+        })
+        .unwrap();
+
+        let failure = db
+            .transaction(|transaction| {
+                for _ in 0..32 {
+                    transaction.execute(
+                        "INSERT INTO growing_payload(value) VALUES (zeroblob(8192))",
+                        [],
+                    )?;
+                }
+                Ok(())
+            })
+            .unwrap_err();
+        assert!(matches!(
+            failure,
+            DbError::Sqlite(rusqlite::Error::SqliteFailure(ref error, _))
+                if error.code == rusqlite::ErrorCode::DiskFull
+        ));
+
+        let (event_value, effect_status): (String, String) = db
+            .with_conn(|connection| {
+                Ok((
+                    connection.query_row(
+                        "SELECT value FROM durable_marker WHERE id = 1",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    connection.query_row(
+                        "SELECT status FROM pending_effect_marker WHERE id = 1",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .unwrap();
+        assert_eq!(event_value, "event-committed");
+        assert_eq!(effect_status, "pending");
+
+        db.with_conn(|connection| {
+            connection.pragma_update(None, "max_page_count", 100_000)?;
+            Ok(())
+        })
+        .unwrap();
+        db.transaction(|transaction| {
+            transaction.execute(
+                "INSERT INTO growing_payload(value) VALUES (zeroblob(8192))",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let rows: i64 = db
+            .with_conn(|connection| {
+                Ok(connection
+                    .query_row("SELECT COUNT(*) FROM growing_payload", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(rows, 1);
+    }
+
+    #[test]
+    fn committed_full_sync_wal_transaction_survives_process_termination() {
+        const CHILD_PATH: &str = "EXECLAW_DB_CRASH_CHILD_PATH";
+        if let Ok(path) = std::env::var(CHILD_PATH) {
+            let db = Database::open(&DbConfig {
+                path: PathBuf::from(path),
+                key: None,
+            })
+            .unwrap();
+            db.with_conn(|connection| {
+                connection.execute_batch(
+                    "CREATE TABLE durable_probe (id INTEGER PRIMARY KEY, value TEXT NOT NULL)",
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            db.transaction(|transaction| {
+                transaction.execute(
+                    "INSERT INTO durable_probe (id, value) VALUES (1, 'committed')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+            std::process::abort();
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("crash-probe.db");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "db::tests::committed_full_sync_wal_transaction_survives_process_termination",
+            ])
+            .env(CHILD_PATH, &path)
+            .status()
+            .unwrap();
+        assert!(!status.success(), "child must terminate before clean close");
+
+        let reopened = Database::open(&DbConfig { path, key: None }).unwrap();
+        let value: String = reopened
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT value FROM durable_probe WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(value, "committed");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bounded_executor_returns_backpressure_at_queue_capacity() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let first_db = db.clone();
+        let first = tokio::spawn(async move {
+            first_db
+                .run_blocking(move || {
+                    started_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    0usize
+                })
+                .await
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            tokio::time::sleep(std::time::Duration::from_millis(10)),
+        )
+        .await
+        .expect("a blocked database job must not block async workers");
+
+        let mut queued = Vec::with_capacity(DB_EXECUTION_QUEUE_CAPACITY);
+        for index in 0..DB_EXECUTION_QUEUE_CAPACITY {
+            let queued_db = db.clone();
+            queued.push(tokio::spawn(async move {
+                queued_db.run_blocking(move || index).await
+            }));
+        }
+        for _ in 0..10_000 {
+            if db.execution_metrics().queued_jobs >= DB_EXECUTION_QUEUE_CAPACITY {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            db.execution_metrics().queued_jobs,
+            DB_EXECUTION_QUEUE_CAPACITY
+        );
+        assert!(matches!(
+            db.run_blocking(|| 99usize).await,
+            Err(DbError::Backpressure)
+        ));
+        release_tx.send(()).unwrap();
+        assert_eq!(first.await.unwrap().unwrap(), 0);
+        for (index, task) in queued.into_iter().enumerate() {
+            assert_eq!(task.await.unwrap().unwrap(), index);
+        }
+
+        db.with_conn(|connection| {
+            connection.execute_batch(
+                "CREATE TABLE executor_counter (value INTEGER NOT NULL); \
+                 INSERT INTO executor_counter(value) VALUES (0);",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        for _ in 0..2 {
+            let mut updates = Vec::new();
+            for _ in 0..8 {
+                let update_executor = db.clone();
+                let update_db = db.clone();
+                updates.push(tokio::spawn(async move {
+                    update_executor
+                        .run_blocking(move || {
+                            update_db.transaction(|transaction| {
+                                transaction
+                                    .execute("UPDATE executor_counter SET value = value + 1", [])?;
+                                Ok(())
+                            })
+                        })
+                        .await
+                }));
+            }
+            for update in updates {
+                update.await.unwrap().unwrap().unwrap();
+            }
+        }
+        let updates: i64 = db
+            .with_conn(|connection| {
+                Ok(connection
+                    .query_row("SELECT value FROM executor_counter", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(updates, 16);
+        assert_eq!(db.execution_metrics().queued_jobs, 0);
+    }
+
+    #[tokio::test]
+    async fn panicking_job_returns_error_without_stopping_shared_worker() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        let failure: Result<(), DbError> =
+            db.run_blocking(|| panic!("injected worker panic")).await;
+        assert!(matches!(failure, Err(DbError::WorkerPanicked)));
+        assert_eq!(db.run_blocking(|| 42usize).await.unwrap(), 42);
+        assert_eq!(db.execution_metrics().queued_jobs, 0);
     }
 
     #[cfg(not(feature = "sqlcipher"))]

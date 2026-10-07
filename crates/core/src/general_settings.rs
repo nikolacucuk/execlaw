@@ -39,6 +39,9 @@ pub struct GeneralSettings {
     /// via PATCH /api/admin/settings/general. Capped to
     /// `download_urls::MAX_TTL_SECS` at call time.
     pub download_url_ttl_secs: i64,
+    /// Whether browser session cookies require HTTPS. Defaults on; disable
+    /// only for a trusted HTTP-only LAN deployment.
+    pub https_only_session_cookies: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -55,6 +58,9 @@ pub struct GeneralSettingsUpdate {
     /// outside that set are rejected by the API layer (validate
     /// before calling [`GeneralSettingsStore::update`]).
     pub history_retention_days: Option<u32>,
+    /// Whether access cookies require HTTPS. `None` preserves the current
+    /// setting; new installations default to enabled in migration 0077.
+    pub https_only_session_cookies: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -85,7 +91,8 @@ impl<'a> GeneralSettingsStore<'a> {
                 let mut stmt = c.prepare(
                     "SELECT start_on_boot, bind_address, updated_at, \
                         setup_wizard_dismissed_at, history_retention_days, \
-                        COALESCE(download_url_ttl_secs, 300) \
+                        COALESCE(download_url_ttl_secs, 300), \
+                        https_only_session_cookies \
                  FROM config_general WHERE id = 1",
                 )?;
                 let row = stmt
@@ -98,6 +105,7 @@ impl<'a> GeneralSettingsStore<'a> {
                             setup_wizard_dismissed_at: r.get(3)?,
                             history_retention_days: raw_retention.max(0) as u32,
                             download_url_ttl_secs: r.get::<_, i64>(5).unwrap_or(300),
+                            https_only_session_cookies: r.get::<_, i64>(6)? != 0,
                         })
                     })
                     .ok();
@@ -241,21 +249,23 @@ impl<'a> GeneralSettingsStore<'a> {
             // Read-modify-write so a partial update preserves
             // siblings. Singleton row → no contention concerns
             // beyond the connection pool's serialization.
-            let current: Option<(i64, String, Option<i64>, i64)> = c
+            let current: Option<(i64, String, Option<i64>, i64, i64)> = c
                 .query_row(
                     "SELECT start_on_boot, bind_address, setup_wizard_dismissed_at, \
-                            history_retention_days \
+                            history_retention_days, https_only_session_cookies \
                      FROM config_general WHERE id = 1",
                     [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                 )
                 .ok();
-            let (cur_boot, cur_bind, cur_dismissed, cur_retention) = current.unwrap_or((
-                1,
-                "127.0.0.1:3031".to_owned(),
-                None,
-                crate::retention::DEFAULT_RETENTION_DAYS as i64,
-            ));
+            let (cur_boot, cur_bind, cur_dismissed, cur_retention, cur_https_only) = current
+                .unwrap_or((
+                    1,
+                    "127.0.0.1:3031".to_owned(),
+                    None,
+                    crate::retention::DEFAULT_RETENTION_DAYS as i64,
+                    1,
+                ));
             let new_boot = upd.start_on_boot.map(|b| b as i64).unwrap_or(cur_boot);
             let new_bind = upd.bind_address.clone().unwrap_or(cur_bind);
             let new_dismissed: Option<i64> = match upd.setup_wizard_dismissed {
@@ -267,18 +277,30 @@ impl<'a> GeneralSettingsStore<'a> {
                 .history_retention_days
                 .map(|d| d as i64)
                 .unwrap_or(cur_retention);
+            let new_https_only = upd
+                .https_only_session_cookies
+                .map(|enabled| if enabled { 1 } else { 0 })
+                .unwrap_or(cur_https_only);
             c.execute(
                 "INSERT INTO config_general \
                     (id, start_on_boot, bind_address, updated_at, setup_wizard_dismissed_at, \
-                     history_retention_days) \
-                 VALUES (1, ?1, ?2, ?3, ?4, ?5) \
+                     history_retention_days, https_only_session_cookies) \
+                 VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6) \
                  ON CONFLICT(id) DO UPDATE SET \
                     start_on_boot = excluded.start_on_boot, \
                     bind_address = excluded.bind_address, \
                     updated_at = excluded.updated_at, \
                     setup_wizard_dismissed_at = excluded.setup_wizard_dismissed_at, \
-                    history_retention_days = excluded.history_retention_days",
-                params![new_boot, new_bind, now, new_dismissed, new_retention],
+                    history_retention_days = excluded.history_retention_days, \
+                    https_only_session_cookies = excluded.https_only_session_cookies",
+                params![
+                    new_boot,
+                    new_bind,
+                    now,
+                    new_dismissed,
+                    new_retention,
+                    new_https_only
+                ],
             )?;
             Ok(GeneralSettings {
                 start_on_boot: new_boot != 0,
@@ -287,6 +309,7 @@ impl<'a> GeneralSettingsStore<'a> {
                 setup_wizard_dismissed_at: new_dismissed,
                 history_retention_days: new_retention.max(0) as u32,
                 download_url_ttl_secs: 300, // preserve current, reads on GET
+                https_only_session_cookies: new_https_only != 0,
             })
         })?;
         Ok(saved)
@@ -357,6 +380,7 @@ mod tests {
         let s = store.get().unwrap().expect("seed must exist");
         assert!(s.start_on_boot);
         assert_eq!(s.bind_address, "127.0.0.1:3031");
+        assert!(s.https_only_session_cookies);
     }
 
     #[test]
@@ -481,6 +505,22 @@ mod tests {
             .unwrap();
         let s = store.get().unwrap().unwrap();
         assert_eq!(s.history_retention_days, 90);
+    }
+
+    #[test]
+    fn update_can_disable_https_only_session_cookies() {
+        let db = open();
+        let store = GeneralSettingsStore::new(&db);
+        store
+            .update(
+                &GeneralSettingsUpdate {
+                    https_only_session_cookies: Some(false),
+                    ..Default::default()
+                },
+                100,
+            )
+            .unwrap();
+        assert!(!store.get().unwrap().unwrap().https_only_session_cookies);
     }
 
     #[test]

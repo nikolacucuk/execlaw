@@ -1,12 +1,12 @@
 # Immediate implementation queue
 
-Status: 2026-09-30. The accepted scope is **all H001-H130**, tracked in
+Status: 2026-10-06. The accepted scope is **all H001-H154**, tracked in
 [implementation-plan.md](implementation-plan.md). This file selects the
 next bounded work, not just three older improvements and not a second full
 status ledger. Requirements, acceptance criteria, and F01-F19 findings live in
 [llm-harness-roadmap.md](llm-harness-roadmap.md).
 
-This queue continues to track the accepted H001-H130 scope. The completed
+This queue continues to track the accepted H001-H154 scope. The completed
 implementation slices below supersede the original tracking-only status where
 they overlap; unrelated open work remains represented in the delivery ledger.
 
@@ -102,7 +102,7 @@ Regression tests accompany each fix; order 8 does not defer verification until
 the end. F15's cross-session voice lock regression is recorded as closed
 under H047; track the remaining findings in the
 [closure ledger](implementation-plan.md#finding-closure-ledger).
-Advance complete user journeys in the six workstreams after their blocking
+Advance complete user journeys in the seven workstreams after their blocking
 dependencies pass. Lab work remains in scope as qualified trials.
 
 ## Unresolved validation inherited from the earlier pass
@@ -484,41 +484,30 @@ implemented or cannot be qualified on this Windows host.
 | H048 | Core source-event tombstone; full `execlaw-skills` suite; server source-forget and skill-forget routes; Memory Assets and Skills UI tests | Core 744/744, skills 158/158, server 1,224 passed/7 ignored, and the Controller skill-forget route test passed. Source lineage/evidence and skill versions, evaluation prompts/results, proposals, invocation notes, FTS entries, and unshared blobs are hidden or scrubbed; name reuse is fenced. Full SPA suite passed 542, including the Skills forget control; TypeScript check passed. | Exports/diagnostics, plugin storage, backup restore reapplication, late restore-writer fencing for skills, and full seeded-projection qualification remain open |
 | H049 | `scripts/tests/test_performance_gate.py` | 3 tests passed: a deliberate confidence-bound regression fails the gate, an in-tolerance result passes, and runner identity mismatch is rejected. No stable-runner Criterion samples ran locally. | Self-hosted baseline, repeated hardware measurements, and quality/policy-equivalent optimization trials |
 | H050 | Full server library suite; full SPA suite and `tsc --noEmit` | Server 1,224 passed, 7 ignored; SPA 542/542 passed; TypeScript check passed. Scrubbed bundle reports local protocol capability counts without model identity/profile JSON; UI labels hardware class as an estimate | Real-browser onboarding/recovery, keyboard/screen-reader, per-OS first-task timing, measured model/hardware suitability, and accessibility regression gates |
+| H051 | Core `information_store::tests`, `tool_apis::tests::memory_read_propagates_its_label_into_the_receiving_durable_run`, attachment and skills store tests; server compaction and outbound transport tests | Migration 0074 stores append-only labels bound to subject content digests. Run inputs, summaries, memory, skills, artifacts, child results, and outbound effects preserve conservative provenance. A Controller-only declassification endpoint records actor, destination, and scope; text and attachment tests prove a synthetic credential is blocked until a destination-specific declassification and rejected for another recipient. `cargo test --workspace` passes. | Revalidate labels against future data adapters and export paths as they are added |
+| H052 | Server `tool_dispatch::tests::revoked_principal_is_denied_at_tool_dispatch_after_turn_start`, `changed_policy_revision_denies_a_tool_catalogued_earlier_in_the_turn`, and transport authority tests | Tool dispatch binds to the current append-only policy revision and principal snapshot. Queued transport sends reject changed principals/policy and legacy effects without an authority label; MCP checks the configured target and credential version. `cargo test --workspace` passes. | Final-boundary authority binding for script HTTP and any future non-transport effect adapters; queue/drain replay qualification under live revocation |
+| H053 | Server canonical approval tests and `only_controller_can_record_scoped_information_declassification`; SPA approvals suite and TypeScript check | Chain plans and cold-contact decisions render typed operation, target, changed fields, reversibility, and scope; secret-like fields are redacted. Saved effect hashes bind approval to canonical arguments. `cargo test --workspace`, SPA tests, and TypeScript check pass. | Manual keyboard/screen-reader review of consequential fields and any future approval kind |
+| H054 | Core `vault_row::tests::credential_version_advances_even_when_rotation_uses_same_timestamp`; server `mcp_host::tests` and `mcp_http_client::tests` | Per-server MCP vault scopes reject cross-server reference use; configured missing/invalid secrets fail closed; monotone credential versions invalidate stale connection fingerprints; bearer values are redacted from returned text. MCP host tests pass (8), and the HTTP client redaction test passes. | General plugin/provider secret brokerage, explicit method/account grants, and cancellation of already-running authenticated requests |
+| H055 | Policy `outbound::tests`; server `transport_outbox::tests` and `mcp_host::tests`; script sidecar and general HTTP body regressions | Deterministic credential indicators are checked at transport text/attachment delivery, MCP tool arguments, sidecar POST/PUT, general HTTP POST/PATCH, and query-bearing GET/DELETE. Attachment scope and hash are checked before send. Controller declassification authorizes one matching destination for an explicit export. `cargo test --workspace` passes. | Browser-form sinks and false-positive/missed-detection feedback telemetry |
 
 Additional workspace checks:
 
-- `cargo fmt --all -- --check` failed on formatting differences across the
-  already-dirty workspace. `rustfmt --edition 2024 --check
-  crates/core/src/eval.rs` passed after formatting the changed validator.
-- `git diff --check` reports pre-existing whitespace issues in
-  `plugins/google-apps/plugin.toml` and `plugins/signal/ui/panel.js`; the
-  changed `crates/core/src/eval.rs` passes its focused whitespace check.
-- `npm.cmd run lint` fails on the unused `CompletionEvidenceRef` import in
-  `web/src/routes/Agents.tsx`. The full SPA run had three 5-second timeouts in
-  `general-page.test.tsx`, `message-stream.test.tsx`, and
-  `settings-shell.test.tsx`; focused Memory Assets/Skills and panel-isolation
-  tests passed.
+- `cargo fmt --all -- --check` passes.
+- `git diff --check` reports trailing whitespace in the pre-existing dirty
+  `server-local.out.log`.
+- `npm.cmd test -- --testTimeout=15000` passed 547 tests across 61 files;
+  `npm.cmd run lint` passed TypeScript checking. The default 5-second run
+  timed out in three unrelated page tests, which passed with the 15-second cap.
 - A targeted runner-local run first had 2 retry-classification failures. A
   later full workspace run passed all 23 runner-local tests; those failures did
   not reproduce.
-- The full `cargo test --workspace --no-fail-fast` run passed the core (709),
-  server library (1,155 passed, 5 ignored), inference API (36), runner-local
-  (23), skills (157), and other reported unit targets. It was not green:
-  `approval_flow` (11), `google_apps_e2e` (4), `script_plugin_e2e` (7),
-  `skills_plugin_zip_e2e` (1), `voice_ws_round_trip` (2), `web_scraper_e2e`
-  (1), and `webhook_auth` (9) received HTTP 401 due to missing Authorization
-  headers in their setup requests. Four script integration test binaries were
-  blocked by Windows Application Control (OS error 4551). In a separate run,
-  `signal_plugin` executed and 7 of 16 tests failed with missing/null decoded
-  Rhai fields; a later attempt to rerun that binary was blocked by the same
-  Application Control policy. These failures require test-fixture/auth and
-  plugin decoding follow-up before the workspace suite is green.
-- The workspace compile initially exposed a missing `rusqlite::OptionalExtension`
-  import in `crates/core/src/routines.rs`; that import was added, after which
-  the full workspace compile proceeded and all 709 core tests passed.
-- `python -m py_compile` could not run because Python is not installed; the
-  Windows `python` command is only the Microsoft Store execution alias. The
-  offline update scripts therefore still need syntax and archive-flow checks.
+- The full `cargo test --workspace` run passed. The server library reported
+  1,250 passed and 7 ignored; core reported 767 passed. Existing Docker, live
+  public-endpoint, benchmark, and selected environment tests remained ignored.
+- `cargo clippy --workspace -- -D warnings` stopped on 36 lint errors across
+  workspace files, including argument-count, documentation, and complexity
+  lints. The initially reported `manual_contains` issue in `plugin-sdk` was
+  corrected; the broad strict-lint run was not repeated.
 
 ### Follow-up verification repair (2026-09-29)
 

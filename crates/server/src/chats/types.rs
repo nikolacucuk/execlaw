@@ -111,6 +111,10 @@ fn required_by_default() -> bool {
 #[derive(Debug, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct SendMessageRequest {
     pub text: String,
+    /// Task-scoped SQLite safety profile selected before durable execution.
+    /// Incognito turns do not create a durable run and cannot bind a profile.
+    #[serde(default)]
+    pub safety_profile_id: Option<String>,
     /// Optional deterministic acceptance requirements for this durable turn.
     #[serde(default)]
     pub completion_contract: Option<CompletionContractInput>,

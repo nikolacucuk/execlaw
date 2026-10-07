@@ -4,7 +4,7 @@ Reference document for the execlaw agent model. This is the mental model a new c
 
 Relationship to other docs:
 
-- [`implementation-plan.md`](implementation-plan.md) tracks the accepted implementation of **all 130 enhancements (H001-H130)**; [`llm-harness-roadmap.md`](llm-harness-roadmap.md) owns requirements, acceptance criteria, and F01-F19 findings. This architecture describes foundations and intended contracts; it does not certify that every production path already meets them.
+- [`implementation-plan.md`](implementation-plan.md) tracks the accepted implementation of **all 154 enhancements (H001-H154)**; [`llm-harness-roadmap.md`](llm-harness-roadmap.md) owns requirements, acceptance criteria, and F01-F19 findings. This architecture describes foundations and intended contracts; it does not certify that every production path already meets them.
 - This document incorporates the durable design rationale from the retired migration plan alongside the current architecture.
 - This document is the *what*: the structure, the invariants, the flows. Read it when you need to understand *how things fit together*.
 - [`agent-model.md`](agent-model.md) is the *how* of one turn — TurnExecutor, memory layers, reflection loop, planner/executor split.
@@ -1212,7 +1212,7 @@ Sub-runners have a narrower tool set (`search_web`, `fetch_url`, `read_pdf`, `de
 | **User cancels mid-turn** | Runner closes SSE stream; cancellation `tool_result`s committed for open `tool_use`s; phase → `Idle` | Pairing invariant enforcement |
 | **Runner crash** (OOM, panic, docker kill) | Bollard event detected; cancellation results committed; new runner spawns and hydrates | Pairing invariant + stateless runners + respawn |
 | **Control plane restart** (`execlaw service restart`, OS reboot, deploy) | Scan `state_conversations` for stale leases; cancellation for dangling `tool_use`; phase → `Idle`; scheduler picks up pending wakeups | Lease expiry + pairing invariant + event log as source of truth |
-| **Host power loss** | SQLite WAL replay restores last committed state; same flow as control-plane restart. Outbox rows in `in_flight` retry on startup | SQLite atomicity + outbox idempotency + inbox dedup |
+| **Host power loss** | SQLite opens WAL with `synchronous=FULL`; transactions acknowledged as committed are expected to survive when the OS, filesystem, storage controller, and device honor flush requests. WAL replay restores that state; `in_flight` outbox rows retry on startup | FULL-synchronous commit + SQLite atomicity + outbox idempotency + inbox dedup; physical hard-reset qualification is storage-specific |
 | **Transport drop** | Transport plugin reconnects, resumes inbound poll from `transport_cursors.cursor_value`; inbox dedup absorbs duplicates | Stable `(plugin_id, source_event_id)` dedup at ingress |
 | **External API timeout** (we don't know if send landed) | Outbox row stays `in_flight`; retry uses same idempotency key; consumer-side inbox returns stored delivery ID; mark success | Framework-minted idempotency + consumer inbox |
 | **Infinite-retry risk** (tool keeps failing) | Per-effect retry budget: 5 attempts + exp backoff + dead-letter; Error alert fires; turn continues with `retry_budget_exhausted` error fed back to agent | Hard retry caps + dead-letter queue + alerting |
@@ -1392,7 +1392,7 @@ and secret-compromise response are in [`key-rotation-drill.md`](key-rotation-dri
 
 ### 17.2 HttpOnly session cookies + sensitive_tool flag (#10)
 
-**HttpOnly cookies:** `POST /api/login`, `POST /api/token/refresh`, and `POST /api/logout` return or clear cookies with `HttpOnly; Secure; SameSite=Strict` attributes. This prevents JavaScript from reading the session token, mitigating XSS-based session theft.
+**HttpOnly cookies:** `POST /api/login`, `POST /api/token/refresh`, and `POST /api/logout` return or clear cookies with `HttpOnly; SameSite=Strict`. The persisted `https_only_session_cookies` setting defaults to enabled and controls the `Secure` attribute. Keep it enabled for HTTPS deployments; disable it only for a trusted HTTP LAN deployment so browsers send the cookie on the authenticated WebSocket event stream.
 
 **`sensitive` field on `ToolDescriptor`:** `crates/core/src/tool.rs` — `ToolDescriptor` gains a `pub sensitive: bool` field. When `true`, the control plane omits that tool from the `has_sensitive_tools` check in `chats.rs` that gates certain policy decisions. All existing tools default to `sensitive: false`. Plugin authors can mark tools that access credential stores, personal data, or external APIs with `sensitive: true` in their manifest.
 
@@ -1598,7 +1598,7 @@ The palette entry appears in the **Actions** group alongside `CallPlugin` and `N
 
 ## 17. Non-goals (what execlaw deliberately does not do)
 
-These boundaries are reconciled with the accepted H001-H130 plan. Planned
+These boundaries are reconciled with the accepted H001-H154 plan. Planned
 extensions do not replace the local-inference, SQLite, outbox, trust, or
 manifest-driven plugin invariants. See the [delivery ledger](implementation-plan.md).
 
@@ -1616,7 +1616,7 @@ manifest-driven plugin invariants. See the [delivery ledger](implementation-plan
 
 Historical milestone snapshot: 2026-06-06. The phase tags below record earlier
 implementation milestones, not current release qualification. Current status
-for all H001-H130 lives in [`implementation-plan.md`](implementation-plan.md).
+for all H001-H154 lives in [`implementation-plan.md`](implementation-plan.md).
 F01-F19 qualify broad safety/durability claims in this snapshot: especially
 admin authorization, production encryption, restart/power-loss recovery,
 default logging, and automation test-run effects. Completing a historical

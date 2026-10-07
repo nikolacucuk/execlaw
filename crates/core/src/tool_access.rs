@@ -19,12 +19,12 @@
 //! `enabled = false` or empty the list.
 
 use crate::db::{Database, DbError};
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 /// What kind of registration produced this tool. The Settings UI
 /// uses this to badge rows; the access check itself doesn't care.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum ToolSource {
     Builtin,
     Plugin,
@@ -53,7 +53,7 @@ impl ToolSource {
 /// Full row shape; what the Settings page hydrates and the dispatch
 /// gate consults. `allowed_classes` is a flat `Vec<String>` so the
 /// store can stay agnostic of the policy crate's `TrustLevel` enum.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 pub struct ToolAccessRow {
     pub tool_name: String,
     pub source: ToolSource,
@@ -65,6 +65,18 @@ pub struct ToolAccessRow {
     pub first_seen_at: i64,
     pub last_seen_at: i64,
     pub removed_at: Option<i64>,
+}
+
+/// Immutable operator policy revision for one registered tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
+pub struct ToolAccessPolicyRevision {
+    pub revision_id: i64,
+    pub tool_name: String,
+    pub enabled: bool,
+    pub allowed_classes: Vec<String>,
+    pub revised_by: String,
+    pub revised_at: i64,
+    pub rollback_of: Option<i64>,
 }
 
 /// Subset used by registration paths — on first-sight we want to
@@ -91,6 +103,19 @@ pub struct ToolAccessStore<'db> {
 impl<'db> ToolAccessStore<'db> {
     pub fn new(db: &'db Database) -> Self {
         Self { db }
+    }
+
+    /// Read the latest immutable operator-policy revision. A turn or queued
+    /// effect bound to an older value must be reauthorized before execution.
+    pub fn latest_policy_revision_id(&self) -> Result<i64, DbError> {
+        self.db.with_conn(|connection| {
+            let revision = connection.query_row(
+                "SELECT COALESCE(MAX(revision_id), 0) FROM config_tool_access_policy_revisions",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok(revision)
+        })
     }
 
     /// Look up a single tool. Returns `None` if no row exists — the
@@ -191,17 +216,143 @@ impl<'db> ToolAccessStore<'db> {
         enabled: bool,
         allowed_classes: &[String],
     ) -> Result<bool, DbError> {
+        self.set_policy_with_actor(
+            tool_name,
+            enabled,
+            allowed_classes,
+            "system",
+            chrono::Utc::now().timestamp(),
+            None,
+        )
+    }
+
+    /// Persist a new policy revision while preserving the operator and rollback chain.
+    pub fn set_policy_with_actor(
+        &self,
+        tool_name: &str,
+        enabled: bool,
+        allowed_classes: &[String],
+        actor: &str,
+        now: i64,
+        rollback_of: Option<i64>,
+    ) -> Result<bool, DbError> {
+        if actor.trim().is_empty() || actor.len() > 128 {
+            return Err(DbError::Invariant(
+                "policy revision actor is invalid".into(),
+            ));
+        }
         let allowed_json = serde_json::to_string(allowed_classes)
             .map_err(|e| DbError::Serde(format!("encoding allowed_classes: {e}")))?;
-        self.db.with_conn(|c| {
-            let n = c.execute(
+        self.db.transaction(|tx| {
+            let changed = tx.execute(
                 "UPDATE config_tool_access \
                  SET enabled = ?1, allowed_classes = ?2 \
                  WHERE tool_name = ?3",
                 params![enabled as i64, allowed_json, tool_name],
             )?;
-            Ok(n > 0)
+            if changed == 0 {
+                return Ok(false);
+            }
+            let (current_enabled, current_allowed): (i64, String) = tx.query_row(
+                "SELECT enabled, allowed_classes FROM config_tool_access WHERE tool_name = ?1",
+                [tool_name],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            tx.execute(
+                "INSERT INTO config_tool_access_policy_revisions \
+                 (tool_name, enabled, allowed_classes_json, revised_by, revised_at, rollback_of) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    tool_name,
+                    current_enabled,
+                    current_allowed,
+                    actor,
+                    now,
+                    rollback_of
+                ],
+            )?;
+            Ok(true)
         })
+    }
+
+    /// Return recent revisions newest first.
+    pub fn policy_revisions(
+        &self,
+        tool_name: &str,
+        limit: usize,
+    ) -> Result<Vec<ToolAccessPolicyRevision>, DbError> {
+        let limit = limit.clamp(1, 100) as i64;
+        self.db.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT revision_id, tool_name, enabled, allowed_classes_json, revised_by, revised_at, rollback_of \
+                 FROM config_tool_access_policy_revisions WHERE tool_name = ?1 \
+                 ORDER BY revision_id DESC LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![tool_name, limit], |row| {
+                let classes: String = row.get(3)?;
+                let allowed_classes = serde_json::from_str(&classes).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        3,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
+                Ok(ToolAccessPolicyRevision {
+                    revision_id: row.get(0)?,
+                    tool_name: row.get(1)?,
+                    enabled: row.get::<_, i64>(2)? != 0,
+                    allowed_classes,
+                    revised_by: row.get(4)?,
+                    revised_at: row.get(5)?,
+                    rollback_of: row.get(6)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+        })
+    }
+
+    /// Restore a previous row state as a new revision; revision IDs never move backward.
+    pub fn rollback_policy_revision(
+        &self,
+        tool_name: &str,
+        revision_id: i64,
+        actor: &str,
+        now: i64,
+    ) -> Result<bool, DbError> {
+        let revision = self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT enabled, allowed_classes_json \
+                     FROM config_tool_access_policy_revisions \
+                     WHERE revision_id = ?1 AND tool_name = ?2",
+                    params![revision_id, tool_name],
+                    |row| {
+                        let serialized: String = row.get(1)?;
+                        let classes: Vec<String> =
+                            serde_json::from_str(&serialized).map_err(|error| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    1,
+                                    rusqlite::types::Type::Text,
+                                    Box::new(error),
+                                )
+                            })?;
+                        Ok((row.get::<_, i64>(0)? != 0, classes))
+                    },
+                )
+                .optional()
+                .map_err(DbError::from)
+        })?;
+        let Some((enabled, allowed_classes)) = revision else {
+            return Ok(false);
+        };
+        self.set_policy_with_actor(
+            tool_name,
+            enabled,
+            &allowed_classes,
+            actor,
+            now,
+            Some(revision_id),
+        )
     }
 
     /// Bulk drop every row owned by a given source — used by the
@@ -415,6 +566,59 @@ mod tests {
             .set_policy("never_seen", false, &["Controller".into()])
             .unwrap();
         assert!(!updated);
+    }
+
+    #[test]
+    fn rollback_restores_policy_as_a_new_append_only_revision() {
+        let db = fresh_db();
+        let store = ToolAccessStore::new(&db);
+        store
+            .upsert_seen(
+                &seed(
+                    "calendar.create",
+                    ToolSource::Mcp,
+                    Some("calendar"),
+                    &["Controller"],
+                ),
+                1,
+            )
+            .unwrap();
+        store
+            .set_policy_with_actor(
+                "calendar.create",
+                true,
+                &["Controller".into(), "KnownTrusted".into()],
+                "controller-1",
+                2,
+                None,
+            )
+            .unwrap();
+        let first = store.policy_revisions("calendar.create", 1).unwrap()[0].clone();
+        store
+            .set_policy_with_actor(
+                "calendar.create",
+                false,
+                &["Controller".into()],
+                "controller-1",
+                3,
+                None,
+            )
+            .unwrap();
+        let second = store.policy_revisions("calendar.create", 1).unwrap()[0].clone();
+        assert!(second.revision_id > first.revision_id);
+
+        assert!(
+            store
+                .rollback_policy_revision("calendar.create", first.revision_id, "controller-1", 4,)
+                .unwrap()
+        );
+        let restored = store.get("calendar.create").unwrap().unwrap();
+        assert!(restored.enabled);
+        assert_eq!(restored.allowed_classes, vec!["Controller", "KnownTrusted"]);
+        let rollback = store.policy_revisions("calendar.create", 1).unwrap()[0].clone();
+        assert!(rollback.revision_id > second.revision_id);
+        assert_eq!(rollback.rollback_of, Some(first.revision_id));
+        assert_eq!(rollback.revised_by, "controller-1");
     }
 
     #[test]

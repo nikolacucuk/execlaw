@@ -22,6 +22,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
 use thiserror::Error;
+use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RoutineRunStatus {
@@ -29,6 +30,62 @@ pub enum RoutineRunStatus {
     Success,
     Failed,
     Skipped,
+}
+
+/// Defines how a scheduler handles occurrences that passed during downtime.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum MissedRunPolicy {
+    #[default]
+    Skip,
+    Coalesce,
+    CatchUp,
+}
+
+impl MissedRunPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Coalesce => "coalesce",
+            Self::CatchUp => "catch_up",
+        }
+    }
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "skip" => Some(Self::Skip),
+            "coalesce" => Some(Self::Coalesce),
+            "catch_up" => Some(Self::CatchUp),
+            _ => None,
+        }
+    }
+}
+
+/// Defines how a routine handles a new occurrence while a prior run is active.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RoutineOverlapPolicy {
+    #[default]
+    Forbid,
+    Queue,
+    Replace,
+}
+
+impl RoutineOverlapPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Forbid => "forbid",
+            Self::Queue => "queue",
+            Self::Replace => "replace",
+        }
+    }
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "forbid" => Some(Self::Forbid),
+            "queue" => Some(Self::Queue),
+            "replace" => Some(Self::Replace),
+            _ => None,
+        }
+    }
 }
 
 impl RoutineRunStatus {
@@ -66,6 +123,9 @@ pub struct RoutineRow {
     pub created_at: i64,
     pub updated_at: i64,
     pub completion_contract: Option<RunCompletionContractDraft>,
+    pub missed_run_policy: MissedRunPolicy,
+    pub missed_run_limit: u32,
+    pub overlap_policy: RoutineOverlapPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -79,6 +139,9 @@ pub struct RoutineUpsert {
     pub target_conversation_id: Option<String>,
     pub enabled: bool,
     pub completion_contract: Option<RunCompletionContractDraft>,
+    pub missed_run_policy: MissedRunPolicy,
+    pub missed_run_limit: u32,
+    pub overlap_policy: RoutineOverlapPolicy,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -91,6 +154,7 @@ pub struct RoutineRunRow {
     pub status: RoutineRunStatus,
     pub error: Option<String>,
     pub conversation_id: Option<String>,
+    pub occurrence_at: Option<i64>,
 }
 
 #[derive(Debug, Error)]
@@ -157,6 +221,57 @@ pub fn next_n_fires(
         .collect()
 }
 
+/// Deterministic result of reconciling scheduled occurrences after a delayed tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DueOccurrencePlan {
+    pub execute: Vec<i64>,
+    pub skip: Vec<i64>,
+}
+
+/// Apply a missed-run policy to sorted, due UTC occurrence timestamps.
+/// An occurrence up to 60 seconds late is treated as an ordinary scheduler
+/// delay; older occurrences are handled by the configured downtime policy.
+pub fn plan_due_occurrences(
+    policy: MissedRunPolicy,
+    missed_run_limit: u32,
+    now: i64,
+    occurrences: &[i64],
+) -> DueOccurrencePlan {
+    let due: Vec<i64> = occurrences
+        .iter()
+        .copied()
+        .filter(|at| *at <= now)
+        .collect();
+    let (ordinary, missed): (Vec<_>, Vec<_>) = due
+        .iter()
+        .copied()
+        .partition(|at| now.saturating_sub(*at) <= 60);
+    let mut execute = Vec::new();
+    let mut skip = Vec::new();
+    match policy {
+        MissedRunPolicy::Skip => skip.extend(missed),
+        MissedRunPolicy::Coalesce => {
+            if missed.is_empty() {
+                execute.extend(ordinary.iter().copied());
+            } else if let Some(latest) = due.last() {
+                execute.push(*latest);
+                skip.extend(due.iter().copied().take_while(|at| at != latest));
+            }
+        }
+        MissedRunPolicy::CatchUp => {
+            let limit = missed_run_limit.clamp(1, 100) as usize;
+            execute.extend(missed.iter().take(limit).copied());
+            skip.extend(missed.into_iter().skip(limit));
+        }
+    }
+    if policy != MissedRunPolicy::Coalesce {
+        execute.extend(ordinary);
+    }
+    execute.sort_unstable();
+    skip.sort_unstable();
+    DueOccurrencePlan { execute, skip }
+}
+
 pub struct RoutineStore<'db> {
     db: &'db Database,
 }
@@ -219,14 +334,23 @@ impl<'db> RoutineStore<'db> {
             .map(serde_json::to_string)
             .transpose()
             .map_err(|error| RoutineError::Invalid(error.to_string()))?;
+        if !(1..=100).contains(&payload.missed_run_limit) {
+            return Err(RoutineError::Invalid(
+                "missed_run_limit must be between 1 and 100".into(),
+            ));
+        }
+        let missed_run_policy = payload.missed_run_policy.as_str();
+        let missed_run_limit = payload.missed_run_limit;
+        let overlap_policy = payload.overlap_policy.as_str();
 
         self.db.with_conn(|c| {
             c.execute(
                 "INSERT INTO config_routines \
                    (id, name, schedule_cron, timezone, prompt, \
                     target_conversation_id, enabled, last_run_at, \
-                    last_run_status, next_run_at, created_at, updated_at, completion_contract_json) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9, ?10) \
+                    last_run_status, next_run_at, created_at, updated_at, completion_contract_json, \
+                    missed_run_policy, missed_run_limit, overlap_policy) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, NULL, ?8, ?9, ?9, ?10, ?11, ?12, ?13) \
                  ON CONFLICT(id) DO UPDATE SET \
                     name                  = excluded.name, \
                     schedule_cron         = excluded.schedule_cron, \
@@ -236,6 +360,9 @@ impl<'db> RoutineStore<'db> {
                     enabled               = excluded.enabled, \
                     next_run_at           = excluded.next_run_at, \
                     completion_contract_json = excluded.completion_contract_json, \
+                    missed_run_policy = excluded.missed_run_policy, \
+                    missed_run_limit = excluded.missed_run_limit, \
+                    overlap_policy = excluded.overlap_policy, \
                     updated_at            = excluded.updated_at",
                 params![
                     id_for_query,
@@ -248,8 +375,19 @@ impl<'db> RoutineStore<'db> {
                     next_run_at,
                     now,
                     completion_contract_json,
+                    missed_run_policy,
+                    missed_run_limit,
+                    overlap_policy,
                 ],
             )?;
+            if payload.id.is_some() {
+                c.execute(
+                    "UPDATE state_routine_runs SET status='Skipped',finished_at=?2, \
+                     error='routine definition changed before this queued occurrence started' \
+                     WHERE routine_id=?1 AND status='Pending' AND started_at IS NULL",
+                    params![id_for_query, now],
+                )?;
+            }
             Ok(())
         })?;
 
@@ -263,7 +401,8 @@ impl<'db> RoutineStore<'db> {
                 c.query_row(
                         "SELECT id, name, schedule_cron, timezone, prompt, \
                             target_conversation_id, enabled, last_run_at, \
-                            last_run_status, next_run_at, created_at, updated_at, completion_contract_json \
+                            last_run_status, next_run_at, created_at, updated_at, completion_contract_json, \
+                            missed_run_policy, missed_run_limit, overlap_policy \
                      FROM config_routines WHERE id = ?1",
                         params![id_owned],
                         row_to_routine,
@@ -281,7 +420,8 @@ impl<'db> RoutineStore<'db> {
             let mut stmt = c.prepare(
                 "SELECT id, name, schedule_cron, timezone, prompt, \
                         target_conversation_id, enabled, last_run_at, \
-                        last_run_status, next_run_at, created_at, updated_at, completion_contract_json \
+                        last_run_status, next_run_at, created_at, updated_at, completion_contract_json, \
+                        missed_run_policy, missed_run_limit, overlap_policy \
                  FROM config_routines \
                  ORDER BY enabled DESC, \
                           CASE WHEN next_run_at IS NULL THEN 1 ELSE 0 END, \
@@ -315,7 +455,8 @@ impl<'db> RoutineStore<'db> {
             let mut stmt = c.prepare(
                 "SELECT id, name, schedule_cron, timezone, prompt, \
                         target_conversation_id, enabled, last_run_at, \
-                        last_run_status, next_run_at, created_at, updated_at, completion_contract_json \
+                        last_run_status, next_run_at, created_at, updated_at, completion_contract_json, \
+                        missed_run_policy, missed_run_limit, overlap_policy \
                  FROM config_routines \
                  WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?1 \
                  ORDER BY next_run_at ASC",
@@ -353,6 +494,24 @@ impl<'db> RoutineStore<'db> {
             .map_err(RoutineError::from)
     }
 
+    /// Advance the schedule cursor without changing the last completed-run status.
+    pub fn advance_schedule(
+        &self,
+        id: &str,
+        now: i64,
+        next_run_at: Option<i64>,
+    ) -> Result<(), RoutineError> {
+        self.db
+            .with_conn(|connection| {
+                connection.execute(
+                    "UPDATE config_routines SET next_run_at=?2,updated_at=?3 WHERE id=?1",
+                    params![id, next_run_at, now],
+                )?;
+                Ok(())
+            })
+            .map_err(Into::into)
+    }
+
     /// Insert a new run-history row in `Pending` status. Returns the
     /// minted run id.
     pub fn insert_run_pending(
@@ -360,26 +519,43 @@ impl<'db> RoutineStore<'db> {
         routine_id: &str,
         fired_at: i64,
     ) -> Result<String, RoutineError> {
+        self.insert_run_for_occurrence(routine_id, fired_at, fired_at)
+    }
+
+    /// Insert one durable run for a scheduled occurrence, returning the existing
+    /// run id when another scheduler already created that occurrence.
+    pub fn insert_run_for_occurrence(
+        &self,
+        routine_id: &str,
+        occurrence_at: i64,
+        fired_at: i64,
+    ) -> Result<String, RoutineError> {
         let run_id = uuid::Uuid::new_v4().to_string();
         let routine_id_owned = routine_id.to_owned();
         let run_id_for_query = run_id.clone();
-        self.db.with_conn(|c| {
+        let saved_id = self.db.with_conn(|c| {
             let inserted = c.execute(
-                "INSERT INTO state_routine_runs \
+                "INSERT OR IGNORE INTO state_routine_runs \
                    (id, routine_id, fired_at, started_at, finished_at, \
-                    status, error, conversation_id, completion_contract_json) \
-                 SELECT ?1, ?2, ?3, NULL, NULL, 'Pending', NULL, NULL, completion_contract_json \
+                    status, error, conversation_id, completion_contract_json, occurrence_at) \
+                 SELECT ?1, ?2, ?3, NULL, NULL, 'Pending', NULL, NULL, completion_contract_json, ?4 \
                  FROM config_routines WHERE id = ?2",
-                params![run_id_for_query, routine_id_owned, fired_at],
+                params![run_id_for_query, routine_id_owned, fired_at, occurrence_at],
             )?;
-            if inserted != 1 {
+            if inserted == 0 {
+                let existing: Option<String> = c.query_row(
+                    "SELECT id FROM state_routine_runs WHERE routine_id=?1 AND occurrence_at=?2",
+                    params![routine_id, occurrence_at],
+                    |row| row.get(0),
+                ).optional()?;
+                if let Some(id) = existing { return Ok(id); }
                 return Err(DbError::Invariant(format!(
                     "routine not found: {routine_id}"
                 )));
             }
-            Ok(())
+            Ok(run_id_for_query)
         })?;
-        Ok(run_id)
+        Ok(saved_id)
     }
 
     /// List unfinished routine fires so the scheduler can resume their stable
@@ -421,6 +597,60 @@ impl<'db> RoutineStore<'db> {
             .transpose()
     }
 
+    /// Return the occurrence timestamp pinned to a routine run.
+    pub fn run_occurrence_at(&self, run_id: &str) -> Result<Option<i64>, RoutineError> {
+        self.db
+            .with_conn(|connection| {
+                connection
+                    .query_row(
+                        "SELECT occurrence_at FROM state_routine_runs WHERE id=?1",
+                        [run_id],
+                        |row| row.get(0),
+                    )
+                    .optional()
+                    .map_err(DbError::from)
+            })
+            .map_err(Into::into)
+    }
+
+    /// Whether this routine has a claimed, unfinished execution.
+    pub fn has_active_run(&self, routine_id: &str) -> Result<bool, RoutineError> {
+        self.db.with_conn(|connection| {
+            connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM state_routine_runs WHERE routine_id=?1 AND status='Pending' AND started_at IS NOT NULL)",
+                [routine_id],
+                |row| row.get(0),
+            ).map_err(DbError::from)
+        }).map_err(Into::into)
+    }
+
+    /// Supersede queued occurrences while preserving work already claimed by a runner.
+    pub fn supersede_queued_runs(
+        &self,
+        routine_id: &str,
+        keep_occurrence: i64,
+        at: i64,
+    ) -> Result<usize, RoutineError> {
+        self.db.with_conn(|connection| {
+            connection.execute(
+                "UPDATE state_routine_runs SET status='Skipped',finished_at=?3,error='replaced by a newer queued occurrence' \
+                 WHERE routine_id=?1 AND status='Pending' AND started_at IS NULL AND occurrence_at<>?2",
+                params![routine_id, keep_occurrence, at],
+            ).map_err(DbError::from)
+        }).map_err(Into::into)
+    }
+
+    /// Terminally mark a run that policy intentionally skipped.
+    pub fn skip_run(&self, run_id: &str, at: i64, reason: &str) -> Result<(), RoutineError> {
+        self.db.with_conn(|connection| {
+            connection.execute(
+                "UPDATE state_routine_runs SET status='Skipped',finished_at=?2,error=?3 WHERE id=?1 AND status='Pending'",
+                params![run_id, at, reason],
+            )?;
+            Ok(())
+        }).map_err(Into::into)
+    }
+
     /// Drop in-process claims left by a stopped server. Called once during
     /// scheduler startup before pending run ids are enumerated.
     pub fn reset_pending_run_claims(&self) -> Result<usize, RoutineError> {
@@ -442,7 +672,11 @@ impl<'db> RoutineStore<'db> {
             .with_conn(|connection| {
                 Ok(connection.execute(
                     "UPDATE state_routine_runs SET started_at=?1 \
-                 WHERE id=?2 AND status='Pending' AND started_at IS NULL",
+                 WHERE id=?2 AND status='Pending' AND started_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM state_routine_runs active \
+                     WHERE active.routine_id=state_routine_runs.routine_id \
+                       AND active.status='Pending' AND active.started_at IS NOT NULL \
+                       AND active.id<>state_routine_runs.id)",
                     params![started_at, run_id],
                 )? == 1)
             })
@@ -552,7 +786,7 @@ impl<'db> RoutineStore<'db> {
         let rows = self.db.with_conn(|c| {
             let mut stmt = c.prepare(
                 "SELECT id, routine_id, fired_at, started_at, finished_at, \
-                        status, error, conversation_id \
+                        status, error, conversation_id, occurrence_at \
                  FROM state_routine_runs \
                  WHERE routine_id = ?1 \
                  ORDER BY fired_at DESC \
@@ -588,6 +822,9 @@ fn row_to_routine(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRow> {
             .get::<_, Option<String>>(12)?
             .map(|json| serde_json::from_str(&json).map_err(|_| rusqlite::Error::InvalidQuery))
             .transpose()?,
+        missed_run_policy: MissedRunPolicy::parse(&row.get::<_, String>(13)?).unwrap_or_default(),
+        missed_run_limit: row.get::<_, u32>(14)?.clamp(1, 100),
+        overlap_policy: RoutineOverlapPolicy::parse(&row.get::<_, String>(15)?).unwrap_or_default(),
     })
 }
 
@@ -612,6 +849,7 @@ fn row_to_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<RoutineRunRow> {
         status,
         error: row.get(6)?,
         conversation_id: row.get(7)?,
+        occurrence_at: row.get(8)?,
     })
 }
 
@@ -637,6 +875,9 @@ mod tests {
             target_conversation_id: None,
             enabled: true,
             completion_contract: None,
+            missed_run_policy: MissedRunPolicy::Skip,
+            missed_run_limit: 1,
+            overlap_policy: RoutineOverlapPolicy::Forbid,
         }
     }
 
@@ -874,6 +1115,51 @@ mod tests {
     }
 
     #[test]
+    fn routine_claim_serializes_distinct_occurrences() {
+        let db = fresh_db();
+        let store = RoutineStore::new(&db);
+        let routine = store.upsert(&upsert("serial", "0 8 * * *"), 0).unwrap();
+        let first = store
+            .insert_run_for_occurrence(&routine.id, 100, 100)
+            .unwrap();
+        let second = store
+            .insert_run_for_occurrence(&routine.id, 200, 200)
+            .unwrap();
+        assert!(store.claim_pending_run(&first, 101).unwrap());
+        assert!(!store.claim_pending_run(&second, 201).unwrap());
+        store
+            .finish_run(&first, RoutineRunStatus::Success, 300, None, None)
+            .unwrap();
+        assert!(store.claim_pending_run(&second, 301).unwrap());
+    }
+
+    #[test]
+    fn editing_a_routine_cancels_unstarted_queued_occurrences() {
+        let db = fresh_db();
+        let store = RoutineStore::new(&db);
+        let routine = store
+            .upsert(&upsert("before edit", "0 8 * * *"), 0)
+            .unwrap();
+        let queued = store
+            .insert_run_for_occurrence(&routine.id, 100, 101)
+            .unwrap();
+        let mut edited = upsert("after edit", "0 9 * * *");
+        edited.id = Some(routine.id.clone());
+        store.upsert(&edited, 1).unwrap();
+        let runs = store.list_runs(&routine.id, 10).unwrap();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].id, queued);
+        assert_eq!(runs[0].status, RoutineRunStatus::Skipped);
+        assert!(
+            runs[0]
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("definition changed")
+        );
+    }
+
+    #[test]
     fn delete_then_list_runs_is_empty_via_fk_cascade() {
         let db = fresh_db();
         let store = RoutineStore::new(&db);
@@ -899,5 +1185,89 @@ mod tests {
         // Each is strictly after the previous.
         assert!(fires[0] < fires[1]);
         assert!(fires[1] < fires[2]);
+    }
+
+    #[test]
+    fn cron_preview_is_stable_through_daylight_saving_gap_and_fold() {
+        let tz = parse_timezone("America/Los_Angeles").unwrap();
+        let fold = parse_cron("30 1 * * *").unwrap();
+        let after_first_0130 = Utc.with_ymd_and_hms(2026, 11, 1, 8, 45, 0).unwrap();
+        assert_eq!(
+            next_fire_after(&fold, tz, after_first_0130).unwrap(),
+            Utc.with_ymd_and_hms(2026, 11, 2, 9, 30, 0).unwrap()
+        );
+
+        let gap = parse_cron("30 2 * * *").unwrap();
+        let after_spring_transition = Utc.with_ymd_and_hms(2026, 3, 8, 10, 0, 0).unwrap();
+        assert_eq!(
+            next_fire_after(&gap, tz, after_spring_transition).unwrap(),
+            Utc.with_ymd_and_hms(2026, 3, 9, 9, 30, 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn missed_occurrence_policies_are_bounded_and_deterministic() {
+        let occurrences = [100, 200, 300, 400];
+        assert_eq!(
+            plan_due_occurrences(MissedRunPolicy::Skip, 1, 500, &occurrences),
+            DueOccurrencePlan {
+                execute: vec![],
+                skip: vec![100, 200, 300, 400]
+            }
+        );
+        assert_eq!(
+            plan_due_occurrences(MissedRunPolicy::Coalesce, 1, 500, &occurrences),
+            DueOccurrencePlan {
+                execute: vec![400],
+                skip: vec![100, 200, 300]
+            }
+        );
+        assert_eq!(
+            plan_due_occurrences(MissedRunPolicy::Coalesce, 1, 500, &[100, 480]),
+            DueOccurrencePlan {
+                execute: vec![480],
+                skip: vec![100]
+            }
+        );
+        assert_eq!(
+            plan_due_occurrences(MissedRunPolicy::CatchUp, 2, 500, &occurrences),
+            DueOccurrencePlan {
+                execute: vec![100, 200],
+                skip: vec![300, 400]
+            }
+        );
+        assert_eq!(
+            plan_due_occurrences(MissedRunPolicy::Skip, 1, 460, &occurrences),
+            DueOccurrencePlan {
+                execute: vec![400],
+                skip: vec![100, 200, 300]
+            }
+        );
+    }
+
+    #[test]
+    fn scheduled_occurrence_identity_is_idempotent_and_policy_round_trips() {
+        let db = fresh_db();
+        let store = RoutineStore::new(&db);
+        let mut definition = upsert("idempotent", "0 8 * * *");
+        definition.missed_run_policy = MissedRunPolicy::CatchUp;
+        definition.missed_run_limit = 3;
+        definition.overlap_policy = RoutineOverlapPolicy::Queue;
+        let row = store.upsert(&definition, 0).unwrap();
+        assert_eq!(row.missed_run_policy, MissedRunPolicy::CatchUp);
+        assert_eq!(row.missed_run_limit, 3);
+        assert_eq!(row.overlap_policy, RoutineOverlapPolicy::Queue);
+        let first = store
+            .insert_run_for_occurrence(&row.id, 1234, 1300)
+            .unwrap();
+        let second = store
+            .insert_run_for_occurrence(&row.id, 1234, 1400)
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(store.list_runs(&row.id, 10).unwrap().len(), 1);
+        assert_eq!(
+            store.list_runs(&row.id, 10).unwrap()[0].occurrence_at,
+            Some(1234)
+        );
     }
 }

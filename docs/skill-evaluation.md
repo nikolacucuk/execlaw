@@ -2,7 +2,7 @@
 
 ## H015 baseline and H039 behavioral gate
 
-The [implementation plan](implementation-plan.md) tracks H001-H130. H015's
+The [implementation plan](implementation-plan.md) tracks H001-H154. H015's
 text-only baseline reports required-term matches; by itself, that score does
 not establish that a tool-using task succeeded. H039 extends evaluation with
 isolated task execution, deterministic mock integrations, forbidden-action

@@ -8,7 +8,7 @@ import {
     within,
 } from "@testing-library/react";
 import { Composer } from "../chat/Composer";
-import type { SkillListEntry } from "../api/endpoints";
+import type { SafetyProfileView, SkillListEntry } from "../api/endpoints";
 
 /// Build a SkillListEntry suitable for the picker tests. We don't
 /// care about the registration_kind / source / updated_at fields
@@ -24,6 +24,42 @@ function fakeSkill(name: string, description: string): SkillListEntry {
         source: "test",
         owning_plugin_id: null,
         updated_at: 0,
+    };
+}
+
+function fakeSafetyProfile(
+    profile_id: SafetyProfileView["profile"]["profile_id"],
+    supported = true,
+): SafetyProfileView {
+    return {
+        profile: {
+            profile_id,
+            display_name: profile_id,
+            capabilities: {
+                data_read: true,
+                workspace_read: true,
+                workspace_write: profile_id === "workspace_edit",
+                workspace_process: profile_id === "workspace_edit",
+                approved_integration: profile_id === "approved_integration",
+                approved_network: profile_id === "approved_integration",
+                brokered_secret_use: profile_id === "approved_integration",
+                approved_destinations: profile_id === "approved_integration",
+            },
+            approved_tools: [],
+            revision: 1,
+            updated_by: "controller",
+            updated_at: 0,
+        },
+        supported,
+        unsupported_reason: supported ? null : "Docker workspace enforcement is unavailable.",
+        permissions: {
+            filesystem: profile_id === "workspace_edit" ? "isolated workspace read and write" : "workspace read only",
+            process: profile_id === "workspace_edit" ? "bounded workspace container only" : "denied",
+            network: profile_id === "approved_integration" ? "approved integration tools only" : "denied",
+            secrets: profile_id === "approved_integration" ? "vault-brokered only" : "denied",
+            destinations: profile_id === "approved_integration" ? "approved tool list only" : "denied",
+        },
+        effective_tools: [],
     };
 }
 
@@ -59,6 +95,61 @@ describe("Composer", () => {
         fireEvent.change(input, { target: { value: "  hello  " } });
         fireEvent.submit(input.closest("form")!);
         expect(onSend).toHaveBeenCalledWith("hello", [], []);
+    });
+
+    it("shows effective permissions and sends the selected durable-run profile", async () => {
+        const onSend = vi.fn().mockResolvedValue(undefined);
+        const getSafetyProfiles = vi.fn().mockResolvedValue([
+            fakeSafetyProfile("inspect_only"),
+            fakeSafetyProfile("workspace_edit"),
+            fakeSafetyProfile("approved_integration"),
+        ]);
+        render(<Composer onSend={onSend} getSafetyProfiles={getSafetyProfiles} />);
+        const select = await screen.findByTestId("composer-safety-profile-select");
+        fireEvent.change(select, { target: { value: "workspace_edit" } });
+        expect(screen.getByTestId("composer-safety-profile-summary")).toHaveTextContent(
+            "isolated workspace read and write",
+        );
+        fireEvent.change(screen.getByTestId("composer-input"), {
+            target: { value: "Update the workspace" },
+        });
+        await act(async () => {
+            fireEvent.submit(screen.getByTestId("composer-input").closest("form")!);
+        });
+        expect(onSend).toHaveBeenCalledWith(
+            "Update the workspace",
+            [],
+            [],
+            undefined,
+            "workspace_edit",
+        );
+    });
+
+    it("hides unavailable profiles from selection and explains why", async () => {
+        render(
+            <Composer
+                onSend={() => {}}
+                getSafetyProfiles={() => Promise.resolve([
+                    fakeSafetyProfile("workspace_edit", false),
+                ])}
+            />,
+        );
+        await screen.findByTestId("composer-safety-profile-select");
+        expect(screen.getByRole("option", { name: /workspace_edit.*unavailable/i })).toBeDisabled();
+        expect(screen.getByRole("status")).toHaveTextContent(
+            "Docker workspace enforcement is unavailable.",
+        );
+    });
+
+    it("does not offer a persistent profile in incognito mode", () => {
+        render(
+            <Composer
+                onSend={() => {}}
+                incognito
+                getSafetyProfiles={() => Promise.resolve([fakeSafetyProfile("inspect_only")])}
+            />,
+        );
+        expect(screen.queryByTestId("composer-safety-profile-select")).toBeNull();
     });
 
     it("attaches explicit completion criteria only when the operator adds them", async () => {

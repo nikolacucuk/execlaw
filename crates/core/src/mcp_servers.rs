@@ -9,6 +9,11 @@
 use crate::db::{Database, DbError};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
+
+/// Vault namespace bound to one MCP server account.
+pub fn auth_vault_scope(server_id: &str) -> String {
+    format!("mcp:{server_id}")
+}
 use std::collections::HashMap;
 
 /// Transport family. `Stdio` is the only fully-wired option in 8c;

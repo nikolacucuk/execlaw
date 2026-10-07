@@ -45,6 +45,8 @@ pub mod graphiti;
 pub mod harness;
 pub mod history_budget;
 pub mod ids;
+pub mod information;
+pub mod information_store;
 pub mod local_endpoint_policy;
 pub mod log_retention;
 pub mod logs;
@@ -58,8 +60,10 @@ pub mod migrations;
 pub mod oauth;
 pub mod outbox;
 pub mod personality;
+pub mod policy_simulation;
 pub mod principal;
 pub mod principal_groups;
+pub mod projection_rebuild;
 pub mod refresh_tokens;
 pub mod reply_drafts;
 pub mod research;
@@ -67,6 +71,7 @@ pub mod retention;
 pub mod routine_run_retention;
 pub mod routines;
 pub mod runs;
+pub mod safety_profiles;
 pub mod search_providers;
 pub mod skills_config;
 pub mod tool;
@@ -84,7 +89,9 @@ pub mod webauthn;
 pub mod workspaces;
 
 pub use db::{Database, DbConfig, DbError};
-pub use events::{EventKind, EventLog, EventRecord};
+pub use events::{
+    EventKind, EventLog, EventRecord, FreshnessComparison, FreshnessHead, FreshnessManifest,
+};
 pub use ids::{
     AlertId, AttachmentId, ConversationId, EventSeq, IdempotencyKey, IncidentId, PluginId,
     PrincipalId, ResearchJobId, TurnSeq,

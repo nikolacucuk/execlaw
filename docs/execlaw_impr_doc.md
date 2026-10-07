@@ -4,8 +4,8 @@ Research cutoff: **2026-09-10**
 
 ## Status and implementation authority
 
-This is the historical research/rationale source. As of 2026-09-27, the
-accepted delivery scope is **all 130 enhancements (H001-H130)** in
+This is the historical research/rationale source. As of 2026-10-06, the
+accepted delivery scope is **all 154 enhancements (H001-H154)** in
 [`llm-harness-roadmap.md`](llm-harness-roadmap.md); their status, owners, and
 verification evidence live in [`implementation-plan.md`](implementation-plan.md).
 The older ranked portfolio and section 21 checklists below are snapshots,
@@ -100,7 +100,7 @@ The roadmap should close gaps around these strengths rather than rebuild them.
 
 These are historical implementation observations from the research snapshot,
 not a current list of open defects. Later implementations supersede some of
-them. Check the H001-H130 ledger and F01-F19 evidence before scheduling work.
+them. Check the H001-H154 ledger and F01-F19 evidence before scheduling work.
 
 ### 4.1 Historical event-integrity gap (superseded by versioned chaining)
 
@@ -1282,7 +1282,7 @@ schema enforcement, endpoint policy, and evals are in place.
 - Every adoption decision still requires a pinned proof of concept, local
   benchmark, security review, and rollback plan.
 
-## 21. Historical implementation TODO (superseded by H001-H130)
+## 21. Historical implementation TODO (superseded by H001-H154)
 
 Status updated: **2026-09-12**. A checked item means the code and focused tests
 exist in this repository; it does not imply that the broader ranked enhancement

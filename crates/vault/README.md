@@ -2,12 +2,14 @@
 
 SQLCipher master-key loader (OS keyring with a durable passphrase-file source)
 and Argon2id admin-password hashing. The event-log HMAC key is persisted
-separately so database-key rotation does not rewrite event history. Secret
-reference dispatch and provider-credential rotation remain separate operations.
+separately so database-key rotation does not rewrite event history. MCP
+bearer references are server-scoped and an unresolved configured credential
+fails closed. General plugin/provider request brokerage, grant lifetimes, and
+rotation revocation remain open under H054.
 
 ## Implementation plan
 
-All 130 enhancements are committed implementation scope under the
+All 154 enhancements are committed implementation scope under the
 [implementation plan](../../docs/implementation-plan.md). This commitment is not a
 claim that they have shipped: the plan owns implementation status, and the
 [roadmap](../../docs/llm-harness-roadmap.md) owns acceptance criteria.

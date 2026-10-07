@@ -262,7 +262,14 @@ describe("ApprovalsPage", () => {
                     original_text: "Tool-chain execution awaiting approval: send report",
                     scope: "External effect set in saved plan plan-1",
                     reason: "External effects require Controller approval.",
-                    requested_action: "[{\"label\":\"send report\",\"effect_kind\":\"email\",\"payload\":{}}]",
+                    requested_action: "Model description says this is harmless.",
+                    canonical_actions: [{
+                        operation: "email.send",
+                        target: "external@example.test",
+                        changed_fields: [{ name: "subject", value: "Report" }],
+                        reversible: false,
+                        approval_scope: "this exact persisted action",
+                    }],
                     approval_token: "signed-effect-token",
                 }],
                 memory_promotions: [],
@@ -272,7 +279,9 @@ describe("ApprovalsPage", () => {
         mountPage();
         await waitFor(() => expect(screen.getByTestId("approval-row")).toBeInTheDocument());
         expect(screen.getByTestId("approval-context").textContent).toContain("External effect set in saved plan plan-1");
-        expect(screen.getByTestId("approval-requested-action").textContent).toContain("send report");
+        expect(screen.getByTestId("approval-canonical-actions").textContent).toContain("email.send");
+        expect(screen.getByTestId("approval-canonical-actions").textContent).toContain("external@example.test");
+        expect(screen.getByTestId("approval-canonical-actions").textContent).not.toContain("harmless");
         expect(screen.getByTestId("approval-row-verb-approve")).toBeInTheDocument();
         expect(screen.queryByTestId("approval-row-verb-trust")).not.toBeInTheDocument();
         fireEvent.click(screen.getByTestId("approval-row-verb-approve"));
@@ -284,5 +293,44 @@ describe("ApprovalsPage", () => {
             verb: "approve",
             approval_token: "signed-effect-token",
         });
+    });
+
+    it("exposes cold-contact consequences in an accessible canonical action list", async () => {
+        fetchMock.mockImplementation(async (url: string) => {
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/approvals") return new Response(JSON.stringify({
+                approvals: [{
+                    kind: "cold_contact",
+                    approval_id: "cold-1",
+                    conversation_id: "conversation-1",
+                    sender_principal_id: "principal-1",
+                    original_text: "hello",
+                    scope: "Trust record for principal principal-1",
+                    reason: "New sender",
+                    requested_action: "Choose a trust decision.",
+                    canonical_actions: [{
+                        operation: "trust_principal_with_topics",
+                        target: "principal-1",
+                        changed_fields: [
+                            { name: "before_trust_class", value: "UnknownPending" },
+                            { name: "resulting_trust_class", value: "KnownLimited" },
+                            { name: "parked_message", value: "replayed after trust change" },
+                        ],
+                        reversible: true,
+                        approval_scope: "persistent trust grant limited by the topic scope entered by the Controller",
+                    }],
+                }],
+                memory_promotions: [],
+            }), { status: 200 });
+            return new Response("not found", { status: 404 });
+        });
+        mountPage();
+
+        const actions = await screen.findByRole("list", { name: "Canonical actions requiring approval" });
+        expect(actions.textContent).toContain("trust_principal_with_topics");
+        expect(screen.getByText("before_trust_class")).toBeInTheDocument();
+        expect(actions.textContent).toContain("replayed after trust change");
+        expect(actions.textContent).toContain("persistent trust grant limited by the topic scope");
+        expect(actions.querySelector("dl dt")?.textContent).toBe("Target");
     });
 });

@@ -27,6 +27,8 @@ use crate::tool_apis_subagent::InferenceSubagentApi;
 use async_trait::async_trait;
 use execlaw_core::Database;
 use execlaw_core::ids::ConversationId;
+use execlaw_core::ids::PrincipalId;
+use execlaw_core::principal::{PrincipalStore, TrustLevel as StoredTrustLevel};
 use execlaw_core::tool::{Capability, Clock, SystemClock, ToolCtx, ToolImpl, ToolOutcome};
 use execlaw_core::tool_access::ToolAccessStore;
 use execlaw_core::tool_apis::{
@@ -38,6 +40,29 @@ use execlaw_policy::trust::TrustLevel;
 use execlaw_runner_local::turn::ToolDispatch;
 use sha2::Digest;
 use std::sync::Arc;
+
+#[derive(Debug, Clone)]
+struct PolicyDecisionContext {
+    run_id: String,
+    conversation_id: String,
+    input_event_seq: i64,
+}
+
+fn policy_reason_code(error: &str) -> &'static str {
+    if error.contains("active safety profile") {
+        "safety_profile_denied"
+    } else if error.contains("trust class") || error.contains("trust >=") {
+        "trust_floor_denied"
+    } else if error.contains("disabled") || error.contains("no longer registered") {
+        "tool_unavailable"
+    } else if error.contains("caller principal") || error.contains("authority changed") {
+        "live_authority_denied"
+    } else if error.contains("capability") {
+        "capability_denied"
+    } else {
+        "policy_denied"
+    }
+}
 
 /// Concrete dispatcher built from a `PluginHost` + built-ins +
 /// caller capability set + caller trust class (the access gate).
@@ -51,6 +76,16 @@ pub struct ChainedToolDispatch<B: BuiltinTools> {
     /// keep working without seeding the gate; `None` means "skip the
     /// trust-class allowlist check," which is the legacy behaviour.
     pub access_db: Option<Database>,
+    policy_revision_snapshot: Option<i64>,
+    /// Task-scoped permissions frozen into the user event for this run.
+    pub safety_profile: Option<execlaw_core::safety_profiles::SafetyProfileSnapshot>,
+    policy_context: Option<PolicyDecisionContext>,
+    /// Principal authority captured when the turn starts. The dispatcher
+    /// compares the full persisted grant again at each tool boundary so a
+    /// trust change, delegated-scope edit, or expiry cannot be hidden by a
+    /// model request that was already in flight.
+    live_principal: Option<(PrincipalId, Option<StoredTrustLevel>)>,
+    live_authority_fingerprint: Option<String>,
     /// Phase-8d MCP dispatch tier. When present, tool names with the
     /// `mcp:<server>:<tool>` prefix route to the connection manager
     /// instead of the builtin/plugin layer.
@@ -137,6 +172,11 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
             caller_trust: TrustLevel::Controller,
             builtins,
             access_db: None,
+            policy_revision_snapshot: None,
+            safety_profile: None,
+            policy_context: None,
+            live_principal: None,
+            live_authority_fingerprint: None,
             mcp_host: None,
             conversation_id: None,
             clock: Arc::new(SystemClock),
@@ -165,12 +205,20 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
         builtins: B,
         access_db: Database,
     ) -> Self {
+        let policy_revision_snapshot = ToolAccessStore::new(&access_db)
+            .latest_policy_revision_id()
+            .ok();
         Self {
             host,
             caller_caps,
             caller_trust,
             builtins,
             access_db: Some(access_db),
+            policy_revision_snapshot,
+            safety_profile: None,
+            policy_context: None,
+            live_principal: None,
+            live_authority_fingerprint: None,
             mcp_host: None,
             conversation_id: None,
             clock: Arc::new(SystemClock),
@@ -193,6 +241,85 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
     /// existing test ctors don't have to grow another argument.
     pub fn with_mcp(mut self, mcp_host: McpHost) -> Self {
         self.mcp_host = Some(mcp_host);
+        self
+    }
+
+    /// Bind this turn to the persisted principal that supplied its authority.
+    /// The current trust record is captured now and rechecked immediately
+    /// before every tool call. A missing principal fails closed at dispatch.
+    pub fn with_live_principal(mut self, principal_id: &str) -> Self {
+        let id = PrincipalId::from(principal_id.to_owned());
+        let snapshot = self.access_db.as_ref().and_then(|db| {
+            PrincipalStore::new(db)
+                .get(&id)
+                .ok()
+                .flatten()
+                .map(|principal| principal.trust_level)
+        });
+        self.live_authority_fingerprint = snapshot.as_ref().and_then(|trust| {
+            serde_json::to_vec(trust)
+                .ok()
+                .map(|bytes| hex::encode(sha2::Sha256::digest(bytes)))
+        });
+        self.live_principal = Some((id, snapshot));
+        self
+    }
+
+    fn live_authority_label_fields(&self) -> (Option<String>, Option<String>) {
+        (
+            self.live_principal
+                .as_ref()
+                .map(|(principal_id, _)| principal_id.as_str().to_owned()),
+            self.live_authority_fingerprint.clone(),
+        )
+    }
+
+    /// Bind a production turn when a participant id is available. System
+    /// initiated turns have no principal and keep their existing host policy.
+    pub fn with_live_principal_opt(mut self, principal_id: Option<&str>) -> Self {
+        if let Some(principal_id) = principal_id {
+            let persisted_id = if principal_id == "controller" {
+                self.access_db.as_ref().and_then(|db| {
+                    crate::routes::controller_principal_id(db)
+                        .ok()
+                        .map(|id| id.as_str().to_owned())
+                })
+            } else {
+                Some(principal_id.to_owned())
+            };
+            if let Some(persisted_id) = persisted_id {
+                self = self.with_live_principal(&persisted_id);
+            } else {
+                // Keep a failed Controller lookup in the live-principal
+                // state so dispatch fails closed instead of silently
+                // dropping the authority check.
+                self = self.with_live_principal(principal_id);
+            }
+        }
+        self
+    }
+
+    /// Apply the immutable task profile alongside caller trust and tool policy.
+    pub fn with_safety_profile(
+        mut self,
+        profile: Option<execlaw_core::safety_profiles::SafetyProfileSnapshot>,
+    ) -> Self {
+        self.safety_profile = profile;
+        self
+    }
+
+    /// Attach content-free run metadata used for policy decision simulation.
+    pub fn with_policy_context(
+        mut self,
+        run_id: impl Into<String>,
+        conversation_id: impl Into<String>,
+        input_event_seq: i64,
+    ) -> Self {
+        self.policy_context = Some(PolicyDecisionContext {
+            run_id: run_id.into(),
+            conversation_id: conversation_id.into(),
+            input_event_seq,
+        });
         self
     }
 
@@ -802,11 +929,11 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
         }
         let now = self.clock.now_unix();
         if needs_mem {
-            ctx.memory = Some(Arc::new(DbMemoryApi::new(
-                db.clone(),
-                self.caller_trust.as_str(),
-                now,
-            )));
+            let api = DbMemoryApi::new(db.clone(), self.caller_trust.as_str(), now);
+            ctx.memory = Some(Arc::new(match &self.parent_run_id {
+                Some(run_id) => api.with_run_id(run_id.clone()),
+                None => api,
+            }));
         }
         if needs_notify {
             ctx.notify = Some(Arc::new(DbNotifyApi::new(db.clone(), conv_id.clone(), now)));
@@ -954,6 +1081,7 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
                             .and_then(|seq| seq.parse::<i64>().ok())
                     })
                     .or_else(|| latest_user_event_seq(&self.host.db(), &ctx.conversation_id).ok());
+                let (principal_id, fingerprint) = self.live_authority_label_fields();
                 ctx.attachments = Some(Arc::new(
                     crate::attachment_api::ServerAttachmentApi::new(
                         self.host.db().clone(),
@@ -963,6 +1091,7 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
                     .with_transports(self.host_transports.clone())
                     .with_plugin_host(self.host.clone())
                     .with_effect_context(effect_turn_seq, self.transport_effect_ordinal.clone())
+                    .with_outbound_authority(principal_id, fingerprint)
                     .with_artifacts_root(artifacts_root),
                 ));
             }
@@ -1014,39 +1143,191 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
         Arc::new(self)
     }
 
+    fn record_policy_decision(
+        &self,
+        tool_name: &str,
+        outcome: execlaw_core::policy_simulation::PolicyDecisionOutcome,
+        reason_code: &str,
+    ) -> Result<(), String> {
+        let (Some(context), Some(db)) = (&self.policy_context, &self.access_db) else {
+            return Ok(());
+        };
+        let access = ToolAccessStore::new(db)
+            .get(tool_name)
+            .map_err(|error| format!("policy decision metadata lookup failed: {error}"))?;
+        let globally_enabled = access
+            .as_ref()
+            .is_none_or(|row| row.enabled && row.removed_at.is_none());
+        let allowed_classes = access
+            .as_ref()
+            .map(|row| row.allowed_classes.clone())
+            .unwrap_or_default();
+        let mut required_capabilities = Vec::new();
+        let mut sensitive = false;
+        let mut external_effect = tool_name.starts_with(MCP_TOOL_PREFIX);
+        let mut trust_floor = None;
+
+        if let Some(tool) = self.host.registry().builtin(tool_name) {
+            let descriptor = tool.descriptor();
+            sensitive = descriptor.sensitive;
+            for capability in &descriptor.capabilities {
+                required_capabilities.extend(
+                    execlaw_policy::trust::required_policy_caps(*capability)
+                        .iter()
+                        .map(|capability| (*capability).to_owned()),
+                );
+                external_effect |= matches!(
+                    capability,
+                    Capability::WebFetch
+                        | Capability::Search
+                        | Capability::Notify
+                        | Capability::SubagentSpawn
+                        | Capability::ResearchSpawn
+                        | Capability::AttachmentSend
+                        | Capability::Transport
+                );
+                sensitive |= matches!(capability, Capability::MemoryRead | Capability::MemoryWrite);
+            }
+        } else if let Some(tool) = self.host.registry().tool(tool_name) {
+            required_capabilities = tool.required_capabilities.clone();
+            trust_floor = tool.trust_floor.clone();
+            // Plugin manifests do not yet carry a complete effect/sensitivity
+            // contract. Preserve a conservative simulation record until H065
+            // can supply exact classifications.
+            external_effect = true;
+            sensitive = true;
+            sensitive |= required_capabilities.iter().any(|capability| {
+                let lower = capability.to_ascii_lowercase();
+                lower.contains("secret") || lower.contains("sensitive")
+            });
+        }
+        required_capabilities.sort();
+        required_capabilities.dedup();
+        let profile_id = self
+            .safety_profile
+            .as_ref()
+            .map(|profile| profile.profile_id.as_str().to_owned());
+        let profile_revision = self.safety_profile.as_ref().map(|profile| profile.revision);
+        let decision = execlaw_core::policy_simulation::NewToolPolicyDecision {
+            run_id: context.run_id.clone(),
+            conversation_id: context.conversation_id.clone(),
+            input_event_seq: context.input_event_seq,
+            tool_name: tool_name.to_owned(),
+            caller_trust: self.caller_trust.as_str().to_owned(),
+            trust_floor,
+            required_capabilities,
+            globally_enabled,
+            allowed_classes,
+            profile_id,
+            profile_revision,
+            outcome,
+            reason_code: reason_code.to_owned(),
+            sensitive,
+            external_effect,
+            approval_required: false,
+            decided_at: chrono::Utc::now().timestamp(),
+        };
+        execlaw_core::policy_simulation::ToolPolicyDecisionStore::new(db)
+            .record(&decision)
+            .map_err(|error| format!("persist policy decision metadata: {error}"))?;
+        Ok(())
+    }
+
     /// Per-tool access check. Returns `Ok(())` when the call should
     /// proceed, `Err(reason)` when it must be denied. Centralises the
     /// rules so the dispatch chain has exactly one enforcement point.
     fn check_access(&self, tool_name: &str) -> Result<(), String> {
-        let Some(db) = &self.access_db else {
-            return Ok(()); // gate disabled (test / legacy)
-        };
-        let row = ToolAccessStore::new(db)
-            .get(tool_name)
-            .map_err(|e| format!("tool_access lookup failed: {e}"))?;
-        let Some(row) = row else {
-            // No policy row yet — happens transiently between boot
-            // and the first sync, or for a tool the registry-sync
-            // hasn't reflected. Allow so the runner doesn't grind to
-            // a halt; production sync runs early enough that this is
-            // a brief, harmless window.
+        self.check_live_principal()?;
+        if let Some(db) = &self.access_db {
+            let current_revision = ToolAccessStore::new(db)
+                .latest_policy_revision_id()
+                .map_err(|error| format!("tool policy revision lookup failed: {error}"))?;
+            if self.policy_revision_snapshot != Some(current_revision) {
+                return Err("not authorized: tool policy changed during this turn".into());
+            }
+        }
+        if let Some(db) = &self.access_db
+            && let Some(row) = ToolAccessStore::new(db)
+                .get(tool_name)
+                .map_err(|e| format!("tool_access lookup failed: {e}"))?
+        {
+            if !row.enabled {
+                return Err(format!("not authorized: tool '{tool_name}' is disabled"));
+            }
+            if row.removed_at.is_some() {
+                return Err(format!(
+                    "not authorized: tool '{tool_name}' is no longer registered by its source"
+                ));
+            }
+            let caller = self.caller_trust.as_str();
+            if !row.allowed_classes.iter().any(|c| c == caller) {
+                return Err(format!(
+                    "not authorized: tool '{tool_name}' is not allowed for trust class {caller}"
+                ));
+            }
+        }
+        self.check_safety_profile(tool_name)
+    }
+
+    fn check_safety_profile(&self, tool_name: &str) -> Result<(), String> {
+        let Some(profile) = &self.safety_profile else {
             return Ok(());
         };
-        if !row.enabled {
-            return Err(format!("not authorized: tool '{tool_name}' is disabled"));
+        if matches!(tool_name, "execlaw.discover_tool" | "execlaw.read_artifact") {
+            return Ok(());
         }
-        if row.removed_at.is_some() {
-            return Err(format!(
-                "not authorized: tool '{tool_name}' is no longer registered by its source"
-            ));
+        let allowed = if let Some(tool) = self.host.registry().builtin(tool_name) {
+            profile.allows_builtin(tool_name, &tool.descriptor().capabilities)
+        } else if tool_name.starts_with(MCP_TOOL_PREFIX) {
+            profile.allows_mcp_tool(tool_name)
+        } else if let Some(tool) = self.host.registry().tool(tool_name) {
+            profile.allows_plugin_tool(tool_name, &tool.required_capabilities)
+        } else {
+            false
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(format!(
+                "not authorized: active safety profile '{}' denies this tool",
+                profile.profile_id.as_str()
+            ))
         }
-        let caller = self.caller_trust.as_str();
-        if !row.allowed_classes.iter().any(|c| c == caller) {
-            return Err(format!(
-                "not authorized: tool '{tool_name}' is not allowed for trust class {caller}"
-            ));
+    }
+
+    fn check_live_principal(&self) -> Result<(), String> {
+        let Some((principal_id, Some(snapshot))) = &self.live_principal else {
+            if self.live_principal.is_some() {
+                return Err("not authorized: caller principal is unavailable".into());
+            }
+            return Ok(());
+        };
+        let db = self
+            .access_db
+            .as_ref()
+            .ok_or_else(|| "not authorized: live principal checks are unavailable".to_owned())?;
+        let current = PrincipalStore::new(db)
+            .get(principal_id)
+            .map_err(|error| format!("live principal authority lookup failed: {error}"))?
+            .ok_or_else(|| "not authorized: caller principal was removed".to_owned())?;
+        if &current.trust_level != snapshot {
+            return Err("not authorized: caller authority changed during the turn".into());
         }
-        Ok(())
+        if current.trust_level.class_tag() != self.caller_trust.as_str() {
+            return Err("not authorized: caller trust no longer matches this turn".into());
+        }
+        match &current.trust_level {
+            StoredTrustLevel::Blocked { .. } | StoredTrustLevel::UnknownPending { .. } => {
+                Err("not authorized: caller principal is not active".into())
+            }
+            StoredTrustLevel::Delegated {
+                expires_at: Some(expires_at),
+                ..
+            } if *expires_at <= chrono::Utc::now().timestamp() => {
+                Err("not authorized: delegated authority has expired".into())
+            }
+            _ => Ok(()),
+        }
     }
 }
 
@@ -1089,7 +1370,14 @@ impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
         // Phase-8a access gate runs FIRST so a denied call never
         // reaches a builtin's side-effect, a plugin subprocess, or an
         // MCP server.
-        self.check_access(tool_name)?;
+        if let Err(error) = self.check_access(tool_name) {
+            self.record_policy_decision(
+                tool_name,
+                execlaw_core::policy_simulation::PolicyDecisionOutcome::Denied,
+                policy_reason_code(&error),
+            )?;
+            return Err(error);
+        }
 
         // 2026-05-16 — fix #4: built-in capability gate. The plugin
         // tier already enforces `caller_caps ⊇ required_capabilities`
@@ -1108,13 +1396,56 @@ impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
             let caps: Vec<&str> = self.caller_caps.iter().map(|s| s.as_str()).collect();
             for c in &tool.descriptor().capabilities {
                 if let Err(missing) = execlaw_policy::trust::check_builtin_capability(*c, &caps) {
-                    return Err(format!(
+                    let error = format!(
                         "not authorized: tool '{tool_name}' requires capability \
                          '{missing}' not in caller's set"
-                    ));
+                    );
+                    self.record_policy_decision(
+                        tool_name,
+                        execlaw_core::policy_simulation::PolicyDecisionOutcome::Denied,
+                        "caller_capability_denied",
+                    )?;
+                    return Err(error);
                 }
             }
         }
+
+        if let Some(registered) = self.host.registry().tool(tool_name) {
+            if !self.caller_caps.iter().any(|cap| cap == "*")
+                && registered
+                    .required_capabilities
+                    .iter()
+                    .any(|required| !self.caller_caps.iter().any(|cap| cap == required))
+            {
+                let error = format!(
+                    "not authorized: plugin tool '{tool_name}' requires an ungranted capability"
+                );
+                self.record_policy_decision(
+                    tool_name,
+                    execlaw_core::policy_simulation::PolicyDecisionOutcome::Denied,
+                    "caller_capability_denied",
+                )?;
+                return Err(error);
+            }
+            if let Some(floor) = registered.trust_floor.as_deref()
+                && TrustLevel::parse(floor)
+                    .is_some_and(|required| self.caller_trust.rank() < required.rank())
+            {
+                let error =
+                    format!("not authorized: plugin tool '{tool_name}' requires trust >= {floor}");
+                self.record_policy_decision(
+                    tool_name,
+                    execlaw_core::policy_simulation::PolicyDecisionOutcome::Denied,
+                    "trust_floor_denied",
+                )?;
+                return Err(error);
+            }
+        }
+        self.record_policy_decision(
+            tool_name,
+            execlaw_core::policy_simulation::PolicyDecisionOutcome::Allowed,
+            "allowed",
+        )?;
 
         if tool_name.starts_with("workspace.")
             && let Some(contract) = self.host.registry().host_tool(tool_name)
@@ -1245,6 +1576,8 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
         let ordinal = self
             .transport_effect_ordinal
             .load(std::sync::atomic::Ordering::SeqCst);
+        let (principal_id, fingerprint) = self.live_authority_label_fields();
+        let authority = principal_id.as_deref().zip(fingerprint.as_deref());
         Some(
             crate::transport_outbox::stage_plugin_text(
                 &self.host.db(),
@@ -1254,6 +1587,7 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
                 channel,
                 &recipient,
                 text,
+                authority,
             )
             .map(|outbox_id| {
                 serde_json::json!({
@@ -1767,6 +2101,218 @@ trust_floor = "Controller"
         );
         let v = disp.call("echo", &serde_json::json!({})).await.unwrap();
         assert_eq!(v["reached"], true);
+    }
+
+    #[tokio::test]
+    async fn inspect_only_profile_denies_an_unclassified_write_before_builtin_execution() {
+        use execlaw_core::tool_access::{ToolAccessSeed, ToolAccessStore, ToolSource};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct LegacyWrite(Arc<AtomicBool>);
+        #[async_trait]
+        impl BuiltinTools for LegacyWrite {
+            async fn call(
+                &self,
+                name: &str,
+                _: &serde_json::Value,
+            ) -> Option<Result<serde_json::Value, String>> {
+                if name == "workspace.write_file" {
+                    self.0.store(true, Ordering::SeqCst);
+                    Some(Ok(serde_json::json!({"written":true})))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let host = test_host();
+        let db = host.db().clone();
+        ToolAccessStore::new(&db)
+            .upsert_seen(
+                &ToolAccessSeed {
+                    tool_name: "workspace.write_file".into(),
+                    source: ToolSource::Builtin,
+                    source_id: None,
+                    description: None,
+                    input_schema: None,
+                    default_allowed_classes: vec!["Controller".into()],
+                },
+                1,
+            )
+            .unwrap();
+        let profile = execlaw_core::safety_profiles::SafetyProfileStore::new(&db)
+            .get(execlaw_core::safety_profiles::SafetyProfileId::InspectOnly)
+            .unwrap();
+        let invoked = Arc::new(AtomicBool::new(false));
+        let dispatch = ChainedToolDispatch::with_access_gate(
+            host,
+            vec!["*".into()],
+            TrustLevel::Controller,
+            LegacyWrite(invoked.clone()),
+            db,
+        )
+        .with_safety_profile(Some(
+            execlaw_core::safety_profiles::SafetyProfileSnapshot::from_profile(&profile),
+        ));
+
+        let error = dispatch
+            .call(
+                "workspace.write_file",
+                &serde_json::json!({"path":"safe.txt"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(error.contains("active safety profile"));
+        assert!(!invoked.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn revoked_principal_is_denied_at_tool_dispatch_after_turn_start() {
+        use execlaw_core::ids::PrincipalId;
+        use execlaw_core::principal::{Principal, PrincipalStore};
+        use execlaw_core::tool_access::{ToolAccessSeed, ToolAccessStore, ToolSource};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct EchoBuiltin(Arc<AtomicBool>);
+        #[async_trait]
+        impl BuiltinTools for EchoBuiltin {
+            async fn call(
+                &self,
+                name: &str,
+                _: &serde_json::Value,
+            ) -> Option<Result<serde_json::Value, String>> {
+                if name == "echo" {
+                    self.0.store(true, Ordering::SeqCst);
+                    Some(Ok(serde_json::json!({"reached": true})))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let host = test_host();
+        let db = host.db().clone();
+        let principal_id = PrincipalId::from("live-authority-test");
+        let store = PrincipalStore::new(&db);
+        let trusted = Principal {
+            id: principal_id.clone(),
+            identifiers: Vec::new(),
+            trust_level: StoredTrustLevel::KnownTrusted {
+                resolvers: Vec::new(),
+                approved_by: PrincipalId::from("controller"),
+                approved_at: 1,
+            },
+            resolved_by: Vec::new(),
+            metadata: serde_json::json!({}),
+            first_seen: 1,
+            last_seen: Some(1),
+            controller_notes: None,
+        };
+        store.upsert(&trusted).unwrap();
+        ToolAccessStore::new(&db)
+            .upsert_seen(
+                &ToolAccessSeed {
+                    tool_name: "echo".into(),
+                    source: ToolSource::Builtin,
+                    source_id: None,
+                    description: None,
+                    input_schema: None,
+                    default_allowed_classes: vec!["KnownTrusted".into()],
+                },
+                1,
+            )
+            .unwrap();
+
+        let invoked = Arc::new(AtomicBool::new(false));
+        let dispatch = ChainedToolDispatch::with_access_gate(
+            host,
+            vec!["*".into()],
+            TrustLevel::KnownTrusted,
+            EchoBuiltin(invoked.clone()),
+            db.clone(),
+        )
+        .with_live_principal(principal_id.as_str());
+
+        let mut revoked = trusted;
+        revoked.trust_level = StoredTrustLevel::Blocked {
+            blocked_by: PrincipalId::from("controller"),
+            blocked_at: chrono::Utc::now().timestamp(),
+            reason: Some("revoked while model request was in flight".into()),
+        };
+        store.upsert(&revoked).unwrap();
+
+        let error = dispatch
+            .call("echo", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("authority changed"));
+        assert!(!invoked.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn changed_policy_revision_denies_a_tool_catalogued_earlier_in_the_turn() {
+        use execlaw_core::tool_access::{ToolAccessSeed, ToolAccessStore, ToolSource};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct EchoBuiltin(Arc<AtomicBool>);
+        #[async_trait]
+        impl BuiltinTools for EchoBuiltin {
+            async fn call(
+                &self,
+                name: &str,
+                _: &serde_json::Value,
+            ) -> Option<Result<serde_json::Value, String>> {
+                if name == "echo" {
+                    self.0.store(true, Ordering::SeqCst);
+                    Some(Ok(serde_json::json!({"reached": true})))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let host = test_host();
+        let db = host.db().clone();
+        let access = ToolAccessStore::new(&db);
+        access
+            .upsert_seen(
+                &ToolAccessSeed {
+                    tool_name: "echo".into(),
+                    source: ToolSource::Builtin,
+                    source_id: None,
+                    description: None,
+                    input_schema: None,
+                    default_allowed_classes: vec!["Controller".into()],
+                },
+                1,
+            )
+            .unwrap();
+        let invoked = Arc::new(AtomicBool::new(false));
+        let dispatch = ChainedToolDispatch::with_access_gate(
+            host,
+            vec!["*".into()],
+            TrustLevel::Controller,
+            EchoBuiltin(invoked.clone()),
+            db.clone(),
+        );
+        access
+            .set_policy_with_actor("echo", true, &["Controller".into()], "controller", 2, None)
+            .unwrap();
+
+        let error = dispatch
+            .call("echo", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(error.contains("policy changed during this turn"));
+        assert!(!invoked.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn missing_controller_mapping_stays_fail_closed_in_live_principal_state() {
+        let dispatch = ChainedToolDispatch::new(test_host(), vec!["*".into()], NoBuiltinTools)
+            .with_live_principal_opt(Some("controller"));
+        assert!(dispatch.live_principal.is_some());
+        assert!(dispatch.live_principal.as_ref().unwrap().1.is_none());
     }
 
     /// Phase-8a gate: a tool flipped `enabled = false` is denied

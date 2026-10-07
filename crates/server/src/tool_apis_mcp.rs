@@ -85,15 +85,15 @@ impl McpAdminApi for DbMcpAdminApi {
             McpTransport::Stdio => unreachable!(),
         };
 
-        // Persist the bearer token (if any) in the vault under a
-        // generated, plugin-scope-less key. The row's
-        // auth_secret_ref points at it.
+        // Persist the bearer token in a vault namespace owned by this MCP
+        // server. A ref copied from another server cannot resolve here.
         let auth_secret_ref =
             if let Some(tok) = spec.auth_token.as_deref().filter(|s| !s.is_empty()) {
                 let key = format!("mcp:{}/auth_token", spec.id);
+                let scope = execlaw_core::mcp_servers::auth_vault_scope(&spec.id);
                 let now = chrono::Utc::now().timestamp();
                 VaultRowStore::new(&self.db)
-                    .put(None, &key, tok.as_bytes(), now)
+                    .put(Some(&scope), &key, tok.as_bytes(), now)
                     .map_err(|e| ApiError::Storage(format!("vault put: {e}")))?;
                 Some(key)
             } else {
@@ -196,7 +196,8 @@ impl McpAdminApi for DbMcpAdminApi {
 
         // Clean up the vault secret if any.
         if let Some(ref secret_key) = existing.auth_secret_ref {
-            let _ = VaultRowStore::new(&self.db).delete(None, secret_key);
+            let scope = execlaw_core::mcp_servers::auth_vault_scope(id);
+            let _ = VaultRowStore::new(&self.db).delete(Some(&scope), secret_key);
         }
         Ok(())
     }

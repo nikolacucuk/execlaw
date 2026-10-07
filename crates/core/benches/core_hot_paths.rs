@@ -1830,6 +1830,41 @@ fn bench_automation_suggestions(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_sqlite_wal_commit_durability(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sqlite_wal_commit_durability");
+    for mode in ["NORMAL", "FULL"] {
+        let directory = tempfile::tempdir().unwrap();
+        let db = Database::open(&DbConfig {
+            path: directory.path().join("sync-bench.db"),
+            key: None,
+        })
+        .unwrap();
+        db.with_conn(|connection| {
+            connection.pragma_update(None, "synchronous", mode)?;
+            connection.execute_batch(
+                "CREATE TABLE commit_probe (id INTEGER PRIMARY KEY, payload BLOB NOT NULL)",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let mut sequence = 0i64;
+        group.bench_function(BenchmarkId::new("commit_256_bytes", mode), |bench| {
+            bench.iter(|| {
+                sequence += 1;
+                db.transaction(|transaction| {
+                    transaction.execute(
+                        "INSERT INTO commit_probe (id, payload) VALUES (?1, zeroblob(256))",
+                        [sequence],
+                    )?;
+                    Ok(black_box(()))
+                })
+                .unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_automation_bus,
@@ -1859,5 +1894,6 @@ criterion_group!(
     bench_research_gather_paths,
     bench_research_retention_candidates,
     bench_transport_binding_store,
+    bench_sqlite_wal_commit_durability,
 );
 criterion_main!(benches);

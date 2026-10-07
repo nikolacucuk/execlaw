@@ -2,9 +2,9 @@
 
 Status: implementation started 2026-09-12.
 
-## Relationship to the 130-item implementation plan
+## Relationship to the 154-item implementation plan
 
-All H001-H130 are accepted implementation scope in
+All H001-H154 are accepted implementation scope in
 [`implementation-plan.md`](implementation-plan.md). This file retains the
 memory subsystem's detailed work breakdown; it is not a separate competing
 status ledger. Coordinate H012-H015, H031-H032, H037-H039, H048, H051,

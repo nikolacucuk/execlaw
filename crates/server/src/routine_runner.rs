@@ -19,7 +19,8 @@ use crate::events::UiEvent;
 use crate::state::AppState;
 use chrono::{DurationRound, TimeDelta, TimeZone, Utc};
 use execlaw_core::routines::{
-    RoutineRunStatus, RoutineStore, next_fire_after, parse_cron, parse_timezone,
+    MissedRunPolicy, RoutineOverlapPolicy, RoutineRunStatus, RoutineStore, next_fire_after,
+    parse_cron, parse_timezone, plan_due_occurrences,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -76,8 +77,11 @@ impl Inner {
     /// `next_run_at`. Errors at the row level are isolated — one
     /// busted routine shouldn't poison the whole tick.
     async fn tick_once(&self) -> Result<(), execlaw_core::routines::RoutineError> {
+        self.tick_once_at(Utc::now().timestamp()).await
+    }
+
+    async fn tick_once_at(&self, now: i64) -> Result<(), execlaw_core::routines::RoutineError> {
         let store = RoutineStore::new(&self.state.db);
-        let now = Utc::now().timestamp();
         for (run_id, routine_id) in store.list_pending_run_ids(500)? {
             let Some(routine) = store.get(&routine_id)? else {
                 continue;
@@ -85,7 +89,19 @@ impl Inner {
             if !routine.enabled {
                 continue;
             }
-            if let Err(error) = self.fire_one(&store, &routine, now, Some(&run_id)).await {
+            let occurrence_at = store.run_occurrence_at(&run_id)?.unwrap_or(now);
+            let next_run_at = next_run_after(&routine, now);
+            if let Err(error) = self
+                .fire_one(
+                    &store,
+                    &routine,
+                    now,
+                    occurrence_at,
+                    next_run_at,
+                    Some(&run_id),
+                )
+                .await
+            {
                 warn!(
                     run_id,
                     routine_id = %routine.id,
@@ -98,12 +114,55 @@ impl Inner {
             return Ok(());
         }
         for routine in due {
-            if let Err(e) = self.fire_one(&store, &routine, now, None).await {
-                warn!(
-                    "routine fire failed for '{}' ({}): {}",
-                    routine.id, routine.name, e
-                );
+            let occurrences = due_occurrences(&routine, now);
+            let plan = plan_due_occurrences(
+                routine.missed_run_policy,
+                routine.missed_run_limit,
+                now,
+                &occurrences,
+            );
+            let next_run_at = next_run_after(&routine, now);
+            let active = store.has_active_run(&routine.id)?;
+            for occurrence_at in plan.skip {
+                record_skipped(
+                    &store,
+                    &routine,
+                    occurrence_at,
+                    now,
+                    "missed-run policy skipped this occurrence",
+                )?;
             }
+            for occurrence_at in plan.execute {
+                if active && routine.overlap_policy == RoutineOverlapPolicy::Forbid {
+                    record_skipped(
+                        &store,
+                        &routine,
+                        occurrence_at,
+                        now,
+                        "overlap policy skipped this occurrence while another run is active",
+                    )?;
+                    continue;
+                }
+                if active && routine.overlap_policy == RoutineOverlapPolicy::Replace {
+                    store.supersede_queued_runs(&routine.id, occurrence_at, now)?;
+                    let _ = store.insert_run_for_occurrence(&routine.id, occurrence_at, now)?;
+                    continue;
+                }
+                if active && routine.overlap_policy == RoutineOverlapPolicy::Queue {
+                    let _ = store.insert_run_for_occurrence(&routine.id, occurrence_at, now)?;
+                    continue;
+                }
+                if let Err(e) = self
+                    .fire_one(&store, &routine, now, occurrence_at, next_run_at, None)
+                    .await
+                {
+                    warn!(
+                        "routine fire failed for '{}' ({}): {}",
+                        routine.id, routine.name, e
+                    );
+                }
+            }
+            store.advance_schedule(&routine.id, now, next_run_at)?;
         }
         Ok(())
     }
@@ -113,6 +172,8 @@ impl Inner {
         store: &RoutineStore<'_>,
         routine: &execlaw_core::routines::RoutineRow,
         now: i64,
+        occurrence_at: i64,
+        next_run_at: Option<i64>,
         existing_run_id: Option<&str>,
     ) -> Result<(), execlaw_core::routines::RoutineError> {
         // Insert a Pending run row first so the operator sees the
@@ -121,7 +182,7 @@ impl Inner {
         // attempt without polling.
         let run_id = match existing_run_id {
             Some(run_id) => run_id.to_owned(),
-            None => store.insert_run_pending(&routine.id, now)?,
+            None => store.insert_run_for_occurrence(&routine.id, occurrence_at, now)?,
         };
         if !store.claim_pending_run(&run_id, now)? {
             return Ok(());
@@ -167,16 +228,6 @@ impl Inner {
         // this same minute. A schedule whose next fire we can't compute
         // is rolled to None — the operator sees "next: never" and can
         // fix the cron.
-        let next_run_at = match (
-            parse_cron(&routine.schedule_cron),
-            parse_timezone(&routine.timezone),
-        ) {
-            (Ok(sched), Ok(tz)) => {
-                let after = Utc.timestamp_opt(now, 0).single().unwrap_or_else(Utc::now);
-                next_fire_after(&sched, tz, after).map(|t| t.timestamp())
-            }
-            _ => None,
-        };
         store.record_run(&routine.id, dispatch_status, now, next_run_at)?;
 
         // Notify the SPA so the run history view updates live without
@@ -218,6 +269,62 @@ impl Inner {
     }
 }
 
+fn next_run_after(routine: &execlaw_core::routines::RoutineRow, now: i64) -> Option<i64> {
+    let (Ok(schedule), Ok(tz)) = (
+        parse_cron(&routine.schedule_cron),
+        parse_timezone(&routine.timezone),
+    ) else {
+        return None;
+    };
+    Utc.timestamp_opt(now, 0)
+        .single()
+        .and_then(|after| next_fire_after(&schedule, tz, after))
+        .map(|next| next.timestamp())
+}
+
+fn due_occurrences(routine: &execlaw_core::routines::RoutineRow, now: i64) -> Vec<i64> {
+    let Some(mut cursor) = routine.next_run_at else {
+        return Vec::new();
+    };
+    if routine.missed_run_policy == MissedRunPolicy::Coalesce && cursor <= now {
+        // One stable identity represents the whole accumulated overdue window.
+        return vec![cursor];
+    }
+    let (Ok(schedule), Ok(tz)) = (
+        parse_cron(&routine.schedule_cron),
+        parse_timezone(&routine.timezone),
+    ) else {
+        return vec![cursor];
+    };
+    let mut occurrences = Vec::new();
+    while cursor <= now && occurrences.len() < 1_000 {
+        occurrences.push(cursor);
+        let Some(after) = Utc.timestamp_opt(cursor, 0).single() else {
+            break;
+        };
+        let Some(next) = next_fire_after(&schedule, tz, after) else {
+            break;
+        };
+        let next = next.timestamp();
+        if next <= cursor {
+            break;
+        }
+        cursor = next;
+    }
+    occurrences
+}
+
+fn record_skipped(
+    store: &RoutineStore<'_>,
+    routine: &execlaw_core::routines::RoutineRow,
+    occurrence_at: i64,
+    now: i64,
+    reason: &str,
+) -> Result<(), execlaw_core::routines::RoutineError> {
+    let run_id = store.insert_run_for_occurrence(&routine.id, occurrence_at, now)?;
+    store.skip_run(&run_id, now, reason)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,6 +342,9 @@ mod tests {
                     target_conversation_id: None,
                     enabled: true,
                     completion_contract: None,
+                    missed_run_policy: execlaw_core::routines::MissedRunPolicy::Skip,
+                    missed_run_limit: 1,
+                    overlap_policy: execlaw_core::routines::RoutineOverlapPolicy::Forbid,
                 },
                 now,
             )
@@ -290,6 +400,9 @@ mod tests {
                     target_conversation_id: None,
                     enabled: false,
                     completion_contract: None,
+                    missed_run_policy: execlaw_core::routines::MissedRunPolicy::Skip,
+                    missed_run_limit: 1,
+                    overlap_policy: execlaw_core::routines::RoutineOverlapPolicy::Forbid,
                 },
                 now,
             )
@@ -301,6 +414,33 @@ mod tests {
         inner.tick_once().await.unwrap();
         let runs = store.list_runs(&row.id, 10).unwrap();
         assert!(runs.is_empty(), "disabled routine must not fire");
+    }
+
+    #[tokio::test]
+    async fn injected_tick_time_applies_skip_policy_and_advances_after_downtime() {
+        let state = crate::routes::test_app_state();
+        let inner = Inner {
+            state: state.clone(),
+        };
+        let store = RoutineStore::new(&state.db);
+        let now = Utc
+            .with_ymd_and_hms(2026, 10, 6, 10, 0, 0)
+            .unwrap()
+            .timestamp();
+        let id = upsert_one(&store, "skip downtime", "* * * * *", now - 3_600);
+        store
+            .advance_schedule(&id, now - 1, Some(now - 600))
+            .unwrap();
+
+        inner.tick_once_at(now).await.unwrap();
+
+        let runs = store.list_runs(&id, 50).unwrap();
+        assert!(!runs.is_empty());
+        assert!(
+            runs.iter()
+                .all(|run| run.status == RoutineRunStatus::Skipped)
+        );
+        assert!(store.get(&id).unwrap().unwrap().next_run_at.unwrap() > now);
     }
 
     #[tokio::test]

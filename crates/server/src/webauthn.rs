@@ -198,7 +198,11 @@ pub fn issue_login_tokens(
     let mut headers = axum::http::HeaderMap::new();
     headers.insert(
         axum::http::header::SET_COOKIE,
-        crate::routes::build_access_cookie(&access, state.config.access_token_ttl_secs),
+        crate::routes::build_access_cookie(
+            &access,
+            state.config.access_token_ttl_secs,
+            crate::routes::https_only_session_cookies_enabled(state),
+        ),
     );
     Ok((
         headers,

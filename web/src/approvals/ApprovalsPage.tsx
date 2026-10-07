@@ -243,7 +243,23 @@ export function ApprovalsPage() {
                                         <dd className="col-sm-10">{a.reason}</dd>
                                         <dt className="col-sm-2">Requested action</dt>
                                         <dd className="col-sm-10 mb-0">
-                                            {a.kind === "effectful_chain" ? (
+                                            {a.canonical_actions?.length ? (
+                                                <ol className="mb-0 ps-3" aria-label="Canonical actions requiring approval" data-testid="approval-canonical-actions">
+                                                    {a.canonical_actions.map((action, index) => <li key={`${action.operation}-${index}`} className="mb-2">
+                                                        <strong>{action.operation}</strong>
+                                                        <dl className="row mb-0">
+                                                            <dt className="col-sm-3">Target</dt>
+                                                            <dd className="col-sm-9">{action.target ?? "Not specified"}</dd>
+                                                            <dt className="col-sm-3">Changed fields</dt>
+                                                            <dd className="col-sm-9"><ul className="mb-0">{action.changed_fields.map((field) => <li key={field.name}><code>{field.name}</code>: {field.value}</li>)}</ul></dd>
+                                                            <dt className="col-sm-3">Reversible</dt>
+                                                            <dd className="col-sm-9">{action.reversible ? "Yes" : "No"}</dd>
+                                                            <dt className="col-sm-3">Approval scope</dt>
+                                                            <dd className="col-sm-9">{action.approval_scope}</dd>
+                                                        </dl>
+                                                    </li>)}
+                                                </ol>
+                                            ) : a.kind === "effectful_chain" ? (
                                                 <pre className="small mb-0" data-testid="approval-requested-action">{a.requested_action}</pre>
                                             ) : (
                                                 <span data-testid="approval-requested-action">{a.requested_action}</span>

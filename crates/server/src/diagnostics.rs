@@ -9,10 +9,17 @@ use axum::http::StatusCode;
 use axum::response::Json;
 use axum::routing::get;
 use execlaw_core::backends::{BackendPurpose, BackendStore};
+use execlaw_core::db::Database;
 use execlaw_core::users::{UserRole, UserStore};
 use execlaw_core::{migrations::MigrationRunner, research::ResearchJobStore};
 use serde::Serialize;
+use std::path::Path;
 use utoipa::ToSchema;
+
+pub(crate) const STORAGE_WARNING_RESERVE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+pub(crate) const STORAGE_CRITICAL_RESERVE_BYTES: u64 = 512 * 1024 * 1024;
+pub(crate) const STORAGE_MAX_WAL_BYTES: u64 = 1024 * 1024 * 1024;
+const WAL_CHECKPOINT_WARNING_FRAMES: i64 = 1000;
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SupportBundle {
@@ -42,6 +49,25 @@ pub struct DatabaseDiagnostic {
     pub database_file_present: bool,
     pub encryption_mode: String,
     pub schema_migrations_applied: u32,
+    pub database_bytes: u64,
+    pub wal_bytes: u64,
+    pub shm_bytes: u64,
+    pub journal_bytes: u64,
+    pub referenced_blob_bytes: u64,
+    pub available_disk_bytes: Option<u64>,
+    pub storage_state: String,
+    pub storage_action: Option<String>,
+    pub wal_checkpoint_blocked: bool,
+    pub wal_frames: i64,
+    pub wal_frames_checkpointed: i64,
+    pub database_queued_jobs: usize,
+    pub database_running_jobs: usize,
+    pub database_rejected_jobs: u64,
+    pub database_completed_jobs: u64,
+    pub database_queue_wait_micros_max: u64,
+    pub database_service_micros_max: u64,
+    pub transaction_micros_total: u64,
+    pub transaction_micros_max: u64,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -147,13 +173,11 @@ pub async fn support_bundle(
             message: "Controller role required".into(),
         });
     }
-    tokio::task::spawn_blocking(move || build_support_bundle(&state))
+    let executor = state.db.clone();
+    executor
+        .run_blocking(move || build_support_bundle(&state))
         .await
-        .map_err(|error| ApiError {
-            status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "diagnostics_worker_failed",
-            message: error.to_string(),
-        })?
+        .map_err(ApiError::from)?
         .map(Json)
 }
 
@@ -162,6 +186,21 @@ fn build_support_bundle(state: &AppState) -> Result<SupportBundle, ApiError> {
     let schema_migrations_applied = MigrationRunner::new(&state.db)
         .applied_count()
         .map_err(|error| diagnostic_error("diagnostics_schema_read_failed", error))?;
+    let file_sizes = state.db.file_sizes();
+    let available_disk_bytes = available_space_for(state.db.path());
+    let referenced_blob_bytes = referenced_blob_bytes(&state.db)?;
+    let checkpoint = state
+        .db
+        .wal_checkpoint_status()
+        .map_err(|error| diagnostic_error("diagnostics_wal_status_failed", error))?;
+    let execution_metrics = state.db.execution_metrics();
+    let (storage_state, storage_action) = storage_state(
+        available_disk_bytes,
+        file_sizes.wal_bytes,
+        checkpoint.checkpoint_blocked,
+        checkpoint.frames_in_wal,
+        checkpoint.frames_checkpointed,
+    );
 
     let hardware = execlaw_container_manager::detect();
     let available_ram_mb = execlaw_container_manager::available_ram_mb();
@@ -349,6 +388,25 @@ fn build_support_bundle(state: &AppState) -> Result<SupportBundle, ApiError> {
             "plaintext_sqlite_connection".into()
         },
         schema_migrations_applied,
+        database_bytes: file_sizes.database_bytes,
+        wal_bytes: file_sizes.wal_bytes,
+        shm_bytes: file_sizes.shm_bytes,
+        journal_bytes: file_sizes.journal_bytes,
+        referenced_blob_bytes,
+        available_disk_bytes,
+        storage_state: storage_state.to_owned(),
+        storage_action: storage_action.map(str::to_owned),
+        wal_checkpoint_blocked: checkpoint.checkpoint_blocked,
+        wal_frames: checkpoint.frames_in_wal,
+        wal_frames_checkpointed: checkpoint.frames_checkpointed,
+        database_queued_jobs: execution_metrics.queued_jobs,
+        database_running_jobs: execution_metrics.running_jobs,
+        database_rejected_jobs: execution_metrics.rejected_jobs,
+        database_completed_jobs: execution_metrics.completed_jobs,
+        database_queue_wait_micros_max: execution_metrics.queue_wait_micros_max,
+        database_service_micros_max: execution_metrics.service_micros_max,
+        transaction_micros_total: execution_metrics.transaction_micros_total,
+        transaction_micros_max: execution_metrics.transaction_micros_max,
     };
 
     let mut corrective_actions = Vec::new();
@@ -356,6 +414,12 @@ fn build_support_bundle(state: &AppState) -> Result<SupportBundle, ApiError> {
         corrective_actions.push(CorrectiveAction {
             code: "database_not_encrypted".into(),
             action: "For production state, use the SQLCipher-enabled release and run the backup/rotation qualification before migrating.".into(),
+        });
+    }
+    if let Some(action) = &database.storage_action {
+        corrective_actions.push(CorrectiveAction {
+            code: format!("storage_{}", database.storage_state),
+            action: action.clone(),
         });
     }
     if backends.iter().all(|backend| !backend.configured) {
@@ -398,7 +462,7 @@ fn build_support_bundle(state: &AppState) -> Result<SupportBundle, ApiError> {
     }
 
     Ok(SupportBundle {
-        schema_version: 1,
+        schema_version: 2,
         generated_at: chrono::Utc::now().timestamp(),
         application: ApplicationDiagnostic {
             version: env!("CARGO_PKG_VERSION").into(),
@@ -451,6 +515,107 @@ fn summarize_qualified_capabilities(observations: &[String]) -> Vec<QualifiedCap
                 .count() as u64,
         })
         .collect()
+}
+
+pub(crate) fn optional_work_denial(database: &Database, write_path: &Path) -> Option<&'static str> {
+    if database.path() == Path::new(":memory:") {
+        return None;
+    }
+    let Some(database_free) = available_space_for(database.path()) else {
+        return Some("optional work paused because database free space cannot be measured");
+    };
+    let Some(target_free) = available_space_for(write_path) else {
+        return Some("optional work paused because target free space cannot be measured");
+    };
+    optional_work_denial_for(database_free, target_free, database.file_sizes().wal_bytes)
+}
+
+fn optional_work_denial_for(
+    database_free: u64,
+    target_free: u64,
+    wal_bytes: u64,
+) -> Option<&'static str> {
+    if database_free < STORAGE_WARNING_RESERVE_BYTES || target_free < STORAGE_WARNING_RESERVE_BYTES
+    {
+        return Some("optional work paused to preserve the local storage reserve");
+    }
+    if wal_bytes > STORAGE_MAX_WAL_BYTES {
+        return Some("optional work paused while WAL growth is investigated");
+    }
+    None
+}
+
+fn available_space_for(path: &Path) -> Option<u64> {
+    if path == Path::new(":memory:") {
+        return None;
+    }
+    let candidate = if path.is_dir() {
+        path
+    } else {
+        path.parent().unwrap_or(path)
+    };
+    let existing =
+        std::iter::successors(Some(candidate), |path| path.parent()).find(|path| path.is_dir())?;
+    fs4::available_space(existing).ok()
+}
+
+fn referenced_blob_bytes(database: &Database) -> Result<u64, ApiError> {
+    let paths = database
+        .with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT path FROM state_attachments UNION ALL SELECT path FROM state_artifacts",
+            )?;
+            Ok(statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?)
+        })
+        .map_err(|error| diagnostic_error("diagnostics_blob_size_failed", error))?;
+    Ok(paths.into_iter().fold(0u64, |total, path| {
+        let size = std::fs::symlink_metadata(path)
+            .ok()
+            .filter(|metadata| metadata.file_type().is_file())
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
+        total.saturating_add(size)
+    }))
+}
+
+fn storage_state(
+    available_bytes: Option<u64>,
+    wal_bytes: u64,
+    checkpoint_blocked: bool,
+    wal_frames: i64,
+    checkpointed_frames: i64,
+) -> (&'static str, Option<&'static str>) {
+    let Some(available_bytes) = available_bytes else {
+        return (
+            "unknown",
+            Some(
+                "Free space could not be measured; optional work is paused until it can be checked.",
+            ),
+        );
+    };
+    if available_bytes < STORAGE_CRITICAL_RESERVE_BYTES || wal_bytes > STORAGE_MAX_WAL_BYTES {
+        return (
+            "critical",
+            Some(
+                "Pause optional indexing and model downloads; free disk space, then retry maintenance.",
+            ),
+        );
+    }
+    let uncheckpointed_frames = wal_frames.saturating_sub(checkpointed_frames);
+    if available_bytes < STORAGE_WARNING_RESERVE_BYTES
+        || checkpoint_blocked
+        || uncheckpointed_frames >= WAL_CHECKPOINT_WARNING_FRAMES
+    {
+        return (
+            "warning",
+            Some(
+                "Review the disk reserve and WAL backlog; long-running readers can stall checkpoint progress.",
+            ),
+        );
+    }
+    ("healthy", None)
 }
 
 fn query_status_counts(
@@ -577,5 +742,45 @@ mod tests {
                 "support bundle leaked {private_value}"
             );
         }
+    }
+
+    #[test]
+    fn storage_health_distinguishes_reserve_wal_and_checkpoint_pressure() {
+        assert_eq!(
+            storage_state(Some(STORAGE_CRITICAL_RESERVE_BYTES - 1), 0, false, 0, 0,).0,
+            "critical"
+        );
+        assert_eq!(
+            storage_state(
+                Some(STORAGE_WARNING_RESERVE_BYTES),
+                STORAGE_MAX_WAL_BYTES + 1,
+                false,
+                0,
+                0,
+            )
+            .0,
+            "critical"
+        );
+        assert_eq!(
+            storage_state(Some(STORAGE_WARNING_RESERVE_BYTES - 1), 0, false, 0, 0,).0,
+            "warning"
+        );
+        assert_eq!(
+            storage_state(Some(STORAGE_WARNING_RESERVE_BYTES), 0, true, 10, 4).0,
+            "warning"
+        );
+        assert_eq!(
+            storage_state(Some(STORAGE_WARNING_RESERVE_BYTES), 0, false, 5000, 3999).0,
+            "warning"
+        );
+        assert_eq!(
+            storage_state(Some(STORAGE_WARNING_RESERVE_BYTES), 0, false, 10, 10).0,
+            "healthy"
+        );
+        assert!(
+            optional_work_denial_for(STORAGE_WARNING_RESERVE_BYTES - 1, u64::MAX, 0,).is_some()
+        );
+        assert!(optional_work_denial_for(u64::MAX, u64::MAX, STORAGE_MAX_WAL_BYTES + 1,).is_some());
+        assert!(optional_work_denial_for(u64::MAX, u64::MAX, STORAGE_MAX_WAL_BYTES).is_none());
     }
 }

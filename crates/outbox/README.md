@@ -19,7 +19,7 @@ sink integration remains tracked under H024.
 
 ## Implementation plan
 
-All 130 enhancements are committed implementation scope under the
+All 154 enhancements are committed implementation scope under the
 [implementation plan](../../docs/implementation-plan.md). This commitment is not a
 claim that they have shipped: the plan owns implementation status, and the
 [roadmap](../../docs/llm-harness-roadmap.md) owns acceptance criteria.

@@ -169,6 +169,9 @@ mod tests {
                     target_conversation_id: None,
                     enabled: true,
                     completion_contract: None,
+                    missed_run_policy: crate::routines::MissedRunPolicy::Skip,
+                    missed_run_limit: 1,
+                    overlap_policy: crate::routines::RoutineOverlapPolicy::Forbid,
                 },
                 now,
             )

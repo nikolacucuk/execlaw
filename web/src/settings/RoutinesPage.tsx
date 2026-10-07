@@ -37,6 +37,9 @@ interface FormState {
     prompt: string;
     target_conversation_id: string;
     enabled: boolean;
+    missed_run_policy: "skip" | "coalesce" | "catch_up";
+    missed_run_limit: number;
+    overlap_policy: "forbid" | "queue" | "replace";
     criteria_text: string;
     artifacts_text: string;
     delivery_required: boolean;
@@ -51,6 +54,9 @@ const EMPTY_FORM: FormState = {
     prompt: "",
     target_conversation_id: "",
     enabled: true,
+    missed_run_policy: "skip",
+    missed_run_limit: 1,
+    overlap_policy: "forbid",
     criteria_text: "",
     artifacts_text: "",
     delivery_required: false,
@@ -66,6 +72,9 @@ function fromView(v: RoutineView): FormState {
         prompt: v.prompt,
         target_conversation_id: v.target_conversation_id ?? "",
         enabled: v.enabled,
+        missed_run_policy: v.missed_run_policy ?? "skip",
+        missed_run_limit: v.missed_run_limit ?? 1,
+        overlap_policy: v.overlap_policy ?? "forbid",
         criteria_text: v.completion_contract?.acceptance_criteria.map((item) => item.description).join("\n") ?? "",
         artifacts_text: v.completion_contract?.required_artifacts.map((item) => item.description).join("\n") ?? "",
         delivery_required: v.completion_contract?.delivery_required ?? false,
@@ -101,6 +110,9 @@ function toUpsert(f: FormState): UpsertRoutineBody {
                 ? null
                 : f.target_conversation_id.trim(),
         enabled: f.enabled,
+        missed_run_policy: f.missed_run_policy,
+        missed_run_limit: f.missed_run_limit,
+        overlap_policy: f.overlap_policy,
         completion_contract,
     };
 }
@@ -395,6 +407,31 @@ export function RoutinesPage() {
                                 data-testid="routine-timezone"
                                 style={{ minWidth: "11rem" }}
                             />
+                        </Form.Group>
+                    </div>
+
+                    <div className="d-flex gap-2 mb-3">
+                        <Form.Group className="flex-grow-1" controlId="routine-missed-policy">
+                            <Form.Label className="small mb-1">Missed runs</Form.Label>
+                            <Form.Select value={form.missed_run_policy} onChange={(e) => onChange("missed_run_policy", e.target.value as FormState["missed_run_policy"])}>
+                                <option value="skip">Skip overdue occurrences</option>
+                                <option value="coalesce">Run once for overdue occurrences</option>
+                                <option value="catch_up">Catch up within the limit</option>
+                            </Form.Select>
+                        </Form.Group>
+                        {form.missed_run_policy === "catch_up" && (
+                            <Form.Group controlId="routine-missed-limit">
+                                <Form.Label className="small mb-1">Catch-up limit</Form.Label>
+                                <Form.Control type="number" min={1} max={100} value={form.missed_run_limit} onChange={(e) => onChange("missed_run_limit", Math.max(1, Math.min(100, Number(e.target.value) || 1)))} style={{ width: "8rem" }} />
+                            </Form.Group>
+                        )}
+                        <Form.Group className="flex-grow-1" controlId="routine-overlap-policy">
+                            <Form.Label className="small mb-1">When a run is active</Form.Label>
+                            <Form.Select value={form.overlap_policy} onChange={(e) => onChange("overlap_policy", e.target.value as FormState["overlap_policy"])}>
+                                <option value="forbid">Forbid overlap and skip</option>
+                                <option value="queue">Queue the occurrence</option>
+                                <option value="replace">Replace queued occurrences</option>
+                            </Form.Select>
                         </Form.Group>
                     </div>
 

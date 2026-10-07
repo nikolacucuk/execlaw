@@ -2345,6 +2345,32 @@ fn register_sidecar_http_get(engine: &mut Engine, plugin_id: &str, host_caps: Ho
     );
 }
 
+fn check_sidecar_outbound_body(
+    plugin_id: &str,
+    method: &str,
+    url: &str,
+    body: &serde_json::Value,
+) -> Result<(), Box<EvalAltResult>> {
+    let encoded = serde_json::to_string(body).map_err(|error| {
+        Box::new(EvalAltResult::ErrorRuntime(
+            format!("[{plugin_id}] {method}: encode outbound body: {error}").into(),
+            rhai::Position::NONE,
+        ))
+    })?;
+    let findings = execlaw_policy::outbound::secret_indicators(&encoded);
+    if findings.is_empty() {
+        return Ok(());
+    }
+    Err(Box::new(EvalAltResult::ErrorRuntime(
+        format!(
+            "[{plugin_id}] {method}: outbound data check blocked request body to {url} ({})",
+            findings.join(",")
+        )
+        .into(),
+        rhai::Position::NONE,
+    )))
+}
+
 fn register_sidecar_http_post(engine: &mut Engine, plugin_id: &str, host_caps: HostCapsHandle) {
     let pid = plugin_id.to_owned();
     let agent = sidecar_http_agent(
@@ -2370,6 +2396,7 @@ fn register_sidecar_http_post(engine: &mut Engine, plugin_id: &str, host_caps: H
                         rhai::Position::NONE,
                     ))
                 })?;
+                check_sidecar_outbound_body(&pid, "sidecar_http_post", &url, &body_value)?;
                 let resp = agent
                     .post(&url)
                     .send_json(body_value)
@@ -2396,6 +2423,7 @@ fn register_sidecar_http_post(engine: &mut Engine, plugin_id: &str, host_caps: H
                     rhai::Position::NONE,
                 ))
             })?;
+            check_sidecar_outbound_body(&pid, "sidecar_http_post", &url, &body_value)?;
             let req = apply_headers(agent.post(&url), &headers);
             let resp = req
                 .send_json(body_value)
@@ -2459,6 +2487,7 @@ fn register_sidecar_http_put(engine: &mut Engine, plugin_id: &str, host_caps: Ho
                         rhai::Position::NONE,
                     ))
                 })?;
+                check_sidecar_outbound_body(&pid, "sidecar_http_put", &url, &body_value)?;
                 let resp = agent
                     .put(&url)
                     .send_json(body_value)
@@ -2485,6 +2514,7 @@ fn register_sidecar_http_put(engine: &mut Engine, plugin_id: &str, host_caps: Ho
                     rhai::Position::NONE,
                 ))
             })?;
+            check_sidecar_outbound_body(&pid, "sidecar_http_put", &url, &body_value)?;
             let req = apply_headers(agent.put(&url), &headers);
             let resp = req
                 .send_json(body_value)
@@ -2814,6 +2844,9 @@ fn http_get_impl_with_headers(
     allow_loopback: bool,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
     validate_url(plugin_id, "http_get", url, allow_loopback)?;
+    let query_json = rhai_to_json(Dynamic::from(query.clone()))
+        .map_err(|error| EvalAltResult::ErrorRuntime(error.into(), rhai::Position::NONE))?;
+    check_sidecar_outbound_body(plugin_id, "http_get", url, &query_json)?;
     let mut req = agent.get(url);
     for (k, v) in map_to_query_iter(query) {
         req = req.query(&k, &v);
@@ -2860,6 +2893,7 @@ fn http_post_impl_with_headers(
     validate_url(plugin_id, "http_post", url, allow_loopback)?;
     let body_json = rhai_to_json(body)
         .map_err(|e| EvalAltResult::ErrorRuntime(e.into(), rhai::Position::NONE))?;
+    check_sidecar_outbound_body(plugin_id, "http_post", url, &body_json)?;
     let mut req = agent.post(url);
     if !bearer.is_empty() {
         req = req.set("Authorization", &format!("Bearer {bearer}"));
@@ -2888,6 +2922,7 @@ fn http_patch_impl(
     validate_url(plugin_id, "http_patch", url, allow_loopback)?;
     let body_json = rhai_to_json(body)
         .map_err(|e| EvalAltResult::ErrorRuntime(e.into(), rhai::Position::NONE))?;
+    check_sidecar_outbound_body(plugin_id, "http_patch", url, &body_json)?;
     let mut req = agent.request("PATCH", url);
     if !bearer.is_empty() {
         req = req.set("Authorization", &format!("Bearer {bearer}"));
@@ -2907,6 +2942,9 @@ fn http_delete_impl(
     allow_loopback: bool,
 ) -> Result<Dynamic, Box<EvalAltResult>> {
     validate_url(plugin_id, "http_delete", url, allow_loopback)?;
+    let query_json = rhai_to_json(Dynamic::from(query.clone()))
+        .map_err(|error| EvalAltResult::ErrorRuntime(error.into(), rhai::Position::NONE))?;
+    check_sidecar_outbound_body(plugin_id, "http_delete", url, &query_json)?;
     let mut req = agent.delete(url);
     for (k, v) in map_to_query_iter(query) {
         req = req.query(&k, &v);
@@ -3303,6 +3341,35 @@ pub fn json_to_rhai(v: &serde_json::Value) -> Dynamic {
 mod tests {
     use super::*;
     use crate::engine::ScriptEngine;
+
+    #[test]
+    fn sidecar_http_body_scan_blocks_synthetic_credentials_without_echoing_them() {
+        let body = serde_json::json!({"message":"send", "api_key":"synthetic-secret-value"});
+        let error = check_sidecar_outbound_body(
+            "fixture",
+            "sidecar_http_post",
+            "http://127.0.0.1:9/",
+            &body,
+        )
+        .unwrap_err();
+        let rendered = error.to_string();
+        assert!(rendered.contains("credential_assignment"));
+        assert!(!rendered.contains("synthetic-secret-value"));
+    }
+
+    #[test]
+    fn general_http_post_and_patch_share_the_outbound_body_guard() {
+        for method in ["http_post", "http_patch"] {
+            let body =
+                serde_json::json!({"comment":"publish", "access_token":"synthetic-secret-value"});
+            let error =
+                check_sidecar_outbound_body("fixture", method, "https://example.test/api", &body)
+                    .unwrap_err();
+            let rendered = error.to_string();
+            assert!(rendered.contains("credential_assignment"));
+            assert!(!rendered.contains("synthetic-secret-value"));
+        }
+    }
 
     #[test]
     fn sidecar_http_agent_does_not_follow_a_cross_sidecar_redirect() {

@@ -61,6 +61,20 @@ fn failed(error: impl std::fmt::Display) -> axum::response::Response {
         .into_response()
 }
 
+fn failed_database(error: DbError) -> axum::response::Response {
+    if matches!(&error, DbError::Backpressure) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "database is busy; retry shortly",
+                "code": "db_backpressure"
+            })),
+        )
+            .into_response();
+    }
+    failed(error)
+}
+
 fn controller(user: &AuthedUser) -> Result<(), axum::response::Response> {
     if user.role == UserRole::Controller {
         Ok(())
@@ -103,69 +117,83 @@ fn rebuild_verified_search_index(
     // suffix. The derived FTS rows are therefore extended only from verified
     // events; a missing watermark triggers a one-time backfill.
     let events = log.replay_since(conversation_id, EventSeq(indexed_seq))?;
-    let last_seq = events
-        .last()
-        .map(|event| event.seq.0)
-        .unwrap_or(indexed_seq);
     if events.is_empty() && indexed_seq == 0 {
         return Ok(());
     }
-    state.db.transaction(|tx| {
-        let stored_seq = tx
-            .query_row(
-                "SELECT indexed_seq FROM state_conversation_event_search_state WHERE conversation_id = ?1",
-                params![conversation_id.as_str()],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .unwrap_or(0);
-        if !rebuild_from_start && stored_seq < indexed_seq {
-            return Err(DbError::Invariant(
-                "conversation search watermark moved backwards during indexing".to_owned(),
-            ));
-        }
-        if rebuild_from_start || stored_seq == 0 {
-            tx.execute("DELETE FROM state_conversation_event_search WHERE conversation_id = ?1", params![conversation_id.as_str()])?;
-        }
-        let current_seq = if rebuild_from_start { 0 } else { stored_seq };
-        for event in events {
-            // Another query may have indexed this suffix while replay was
-            // verifying it. Recheck the watermark under the writer lock so
-            // concurrent searches never duplicate FTS rows or regress it.
-            if event.seq.0 <= current_seq {
-                continue;
+    let mut first_batch = true;
+    for event_batch in events.chunks(128) {
+        let is_first_batch = first_batch;
+        state.db.transaction(|tx| {
+            let stored_seq = tx
+                .query_row(
+                    "SELECT indexed_seq FROM state_conversation_event_search_state WHERE conversation_id = ?1",
+                    params![conversation_id.as_str()],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .unwrap_or(0);
+            if !rebuild_from_start && stored_seq < indexed_seq {
+                return Err(DbError::Invariant(
+                    "conversation search watermark moved backwards during indexing".to_owned(),
+                ));
             }
-            if event.actor.as_deref() == Some(SYSTEM_ORCHESTRATOR_ACTOR) {
-                continue;
+            if (is_first_batch && rebuild_from_start) || stored_seq == 0 {
+                tx.execute(
+                    "DELETE FROM state_conversation_event_search WHERE conversation_id = ?1",
+                    params![conversation_id.as_str()],
+                )?;
             }
-            let Some(text) = extract_text(&event) else {
-                continue;
-            };
-            let source = if event.kind == execlaw_core::events::EventKind::ModelTurn {
-                "execlaw".to_owned()
+            let mut current_seq = if is_first_batch && rebuild_from_start {
+                0
             } else {
-                extract_channel_origin(&event).unwrap_or_else(|| "web".to_owned())
+                stored_seq
             };
+            for event in event_batch {
+                // Keep each write lock short so an approval or streaming
+                // continuation can acquire the same SQLite connection while
+                // a large verified history is being indexed.
+                if event.seq.0 <= current_seq {
+                    continue;
+                }
+                current_seq = event.seq.0;
+                if event.actor.as_deref() == Some(SYSTEM_ORCHESTRATOR_ACTOR) {
+                    continue;
+                }
+                let Some(text) = extract_text(event) else {
+                    continue;
+                };
+                let source = if event.kind == execlaw_core::events::EventKind::ModelTurn {
+                    "execlaw".to_owned()
+                } else {
+                    extract_channel_origin(event).unwrap_or_else(|| "web".to_owned())
+                };
+                tx.execute(
+                    "INSERT INTO state_conversation_event_search \
+                     (conversation_id, seq, source, committed_at, text) \
+                     VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        conversation_id.as_str(),
+                        event.seq.0,
+                        source,
+                        event.committed_at,
+                        text
+                    ],
+                )?;
+            }
+            let batch_last_seq = event_batch
+                .last()
+                .map(|event| event.seq.0)
+                .unwrap_or(current_seq);
             tx.execute(
-                "INSERT INTO state_conversation_event_search \
-                 (conversation_id, seq, source, committed_at, text) \
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    conversation_id.as_str(),
-                    event.seq.0,
-                    source,
-                    event.committed_at,
-                    text
-                ],
+                "INSERT INTO state_conversation_event_search_state (conversation_id, indexed_seq, updated_at) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT(conversation_id) DO UPDATE SET indexed_seq = excluded.indexed_seq, updated_at = excluded.updated_at",
+                params![conversation_id.as_str(), current_seq.max(batch_last_seq), chrono::Utc::now().timestamp()],
             )?;
-        }
-        tx.execute(
-            "INSERT INTO state_conversation_event_search_state (conversation_id, indexed_seq, updated_at) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(conversation_id) DO UPDATE SET indexed_seq = excluded.indexed_seq, updated_at = excluded.updated_at",
-            params![conversation_id.as_str(), current_seq.max(last_seq), chrono::Utc::now().timestamp()],
-        )?;
-        Ok(())
-    })
+            Ok(())
+        })?;
+        first_batch = false;
+    }
+    Ok(())
 }
 
 pub async fn list_organization(
@@ -358,48 +386,56 @@ pub async fn search_messages(
         return invalid("search text must contain 2 to 128 characters");
     }
     let cid = ConversationId::from(conversation_id.as_str());
-    if let Err(error) = rebuild_verified_search_index(&state, &cid) {
-        return failed(error);
-    }
     let Some(fts) = fts_query(&needle) else {
         return invalid("search text must contain searchable characters");
     };
     let limit = query.limit.unwrap_or(50).clamp(1, 100);
-    let mut matches = match state.db.with_conn(|conn| {
-        let mut statement = conn.prepare(
-            "SELECT seq, text, source, committed_at \
-             FROM state_conversation_event_search \
-             WHERE state_conversation_event_search MATCH ?1 \
-               AND conversation_id = ?2 \
-               AND (?3 IS NULL OR source = ?3 COLLATE NOCASE) \
-               AND (?4 IS NULL OR seq < ?4) \
-             ORDER BY seq DESC LIMIT ?5",
-        )?;
-        Ok(statement
-            .query_map(
-                params![
-                    fts,
-                    cid.as_str(),
-                    query.source,
-                    query.before,
-                    (limit + 1) as i64
-                ],
-                |row| {
-                    Ok(serde_json::json!({
-                        "seq": row.get::<_, i64>(0)?,
-                        "text": row.get::<_, String>(1)?.chars().take(180).collect::<String>(),
-                        "source": row.get::<_, String>(2)?,
-                        "committed_at": row.get::<_, i64>(3)?,
-                    }))
-                },
-            )?
-            .collect::<Result<Vec<_>, _>>()?)
-    }) {
-        Ok(matches) => matches,
-        Err(error) => return failed(error),
+    let source = query.source;
+    let before = query.before;
+    let executor = state.db.clone();
+    let result = executor
+        .run_blocking(move || {
+            let result: Result<(Vec<serde_json::Value>, bool), DbError> = (|| {
+                rebuild_verified_search_index(&state, &cid)?;
+                let mut matches = state.db.with_conn(|conn| {
+                    let mut statement = conn.prepare(
+                        "SELECT seq, text, source, committed_at \
+                         FROM state_conversation_event_search \
+                         WHERE state_conversation_event_search MATCH ?1 \
+                           AND conversation_id = ?2 \
+                           AND (?3 IS NULL OR source = ?3 COLLATE NOCASE) \
+                           AND (?4 IS NULL OR seq < ?4) \
+                         ORDER BY seq DESC LIMIT ?5",
+                    )?;
+                    Ok(statement
+                        .query_map(
+                            params![fts, cid.as_str(), source, before, (limit + 1) as i64],
+                            |row| {
+                                Ok(serde_json::json!({
+                                    "seq": row.get::<_, i64>(0)?,
+                                    "text": row.get::<_, String>(1)?
+                                        .chars()
+                                        .take(180)
+                                        .collect::<String>(),
+                                    "source": row.get::<_, String>(2)?,
+                                    "committed_at": row.get::<_, i64>(3)?,
+                                }))
+                            },
+                        )?
+                        .collect::<Result<Vec<_>, _>>()?)
+                })?;
+                let has_more = matches.len() > limit;
+                matches.truncate(limit);
+                Ok((matches, has_more))
+            })();
+            result
+        })
+        .await;
+    let (matches, has_more) = match result {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => return failed(error),
+        Err(error) => return failed_database(error),
     };
-    let has_more = matches.len() > limit;
-    matches.truncate(limit);
     (
         StatusCode::OK,
         Json(serde_json::json!({ "matches": matches, "has_more": has_more })),

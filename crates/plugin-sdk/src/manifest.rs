@@ -159,6 +159,161 @@ pub struct ToolDecl {
     /// max_tool_rounds trips).
     #[serde(default, skip_serializing_if = "is_false")]
     pub host_internal: bool,
+    /// Descriptive effect and scheduling semantics. This metadata narrows
+    /// what the host may automate; it never grants a capability or bypasses
+    /// operator policy. Omitted declarations normalize to conservative
+    /// `unknown` values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect_contract: Option<ToolEffectContract>,
+}
+
+/// Declarative tool behavior shared by script and subprocess plugins.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolEffectContract {
+    #[serde(default)]
+    pub resources: Vec<ToolResourceAccess>,
+    #[serde(default)]
+    pub external_effect: ToolExternalEffect,
+    #[serde(default)]
+    pub idempotency: ToolIdempotency,
+    #[serde(default)]
+    pub reconciliation: ToolReconciliation,
+    #[serde(default)]
+    pub cancellation: ToolCancellation,
+    #[serde(default)]
+    pub sensitivity: ToolSensitivity,
+    #[serde(default)]
+    pub concurrency: ToolConcurrency,
+}
+
+/// Host/operator decisions that may further restrict plugin declarations.
+/// The default denies automatic retries and parallel execution.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolEffectPolicy {
+    #[serde(default)]
+    pub allow_automatic_retries: bool,
+    #[serde(default)]
+    pub allow_parallel_execution: bool,
+}
+
+/// A stable, plugin-defined resource name and the access mode used by a tool.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ToolResourceAccess {
+    pub resource: String,
+    pub access: ToolResourceMode,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolResourceMode {
+    Read,
+    Write,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolExternalEffect {
+    None,
+    ReadOnly,
+    LocalWrite,
+    ExternalWrite,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolIdempotency {
+    None,
+    FrameworkKey,
+    PluginKey,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolReconciliation {
+    None,
+    ReadAfterWrite,
+    IdempotencyLookup,
+    Manual,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolCancellation {
+    Safe,
+    BestEffort,
+    NotCancellable,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolSensitivity {
+    Public,
+    Personal,
+    Sensitive,
+    #[default]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolConcurrency {
+    ReadOnly,
+    Exclusive,
+    Keyed,
+    #[default]
+    Unknown,
+}
+
+impl ToolEffectContract {
+    /// Whether a retry can be automated without risking a duplicate effect.
+    /// A plugin declaration alone cannot establish this for a write.
+    pub fn allows_automatic_effect_retry(&self, policy: &ToolEffectPolicy) -> bool {
+        if !policy.allow_automatic_retries {
+            return false;
+        }
+        match self.external_effect {
+            ToolExternalEffect::None | ToolExternalEffect::ReadOnly => true,
+            ToolExternalEffect::LocalWrite | ToolExternalEffect::ExternalWrite => {
+                self.idempotency == ToolIdempotency::FrameworkKey
+                    && matches!(
+                        self.reconciliation,
+                        ToolReconciliation::ReadAfterWrite | ToolReconciliation::IdempotencyLookup
+                    )
+            }
+            ToolExternalEffect::Unknown => false,
+        }
+    }
+
+    /// Unknown semantics and all write modes default to serialized execution.
+    pub fn allows_parallel_execution(&self, policy: &ToolEffectPolicy) -> bool {
+        policy.allow_parallel_execution
+            && self.external_effect == ToolExternalEffect::ReadOnly
+            && self.concurrency == ToolConcurrency::ReadOnly
+            && self
+                .resources
+                .iter()
+                .all(|resource| resource.access == ToolResourceMode::Read)
+    }
+}
+
+impl ToolDecl {
+    /// Normalize old manifests to the conservative host contract.
+    pub fn normalized_effect_contract(&self) -> ToolEffectContract {
+        self.effect_contract.clone().unwrap_or_default()
+    }
 }
 
 fn is_false(b: &bool) -> bool {
@@ -738,7 +893,7 @@ const KNOWN_TRUST_LEVELS: &[&str] = &[
 /// Public so other crates can share the canonical list without re-typing
 /// it.
 pub fn is_known_trust_level(s: &str) -> bool {
-    KNOWN_TRUST_LEVELS.iter().any(|k| *k == s)
+    KNOWN_TRUST_LEVELS.contains(&s)
 }
 
 impl PluginManifest {

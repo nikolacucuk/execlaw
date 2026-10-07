@@ -593,7 +593,7 @@ impl TurnExecutor {
         while trace.attempts_used < trace.retry_budget_total {
             let now_ms = chrono::Utc::now().timestamp_millis();
             let run_budget = execlaw_core::runs::RunStore::new(db)
-                .execution_budget(run_id)
+                .execution_budget_at(run_id, now_ms)
                 .map_err(|error| execlaw_core::db::DbError::Invariant(error.to_string()))?;
             let mut remaining_ms = run_budget
                 .map(|budget| budget.deadline_at_ms.saturating_sub(now_ms))
@@ -621,12 +621,11 @@ impl TurnExecutor {
                     return Ok(ToolResultEnvelope::Err { failure });
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
-                remaining_ms = run_budget
-                    .map(|budget| {
-                        budget
-                            .deadline_at_ms
-                            .saturating_sub(chrono::Utc::now().timestamp_millis())
-                    })
+                let after_backoff_ms = chrono::Utc::now().timestamp_millis();
+                remaining_ms = execlaw_core::runs::RunStore::new(db)
+                    .execution_budget_at(run_id, after_backoff_ms)
+                    .map_err(|error| execlaw_core::db::DbError::Invariant(error.to_string()))?
+                    .map(|budget| budget.deadline_at_ms.saturating_sub(after_backoff_ms))
                     .unwrap_or(i64::MAX);
                 if remaining_ms <= 0 {
                     let failure = ToolFailure::new(
@@ -1123,8 +1122,8 @@ impl TurnExecutor {
         );
 
         loop {
-            let execution_budget = durable.execution_budget()?;
             let now_ms = chrono::Utc::now().timestamp_millis();
+            let execution_budget = durable.execution_budget_at(now_ms)?;
             let remaining_ms = execution_budget.deadline_at_ms.saturating_sub(now_ms);
             if remaining_ms <= 0 {
                 return Err(TurnError::TimeBudgetExceeded);
@@ -1206,10 +1205,11 @@ impl TurnExecutor {
                     let retry_started = attempt_started.clone();
                     let retry_observer = self.retry_observer.clone();
                     let cancel_flag = self.cancel_flag.clone();
+                    let inference_now_ms = chrono::Utc::now().timestamp_millis();
                     let inference_remaining_ms = durable
-                        .execution_budget()?
+                        .execution_budget_at(inference_now_ms)?
                         .deadline_at_ms
-                        .saturating_sub(chrono::Utc::now().timestamp_millis());
+                        .saturating_sub(inference_now_ms);
                     if inference_remaining_ms <= 0 {
                         return Err(TurnError::TimeBudgetExceeded);
                     }

@@ -104,7 +104,7 @@ describe("ToolsPage", () => {
         expect(screen.getByText("mcp")).toBeInTheDocument();
     });
 
-    it("toggling a class fires a PATCH with the new allowed_classes", async () => {
+    it("simulates a staged class change before applying it", async () => {
         const calls: Array<{ url: string; init?: RequestInit }> = [];
         fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
             calls.push({ url, init });
@@ -128,6 +128,26 @@ describe("ToolsPage", () => {
                                 removed_at: null,
                             },
                         ],
+                    }),
+                    { status: 200 },
+                );
+            }
+            if (
+                url === "/api/admin/tools/read_memory/simulate" &&
+                init?.method === "POST"
+            ) {
+                return new Response(
+                    JSON.stringify({
+                        tool_name: "read_memory",
+                        historical_decisions: 0,
+                        trust_class_fixtures: 6,
+                        report: {
+                            evaluated_decisions: 6,
+                            newly_allowed: [],
+                            newly_denied: [],
+                            newly_approval_gated: [],
+                            omitted_changes: 0,
+                        },
                     }),
                     { status: 200 },
                 );
@@ -163,6 +183,14 @@ describe("ToolsPage", () => {
             .find((el) => el.getAttribute("data-class") === "KnownTrusted");
         expect(knownTrustedBox).toBeDefined();
         fireEvent.click(knownTrustedBox!);
+        expect(
+            calls.some((c) => c.url === "/api/admin/tools/read_memory" && c.init?.method === "PATCH"),
+        ).toBe(false);
+        fireEvent.click(screen.getByTestId("simulate-tool-policy"));
+        await waitFor(() => {
+            expect(screen.getByTestId("tool-policy-simulation")).toBeInTheDocument();
+        });
+        fireEvent.click(screen.getByTestId("save-tool-policy"));
         await waitFor(() => {
             expect(
                 calls.some(

@@ -13,7 +13,17 @@ Relationship to other docs:
 
 ## Implementation delivery plan
 
-All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+The [Paperclip interoperability proposal](llm-harness-roadmap.md#paperclip-roadmap)
+uses an optional execlaw bridge plugin and a separate Paperclip-side external
+adapter. Neither is claimed implemented. Provider-specific mappings belong
+at those edges; generic worker admission, policy, run and outbox contracts
+belong in the host. H140-H154 cover pairing, signed admission, scoped secrets,
+cancellation, reconciliation and version qualification. Existing webhook
+acknowledgments are not worker completion receipts, and ordinary script HTTP
+loopback restrictions must not be disabled to connect the systems. Track
+delivery in the [implementation ledger](implementation-plan.md#paperclip-coordination-and-interoperability).
+
+All H001-H154 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
 Plugin work must implement [H027 transactional lifecycle/panel isolation](llm-harness-roadmap.md#enhancement-027),
 [H054 secret brokering](llm-harness-roadmap.md#enhancement-054),
 [H065 effect contracts](llm-harness-roadmap.md#enhancement-065),

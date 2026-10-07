@@ -8,7 +8,7 @@ returns an in-memory trace and can still perform live effects.
 
 ## Implementation delivery plan
 
-All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+All H001-H154 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
 Automation delivery covers [H023 recovery](llm-harness-roadmap.md#enhancement-023),
 [H026 authorization](llm-harness-roadmap.md#enhancement-026),
 [H052 live authority](llm-harness-roadmap.md#enhancement-052),
@@ -430,7 +430,7 @@ docs/automations.md                   — you are here
 ## Deferred to follow-ups
 
 Historical estimates below are design notes, not the implementation order or
-current qualification status. Use the accepted H001-H130 tracker above;
+current qualification status. Use the accepted H001-H154 tracker above;
 H124-H126 own the workflow versioning, control-node, and simulation work.
 
 | Item | Effort | Notes |

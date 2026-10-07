@@ -11,7 +11,7 @@ import { useEffect, useRef, useState, type DragEvent, type FormEvent, type Keybo
 import Button from "react-bootstrap/Button";
 import Form from "react-bootstrap/Form";
 import Spinner from "react-bootstrap/Spinner";
-import type { InlineAttachment, RunCompletionContractDraft, SkillListEntry } from "../api/endpoints";
+import type { InlineAttachment, RunCompletionContractDraft, SafetyProfileView, SkillListEntry } from "../api/endpoints";
 import { useT } from "../i18n";
 import type { VoiceReadiness } from "./useVoiceReadiness";
 import { VoiceCaptureButton } from "./VoiceCaptureButton";
@@ -190,7 +190,10 @@ interface Props {
         attachments: InlineAttachment[],
         skillNames: string[],
         completionContract?: RunCompletionContractDraft,
+        safetyProfileId?: SafetyProfileView["profile"]["profile_id"],
     ) => Promise<void> | void;
+    getSafetyProfiles?: () => Promise<SafetyProfileView[]>;
+    incognito?: boolean;
     /**
      * 2026-05-15 — gates the image-attach affordance ( + button +
      * popup menu). When false (text-only backend / probe hasn't
@@ -293,6 +296,8 @@ export function Composer({
     multimodal,
     recommendedImageEdge,
     getSkills,
+    getSafetyProfiles,
+    incognito,
     skillDefaultsStorageKey,
     defaultSkillNames,
 }: Props) {
@@ -300,6 +305,9 @@ export function Composer({
     const managePersistentDefaults =
         !!skillDefaultsStorageKey || (defaultSkillNames?.length ?? 0) > 0;
     const [text, setText] = useState("");
+    const [safetyProfiles, setSafetyProfiles] = useState<SafetyProfileView[]>([]);
+    const [safetyProfileError, setSafetyProfileError] = useState<string | null>(null);
+    const [safetyProfileId, setSafetyProfileId] = useState<"" | SafetyProfileView["profile"]["profile_id"]>("");
     const [completionCriteria, setCompletionCriteria] = useState("");
     const [requiredArtifacts, setRequiredArtifacts] = useState("");
     const [deliveryRequired, setDeliveryRequired] = useState(false);
@@ -326,6 +334,26 @@ export function Composer({
     const [skillsLoading, setSkillsLoading] = useState(false);
     const [skillsError, setSkillsError] = useState<string | null>(null);
     const [selectedSkills, setSelectedSkills] = useState<SkillListEntry[]>([]);
+    useEffect(() => {
+        if (!getSafetyProfiles || incognito) return;
+        let cancelled = false;
+        getSafetyProfiles()
+            .then((profiles) => {
+                if (!cancelled) {
+                    setSafetyProfiles(profiles);
+                    setSafetyProfileError(null);
+                }
+            })
+            .catch((error: unknown) => {
+                if (!cancelled) {
+                    setSafetyProfiles([]);
+                    setSafetyProfileError(
+                        error instanceof Error ? error.message : String(error),
+                    );
+                }
+            });
+        return () => { cancelled = true; };
+    }, [getSafetyProfiles, incognito]);
     useEffect(() => {
         if (
             !voiceTranscript?.is_final ||
@@ -735,7 +763,13 @@ export function Composer({
         }
         try {
             if (completionContract) {
-                await onSend(trimmed, wire, skillNames, completionContract);
+                if (safetyProfileId) {
+                    await onSend(trimmed, wire, skillNames, completionContract, safetyProfileId);
+                } else {
+                    await onSend(trimmed, wire, skillNames, completionContract);
+                }
+            } else if (safetyProfileId) {
+                await onSend(trimmed, wire, skillNames, undefined, safetyProfileId);
             } else {
                 await onSend(trimmed, wire, skillNames);
             }
@@ -762,6 +796,9 @@ export function Composer({
     // at least one staged image. Image-only sends are valid against
     // a multimodal backend.
     const sendDisabled = isBusy || (trimmedEmpty && attachments.length === 0);
+    const selectedSafetyProfile = safetyProfiles.find(
+        (profile) => profile.profile.profile_id === safetyProfileId,
+    );
 
     // ChatGPT-style composer:
     //   * The visible "chip" is the outer `<div>`. It owns the
@@ -942,6 +979,60 @@ export function Composer({
                                 </button>
                             </div>
                         ))}
+                    </div>
+                )}
+                {getSafetyProfiles && !incognito && safetyProfiles.length > 0 && (
+                    <div className="px-3 pt-2" data-testid="composer-safety-profile">
+                        <Form.Label htmlFor="composer-safety-profile-select" className="small execlaw-muted mb-1">
+                            Task safety profile
+                        </Form.Label>
+                        <Form.Select
+                            id="composer-safety-profile-select"
+                            data-testid="composer-safety-profile-select"
+                            size="sm"
+                            value={safetyProfileId}
+                            onChange={(event) => setSafetyProfileId(event.target.value as typeof safetyProfileId)}
+                            aria-describedby="composer-safety-profile-summary"
+                        >
+                            <option value="">Use current policy</option>
+                            {safetyProfiles.map((profile) => (
+                                <option
+                                    key={profile.profile.profile_id}
+                                    value={profile.profile.profile_id}
+                                    disabled={!profile.supported}
+                                    title={profile.unsupported_reason ?? undefined}
+                                >
+                                    {profile.profile.display_name}{profile.supported ? "" : " (unavailable)"}
+                                </option>
+                            ))}
+                        </Form.Select>
+                        <div
+                            id="composer-safety-profile-summary"
+                            className="execlaw-muted small mt-1"
+                            aria-live="polite"
+                            data-testid="composer-safety-profile-summary"
+                        >
+                            {selectedSafetyProfile
+                                ? selectedSafetyProfile.supported
+                                    ? `${selectedSafetyProfile.permissions.filesystem}; ${selectedSafetyProfile.permissions.process}; ${selectedSafetyProfile.permissions.network}; ${selectedSafetyProfile.permissions.secrets}; ${selectedSafetyProfile.permissions.destinations}.${selectedSafetyProfile.profile.profile_id === "approved_integration" ? ` Approved tools: ${selectedSafetyProfile.effective_tools.length ? selectedSafetyProfile.effective_tools.join(", ") : "none"}.` : ""}`
+                                    : selectedSafetyProfile.unsupported_reason
+                                : "Current trust, tool, and approval policy applies."}
+                        </div>
+                        {safetyProfiles.filter((profile) => !profile.supported).map((profile) => (
+                            <div key={profile.profile.profile_id} className="text-warning small" role="status">
+                                {profile.profile.display_name} unavailable: {profile.unsupported_reason}
+                            </div>
+                        ))}
+                        {safetyProfileError && (
+                            <div className="text-danger small mt-1" role="status">
+                                Safety profiles could not be loaded; current policy remains active.
+                            </div>
+                        )}
+                    </div>
+                )}
+                {getSafetyProfiles && !incognito && safetyProfileError && safetyProfiles.length === 0 && (
+                    <div className="text-warning small px-3 pt-2" role="status">
+                        Task safety profiles could not be loaded; current policy remains active.
                     </div>
                 )}
                 <Form.Control

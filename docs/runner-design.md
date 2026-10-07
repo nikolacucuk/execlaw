@@ -11,7 +11,7 @@ intent, even when the Rust idiom for implementing it differs.
 
 ## Implementation delivery plan
 
-All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+All H001-H154 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
 The predecessor examples and environment-variable names below are historical
 design context, not current configuration instructions. New operator settings
 belong in SQLite. Implementation does not imply production qualification.

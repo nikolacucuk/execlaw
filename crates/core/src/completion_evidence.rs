@@ -157,8 +157,10 @@ fn artifact_has_run_producer(
     for event in events {
         let (event_kind, payload) = event?;
         if event_kind == "tool_result" {
-            let Ok(result) = rmp_serde::from_slice::<crate::events::ToolResultPayload>(&payload)
-            else {
+            let Ok(result) = crate::events::decode_payload_bytes::<crate::events::ToolResultPayload>(
+                crate::events::EventKind::parse(&event_kind),
+                &payload,
+            ) else {
                 continue;
             };
             let Ok(value) = result.outcome else {
@@ -177,7 +179,9 @@ fn artifact_has_run_producer(
             {
                 return Ok(true);
             }
-        } else if let Ok(card) = rmp_serde::from_slice::<crate::cards::CardClosedPayload>(&payload)
+        } else if let Ok(card) = crate::events::decode_payload_bytes::<
+            crate::cards::CardClosedPayload,
+        >(crate::events::EventKind::parse(&event_kind), &payload)
             && card.state == crate::cards::CardState::Completed
             && card.attachment_id.as_deref() == Some(artifact_id)
         {

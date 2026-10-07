@@ -31,6 +31,7 @@ use execlaw_core::tool_access::{ToolAccessSeed, ToolAccessStore, ToolSource};
 use execlaw_core::vault_row::VaultRowStore;
 use execlaw_mcp_client::{McpClient, McpError, McpNotification, McpResult, McpTool, StdioSpec};
 use serde_json::Value;
+use sha2::Digest;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,6 +64,30 @@ impl ConnectedClient {
             Self::Http(c) => c.call_tool(name, args).await,
         }
     }
+
+    fn redact_secret(&self, value: &str) -> String {
+        match self {
+            Self::Http(client) => client.redact_secret(value),
+            Self::Stdio(_) => value.to_owned(),
+        }
+    }
+}
+
+fn redact_json_strings(client: &ConnectedClient, value: &mut Value) {
+    match value {
+        Value::String(text) => *text = client.redact_secret(text),
+        Value::Array(values) => {
+            for value in values {
+                redact_json_strings(client, value);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values_mut() {
+                redact_json_strings(client, value);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Tool-name prefix all MCP-sourced tools use in the registry. Lets
@@ -74,11 +99,62 @@ pub const MCP_TOOL_PREFIX: &str = "mcp:";
 const RECONNECT_INITIAL: Duration = Duration::from_secs(1);
 const RECONNECT_MAX: Duration = Duration::from_secs(60);
 
+fn load_mcp_bearer(db: &Database, row: &McpServerRow) -> Result<Option<String>, &'static str> {
+    let Some(reference) = row
+        .auth_secret_ref
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let scope = execlaw_core::mcp_servers::auth_vault_scope(&row.id);
+    let bytes = VaultRowStore::new(db)
+        .get(Some(&scope), reference)
+        .map_err(|_| "vault_read_failed")?
+        .ok_or("credential_ref_missing")?;
+    let value = String::from_utf8(bytes).map_err(|_| "credential_not_utf8")?;
+    if value.is_empty() {
+        return Err("credential_empty");
+    }
+    Ok(Some(value))
+}
+
+fn mcp_config_fingerprint(db: &Database, row: &McpServerRow) -> Result<String, String> {
+    let env = row.env.iter().collect::<std::collections::BTreeMap<_, _>>();
+    let credential_updated_at = match row.auth_secret_ref.as_deref() {
+        Some(reference) => {
+            let scope = execlaw_core::mcp_servers::auth_vault_scope(&row.id);
+            VaultRowStore::new(db)
+                .updated_at(Some(&scope), reference)
+                .map_err(|_| "MCP credential version lookup failed".to_owned())?
+        }
+        None => None,
+    };
+    let canonical = serde_json::json!({
+        "id": &row.id,
+        "display_name": &row.display_name,
+        "transport": row.transport.as_str(),
+        "command": &row.command,
+        "args": &row.args,
+        "env": env,
+        "cwd": &row.cwd,
+        "url": &row.url,
+        "auth_secret_ref": &row.auth_secret_ref,
+        "credential_updated_at": credential_updated_at,
+        "enabled": row.enabled,
+        "default_allowed_classes": &row.default_allowed_classes,
+    });
+    let bytes = serde_json::to_vec(&canonical)
+        .expect("canonical MCP configuration JSON serialization is infallible");
+    Ok(hex::encode(sha2::Sha256::digest(bytes)))
+}
+
 /// One running MCP server actor's handle.
 struct ServerHandle {
     client: Mutex<Option<ConnectedClient>>,
     tool_schemas: Mutex<HashMap<String, RegisteredMcpSchema>>,
     shutdown: Arc<Notify>,
+    config_fingerprint: String,
 }
 
 struct RegisteredMcpSchema {
@@ -131,8 +207,23 @@ impl McpHost {
                 self.stop_one(&row.id).await;
                 continue;
             }
-            if !self.inner.servers.contains_key(&row.id) {
-                self.start_one(row.clone());
+            let desired = match mcp_config_fingerprint(&self.inner.db, row) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    warn!(server = %row.id, %error, "MCP configuration authority could not be checked");
+                    continue;
+                }
+            };
+            let current = self
+                .inner
+                .servers
+                .get(&row.id)
+                .map(|handle| handle.config_fingerprint.clone());
+            if current.as_deref() != Some(desired.as_str()) {
+                if current.is_some() {
+                    self.stop_one(&row.id).await;
+                }
+                self.start_one(row.clone(), desired);
             }
         }
 
@@ -191,6 +282,17 @@ impl McpHost {
             .get(server_id)
             .map(|kv| kv.value().clone())
             .ok_or_else(|| format!("MCP server '{server_id}' not connected"))?;
+        let current = McpServerStore::new(&self.inner.db)
+            .get(server_id)
+            .map_err(|_| "MCP server authority lookup failed".to_owned())?
+            .filter(|row| row.enabled)
+            .ok_or_else(|| format!("MCP server '{server_id}' is disabled or missing"))?;
+        let fingerprint = mcp_config_fingerprint(&self.inner.db, &current)?;
+        if fingerprint != handle.config_fingerprint {
+            return Err(format!(
+                "MCP server '{server_id}' configuration changed; reconnect is required"
+            ));
+        }
         let client =
             handle.client.lock().await.clone().ok_or_else(|| {
                 format!("MCP server '{server_id}' has no live connection right now")
@@ -202,24 +304,30 @@ impl McpHost {
         schema.validator.validate(&args).map_err(|error| {
             format!("MCP tool '{prefixed}' arguments do not match its JSON Schema: {error}")
         })?;
+        check_mcp_outbound_args(&args)?;
         debug!(tool = prefixed, schema_hash = %schema.hash, "dispatching validated MCP tool");
         drop(schemas);
-        let r = client
-            .call_tool(remote_name, args)
-            .await
-            .map_err(|e| format!("MCP call failed: {e}"))?;
-        Ok(serde_json::json!({
+        let r = client.call_tool(remote_name, args).await.map_err(|error| {
+            format!(
+                "MCP call failed: {}",
+                client.redact_secret(&error.to_string())
+            )
+        })?;
+        let mut result = serde_json::json!({
             "content": r.content,
             "isError": r.is_error,
-        }))
+        });
+        redact_json_strings(&client, &mut result);
+        Ok(result)
     }
 
-    fn start_one(&self, row: McpServerRow) {
+    fn start_one(&self, row: McpServerRow, config_fingerprint: String) {
         let shutdown = Arc::new(Notify::new());
         let handle = Arc::new(ServerHandle {
             client: Mutex::new(None),
             tool_schemas: Mutex::new(HashMap::new()),
             shutdown: shutdown.clone(),
+            config_fingerprint,
         });
         self.inner.servers.insert(row.id.clone(), handle.clone());
 
@@ -235,6 +343,20 @@ impl McpHost {
                 }
             }
         });
+    }
+}
+
+fn check_mcp_outbound_args(args: &Value) -> Result<(), String> {
+    let encoded = serde_json::to_string(args)
+        .map_err(|_| "MCP arguments could not be inspected for outbound secrets".to_owned())?;
+    let findings = execlaw_policy::outbound::secret_indicators(&encoded);
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "outbound data check blocked MCP tool arguments: {}",
+            findings.join(",")
+        ))
     }
 }
 
@@ -394,28 +516,28 @@ async fn http_actor_loop(
                 return;
             }
         };
-        // auth_secret_ref points at a vault row with the bearer
-        // token. None / empty = unauthenticated server.
-        let bearer = if let Some(name) = row.auth_secret_ref.as_deref().filter(|s| !s.is_empty()) {
-            match VaultRowStore::new(&db).get(None, name) {
-                Ok(Some(bytes)) => match String::from_utf8(bytes) {
-                    Ok(s) => Some(s),
-                    Err(_) => {
-                        warn!(server = %row.id, "auth_secret_ref vault row is not utf-8; treating as no auth");
-                        None
-                    }
-                },
-                Ok(None) => {
-                    warn!(server = %row.id, name, "auth_secret_ref points at a missing vault row; treating as no auth");
-                    None
+        // Resolve credentials only inside the configured server's vault
+        // namespace. A stale or cross-account ref must never downgrade the
+        // connection to unauthenticated mode.
+        let bearer = match load_mcp_bearer(&db, &row) {
+            Ok(value) => value,
+            Err(reason) => {
+                warn!(server = %row.id, %reason, "MCP credential resolution denied");
+                let now = chrono::Utc::now().timestamp();
+                let _ = McpServerStore::new(&db).set_status(
+                    &row.id,
+                    McpServerStatus::Error,
+                    Some("MCP credential reference is unavailable or invalid"),
+                    now,
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = shutdown.notified() => return,
+                    _ = global_stop.notified() => return,
                 }
-                Err(e) => {
-                    warn!(server = %row.id, error = %e, "vault read failed; treating as no auth");
-                    None
-                }
+                backoff = (backoff * 2).min(RECONNECT_MAX);
+                continue;
             }
-        } else {
-            None
         };
 
         let endpoint_key = format!("mcp:{}", row.id);
@@ -610,6 +732,92 @@ pub fn parse_prefixed_tool_name(name: &str) -> Option<(&str, &str)> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn mcp_credentials_are_resolved_only_from_the_server_account_scope() {
+        use execlaw_core::db::DbConfig;
+        use execlaw_core::migrations::MigrationRunner;
+        use execlaw_core::vault_row::VaultRowStore;
+
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let scope_a = execlaw_core::mcp_servers::auth_vault_scope("server-a");
+        VaultRowStore::new(&db)
+            .put(Some(&scope_a), "credential-a", b"synthetic-bearer", 1)
+            .unwrap();
+        let mut row = McpServerRow {
+            id: "server-a".into(),
+            display_name: "Server A".into(),
+            transport: McpTransport::StreamableHttp,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("http://127.0.0.1:8080/mcp".into()),
+            auth_secret_ref: Some("credential-a".into()),
+            enabled: true,
+            default_allowed_classes: vec!["Controller".into()],
+            status: McpServerStatus::Idle,
+            last_error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        assert_eq!(
+            load_mcp_bearer(&db, &row).unwrap().as_deref(),
+            Some("synthetic-bearer")
+        );
+        row.id = "server-b".into();
+        assert_eq!(load_mcp_bearer(&db, &row), Err("credential_ref_missing"));
+        row.auth_secret_ref = None;
+        assert_eq!(load_mcp_bearer(&db, &row).unwrap(), None);
+    }
+
+    #[test]
+    fn mcp_auth_reference_rotation_changes_the_live_connection_fingerprint() {
+        use execlaw_core::db::DbConfig;
+        use execlaw_core::migrations::MigrationRunner;
+        use execlaw_core::vault_row::VaultRowStore;
+
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let mut row = McpServerRow {
+            id: "server-a".into(),
+            display_name: "Server A".into(),
+            transport: McpTransport::StreamableHttp,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("http://127.0.0.1:8080/mcp".into()),
+            auth_secret_ref: Some("credential-a".into()),
+            enabled: true,
+            default_allowed_classes: vec!["Controller".into()],
+            status: McpServerStatus::Idle,
+            last_error: None,
+            created_at: 1,
+            updated_at: 1,
+        };
+        let scope = execlaw_core::mcp_servers::auth_vault_scope(&row.id);
+        VaultRowStore::new(&db)
+            .put(Some(&scope), "credential-a", b"first-token", 1)
+            .unwrap();
+        let before = mcp_config_fingerprint(&db, &row).unwrap();
+        VaultRowStore::new(&db)
+            .put(Some(&scope), "credential-a", b"rotated-token", 2)
+            .unwrap();
+        assert_ne!(before, mcp_config_fingerprint(&db, &row).unwrap());
+        row.auth_secret_ref = Some("credential-b".into());
+        assert_ne!(before, mcp_config_fingerprint(&db, &row).unwrap());
+    }
+
+    #[test]
+    fn mcp_http_tool_arguments_are_scanned_before_the_external_call() {
+        let args = serde_json::json!({"document": "api_key=synthetic-outbound-secret"});
+        let error = check_mcp_outbound_args(&args).unwrap_err();
+        assert!(error.contains("credential_assignment"));
+        assert!(!error.contains("synthetic-outbound-secret"));
+        assert!(check_mcp_outbound_args(&serde_json::json!({"query":"weather today"})).is_ok());
+    }
+
     #[tokio::test]
     async fn denied_private_http_endpoint_waits_for_a_later_policy_grant() {
         use execlaw_core::db::DbConfig;
@@ -639,6 +847,7 @@ mod tests {
             client: Mutex::new(None),
             tool_schemas: Mutex::new(HashMap::new()),
             shutdown: shutdown.clone(),
+            config_fingerprint: mcp_config_fingerprint(&db, &row).unwrap(),
         });
         let task = tokio::spawn(http_actor_loop(
             db,

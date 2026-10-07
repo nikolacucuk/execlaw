@@ -24,6 +24,7 @@ import {
     getHardware,
     getHfCache,
     getScrubbedSupportBundle,
+    runStorageCheckpoint,
     getSetupPreflight,
     listBackends,
     putHfCache,
@@ -189,6 +190,8 @@ export function BackendsPage() {
     const [error, setError] = useState<string | null>(null);
     const [supportBundle, setSupportBundle] = useState<ScrubbedSupportBundle | null>(null);
     const [supportBundleBusy, setSupportBundleBusy] = useState(false);
+    const [storageMaintenanceBusy, setStorageMaintenanceBusy] = useState(false);
+    const [storageMaintenanceMessage, setStorageMaintenanceMessage] = useState<string | null>(null);
     const [editing, setEditing] = useState<BackendPurpose | null>(null);
     const [form, setForm] = useState<FormState>(EMPTY_FORM);
     const [busy, setBusy] = useState(false);
@@ -364,6 +367,23 @@ export function BackendsPage() {
         }
     }, [getToken]);
 
+    const runPassiveCheckpoint = useCallback(async () => {
+        setStorageMaintenanceBusy(true);
+        setStorageMaintenanceMessage(null);
+        setError(null);
+        try {
+            const result = await runStorageCheckpoint(getToken);
+            setStorageMaintenanceMessage(
+                `${result.progress.frames_checkpointed}/${result.progress.frames_in_wal} WAL frames checkpointed; ${Math.round(result.wal_bytes_after / 1048576)} MiB WAL remains.`,
+            );
+            setSupportBundle(await getScrubbedSupportBundle(getToken));
+        } catch (reason) {
+            setError(reason instanceof Error ? reason.message : String(reason));
+        } finally {
+            setStorageMaintenanceBusy(false);
+        }
+    }, [getToken]);
+
     /// True when the wizard should drive the form. We show it for
     /// fresh "Add backend" clicks (no prior config) and let the
     /// operator skip into raw JSON via the "I'll type the JSON" link.
@@ -530,6 +550,18 @@ export function BackendsPage() {
                 {canMutate && (
                     <Button
                         size="sm"
+                        variant="outline-secondary"
+                        className="me-2"
+                        disabled={storageMaintenanceBusy}
+                        onClick={() => void runPassiveCheckpoint()}
+                        data-testid="backends-storage-checkpoint"
+                    >
+                        {storageMaintenanceBusy ? "Checkpointing…" : "Checkpoint WAL"}
+                    </Button>
+                )}
+                {canMutate && (
+                    <Button
+                        size="sm"
                         variant="outline-primary"
                         disabled={supportBundleBusy}
                         onClick={() => void downloadSupportBundle()}
@@ -570,6 +602,14 @@ export function BackendsPage() {
                 <section className="alert alert-secondary mb-3" aria-live="polite" data-testid="support-bundle-summary">
                     <h4 className="h6">Support snapshot</h4>
                     <p className="small mb-2">Database: {supportBundle.database.encryption_mode}; {supportBundle.database.schema_migrations_applied} schema migrations. Hardware estimate: {supportBundle.hardware.capacity_class}; {supportBundle.hardware.available_ram_mb ?? "unknown"} MiB RAM, {supportBundle.hardware.total_detected_gpu_memory_mb ?? "unknown"} MiB detected GPU memory.</p>
+                    <p className="small mb-2" data-testid="support-storage-state">
+                        Storage: <strong>{supportBundle.database.storage_state}</strong>; database {Math.round(supportBundle.database.database_bytes / 1048576)} MiB, WAL {Math.round(supportBundle.database.wal_bytes / 1048576)} MiB, referenced blobs {Math.round(supportBundle.database.referenced_blob_bytes / 1048576)} MiB, free {supportBundle.database.available_disk_bytes === null ? "unknown" : `${(supportBundle.database.available_disk_bytes / 1073741824).toFixed(2)} GiB`}. Checkpoint {supportBundle.database.wal_frames_checkpointed}/{supportBundle.database.wal_frames} frames; longest transaction {(supportBundle.database.transaction_micros_max / 1000).toFixed(1)} ms. Database queue: {supportBundle.database.database_queued_jobs} queued, {supportBundle.database.database_running_jobs} running; {supportBundle.database.database_rejected_jobs} rejected, max wait {(supportBundle.database.database_queue_wait_micros_max / 1000).toFixed(1)} ms.
+                    </p>
+                    {storageMaintenanceMessage && (
+                        <p className="small mb-2" role="status" data-testid="storage-checkpoint-result">
+                            {storageMaintenanceMessage}
+                        </p>
+                    )}
                     <p className="small mb-2">Qualified model profiles: {supportBundle.protocols.active_model_profiles}; installed/enabled/quarantined plugins: {supportBundle.authority.installed_plugins}/{supportBundle.authority.enabled_plugins}/{supportBundle.authority.quarantined_plugins}. Recoverable runs: {supportBundle.recovery.recoverable_runs_by_status.reduce((sum, row) => sum + row.count, 0)}; pending local deletions: {supportBundle.recovery.pending_research_deletions}.</p>
                     <p className="small mb-2">Recorded protocol checks: {supportBundle.protocols.qualified_capabilities.map((check) => `${check.capability} ${check.passing_profiles}/${supportBundle.protocols.active_model_profiles}`).join(" · ") || "none"}. Hardware suitability is a capacity estimate, not a model performance measurement.</p>
                     <ul className="small mb-2" aria-label="Backend readiness">

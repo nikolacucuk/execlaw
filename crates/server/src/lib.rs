@@ -89,6 +89,7 @@ pub mod runner_spawn;
 pub mod runner_supervisor;
 pub mod runners_admin;
 pub mod runs_admin;
+pub mod safety_profiles_admin;
 pub mod search_rate_limit;
 pub mod search_resolver;
 pub mod search_rotating;
@@ -98,6 +99,7 @@ pub mod settings_search;
 pub mod setup_preflight;
 pub mod sidecar_supervisor;
 pub mod sidecars_admin;
+pub mod storage_admin;
 pub mod transport_outbox;
 pub mod transport_registry;
 // Phase B: signal_admin / signal_inbound / signal_tools /

@@ -136,6 +136,16 @@ impl<'db> DurableRun<'db> {
             .ok_or_else(|| RunStoreError::Corrupt("run execution budget is missing".into()))
     }
 
+    /// Observe the wall clock before calculating remaining time for this run.
+    pub fn execution_budget_at(
+        &self,
+        now_ms: i64,
+    ) -> Result<execlaw_core::runs::RunExecutionBudget, RunStoreError> {
+        self.store
+            .execution_budget_at(&self.run_id, now_ms)?
+            .ok_or_else(|| RunStoreError::Corrupt("run execution budget is missing".into()))
+    }
+
     /// Persist the task's immutable user-authored completion requirements.
     pub fn set_completion_contract(
         &self,

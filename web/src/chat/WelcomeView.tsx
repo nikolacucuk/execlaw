@@ -44,7 +44,7 @@ const SUGGESTIONS: ReadonlyArray<SuggestionDef> = [
     },
 ];
 
-import type { InlineAttachment, RunCompletionContractDraft, SkillListEntry } from "../api/endpoints";
+import type { InlineAttachment, RunCompletionContractDraft, SafetyProfileView, SkillListEntry } from "../api/endpoints";
 
 interface Props {
     onSend: (
@@ -52,7 +52,9 @@ interface Props {
         attachments: InlineAttachment[],
         skillNames: string[],
         completionContract?: RunCompletionContractDraft,
+        safetyProfileId?: SafetyProfileView["profile"]["profile_id"],
     ) => Promise<void> | void;
+    getSafetyProfiles?: () => Promise<SafetyProfileView[]>;
     /**
      * Phase 13.A — voice mic button surfaces here too so the
      * operator can start a voice conversation without typing
@@ -116,6 +118,7 @@ interface Props {
 
 export function WelcomeView({
     onSend,
+    getSafetyProfiles,
     sendVoiceFrame,
     sendVoiceControl,
     getVoiceConversationId,
@@ -208,6 +211,8 @@ export function WelcomeView({
             >
                 <Composer
                     onSend={onSend}
+                    getSafetyProfiles={getSafetyProfiles}
+                    incognito={incognito}
                     sendVoiceFrame={sendVoiceFrame}
                     sendVoiceControl={sendVoiceControl}
                     getVoiceConversationId={getVoiceConversationId}

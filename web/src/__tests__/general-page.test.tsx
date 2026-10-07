@@ -25,6 +25,7 @@ function settingsResponse(overrides: Partial<Record<string, unknown>> = {}) {
         JSON.stringify({
             start_on_boot: true,
             bind_address: "127.0.0.1:3031",
+            https_only_session_cookies: true,
             updated_at: 100,
             bind_address_requires_restart: true,
             history_retention_days: 30,
@@ -87,11 +88,39 @@ describe("GeneralPage", () => {
         const startOnBoot = screen.getByTestId(
             "general-start-on-boot",
         ) as HTMLInputElement;
+        const httpsOnlyCookies = screen.getByTestId(
+            "general-https-only-session-cookies",
+        ) as HTMLInputElement;
         const bindAddr = screen.getByTestId(
             "general-bind-address",
         ) as HTMLInputElement;
         expect(startOnBoot.checked).toBe(true);
+        expect(httpsOnlyCookies.checked).toBe(true);
         expect(bindAddr.value).toBe("127.0.0.1:3031");
+    });
+
+    it("persists disabling HTTPS-only cookies for an HTTP LAN deployment", async () => {
+        let savedBody: Record<string, unknown> | null = null;
+        fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+            if (url === "/api/admin/me") return meResponse();
+            if (url === "/api/admin/settings/general" && init?.method === "PUT") {
+                savedBody = JSON.parse(String(init.body)) as Record<string, unknown>;
+                return settingsResponse({ https_only_session_cookies: false });
+            }
+            if (url === "/api/admin/settings/general") return settingsResponse();
+            return new Response("{}", { status: 200 });
+        });
+        mountPage();
+        const toggle = (await screen.findByTestId(
+            "general-https-only-session-cookies",
+        )) as HTMLInputElement;
+        expect(toggle.checked).toBe(true);
+        fireEvent.click(toggle);
+        fireEvent.click(screen.getByTestId("general-save"));
+        await waitFor(() => expect(savedBody).toEqual({ https_only_session_cookies: false }));
+        expect(
+            screen.getByTestId("general-https-only-session-cookies"),
+        ).not.toBeChecked();
     });
 
     it("disables Save until a field changes", async () => {

@@ -1155,6 +1155,7 @@ mod tests {
     use super::*;
     use crate::chats::types::InlineAttachmentRequest;
     use base64::Engine;
+    use sha2::{Digest, Sha256};
 
     fn req(mime: &str, body: &[u8], filename: Option<&str>) -> InlineAttachmentRequest {
         let b64 = base64::engine::general_purpose::STANDARD.encode(body);
@@ -1709,7 +1710,7 @@ mod tests {
                 conversation_id: cid.clone(),
                 mime_type: mime.to_owned(),
                 path: tmp.path().to_string_lossy().into_owned(),
-                sha256: format!("sha-test-{}", id.as_str()),
+                sha256: hex::encode(Sha256::digest(bytes)),
                 received_at: 0,
                 filename: filename.map(|s| s.to_owned()),
             })

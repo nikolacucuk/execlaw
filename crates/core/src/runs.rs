@@ -9,6 +9,7 @@ use crate::ids::{ConversationId, EventSeq};
 use crate::outbox::OutboxRow;
 use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -221,6 +222,27 @@ pub struct RunExecutionBudget {
     pub retries_used: u32,
     pub effect_limit: u32,
     pub effects_used: u32,
+}
+
+/// Error returned when persisted UTC observations show that wall time moved backward.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum RunClockError {
+    #[error(
+        "wall clock moved backward from {last_observed_ms} to {now_ms}; timer validity is unverifiable"
+    )]
+    Rollback { last_observed_ms: i64, now_ms: i64 },
+}
+
+/// Reject a timer decision when UTC moved backward relative to its durable observation.
+pub fn validate_run_clock(last_observed_ms: i64, now_ms: i64) -> Result<(), RunClockError> {
+    if now_ms < last_observed_ms {
+        Err(RunClockError::Rollback {
+            last_observed_ms,
+            now_ms,
+        })
+    } else {
+        Ok(())
+    }
 }
 
 /// Versioned hashes of the effective prompt and model settings plus the
@@ -812,6 +834,48 @@ impl<'db> RunStore<'db> {
                 "run '{run_id}' was retried with a different definition"
             )));
         }
+        let input = self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT e.payload,c.trust_class FROM state_conversations c \
+                     LEFT JOIN state_events e ON e.conversation_id=c.conversation_id AND e.seq=?2 \
+                     WHERE c.conversation_id=?1",
+                    params![new_run.conversation_id.as_str(), new_run.input_event_seq.0],
+                    |row| Ok((row.get::<_, Option<Vec<u8>>>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(DbError::from)
+        })?;
+        let (payload, trust_class) = input.unwrap_or_else(|| (None, "UnknownPending".into()));
+        let source_bytes = payload.unwrap_or_else(|| run_id.as_bytes().to_vec());
+        let subject = crate::information_store::InformationSubject {
+            kind: "run".into(),
+            id: run_id.to_owned(),
+            sha256: hex::encode(Sha256::digest(&source_bytes)),
+        };
+        let labels = crate::information_store::InformationLabelStore::new(self.db);
+        if labels.get(&subject)?.is_none() {
+            let label = crate::information::InformationLabel::observed(
+                crate::information::Sensitivity::Sensitive,
+                Some(new_run.conversation_id.as_str().to_owned()),
+                trust_class.clone(),
+                "run_input",
+                format!(
+                    "{}:{}",
+                    new_run.conversation_id.as_str(),
+                    new_run.input_event_seq.0
+                ),
+                if matches!(
+                    trust_class.as_str(),
+                    "Controller" | "Delegated" | "KnownTrusted"
+                ) {
+                    vec!["transport:*".to_owned()]
+                } else {
+                    Vec::new()
+                },
+            );
+            labels.observe(&subject, &label, "runs:store", new_run.started_at)?;
+        }
         Ok(existing)
     }
 
@@ -928,6 +992,51 @@ impl<'db> RunStore<'db> {
         }).map_err(RunStoreError::from)
     }
 
+    /// Observe UTC before making a timer decision; rollback since the previous
+    /// durable observation invalidates the remaining-time calculation.
+    pub fn execution_budget_at(
+        &self,
+        run_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<RunExecutionBudget>, RunStoreError> {
+        self.db.transaction(|tx| {
+            let changed = tx.execute(
+                "UPDATE state_run_execution_budgets SET updated_at_ms=?2 WHERE run_id=?1 AND updated_at_ms<=?2",
+                params![run_id, now_ms],
+            )?;
+            if changed == 0 {
+                let exists: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_run_execution_budgets WHERE run_id=?1)",
+                    [run_id],
+                    |row| row.get(0),
+                )?;
+                if exists {
+                    let last_observed: i64 = tx.query_row(
+                        "SELECT updated_at_ms FROM state_run_execution_budgets WHERE run_id=?1",
+                        [run_id],
+                        |row| row.get(0),
+                    )?;
+                    validate_run_clock(last_observed, now_ms)
+                        .map_err(|error| DbError::Invariant(error.to_string()))?;
+                }
+                return Ok(None);
+            }
+            tx.query_row(
+                "SELECT time_limit_ms,deadline_at_ms,retry_limit,retries_used,effect_limit,effects_used \
+                 FROM state_run_execution_budgets WHERE run_id=?1",
+                [run_id],
+                |row| Ok(RunExecutionBudget {
+                    time_limit_ms: row.get::<_, i64>(0)?.max(0) as u64,
+                    deadline_at_ms: row.get(1)?,
+                    retry_limit: row.get(2)?,
+                    retries_used: row.get(3)?,
+                    effect_limit: row.get(4)?,
+                    effects_used: row.get(5)?,
+                }),
+            ).optional().map_err(DbError::from)
+        }).map_err(RunStoreError::from)
+    }
+
     /// Consume one run-wide retry reservation if the deadline and quota allow it.
     pub fn consume_execution_retry(
         &self,
@@ -938,7 +1047,7 @@ impl<'db> RunStore<'db> {
             .with_conn(|connection| {
                 let changed = connection.execute(
                 "UPDATE state_run_execution_budgets SET retries_used=retries_used+1,updated_at_ms=?2
-                 WHERE run_id=?1 AND retries_used<retry_limit AND deadline_at_ms>?2",
+                 WHERE run_id=?1 AND updated_at_ms<=?2 AND retries_used<retry_limit AND deadline_at_ms>?2",
                 params![run_id,now_ms],
             )?;
                 Ok(changed == 1)
@@ -955,17 +1064,29 @@ impl<'db> RunStore<'db> {
         now_ms: i64,
     ) -> Result<bool, RunStoreError> {
         self.db.transaction(|tx| {
+            let last_observed: Option<i64> = tx.query_row(
+                "SELECT updated_at_ms FROM state_run_execution_budgets WHERE run_id=?1",
+                [run_id],
+                |row| row.get(0),
+            ).optional()?;
+            if let Some(last_observed) = last_observed {
+                validate_run_clock(last_observed, now_ms).map_err(|error| DbError::Invariant(error.to_string()))?;
+            }
             let claimed: bool = tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM state_run_effect_claims WHERE run_id=?1 AND step_id=?2)",
                 params![run_id,step_id],
                 |row| row.get(0),
             )?;
             if claimed {
+                tx.execute(
+                    "UPDATE state_run_execution_budgets SET updated_at_ms=?2 WHERE run_id=?1 AND updated_at_ms<=?2",
+                    params![run_id, now_ms],
+                )?;
                 return Ok(true);
             }
             let changed = tx.execute(
                 "UPDATE state_run_execution_budgets SET effects_used=effects_used+1,updated_at_ms=?2
-                 WHERE run_id=?1 AND effects_used<effect_limit AND deadline_at_ms>?2",
+                 WHERE run_id=?1 AND updated_at_ms<=?2 AND effects_used<effect_limit AND deadline_at_ms>?2",
                 params![run_id,now_ms],
             )?;
             if changed != 1 {
@@ -1920,6 +2041,8 @@ impl<'db> RunStore<'db> {
         now: i64,
         lease_expires_at: i64,
     ) -> Result<RunStepRecord, RunStoreError> {
+        let now_ms = now.saturating_mul(1_000);
+        let _ = self.execution_budget_at(run_id, now_ms)?;
         if lease_expires_at <= now {
             return Err(RunStoreError::InvalidLease {
                 now,
@@ -2427,6 +2550,7 @@ impl<'db> RunStore<'db> {
         run_id: &str,
         now_ms: i64,
     ) -> Result<bool, RunStoreError> {
+        let _ = self.execution_budget_at(run_id, now_ms)?;
         self.db
             .transaction(|tx| {
                 let changed = tx.execute(
@@ -2957,6 +3081,31 @@ mod tests {
             Some("error:run_budget_expired")
         );
         assert!(closed.lease_owner.is_none());
+    }
+
+    #[test]
+    fn execution_budget_clock_rollback_is_rejected_and_deadline_is_immutable() {
+        let db = fresh_db();
+        let store = RunStore::new(&db);
+        let run_id = create_run(&store, None);
+        let budget = store
+            .ensure_execution_budget(&run_id, 5_000, 2, 1, 10_000)
+            .unwrap();
+        assert_eq!(budget.deadline_at_ms, 15_000);
+        let observed = store.execution_budget_at(&run_id, 12_000).unwrap().unwrap();
+        assert_eq!(observed.deadline_at_ms, 15_000);
+        assert!(matches!(
+            store.execution_budget_at(&run_id, 11_999),
+            Err(RunStoreError::Db(DbError::Invariant(message))) if message.contains("moved backward")
+        ));
+        assert_eq!(
+            store
+                .execution_budget_at(&run_id, 12_500)
+                .unwrap()
+                .unwrap()
+                .deadline_at_ms,
+            15_000
+        );
     }
 
     #[test]
@@ -4207,5 +4356,23 @@ mod tests {
         assert_eq!(fork.status, RunStatus::Pending);
         assert!(store.list_steps(&fork.run_id).unwrap().is_empty());
         assert_eq!(store.list_steps(&source).unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod run_clock_tests {
+    use super::{RunClockError, validate_run_clock};
+
+    #[test]
+    fn persisted_wall_clock_observation_fails_closed_after_rollback() {
+        assert_eq!(validate_run_clock(10_000, 10_000), Ok(()));
+        assert_eq!(validate_run_clock(10_000, 10_001), Ok(()));
+        assert_eq!(
+            validate_run_clock(10_000, 9_999),
+            Err(RunClockError::Rollback {
+                last_observed_ms: 10_000,
+                now_ms: 9_999
+            })
+        );
     }
 }

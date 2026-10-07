@@ -1,7 +1,12 @@
 # Local LLM Harness Roadmap
 
-Status: accepted implementation scope, 2026-09-27. **All 130 enhancements
-(H001-H130) are accepted implementation scope.** This document owns their scope,
+**Using this as the only attachment?** Start with the
+[repository navigation and reading guide](#roadmap-entry-guide). This file is
+the entry point to the requirements, implementation evidence, source catalog,
+and upstream repositories; it is not a bundle of their contents.
+
+Status: accepted implementation scope, updated 2026-10-06. **All 154 enhancements
+(H001-H154) are accepted implementation scope.** This document owns their scope,
 acceptance criteria, and the F01-F19 review findings. The
 [`implementation-plan.md`](implementation-plan.md) ledger owns delivery status,
 assigned owners, dependencies, and verification evidence; it must be updated
@@ -12,6 +17,17 @@ The [Nexus visual extension](#nexus-visual-roadmap) adds separately tracked
 NX01-NX30 proposals and NXF01-NXF11 findings. These refine the chat appearance
 experience without renumbering the H baseline or implying that a redesign has
 already shipped.
+
+The [Paperclip coordination and interoperability extension](#paperclip-roadmap),
+reviewed 2026-10-06, continues the numbered roadmap with H131-H154. It covers native execlaw agent management
+and optional participation as a Paperclip worker, lead, or executive. These
+items use the main delivery ledger; existing H001-H130 and NX statuses are unchanged.
+
+Implementation references for H001-H130 are linked under each item. The
+[source guide and repository directory](implementation-sources.md) distinguish
+documented inspiration from supporting references selected on 2026-10-06;
+[the machine-readable catalog](roadmap-sources.json) supports per-item lookup.
+These annotations do not change requirements, permissions, or qualification.
 
 A checked item records reported implementation, not independent release
 qualification. Open review findings and missing acceptance evidence can reopen
@@ -26,11 +42,178 @@ network. Cloud LLM providers and default internet inference are out of scope.
 The local endpoint policy, SQLite configuration, event log, trust ladder,
 outbox, and plugin contract remain authoritative.
 
+<a id="roadmap-entry-guide"></a>
+
+## Start here: using this roadmap as the only attachment
+
+This file belongs at **`docs/llm-harness-roadmap.md`** in the execlaw repository.
+Link targets are relative to that location: `implementation-plan.md` means
+`docs/implementation-plan.md`; `../README.md` means the repository-root README.
+Code paths such as `crates/core/src/runs.rs` are relative to the repository root.
+Do not assume a particular Windows username, checkout path, branch, or deployed
+binary from an older review note.
+
+If the repository is available, follow these links directly or open the named
+paths. If only this attachment is available and repository access is absent,
+state which required files cannot be inspected and request the relevant files
+or an accessible checkout/repository revision. Relative links do not grant
+access or embed the linked documents. Do not infer current implementation,
+tests, credentials, or deployment state from filenames and historical notes.
+
+### Reading order and document authority
+
+1. Read the applicable [repo instructions (`AGENTS.md`)](../AGENTS.md) and
+   [architecture](architecture.md), especially its design principles, before
+   implementation. Check for more specific instructions in the directories
+   being edited. This roadmap supplies requirements and navigation; it does
+   not authorize every listed task, a commit, deployment, or live external
+   effect merely because it was attached.
+2. Locate the requested H or NX item here, including dependencies, acceptance
+   criteria and related F/NXF findings. Open its current row in
+   [the implementation plan](implementation-plan.md) and consult
+   [the immediate queue](remaining-improvements-todo.md). Existing partial
+   work should be completed and verified, not rebuilt from an outdated proposal.
+3. Use the topic map below to read the relevant subsystem design and current
+   source/tests. [The documentation index](README.md) lists additional guides
+   and explains which documents are historical. Resolve conflicting claims
+   using current code and revision-specific evidence; neither a checkbox nor
+   an old passing test report proves the present tree is qualified.
+4. Read the item's implementation-source annotations, then
+   [the source guide](implementation-sources.md) and the applicable upstream
+   pages/files. Use the provenance labels: documented inspiration is different
+   from a supporting reference selected later. A reference does not assert
+   that the upstream project implements execlaw's entire acceptance contract.
+5. Use [testing.md](testing.md) and the applicable qualification/runbook files
+   to choose checks for the actual execution path and platform. Report what
+   ran, failed, was skipped or remains unverified; keep operator state separate
+   from disposable test fixtures.
+6. After authorized implementation, update this item's notes/checkbox, its
+   implementation-ledger evidence, affected subsystem docs and relevant
+   READMEs together. Preserve stable H001-H154 and NX01-NX30 IDs. Close a finding
+   only with its own remediation evidence; adding a source link is not completion.
+
+| Need | Authoritative or supporting document |
+|---|---|
+| Requirements and acceptance | This roadmap; H001-H154 use `enhancement-NNN` anchors, NX items use `nexus-nxNN` |
+| Current status, owner, workstream and evidence | [`docs/implementation-plan.md`](implementation-plan.md) |
+| Next bounded work and unresolved verification | [`docs/remaining-improvements-todo.md`](remaining-improvements-todo.md) |
+| Per-item upstream links, applicability and provenance | [`docs/implementation-sources.md`](implementation-sources.md) and [`docs/roadmap-sources.json`](roadmap-sources.json) |
+| Full document directory and historical context | [`docs/README.md`](README.md); [`docs/execlaw_impr_doc.md`](execlaw_impr_doc.md) is research history, not a competing live backlog |
+| Build, development and contribution conventions | [`README.md`](../README.md), [`AGENTS.md`](../AGENTS.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
+
+### Topic-to-document map
+
+Read the rows relevant to the requested change rather than loading every
+document into every task. These are repository files, not external websites.
+
+| Area | Read for design, implementation detail and verification |
+|---|---|
+| State, trust and turn execution | [architecture.md](architecture.md), [agent-model.md](agent-model.md), [core README](../crates/core/README.md), [policy README](../crates/policy/README.md) |
+| Runners, local services and resource ownership | [runner-design.md](runner-design.md), [sidecar-supervisor-design.md](sidecar-supervisor-design.md), [runner README](../crates/runner-local/README.md), [container-manager README](../crates/container-manager/README.md) |
+| Plugins, tools and architectural placement | [plugins.md](plugins.md), [operator-decision-rubric.md](operator-decision-rubric.md), [plugin collection README](../plugins/README.md), [plugin SDK README](../crates/plugin-sdk/README.md) |
+| Workspace coding, checkpoints, terminal and diagnostics | [workspace-coding.md](workspace-coding.md), [runner-design.md](runner-design.md), [client contract schema](../spec/client-contract-v1.schema.json) |
+| Memory, evidence, loadouts and learning | [memory-roadmap.md](memory-roadmap.md), [skill-evaluation.md](skill-evaluation.md), [agent-model.md](agent-model.md) |
+| Agents, routines, automation graphs and approval waits | [agent-model.md](agent-model.md), [automations.md](automations.md), [agent-related H delivery rows](implementation-plan.md#item-ledger) |
+| Models, serving and local endpoint behavior | [ollama.md](ollama.md), [inference API README](../crates/inference-api/README.md), [architecture.md](architecture.md) |
+| Voice and interruption | [voice-followups.md](voice-followups.md), [voice-pipeline README](../crates/voice-pipeline/README.md) |
+| Security, authorization and data protection | [security.md](security.md), [adversarial-evaluations.md](adversarial-evaluations.md); [security-hardening-2026-06.md](security-hardening-2026-06.md) is a dated earlier record |
+| Tests, benchmarks and actual qualification evidence | [testing.md](testing.md), [h022-h025-qualification.md](h022-h025-qualification.md), [adversarial-evaluations.md](adversarial-evaluations.md), [CI workflow](../.github/workflows/ci.yml) |
+| SQLCipher, backups, rotation and incident recovery | [key-rotation-drill.md](key-rotation-drill.md), [security.md](security.md), [vault README](../crates/vault/README.md) |
+| Desktop builds and installation | [desktop-installations.md](desktop-installations.md), [Windows README](../desktop-windows/README.md), [Linux README](../desktop-linux/README.md), [macOS README](../desktop-macos/README.md) |
+| Operator setup and TrueNAS | [setup-walkthroughs.md](setup-walkthroughs.md), [setup-mac.md](setup-mac.md), [truenas-docker.md](truenas-docker.md), [truenas-docker-nvidia-ollama-setup.md](truenas-docker-nvidia-ollama-setup.md), [TrueNAS_deploy_doc.md](TrueNAS_deploy_doc.md) |
+| SPA, chat appearance and Nexus evidence | [web README](../web/README.md), [Nexus requirements](#nexus-visual-roadmap), [live capture analysis](#nexus-live-review), [screenshot guide](screenshots/README.md), [sanitized measurements](screenshots/nexus-live-review-metrics.json) |
+| API/client contracts and event messages | [client contract schema](../spec/client-contract-v1.schema.json), [AsyncAPI YAML](../spec/asyncapi.yaml), [AsyncAPI JSON](../spec/asyncapi.json), [OpenAPI registration source](../crates/server/src/docs.rs), [server README](../crates/server/README.md) |
+| Paperclip learning and integration | [H131-H154 and pinned upstream contracts](#paperclip-roadmap), [implementation guidance](implementation-plan.md#paperclip-coordination-and-interoperability), [plugins.md](plugins.md); keep provider-specific mappings at the adapter/plugin edges |
+| Developer graph/knowledge workflow and skill context | [copilot-graphify-obsidian-workspace-setup.md](copilot-graphify-obsidian-workspace-setup.md), [superpowers-integration.md](superpowers-integration.md) |
+| Earlier investigations and scenario-specific rationale | [hermes-porting-todo.md](hermes-porting-todo.md), [chat_thread_del_bug.md](chat_thread_del_bug.md), [camper_wha_agent_handling.md](camper_wha_agent_handling.md); verify current code before reusing conclusions |
+
+The source-backed OpenAPI registration above is a real repository path; do
+not assume a static `spec/openapi.yaml` exists. Inspect the schema exported by
+the intended test instance when needed. Likewise, a running SPA, a local debug
+server and a packaged TrueNAS installation may represent different revisions.
+The qualification notes explain how earlier reviews distinguished them; their
+machine addresses and test results are historical, not universal defaults.
+
+### Finding implementation code without guessing paths
+
+Use the linked module READMEs and the repository's Graphify instructions for
+navigation. When `graphify-out/graph.json` exists and Graphify is available,
+query the requested concept first; use `path` for relationships and `explain`
+for focused concepts. Follow the current AGENTS instructions for graph updates
+and exceptions. If tooling is unavailable, report that limitation and use
+bounded file/text search. Do not treat stale graph output as source truth.
+
+Read-only examples, run from the repository root:
+
+```powershell
+graphify query "durable child tasks and cancellation"
+rg -n "enhancement-042|H042" docs/llm-harness-roadmap.md docs/implementation-plan.md
+rg -n "ChildRun|child_task" crates/core/src crates/server/src
+node -e "const c=require('./docs/roadmap-sources.json'); console.log(JSON.stringify(c.entries.find(x=>x.id==='H042'),null,2))"
+```
+
+| Implementation concern | Start in these repository paths |
+|---|---|
+| Persistence and schema changes | `crates/core/src/`, `crates/core/migrations/`; add migrations rather than editing shipped history |
+| Agent definitions, work ownership and durable execution | `crates/core/src/agents.rs`, `crates/core/src/agent_contract.rs`, `crates/core/src/agent_ownership.rs`, `crates/core/src/runs.rs`, `crates/server/src/agent_supervisor.rs`, `crates/server/src/tool_apis_subagent.rs` |
+| Turn execution and transport protocol | `crates/runner-local/`, `crates/runner-binary/`, `crates/runner-protocol/`, `crates/server/src/chats.rs` |
+| Tool policy and effects | `crates/policy/`, `crates/server/src/tool_dispatch.rs`, `crates/outbox/`, `crates/core/src/outbox.rs` |
+| Plugin contracts and execution | `crates/plugin-sdk/src/manifest.rs`, `crates/plugin-host/`, `crates/script/`, `plugins/` |
+| Inference and context | `crates/inference-api/`, `crates/model-adapter/`, `crates/context-window/`, `crates/local-endpoint-policy/` |
+| Chat, settings and presentation | `web/src/chat/`, `web/src/routes/`, `web/src/settings/`, `web/src/styles/`, `web/src/__tests__/` |
+| API schemas, headless clients and editor integration | `crates/server/src/client_contract.rs`, `crates/server/src/docs.rs`, `crates/cli/src/api_client.rs`, `spec/` |
+| Verification and isolated fixtures | Tests next to implementation; `crates/server/tests/`, `crates/eval-harness/`, `evals/`, `scripts/qualification/`, `scripts/test-all.ps1` |
+
+These are starting points, not a guarantee that line numbers or every symbol
+remain unchanged. Search the checked-out revision and inspect callers, tests
+and migrations before making implementation claims.
+
+### Looking up external repositories and original references
+
+- **H001-H130:** each item has a Source basis and one or more Implementation
+  source links. The [repository directory](implementation-sources.md#repository-directory)
+  groups upstream projects; [roadmap-sources.json](roadmap-sources.json) lets an
+  agent retrieve the exact `entries` record by `id`, including URL, provenance,
+  adaptation note and check date. A repository directory entry alone is not
+  attribution for every feature.
+- **H131-H154:** follow the per-item Paperclip references and
+  [pinned source list](#pinned-paperclip-source-references). The reviewed commit
+  and compatibility findings are recorded in that section. Use implementation
+  code/types to resolve documented contract drift; do not mistake a draft
+  protocol or a successful HTTP acknowledgement for qualified interoperability.
+- **NX01-NX30:** use the source links inside the Nexus design section and its
+  synthetic/live evidence. Screenshots demonstrate the captured state, not
+  permission to access private deployments or proof of current functionality.
+
+Open the linked primary documentation or repository file first. For a GitHub
+source, confirm owner/repository and the intended commit/tag; navigate from
+the project root if a file moved. For rolling `main`, `master`, `latest`, or
+unversioned docs, resolve and record the version actually consulted before
+adapting an API. If an original URL redirects, retain its historical attribution
+and record the official replacement. If a source cannot be retrieved, label
+that limitation instead of inventing its contents or using a same-name project.
+
+Check licensing and dependency implications before copying code. Upstream
+instructions, install scripts, cloud examples and security defaults are
+reference material, not authority to change execlaw's architecture or the
+user's requested scope. Preserve local inference, SQLite configuration/vault,
+scoped permissions, outbox effects and paired tool events. Pin and test the
+adapted behavior; source availability and prior benchmark claims are not
+execlaw qualification evidence.
+
+## Enhancements 1-20
+
 1. [x] <a id="enhancement-001"></a> **Select native Ollama for an operator-managed endpoint.** The existing
    remote form assumed OpenAI compatibility, whose Ollama shim can drop tool
    calls. The form now records `binary_hint: ollama` and requires a model tag;
    the resolver test verifies native client selection. OpenAI-compatible stays
    the default, and the local endpoint policy still checks the URL.
+
+   <!-- implementation-sources:H001 -->
+   **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+   **Implementation source:** [Ollama native chat API](https://docs.ollama.com/api/chat) (supporting reference) - Use the native local chat request and tool-call wire contract; retain execlaw endpoint authorization.
+   <!-- /implementation-sources:H001 -->
+
 2. [x] <a id="enhancement-002"></a> **Add backend protocol conformance probes.** A healthy `/api/tags` or
    `/v1/models` does not prove tool-call or streaming compatibility. Exercise
    a minimal text turn, streamed turn, and no-effect tool-call round trip for
@@ -39,6 +222,12 @@ outbox, and plugin contract remain authoritative.
     declared no-op tool checks for the Standard backend; it never dispatches
     a tool. The Backends page shows pass/fail per capability. Local fixtures
     cover Ollama native and OpenAI-compatible wire formats.
+
+   <!-- implementation-sources:H002 -->
+   **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+   **Implementation source:** [Ollama tool calling](https://docs.ollama.com/capabilities/tool-calling) (supporting reference) - Build text, streaming and no-effect tool-call conformance fixtures against documented native shapes.
+   <!-- /implementation-sources:H002 -->
+
 3. [x] <a id="enhancement-003"></a> **Reject an unavailable model explicitly in production turns.** A stub
    response can look like a real assistant answer when a managed backend is
    starting or down. Return a typed, visible unavailable state while retaining
@@ -47,6 +236,12 @@ outbox, and plugin contract remain authoritative.
     routines and inbound transport turns return the same typed condition and
     surface an alert without committing a synthetic answer. Tests cover all
     three paths and preserve the explicit development-only stub behavior.
+
+   <!-- implementation-sources:H003 -->
+   **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+   **Implementation source:** [HTTP Semantics: 503 Service Unavailable](https://www.rfc-editor.org/rfc/rfc9110.html#section-15.6.4) (supporting reference) - Use explicit temporary-unavailability semantics; never substitute a development answer in production.
+   <!-- /implementation-sources:H003 -->
+
 4. [x] <a id="enhancement-004"></a> **Capture backend readiness and version transitions.** An endpoint can
    serve HTTP before loading the chosen model. Record model ID, last successful
    probe, loading/error status, and the transition time in SQLite; test
@@ -55,6 +250,12 @@ outbox, and plugin contract remain authoritative.
     and last healthy time. Backend edits clear stale readiness; reopen and
     model-switch tests cover the store, and the status API distinguishes a
     stopped supervisor from its previously healthy observation.
+
+   <!-- implementation-sources:H004 -->
+   **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+   **Implementation source:** [Ollama API reference](https://github.com/ollama/ollama/blob/main/docs/api.md) (supporting reference) - Use version, loaded-model and model-list observations as inputs to persisted readiness; HTTP reachability alone is insufficient.
+   <!-- /implementation-sources:H004 -->
+
 5. [x] <a id="enhancement-005"></a> **Bound inference retries by error class and deadline.** Retrying an
    invalid model or malformed request burns latency, while transient local
    failures merit a bounded retry. Persist attempt metadata per run and test
@@ -69,12 +270,24 @@ outbox, and plugin contract remain authoritative.
     cover cancellation before response headers and during retry delay alongside
     error-class and deadline cases. Every production retry consumer supplies
     its active turn cancellation flag.
+
+   <!-- implementation-sources:H005 -->
+   **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+   **Implementation source:** [Timeouts, retries, and backoff with jitter](https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/) (supporting reference) - Adapt deadline-aware retry and jitter principles locally; no AWS runtime dependency or cloud inference.
+   <!-- /implementation-sources:H005 -->
+
 6. [x] <a id="enhancement-006"></a> **Prove tool-call schemas against each supported model adapter.** A
    model can emit invalid tool arguments even when a catalog is present. Add
    fixtures for Qwen, Llama, and generic OpenAI-compatible shapes; reject
    invalid calls before dispatch and test repaired calls stay within budget.
     The shared runner envelope is schema-validated before dispatch and has
     fixtures for each supported wire shape; malformed calls do not dispatch.
+
+   <!-- implementation-sources:H006 -->
+   **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+   **Implementation source:** [JSON Schema: object validation](https://json-schema.org/understanding-json-schema/reference/object) (supporting reference) - Validate required properties, types and unexpected properties before tool dispatch; model output is not authority.
+   <!-- /implementation-sources:H006 -->
+
 7. [x] <a id="enhancement-007"></a> **Make tool catalog budgets observable.** Large plugin catalogs waste
    context and prefill time. Measure schema tokens per tool and per turn,
    trim by capability and relevance before inference, and prove unavailable
@@ -82,12 +295,24 @@ outbox, and plugin contract remain authoritative.
     The shared catalog builder enforces a 24 KiB serialized-declaration cap,
     logs included bytes and exclusions, and derives routing prose from the
     same retained tool names.
+
+   <!-- implementation-sources:H007 -->
+   **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+   **Implementation source:** [TrueForge harness repository](https://github.com/truefoundry/trueforge) (supporting reference) - Compare deferred tool discovery and context efficiency; execlaw's catalog caps and trust filtering remain its own requirements.
+   <!-- /implementation-sources:H007 -->
+
 8. [x] <a id="enhancement-008"></a> **Complete the two-pass untrusted-content boundary.** The safe-analysis
    planner receives only framework-owned metadata and untrusted text, has no
    tools, and produces a bounded handoff for the executor. Untrusted content
    remains tainted across turns; tool-capable execution uses only the reviewed
    handoff and safe framework context. Tests cover the planner request, tool
    stripping, and persisted trust boundary.
+
+   <!-- implementation-sources:H008 -->
+   **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+   **Implementation source:** [Meta: Agents Rule of Two](https://ai.meta.com/blog/practical-ai-agent-security/) (supporting reference) - Adapt capability separation around untrusted input, sensitive data and effects; execlaw's persisted two-pass handoff requires its own tests.
+   <!-- /implementation-sources:H008 -->
+
 9. [x] <a id="enhancement-009"></a> **Run a process-kill recovery matrix for every tool boundary.** The
    durable step store exists, but restart semantics need evidence. Kill runner
    and host before/after claim, dispatch, outbox enqueue, and commit; verify
@@ -108,12 +333,24 @@ outbox, and plugin contract remain authoritative.
     returns the same receipt for the stable idempotency key, proving one visible
     effect. Unknown unfenced effects stay explicitly unresolved for operator
     reconciliation instead of being repeated.
+
+   <!-- implementation-sources:H009 -->
+   **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+   **Implementation source:** [SQLite atomic commit: testing](https://www.sqlite.org/atomiccommit.html#testing_atomic_commit_behavior) (supporting reference) - Use interruption and recovery testing as a durability pattern; also test remote effects and process boundaries beyond SQLite transactions.
+   <!-- /implementation-sources:H009 -->
+
 10. [x] <a id="enhancement-010"></a> **Bind approvals to a specific pending effect and replay state.** A
     stale approval must not authorize a rephrased or replaced action. Effectful
     chain approvals bind the pending plan hash, conversation, Controller
     principal, and expiry into the signed token; the shared UI/sideband route
     rechecks all claims and the live plan before resume. Tests cover expiry,
     duplicate use, changed plan, and principal mismatch.
+
+    <!-- implementation-sources:H010 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [OWASP Transaction Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html) (supporting reference) - Bind authorization to the exact action data, sequence and expiry rather than a reusable generic approval.
+    <!-- /implementation-sources:H010 -->
+
 11. [x] <a id="enhancement-011"></a> **Provide an auditable transport delivery timeline.** "Drafted",
     "send requested", and "delivered" are different states. Project outbox
     and transport acknowledgments into the chat UI with event references;
@@ -130,6 +367,12 @@ outbox, and plugin contract remain authoritative.
    covered with a file-backed process-kill test and an idempotent sink fixture.
    The chat projection and SPA timeline regression verify the operator-visible
    sequence and opaque receipt.
+
+    <!-- implementation-sources:H011 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [RabbitMQ acknowledgements and publisher confirms](https://www.rabbitmq.com/docs/confirms) (supporting reference) - Use the explicit distinction between submission, acceptance and acknowledgment; do not interpret broker acceptance as recipient delivery.
+    <!-- /implementation-sources:H011 -->
+
 12. [x] <a id="enhancement-012"></a> **Index conversation search without weakening trust scope.** Full
     event replay is costly for long threads. Build a derived SQLite FTS index
     keyed by conversation and event seq; verify HMAC-backed reads, incognito
@@ -139,6 +382,12 @@ outbox, and plugin contract remain authoritative.
    replays and verifies the HMAC chain before reading indexed content, applies
    conversation/source filters, and removes indexed rows on incognito deletion.
    Whole-chain verification remains the integrity check on each search.
+
+    <!-- implementation-sources:H012 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [SQLite FTS5](https://www.sqlite.org/fts5.html) (supporting reference) - Implement a derived full-text index and maintenance strategy; conversation trust and HMAC verification remain execlaw responsibilities.
+    <!-- /implementation-sources:H012 -->
+
 13. [x] <a id="enhancement-013"></a> **Finish governed memory-asset loadouts.** Metadata and HOT memory
     exist, but role/task bindings are not fully resolved into turns. Enforce
     trust filtering before ranking, byte budgets, version hashes, and an
@@ -146,6 +395,12 @@ outbox, and plugin contract remain authoritative.
     binding management feeds chat, routine, and child-agent prompt assembly;
     loadouts filter trust, owner scope, lifecycle, expiry, and turn bytes before
     rendering content, with source hashes and versions included.
+
+    <!-- implementation-sources:H013 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [Letta Code repository](https://github.com/letta-ai/letta-code) (supporting reference) - Reference persistent editable memory and memory organization; add execlaw's own owner/trust/version/budget eligibility gates.
+    <!-- /implementation-sources:H013 -->
+
 14. [x] <a id="enhancement-014"></a> **Close the memory lifecycle review loop.** Promotion/demotion
     candidates without a sweeper and controller approval UI accumulate
     silently. Add the server sweeper and decision surface; test stale
@@ -154,6 +409,12 @@ outbox, and plugin contract remain authoritative.
     controller-only Approvals feed exposes the exact memory-row reference and
     approve/reject actions; approval refuses a target whose tier changed, and
     core tests cover stale proposals and duplicate sweep proposals.
+
+    <!-- implementation-sources:H014 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [LangMem background memory processing](https://langchain-ai.github.io/langmem/background_quickstart/) (supporting reference) - Adapt background consolidation separate from foreground turns; keep lifecycle decisions approval-gated and inference local.
+    <!-- /implementation-sources:H014 -->
+
 15. [x] <a id="enhancement-015"></a> **Evaluate skill capture against held-out local tasks.** A reusable
     skill can also preserve a bad solution or a secret. Secret scanning remains
     mandatory on skill writes; Controller-authored held-out cases run through
@@ -162,12 +423,24 @@ outbox, and plugin contract remain authoritative.
     requires a passing run for the current body and suite. Before/after scores
     compare only when the parent version used the same suite and local backend.
     No cloud judge or inference path is used.
+
+    <!-- implementation-sources:H015 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [Pydantic Evals overview](https://pydantic.dev/docs/ai/evals/evals/) (supporting reference) - Reference repeatable test cases and evaluator contracts; evaluate local skill versions without adopting hosted judges.
+    <!-- /implementation-sources:H015 -->
+
 16. [x] <a id="enhancement-016"></a> **Version prompts, model settings, and tool catalogs per turn.** A
     replay should explain not just the event sequence but the exact inputs
     used by the local model. Persist hashes and immutable references; test
     that replay identifies drift after a backend or plugin upgrade. Migration
     0034 stores versioned SHA-256 fingerprints, reopening rejects drift, and
     `execlaw replay` reports hashes without copying sensitive prompt text.
+
+    <!-- implementation-sources:H016 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence) (supporting reference) - Reference checkpoint identity and history for replay; persist execlaw-specific immutable prompt/model/catalog fingerprints.
+    <!-- /implementation-sources:H016 -->
+
 17. [x] <a id="enhancement-017"></a> **Add offline adversarial evaluation suites.** Prompt injection,
     malformed tool calls, Unicode spoofing, SSRF, and cross-trust memory
     leakage require recurring tests. Run deterministic fixtures in CI; optional
@@ -177,6 +450,12 @@ outbox, and plugin contract remain authoritative.
    [`adversarial-evaluations.md`](adversarial-evaluations.md). Coverage includes
    delimiter smuggling, malformed tool arguments, Unicode controls/homoglyphs,
    SSRF, and conversation-scoped memory search with HMAC tampering.
+
+    <!-- implementation-sources:H017 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [OWASP LLM Prompt Injection Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html) (supporting reference) - Derive attack-focused test categories; keep enforcement fixtures deterministic and offline.
+    <!-- /implementation-sources:H017 -->
+
 18. [x] <a id="enhancement-018"></a> **Attribute latency and context cost by phase.** The inference probe
     exists, but operators need actionable turn breakdowns. Track prompt
     construction, local prefill/decode, tool wait, retries, and stream delay
@@ -201,6 +480,12 @@ outbox, and plugin contract remain authoritative.
     The source review also covered MCP request/notification bodies, WebSocket
     close reasons, skill capture, inference decoding, and tool failures; only
     bounded sizes, counts, codes, and error classes remain in those logs.
+
+    <!-- implementation-sources:H018 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [OpenTelemetry GenAI span conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md) (supporting reference) - Reference phase/operation and usage telemetry semantics; retain numeric-only defaults and avoid prompt-content capture.
+    <!-- /implementation-sources:H018 -->
+
 19. [x] <a id="enhancement-019"></a> **Validate resource-aware model routing.** Ollama, vLLM, voice, and
     vision compete for local RAM/VRAM. Check capacity before spawn, decline
     overcommitted configurations, and test recovery when a model releases
@@ -213,6 +498,12 @@ outbox, and plugin contract remain authoritative.
     samples, disappeared devices, and unmonitored GPU vendors fail closed.
     Non-NVIDIA managed models that declare VRAM need a vendor-specific live
     probe before they can start.
+
+    <!-- implementation-sources:H019 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [Ollama FAQ: concurrency and memory](https://docs.ollama.com/faq) (supporting reference) - Use documented residency/concurrency memory behavior to inform measured local resource admission; do not assume model size equals live free memory.
+    <!-- /implementation-sources:H019 -->
+
 20. [ ] <a id="enhancement-020"></a> **Drill backup, key rotation, and secret incident recovery.** A backup
     is useful only if it restores encrypted SQLite, vault references, plugin
     state, and the HMAC chain. Automate a disposable restore check and test
@@ -248,6 +539,13 @@ outbox, and plugin contract remain authoritative.
     a final summary. Native installed-package workflow results are still pending;
     H020 remains verification-blocked under F04/F16 until those cross-platform
     artifact results are recorded.
+
+    <!-- implementation-sources:H020 -->
+    **Source basis:** Repository-driven H001-H020 reliability work; external reference added for implementation guidance, not claimed as its original inspiration.
+    **Implementation source:** [SQLCipher API: rekey and export](https://www.zetetic.net/sqlcipher/sqlcipher-api/) (supporting reference) - Use SQLCipher's explicit key rotation/export interfaces and test wrong-key rejection plus restoration.
+    **Implementation source:** [SQLite Online Backup API](https://www.sqlite.org/backup.html) (supporting reference) - Use a consistent database snapshot mechanism; independently verify encrypted vault and event-signing continuity.
+    <!-- /implementation-sources:H020 -->
+
 
 Prioritization: complete items 2-5 before claiming reliable multi-backend
 operation; items 8-11 and 17 are release-blocking safety gates for effectful
@@ -353,6 +651,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     hardware-tier runs remain open, so the item is checked for implementation
     while comparative benchmark qualification is pending.
 
+    <!-- implementation-sources:H021 -->
+    **Source basis:** Documented inspiration: llm-harness-roadmap.md comparison explicitly maps NeMo evaluation/profiling to H021; execlaw_impr_doc.md section5.1 also associates mini-SWE-agent with benchmark discipline.
+    **Implementation source:** [NeMo Agent Toolkit evaluation](https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/develop/docs/source/improve-workflows/evaluate.md) (documented inspiration) - Adapt curated task execution, reproducibility artifacts and per-case scoring; use local models and deterministic verifiers.
+    <!-- /implementation-sources:H021 -->
+
+
 22. [ ] <a id="enhancement-022"></a> **Make task completion an explicit, verifiable contract.** **P1 / M.**
     Build on `crates/core/src/runs.rs` and agent run history: persist user
     acceptance criteria, required artifacts, verifier results, and blocked or
@@ -399,6 +703,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     Code editor adapter processes and a settled-build matrix remain unproved;
     H022 stays Partial. See [qualification notes](h022-h025-qualification.md).
 
+    <!-- implementation-sources:H022 -->
+    **Source basis:** Repository-driven completion-contract requirement; external evaluator reference supports implementation and is not evidence of an original external source.
+    **Implementation source:** [Pydantic Evals evaluators](https://pydantic.dev/docs/ai/evals/evals/) (supporting reference) - Separate model response generation from criteria evaluation, required artifacts and terminal task evidence.
+    <!-- /implementation-sources:H022 -->
+
+
 23. [ ] <a id="enhancement-023"></a> **Unify production executor semantics and recovery.** **P0 / L.**
     `runner-local`, `runner-binary`, and `server/src/chats.rs` have overlapping
     loops with different retry, cancellation, and replay behavior. Define a
@@ -443,6 +753,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     qualification, as do streaming/routine parity and the full kill matrix;
     H023 stays Partial. See [qualification notes](h022-h025-qualification.md).
 
+    <!-- implementation-sources:H023 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md section5.1 explicitly maps LangGraph checkpoints, pending writes and node-level resume to a native SQLite step machine.
+    **Implementation source:** [LangGraph persistence and durable execution](https://docs.langchain.com/oss/python/langgraph/persistence) (documented inspiration) - Adapt persisted step boundaries and replay-safe side-effect handling across execlaw executors; do not import LangGraph as runtime authority.
+    <!-- /implementation-sources:H023 -->
+
+
 24. [ ] <a id="enhancement-024"></a> **Add client request idempotency and explicit effect reconciliation.**
     **P0 / M.** Extend the chat API, `core/src/runs.rs`, and outbox contract
     with caller request IDs scoped to principal and conversation, canonical
@@ -480,6 +796,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     compilation but was stopped before an image was produced when host RAM
     became scarce. H024 stays Partial; see
     [qualification notes](h022-h025-qualification.md).
+
+    <!-- implementation-sources:H024 -->
+    **Source basis:** Repository-driven client submission and uncertain-effect gap; supporting idempotency reference added now.
+    **Implementation source:** [Making retries safe with idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/) (supporting reference) - Adapt caller request identifiers, duplicate lookup and conflicting-request semantics; do not infer exactly-once behavior from a local key.
+    <!-- /implementation-sources:H024 -->
+
 
 25. [ ] <a id="enhancement-025"></a> **Enforce capability-specific network egress at connection time.**
     **P0 / M.** Extend the existing `local-endpoint-policy` approach to
@@ -524,6 +846,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     rebinding, and proxy matrix remain open. H025 stays Partial; see
     [qualification notes](h022-h025-qualification.md).
 
+    <!-- implementation-sources:H025 -->
+    **Source basis:** Repository SSRF finding and local-endpoint policy drove this item; OWASP is a supporting security reference, not an asserted original harness source.
+    **Implementation source:** [OWASP SSRF Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Server_Side_Request_Forgery_Prevention_Cheat_Sheet.html) (supporting reference) - Adapt address validation, allowlisting and redirect controls at connection boundaries while preserving explicitly approved private integrations.
+    <!-- /implementation-sources:H025 -->
+
+
 26. [x] <a id="enhancement-026"></a> **Make authorization and session revocation systematic.** **P0 / M.**
     Centralize protected admin-route construction in `server/src/routes.rs`
     and require explicit public-route exceptions. Add a generated route/role
@@ -534,6 +862,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     state; revoked access/refresh tokens and active connections lose authority
     across restart. Show operators the principal, scope, reason, and exact
     action for approval requests. F01 and F05 are release blockers.
+
+    <!-- implementation-sources:H026 -->
+    **Source basis:** Repository authorization and revocation findings drove this item; supporting authorization/session references added now.
+    **Implementation source:** [OWASP Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) (supporting reference) - Use deny-by-default, centralized checks and permission validation on every request.
+    **Implementation source:** [OWASP Session Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html) (supporting reference) - Specify session invalidation and sensitive-account-change behavior across tokens and active connections.
+    <!-- /implementation-sources:H026 -->
+
 
 27. [x] <a id="enhancement-027"></a> **Make plugin upgrades transactional and panel authority explicit.**
     **P0 / L.** Extend existing manifest/schema/provenance validation with
@@ -551,6 +886,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     implemented. Panels use opaque-origin frames and manifest-scoped RPC
     without the operator token. Focused browser and rejected-upgrade regression
     checks pass; cross-platform release qualification remains.
+
+    <!-- implementation-sources:H027 -->
+    **Source basis:** Mixed provenance: transactional staging/panel isolation follows repository findings; execlaw_impr_doc.md section5.3 explicitly names Sigstore and SLSA for artifact provenance.
+    **Implementation source:** [Sigstore verification](https://docs.sigstore.dev/cosign/verifying/verify/) (documented inspiration) - Verify publisher identity and artifact integrity before activation; signatures do not sandbox plugin code.
+    **Implementation source:** [OWASP File Upload Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/File_Upload_Cheat_Sheet.html) (supporting reference) - Apply bounded archive extraction and safe storage/validation principles before atomic activation.
+    <!-- /implementation-sources:H027 -->
+
 
 28. [x] <a id="enhancement-028"></a> **Qualify the actual production release artifacts.** **P0 / M.**
     Fix SQLCipher feature selection in all three `scripts/build-*` paths.
@@ -573,6 +915,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     schema downgrade. Native runner executions, platform release qualification,
     and actual upgrade/rollback runs are deferred to the later verification pass.
 
+    <!-- implementation-sources:H028 -->
+    **Source basis:** Repository SQLCipher packaging finding drove release qualification; provenance inspiration was explicitly associated with SLSA in execlaw_impr_doc.md section5.3.
+    **Implementation source:** [SQLCipher API](https://www.zetetic.net/sqlcipher/sqlcipher-api/) (supporting reference) - Verify the packaged binary actually supports encryption and key changes; retain installation/restore tests.
+    **Implementation source:** [SLSA 1.2 specification](https://slsa.dev/spec/v1.2/) (documented inspiration) - Use artifact provenance and build-evidence concepts without claiming attestation proves runtime correctness.
+    <!-- /implementation-sources:H028 -->
+
+
 29. [x] <a id="enhancement-029"></a> **Treat streaming as a tested protocol state machine.** **P0 / M.**
     Replace ad hoc framing in `inference-api/src/lib.rs` and reuse bounded
     framing primitives where appropriate in `server/src/mcp_http_client.rs`.
@@ -594,6 +943,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     Follow-up tests passed for inference API (36), runner binary (13),
     runner-local (23), protocol (10), and one focused host process-kill
     recovery case. The full stream process-kill matrix remains open.
+
+    <!-- implementation-sources:H029 -->
+    **Source basis:** Repository streaming-framing findings drove this item; external protocol specifications are supporting normative references.
+    **Implementation source:** [HTML Living Standard: server-sent events](https://html.spec.whatwg.org/multipage/server-sent-events.html) (supporting reference) - Implement incremental UTF-8/SSE framing and legal line endings; inference completion semantics need separate protocol checks.
+    **Implementation source:** [MCP 2025-06-18 transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) (supporting reference) - Use the pinned MCP transport contract for matching streamed responses and connection lifecycle.
+    <!-- /implementation-sources:H029 -->
+
 
 30. [x] <a id="enhancement-030"></a> **Schedule local inference with fair hierarchical budgets.**
     **P1 / L.** Resource admission in item 19 prevents some overcommit but
@@ -620,6 +976,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     including child reservation/reopen and cancellation cleanup. Hardware-tier
     queue-delay measurement and time/retry/effect restart qualification remain.
 
+    <!-- implementation-sources:H030 -->
+    **Source basis:** Repository resource-admission extension; vLLM scheduler controls are supporting implementation context, not an origin claim for hierarchical fairness.
+    **Implementation source:** [vLLM engine arguments](https://docs.vllm.ai/en/latest/configuration/engine_args/) (supporting reference) - Understand scheduler concurrency/token controls while implementing priority, aging and parent-child budgets in the local host.
+    <!-- /implementation-sources:H030 -->
+
+
 31. [x] <a id="enhancement-031"></a> **Compile context against the full budget on every model round.**
     **P1 / M.** Extend `context-window`, `core/src/history_budget.rs`, and
     both executor loops beyond the current estimates and initial trimming.
@@ -630,6 +992,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     requests fit the qualified context limit after every tool round; Unicode,
     long JSON, images, and oversized summaries are covered; paired calls and
     mandatory user constraints survive. See F12.
+
+    <!-- implementation-sources:H031 -->
+    **Source basis:** Documented inspiration: roadmap comparison explicitly maps TrueForge result offloading and compaction to H031-H034; execlaw_impr_doc.md section8.4 separately defines context budgets.
+    **Implementation source:** [TrueForge harness repository](https://github.com/truefoundry/trueforge) (documented inspiration) - Adapt large-result offloading and context-management patterns; preserve scoped artifact retrieval and per-round full-request accounting.
+    <!-- /implementation-sources:H031 -->
+
 
 32. [x] <a id="enhancement-032"></a> **Give compaction a provenance and quality contract.** **P1 / M.**
     Build on existing history summaries and input fingerprints with a compact
@@ -642,6 +1010,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     changes; malicious text cannot gain authority through summarization.
     Compare task success and prompt size against today's history policies.
 
+    <!-- implementation-sources:H032 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md section5.1 names OpenCode compaction; its section8.4 specifies compaction receipts. The provenance/trust contract is execlaw's adaptation.
+    **Implementation source:** [OpenCode compaction implementation](https://github.com/anomalyco/opencode/blob/dev/packages/opencode/src/session/compaction.ts) (documented inspiration) - Inspect summarization/pruning boundaries and retain execlaw's own source ranges, trust labels and quality receipts.
+    <!-- /implementation-sources:H032 -->
+
+
 33. [x] <a id="enhancement-033"></a> **Add on-demand tool discovery and progressive schema loading.**
     **P1 / M.** Extend `server/src/chats.rs::build_runner_tool_catalog` beyond
     item 7's declaration cap. Advertise concise authorized capabilities and
@@ -652,6 +1026,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     context cost while useful tools remain discoverable; disabled,
     lower-trust, and removed tools never become callable through search;
     task success does not regress against the full-catalog baseline.
+
+    <!-- implementation-sources:H033 -->
+    **Source basis:** Documented inspiration: roadmap comparison maps TrueForge deferred tools and Pi's extensible small core to H033.
+    **Implementation source:** [TrueForge harness repository](https://github.com/truefoundry/trueforge) (documented inspiration) - Adapt deferred tool discovery and schema loading; recheck capability scope and pin the dispatched schema version.
+    <!-- /implementation-sources:H033 -->
+
 
 34. [x] <a id="enhancement-034"></a> **Qualify model-specific capability profiles and structured outputs.**
     **P1 / M.** Extend backend probes and `model-adapter` using exact model,
@@ -664,6 +1044,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     call rates and latency. Compare approved local alternatives on measured
     task success; never fail over to a cloud provider.
 
+    <!-- implementation-sources:H034 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md sections5.4 and8.6 explicitly identify vLLM structured outputs and native Ollama format support.
+    **Implementation source:** [vLLM structured outputs](https://docs.vllm.ai/en/latest/features/structured_outputs/) (documented inspiration) - Qualify actual backend/model/template structured-decoding behavior and retain host-side validation.
+    **Implementation source:** [Ollama structured outputs](https://docs.ollama.com/capabilities/structured-outputs) (documented inspiration) - Use native JSON-schema formatting for approved local models; do not assume support across every model.
+    <!-- /implementation-sources:H034 -->
+
+
 35. [x] <a id="enhancement-035"></a> **Provide a durable execution inspector with reconnectable traces.**
     **P1 / M.** Build on events, run steps, item 11's delivery timeline, and
     item 18's aggregate metrics. Correlate model rounds, tool retries,
@@ -673,6 +1060,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     inspector identifies gaps and reloads authoritative state; operators can
     distinguish model delay, a stalled tool, and uncertain delivery. No
     prompt, credential, or raw tool-output content enters default logs.
+
+    <!-- implementation-sources:H035 -->
+    **Source basis:** Documented inspiration: roadmap comparison maps NeMo profiling to H035; execlaw_impr_doc.md section5.3 names OpenTelemetry GenAI as a replaceable adapter.
+    **Implementation source:** [NeMo Agent Toolkit profiler](https://github.com/NVIDIA/NeMo-Agent-Toolkit/blob/develop/docs/source/improve-workflows/profiler.md) (documented inspiration) - Adapt correlated workflow/phase artifacts and bottleneck inspection, with sensitive content disabled by default.
+    **Implementation source:** [OpenTelemetry GenAI span conventions](https://github.com/open-telemetry/semantic-conventions-genai/blob/main/docs/gen-ai/gen-ai-spans.md) (documented inspiration) - Map trace IDs and operations through an optional local exporter; evolving conventions must not become the canonical database schema.
+    <!-- /implementation-sources:H035 -->
+
 
 36. [x] <a id="enhancement-036"></a> **Turn failures into consented, replayable regression fixtures.**
     **P1 / M.** Connect `core/src/eval.rs` flagged ranges to the evaluation
@@ -725,6 +1119,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     exact tool catalogs, executor turns, and recovery. Consent, redaction, and
     these incident/release-linked offline cases have regression coverage.
 
+    <!-- implementation-sources:H036 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md section5.1 explicitly associates mini-SWE-agent trajectory files with deterministic evaluation export.
+    **Implementation source:** [mini-SWE-agent repository](https://github.com/SWE-agent/mini-swe-agent) (documented inspiration) - Adapt inspectable trajectory artifacts into consented redacted fixtures and offline effect-disabled regression replay.
+    <!-- /implementation-sources:H036 -->
+
+
 37. [x] <a id="enhancement-037"></a> **Make memory evidence inspectable and correctable.** **P1 / M.**
     Extend `core/src/memory_assertions.rs`, `memory_assets.rs`, and the memory
     admin UI rather than creating another store. Show source events/spans,
@@ -767,6 +1167,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     memory-admin tests (5) pass; the memory-assets SPA test (4) and TypeScript
     lint pass. Held-out end-to-end retrieval and release qualification are
     tracked under H038 and remain open.
+
+    <!-- implementation-sources:H037 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md sections5.1-5.2 associate Letta revision UX and Graphiti evidence/temporal facts with memory inspection.
+    **Implementation source:** [Letta Code repository](https://github.com/letta-ai/letta-code) (documented inspiration) - Adapt editable persistent-memory inspection while retaining Controller-governed correction and evidence lineage.
+    **Implementation source:** [Graphiti repository](https://github.com/getzep/graphiti) (documented inspiration) - Adapt episodic provenance and temporal fact semantics; keep SQLite authoritative and Graphiti optional.
+    <!-- /implementation-sources:H037 -->
+
 
 38. [ ] <a id="enhancement-038"></a> **Qualify trust-first hybrid and temporal retrieval end to end.**
     **P1 / L.** `core/src/memory_assets.rs` already implements lexical/vector
@@ -811,6 +1218,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     pre-`scope` `config_local_endpoint_approvals` schema. No migration or restart
     was run against that active service.
 
+    <!-- implementation-sources:H038 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md section5.2 explicitly associates Graphiti temporal retrieval and Mem0 fused retrieval/benchmark discipline.
+    **Implementation source:** [Graphiti repository](https://github.com/getzep/graphiti) (documented inspiration) - Reference temporal validity and hybrid retrieval, then enforce scope/trust before ranking in execlaw.
+    **Implementation source:** [Mem0 repository](https://github.com/mem0ai/mem0) (documented inspiration) - Reference memory retrieval and evaluation patterns; qualify gains locally and do not copy hosted defaults or benchmark claims.
+    <!-- /implementation-sources:H038 -->
+
+
 39. [ ] <a id="enhancement-039"></a> **Evaluate learned skills by execution and support safe rollback.**
     **P1 / L.** Extend item 15 and `server/src/skills_admin.rs` beyond
     tools-disabled substring evaluation. Run procedural skills on isolated
@@ -834,6 +1248,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     `skill_eval` workspace/mock-integration tests; H039 remains unqualified
     until the candidate/parent held-out suite and governed promotion run use a
     reachable local Standard model.
+
+    <!-- implementation-sources:H039 -->
+    **Source basis:** Documented inspiration: roadmap Hermes comparison explicitly maps experience-derived skills to H037-H039. Executable held-out promotion gates are execlaw's proposed extension, not a claim that Hermes already supplies them.
+    **Implementation source:** [Hermes Agent repository](https://github.com/NousResearch/hermes-agent) (documented inspiration) - Adapt experience-derived reusable skills while requiring executable held-out verification, approval and rollback in execlaw.
+    <!-- /implementation-sources:H039 -->
+
 
 40. [ ] <a id="enhancement-040"></a> **Ship a complete workspace coding plugin.** **P1 / L.**
     Implement the existing strategy's coding-workspace proposal through
@@ -870,6 +1290,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     and returned seven Rust Analyzer diagnostics. H040 remains open pending
     H023-H029 qualification and the held-out local-model benchmark.
 
+    <!-- implementation-sources:H040 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md section5.1 and roadmap comparison explicitly associate OpenHands with workspace-oriented coding agents.
+    **Implementation source:** [OpenHands Software Agent SDK](https://github.com/OpenHands/software-agent-sdk) (documented inspiration) - Adapt isolated workspace tools, execution interfaces and agent-server separation through an execlaw plugin; keep local inference and host policy.
+    <!-- /implementation-sources:H040 -->
+
+
 41. [x] <a id="enhancement-041"></a> **Add workspace checkpoints, run forks, and safe diff application.**
     **P1 / L.** Extend the coding plugin and run store with isolated working
     copies, content-addressed snapshots, and branch/run lineage. Record which
@@ -879,6 +1305,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     overwrite one another or the operator's work; restore touches only owned
     changes; external sends are never described as undone. Commits, pushes,
     and publication remain explicit operator decisions.
+
+    <!-- implementation-sources:H041 -->
+    **Source basis:** Documented inspiration: roadmap comparison explicitly maps Claude Code checkpointing to H040-H041; execlaw_impr_doc.md also cites Goose forkable sessions.
+    **Implementation source:** [Claude Code checkpointing](https://code.claude.com/docs/en/checkpointing) (documented inspiration) - Adapt explicit rewind boundaries and inspectable restores; do not assume checkpoints undo arbitrary shell changes or external effects.
+    <!-- /implementation-sources:H041 -->
+
 
 42. [x] <a id="enhancement-042"></a> **Make child-agent work a durable, inspectable run tree.** **P1 / L.**
     Extend existing agent definitions/mailboxes, `server/src/tool_apis_subagent.rs`,
@@ -891,6 +1323,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     resolution. Benchmark delegation overhead so simple tasks remain single
     agent by default.
 
+    <!-- implementation-sources:H042 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md section5.1 explicitly associates OpenCode parent/child session navigation with first-class run trees.
+    **Implementation source:** [OpenCode agents](https://opencode.ai/docs/agents/) (documented inspiration) - Adapt visible parent/subagent navigation and scoped roles; execlaw adds durable joins, inherited ceilings and aggregate budgets.
+    <!-- /implementation-sources:H042 -->
+
+
 43. [ ] <a id="enhancement-043"></a> **Support durable steering, queued messages, and useful stop controls.**
     **P1 / M.** Extend chat events, the composer, and runner protocol with
     distinct queue-next-turn, steer-at-safe-boundary, pause, and cancel
@@ -900,6 +1338,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     survives restart and applies once at the intended boundary; stop is
     acknowledged within a defined tested latency even when inference or a
     tool stalls. Never convert elapsed silence into approval.
+
+    <!-- implementation-sources:H043 -->
+    **Source basis:** Documented inspiration: roadmap Cursor comparison explicitly maps queued/immediate steering to H043.
+    **Implementation source:** [Cursor Agent overview](https://cursor.com/docs/agent/overview) (documented inspiration) - Adapt queue/steering and stop interaction concepts; persist intent and safe execution boundaries in execlaw rather than copying cloud runtime assumptions.
+    <!-- /implementation-sources:H043 -->
+
 
 44. [x] <a id="enhancement-044"></a> **Expose a stable headless, terminal, and editor client contract.**
     **P2 / L.** Build versioned clients from `spec/` and the server API with
@@ -912,6 +1356,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     integration surfaces while retaining one local authority and SQLite
     configuration.
 
+    <!-- implementation-sources:H044 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md section5.3 specifies ACP as an optional editor adapter; roadmap comparison associates Pi RPC/SDK with H044. The originally documented badlogic/pi-mono URL now redirects to earendil-works/pi; the reference uses that verified destination.
+    **Implementation source:** [Agent Client Protocol overview](https://agentclientprotocol.com/protocol/v1/overview) (documented inspiration) - Map editor sessions, permissions, files and terminals to the existing local authority; do not replace runner protocol.
+    **Implementation source:** [Pi coding agent README](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/README.md) (documented inspiration) - Adapt a thin terminal/RPC/SDK surface over the harness rather than duplicating execution state in clients.
+    <!-- /implementation-sources:H044 -->
+
+
 45. [x] <a id="enhancement-045"></a> **Complete negotiated, bounded MCP interoperability.** **P1 / M.**
     Extend the stdio client and `server/src/mcp_http_client.rs` with verified
     version negotiation, session headers/lifecycle, bounded streaming,
@@ -922,6 +1373,12 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     oversized bodies, and a matching response on a still-open SSE connection.
     Use the [MCP transport specification](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)
     as the current client's baseline, not an unverified "latest" assumption.
+
+    <!-- implementation-sources:H045 -->
+    **Source basis:** Documented inspiration: execlaw_impr_doc.md section5.3 names MCP interoperability; H045 explicitly selects the 2025-06-18 transport baseline. Later protocol versions require separate qualification.
+    **Implementation source:** [MCP 2025-06-18 transports](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports) (documented inspiration) - Implement and test the pinned stdio/Streamable HTTP lifecycle, matching response IDs, cancellation and bounded streaming.
+    <!-- /implementation-sources:H045 -->
+
 
 46. [ ] <a id="enhancement-046"></a> **Make research and browser results evidence-verifiable.** **P1 / M.**
     Extend `server/src/research/` and the browser plugin with bounded local
@@ -934,6 +1391,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     tasks score supported claims, not citation-shaped text. Cite private
     sources only within their authorized scope.
 
+    <!-- implementation-sources:H046 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [W3C PROV-O](https://www.w3.org/TR/prov-o/) (supporting reference) - Represent derivation and source identity explicitly; execlaw adds snapshots, hashes and citation acceptance tests.
+    **Implementation source:** [Playwright Trace Viewer](https://playwright.dev/docs/trace-viewer) (supporting reference) - Inspectable browser snapshots and action traces support evidence capture; traces do not independently prove a research claim.
+    <!-- /implementation-sources:H046 -->
+
+
 47. [ ] <a id="enhancement-047"></a> **Deliver cancellable, low-latency local voice sessions.** **P2 / L.**
     Build on `voice-pipeline` and `server/src/voice_runtime.rs`, whose current
     route is push-to-talk, with continuous endpointing, bounded audio queues,
@@ -943,6 +1407,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     one session cannot block another's interrupt; measured noise, silence,
     reconnect, and barge-in suites pass on supported hardware. Spoken output
     must not claim an external action succeeded before its durable result.
+
+    <!-- implementation-sources:H047 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [whisper.cpp streaming example](https://github.com/ggml-org/whisper.cpp/tree/master/examples/stream) (supporting reference) - A local incremental audio/transcription example to benchmark; continuous session cancellation remains execlaw design.
+    **Implementation source:** [Tokio graceful shutdown](https://tokio.rs/tokio/topics/shutdown) (supporting reference) - Propagate cancellation and wait for owned tasks to finish instead of retaining global locks during I/O.
+    <!-- /implementation-sources:H047 -->
+
 
 48. [ ] <a id="enhancement-048"></a> **Make privacy retention and deletion cover every projection.**
     **P1 / M.** Extend current incognito/search deletion and backup controls
@@ -956,6 +1427,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     erasure from immutable backups or storage snapshots without a supported
     mechanism.
 
+    <!-- implementation-sources:H048 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [SQLite PRAGMA secure_delete](https://sqlite.org/pragma.html#pragma_secure_delete) (supporting reference) - SQLite documents limits of deleting recoverable bytes, including virtual-table traces; live projection deletion is not backup erasure.
+    **Implementation source:** [W3C PROV-O](https://www.w3.org/TR/prov-o/) (supporting reference) - Derivation relationships inform which projections must receive tombstones.
+    <!-- /implementation-sources:H048 -->
+
+
 49. [ ] <a id="enhancement-049"></a> **Enforce performance budgets and benchmark local optimizations.**
     **P1 / M.** Connect existing Criterion benchmarks to baseline comparison
     in stable-hardware CI. Cover replay, search, catalog assembly, framing,
@@ -966,6 +1444,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     task-quality and policy checks. Never enable an optimization because its
     upstream throughput claim looks attractive. Item 18's process-local p95
     alert remains useful operationally but is not this release gate.
+
+    <!-- implementation-sources:H049 -->
+    **Source basis:** Earlier strategy documents local backend optimization capabilities; Criterion gating is execlaw-specific engineering rather than a competitor feature copied verbatim.
+    **Implementation source:** [Criterion saved baselines](https://bheisler.github.io/criterion.rs/book/user_guide/command_line_options.html) (supporting reference) - Save/compare benchmark baselines; execlaw must define noise tolerance and release failure policy.
+    **Implementation source:** [vLLM automatic prefix caching](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/) (documented inspiration) - Candidate local prefill optimization, subject to equal task-quality benchmarks.
+    <!-- /implementation-sources:H049 -->
+
 
 50. [ ] <a id="enhancement-050"></a> **Make first success and recovery accessible and diagnosable.**
     **P1 / M.** Extend setup/doctor/backends UI with protocol qualification,
@@ -978,6 +1463,13 @@ uncertainty. A faster run that silently drops work or weakens policy fails.
     or prompts. Measure time to the first verified task on each OS and
     prevent accessibility and recovery regressions in CI.
 
+    <!-- implementation-sources:H050 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [W3C WCAG 2.2](https://www.w3.org/TR/WCAG22/) (supporting reference) - Keyboard access, focus, error identification and status messages provide testable accessibility requirements.
+    **Implementation source:** [Playwright accessibility testing](https://playwright.dev/docs/accessibility-testing) (supporting reference) - Browser accessibility checks supplement manual assistive-technology qualification.
+    <!-- /implementation-sources:H050 -->
+
+
 ## Extended enhancement portfolio 51-130
 
 Added 2026-09-27. These 80 additional proposals extend the first 50; they are
@@ -985,7 +1477,7 @@ not assertions that every underlying primitive is absent. Each describes a
 separately testable deliverable. Referenced earlier items are prerequisites or
 parent initiatives, not work to implement twice. P0/P1/P2 and S/M/L retain the
 definitions above; **Lab** means a bounded experiment with an explicit
-adoption gate. All 130 items are accepted scope, delivered in bounded increments.
+adoption gate. All 154 items are accepted scope, delivered in bounded increments.
 Keep only a few initiatives active. Lab items require implementing and
 evaluating the specified trial; production activation still requires its gate.
 A failed trial is blocked pending redesign or an explicit operator scope
@@ -1007,7 +1499,7 @@ decision, not silently dropped from the plan.
 
 ### Policy and authority
 
-51. [ ] <a id="enhancement-051"></a> **Carry typed sensitivity and provenance through the entire run.**
+51. [x] <a id="enhancement-051"></a> **Carry typed sensitivity and provenance through the entire run.**
     **P1 / L; extends 8/32/48.** Associate observations, artifacts, memories,
     and child results with source, owner, trust, and permitted destination
     labels. Propagate labels through transformations; changing data's format
@@ -1015,6 +1507,13 @@ decision, not silently dropped from the plan.
     **Accept:** tests trace sensitive material through a summary, skill,
     artifact, and child run; downstream policy still prevents an unauthorized
     export. Explicit authorized declassification records its actor and scope.
+
+    <!-- implementation-sources:H051 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [CaMeL paper](https://arxiv.org/abs/2503.18813) (supporting reference) - Research reference for explicit data/control separation and capability-governed data flow; not a claim of universal injection prevention.
+    **Implementation source:** [W3C PROV-O](https://www.w3.org/TR/prov-o/) (supporting reference) - Formal provenance vocabulary supports derivation receipts; sensitivity labels and enforcement are execlaw-specific.
+    <!-- /implementation-sources:H051 -->
+
 
 52. [ ] <a id="enhancement-052"></a> **Recheck live authority immediately before dispatch.** **P0 / M;
     extends 10/26.** Bind decisions to a policy revision and scoped grant,
@@ -1025,6 +1524,12 @@ decision, not silently dropped from the plan.
     revoked grants. Already-accepted external actions remain explicitly
     separate from cancellable pending work.
 
+    <!-- implementation-sources:H052 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [OWASP Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Authorization_Cheat_Sheet.html) (supporting reference) - Validate permissions on every request and enforce deny-by-default; recheck queued effects at dispatch.
+    <!-- /implementation-sources:H052 -->
+
+
 53. [ ] <a id="enhancement-053"></a> **Render approvals from canonical typed actions.** **P1 / M;
     extends 10/22.** Generate recipient, target, operation, changed fields,
     reversibility, and approval scope from validated arguments, not solely
@@ -1034,6 +1539,12 @@ decision, not silently dropped from the plan.
     operation; changed canonical arguments invalidate approval; keyboard and
     screen-reader users can inspect the same consequential fields.
 
+    <!-- implementation-sources:H053 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [OWASP Transaction Authorization Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Transaction_Authorization_Cheat_Sheet.html) (supporting reference) - Show significant transaction data and bind authorization to the actual operation, not untrusted explanatory prose.
+    <!-- /implementation-sources:H053 -->
+
+
 54. [ ] <a id="enhancement-054"></a> **Broker secrets without placing credentials in model context.**
     **P1 / L; extends 25/27.** Give tools scoped credential references that
     the host resolves only for an authorized account, destination, method,
@@ -1042,6 +1553,12 @@ decision, not silently dropped from the plan.
     reference against another service or account; request failures and tool
     results do not reveal credential values. Record secret-use metadata and
     revoke outstanding references on credential rotation.
+
+    <!-- implementation-sources:H054 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html) (supporting reference) - Least privilege, short-lived credentials, rotation and auditing support host-side credential brokerage.
+    <!-- /implementation-sources:H054 -->
+
 
 55. [ ] <a id="enhancement-055"></a> **Check outbound data at the actual delivery boundary.** **P1 / M;
     depends on 51/54.** Combine deterministic secret detection with sensitivity
@@ -1053,6 +1570,12 @@ decision, not silently dropped from the plan.
     detections and false blocks; scanning is defense in depth, not proof of
     complete data-loss prevention.
 
+    <!-- implementation-sources:H055 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [OWASP LLM Prompt Injection Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html) (supporting reference) - Output monitoring and exfiltration controls are layered defenses; sink labels/recipient enforcement remain execlaw-specific.
+    <!-- /implementation-sources:H055 -->
+
+
 56. [ ] <a id="enhancement-056"></a> **Offer task-scoped safety profiles with visible enforcement.**
     **P1 / M; extends 26/40.** Define inspect-only, workspace-edit, and
     approved-integration profiles as SQLite-backed capability sets, not
@@ -1061,6 +1584,12 @@ decision, not silently dropped from the plan.
     inspect-only makes write attempts fail at host/OS boundaries; importing
     a skill cannot broaden a profile. Unsupported enforcement on a platform
     is visible and prevents use of a profile claiming that guarantee.
+
+    <!-- implementation-sources:H056 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Docker seccomp profiles](https://docs.docker.com/engine/security/seccomp/) (supporting reference) - Effective syscall restrictions must be enforced outside prompts; execlaw combines them with task-scoped capability profiles.
+    <!-- /implementation-sources:H056 -->
+
 
 57. [ ] <a id="enhancement-057"></a> **Simulate policy changes before enabling them.** **P1 / M;
     extends 17/26.** Replay saved, authorized decision metadata through a
@@ -1071,35 +1600,75 @@ decision, not silently dropped from the plan.
     external action and cannot overwrite historical decisions. Reverting
     policy must not resurrect expired approval tokens.
 
+    <!-- implementation-sources:H057 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Open Policy Agent policy testing](https://www.openpolicyagent.org/docs/policy-testing) (supporting reference) - Evaluate candidate policy against explicit fixtures without issuing production effects; no OPA runtime dependency is implied.
+    <!-- /implementation-sources:H057 -->
+
+
 ### Durable storage
 
 58. [ ] <a id="enhancement-058"></a> **Define and test power-loss durability separately from crash recovery.**
-    **P0 / M; extends 9/23.** `core/src/db.rs` currently selects WAL with
-    `synchronous=NORMAL`; specify the persistence boundary required before
-    effects are eligible for dispatch. Evaluate `FULL` or a documented
-    equivalent for effect-critical commits and quantify the latency cost.
-    **Accept:** storage fault tests distinguish process termination from
+    **P0 / M; extends 9/23.** `core/src/db.rs` now selects WAL with
+    `synchronous=FULL`; the durable boundary for an effect is its event/outbox
+    transaction commit. The OS, filesystem, controller, and device must honor
+    SQLite's flush requests. A subprocess-abort test verifies process-crash
+    recovery; an injected `SQLITE_FULL` test verifies failed transactions do
+    not erase previously committed rows. Criterion reports 256-byte commit
+    times of 109.70 µs (NORMAL) and 1.0315 ms (FULL) on one Windows/OneDrive
+    run. **Accept:** storage-fault tests distinguish process termination from
     hard-reset loss, and no durability promise exceeds the tested storage
-    contract. SQLite documents the distinction in its
-    [WAL durability discussion](https://sqlite.org/wal.html). See F17.
+    contract. Disposable hard-reset qualification remains. SQLite documents
+    the distinction in its [WAL durability discussion](https://sqlite.org/wal.html). See F17.
+
+    <!-- implementation-sources:H058 -->
+    **Source basis:** The roadmap already links SQLite WAL durability documentation; the effect-critical commit contract and qualification matrix are execlaw-specific.
+    **Implementation source:** [SQLite WAL durability](https://sqlite.org/wal.html) (documented inspiration) - Distinguish WAL NORMAL and FULL sync behavior and storage assumptions.
+    **Implementation source:** [SQLite PRAGMA synchronous](https://sqlite.org/pragma.html#pragma_synchronous) (supporting reference) - Defines synchronous modes and their durability tradeoffs; process-crash tests cannot prove hard-reset durability.
+    <!-- /implementation-sources:H058 -->
+
 
 59. [ ] <a id="enhancement-059"></a> **Move blocking database work behind a bounded execution service.**
-    **P1 / L; extends 30/49.** The current `Database` wraps one synchronous
-    connection mutex. Introduce measured queueing, short write transactions,
-    and bounded read execution while preserving ordering and SQLCipher
-    initialization. Add a reader pool only if benchmarks justify it.
-    **Accept:** a long search or export cannot stall streaming/approval
-    handling on async workers; queue saturation produces typed backpressure
-    rather than unbounded tasks. Test transactional consistency under load.
+    **P1 / L; extends 30/49.** `Database` retains one synchronous connection
+    with a process-wide, single-worker FIFO executor for blocking async work.
+    Its queue holds 16 pending jobs and reports typed backpressure; queue wait,
+    service, operation, and transaction timings are measured. Message search
+    writes its verified index in 128-event transactions. Support-bundle export
+    and memory-embedding rebuild database steps use the executor. SQLCipher
+    initialization and single-writer ordering are preserved. No reader pool is
+    enabled without measured justification. **Accept:** a long search or
+    export cannot stall streaming/approval handling on async workers; queue
+    saturation produces typed backpressure rather than unbounded tasks. Test
+    transactional consistency under load; live contention qualification remains.
+
+    <!-- implementation-sources:H059 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Tokio spawn_blocking](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html) (supporting reference) - Blocking work needs explicit concurrency/backpressure bounds; spawned blocking tasks cannot generally be aborted once running.
+    <!-- /implementation-sources:H059 -->
+
 
 60. [ ] <a id="enhancement-060"></a> **Manage disk pressure and WAL growth as first-class health states.**
-    **P1 / M; extends 49/50.** Track database/WAL/blob sizes, checkpoint
-    progress, transaction duration, and free-space reserves. Throttle optional
-    indexing/downloads before critical state writes fail; perform bounded
-    maintenance without dropping durable work. **Accept:** a long reader,
-    disk-full injection, and stalled checkpoint produce actionable states;
-    cleanup respects retention and artifact references. Recovery after space
-    is restored preserves event integrity and pending effects.
+    **P1 / M; extends 49/50.** The scrubbed support snapshot tracks database,
+    WAL, SHM, journal, and referenced-blob sizes; free space; NOOP checkpoint
+    progress; and queue/transaction timing. It reports healthy, warning
+    (below 2 GiB reserve or at least 1,000 uncheckpointed frames), and
+    critical (below 512 MiB reserve or WAL over 1 GiB) states. Embedding
+    rebuilds and host HuggingFace downloads pause at warning pressure.
+    Controller-triggered PASSIVE
+    checkpoint maintenance is bounded by the database executor. Storage
+    pressure does not trigger content deletion; existing retention sweepers
+    remain the only cleanup path. **Accept:** a long reader, disk-full
+    injection, and stalled checkpoint produce actionable states; cleanup
+    respects retention and artifact references. Recovery after space is
+    restored preserves event integrity and pending effects. Supported-volume
+    and managed-container download qualification remains.
+
+    <!-- implementation-sources:H060 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [SQLite WAL checkpointing](https://sqlite.org/wal.html#checkpointing) (supporting reference) - Long-lived readers and checkpoint progress affect WAL growth; monitor separately from database size.
+    **Implementation source:** [SQLite checkpoint API](https://sqlite.org/c3ref/wal_checkpoint_v2.html) (supporting reference) - Use documented checkpoint modes and busy/progress results rather than treating checkpoint invocation as completion.
+    <!-- /implementation-sources:H060 -->
+
 
 61. [ ] <a id="enhancement-061"></a> **Version event payloads and replay transformations explicitly.**
     **P1 / M; extends 16/23.** Add explicit payload schema identities and
@@ -1109,6 +1678,12 @@ decision, not silently dropped from the plan.
     releases reconstruct equivalent state, unknown required semantics fail
     clearly, and replay requires neither network nor model calls. Document
     which reader versions can understand each event generation.
+
+    <!-- implementation-sources:H061 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Microsoft Event Sourcing pattern](https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing) (supporting reference) - Event-version compatibility and replay projections inform schema evolution; signed-byte preservation is execlaw-specific, with no Azure dependency.
+    <!-- /implementation-sources:H061 -->
+
 
 62. [ ] <a id="enhancement-062"></a> **Rebuild derived projections safely while the service runs.**
     **P1 / L; extends 12/38.** Provide resumable, versioned rebuilds for
@@ -1121,6 +1696,13 @@ decision, not silently dropped from the plan.
     a partially populated index as complete. Live events and deletion
     tombstones arriving during rebuild cannot be lost or resurrected.
 
+    <!-- implementation-sources:H062 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Microsoft Materialized View pattern](https://learn.microsoft.com/en-us/azure/architecture/patterns/materialized-view) (supporting reference) - Derived views can be rebuilt from authoritative data; watermarks, tombstones and atomic activation are execlaw requirements.
+    **Implementation source:** [SQLite transactions](https://sqlite.org/lang_transaction.html) (supporting reference) - Atomic activation and consistent reader behavior must follow SQLite transaction semantics.
+    <!-- /implementation-sources:H062 -->
+
+
 63. [ ] <a id="enhancement-063"></a> **Detect rollback of an otherwise valid database snapshot.**
     **P2 / L; extends 20.** Offer operator-controlled export of signed
     conversation heads or checkpoint roots to an independently retained
@@ -1131,6 +1713,12 @@ decision, not silently dropped from the plan.
     assumption: if an attacker can replace both copies or steal all keys,
     this mechanism cannot establish independent freshness.
 
+    <!-- implementation-sources:H063 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [The Update Framework specification](https://theupdateframework.github.io/specification/latest/) (supporting reference) - Rollback/freeze resistance depends on version/freshness metadata and trusted retained state; applying this to signed database heads is an execlaw synthesis.
+    <!-- /implementation-sources:H063 -->
+
+
 64. [ ] <a id="enhancement-064"></a> **Test schema evolution across supported release histories.**
     **P1 / M; extends 28.** Build fixture databases from released schema
     versions, including realistic large tables, legacy event formats, and
@@ -1140,6 +1728,13 @@ decision, not silently dropped from the plan.
     and configuration; failures leave a recoverable snapshot. Append new
     migrations, preserve shipped migration history, and refuse unsupported
     downgrades rather than attempting an improvised reverse migration.
+
+    <!-- implementation-sources:H064 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [SQLite ALTER TABLE](https://sqlite.org/lang_altertable.html) (supporting reference) - SQLite's supported schema-change procedures and compatibility caveats guide upgrade fixtures.
+    **Implementation source:** [SQLite atomic commit](https://sqlite.org/atomiccommit.html) (supporting reference) - Failure and storage assumptions must be tested during migration, not inferred from a successful schema edit.
+    <!-- /implementation-sources:H064 -->
+
 
 ### Effects and workflow semantics
 
@@ -1152,6 +1747,12 @@ decision, not silently dropped from the plan.
     and parallel writes; conformance fixtures identify falsely declared
     behavior. All runtime tiers expose the same normalized contract.
 
+    <!-- implementation-sources:H065 -->
+    **Source basis:** Earlier strategy links MCP and warns that annotations are not authority; execlaw's expanded effect/concurrency contract is its own design.
+    **Implementation source:** [MCP tools specification](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) (documented inspiration) - Read-only/destructive/idempotent annotations inform vocabulary but remain untrusted hints, not permissions.
+    <!-- /implementation-sources:H065 -->
+
+
 66. [ ] <a id="enhancement-066"></a> **Support prepare/preview/execute with resource preconditions.**
     **P1 / L; depends on 53/65.** For participating tools, prepare a bounded
     proposal tied to resource versions, then execute only if the approved
@@ -1160,6 +1761,12 @@ decision, not silently dropped from the plan.
     record, or recipient between preview and execution causes a conflict;
     preview itself has no external effect. Integrations lacking conditional
     updates must disclose that limitation and use conservative handling.
+
+    <!-- implementation-sources:H066 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [RFC 9110 conditional requests](https://www.rfc-editor.org/rfc/rfc9110.html#section-13) (supporting reference) - If-Match and other preconditions prevent applying a change to a resource version different from the approved preview.
+    <!-- /implementation-sources:H066 -->
+
 
 67. [ ] <a id="enhancement-067"></a> **Model compensating actions for partially completed workflows.**
     **P2 / L; depends on 24/65.** Let workflows declare separate, authorized
@@ -1170,6 +1777,12 @@ decision, not silently dropped from the plan.
     An irreversible message or third-party operation is not labelled undone.
     Compensation with new consequences needs its own applicable approval.
 
+    <!-- implementation-sources:H067 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Microsoft Compensating Transaction pattern](https://learn.microsoft.com/en-us/azure/architecture/patterns/compensating-transaction) (supporting reference) - Compensation is application-specific and may not restore the original state; record its own failures and authority.
+    <!-- /implementation-sources:H067 -->
+
+
 68. [ ] <a id="enhancement-068"></a> **Parallelize only independent tool work.** **P1 / M;
     depends on 30/65.** Build a bounded scheduler from declared read/write
     sets and task dependencies. Overlap safe reads while serializing
@@ -1178,6 +1791,13 @@ decision, not silently dropped from the plan.
     slow reads improve measured completion time; same-resource writes retain
     deterministic ordering; one failed/cancelled child does not orphan the
     other results or release effects outside the parent budget.
+
+    <!-- implementation-sources:H068 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Tokio JoinSet](https://docs.rs/tokio/latest/tokio/task/struct.JoinSet.html) (supporting reference) - Track and settle spawned work as a group; independence detection and resource-conflict scheduling remain host responsibilities.
+    **Implementation source:** [Tokio Semaphore](https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html) (supporting reference) - Bound concurrency and retain permits for actual work lifetimes, including descendants.
+    <!-- /implementation-sources:H068 -->
+
 
 69. [ ] <a id="enhancement-069"></a> **Specify timer behavior across clock changes and restart.**
     **P1 / M; extends 23/30.** Distinguish persisted UTC deadlines from
@@ -1189,6 +1809,13 @@ decision, not silently dropped from the plan.
     granting additional run budget. Fail closed when rollback makes expiry
     unverifiable after restart; a monotonic clock alone cannot prove continuity.
 
+    <!-- implementation-sources:H069 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Rust Instant](https://doc.rust-lang.org/std/time/struct.Instant.html) (supporting reference) - Monotonic elapsed time has platform/suspend caveats and cannot substitute for persisted UTC deadlines.
+    **Implementation source:** [Tokio time testing](https://docs.rs/tokio/latest/tokio/time/fn.pause.html) (supporting reference) - Paused test time enables deterministic timeout tests; wall-clock rollback and restart need separate injected-clock fixtures.
+    <!-- /implementation-sources:H069 -->
+
+
 70. [ ] <a id="enhancement-070"></a> **Give routines explicit missed-run and overlap policies.**
     **P1 / M; extends 30.** Extend `core/src/routines.rs` and
     `server/src/routine_runner.rs` beyond timezone-aware cron selection with
@@ -1198,6 +1825,12 @@ decision, not silently dropped from the plan.
     runs, and edits near a deadline have deterministic outcomes; unique
     occurrence IDs prevent duplicate local run creation.
 
+    <!-- implementation-sources:H070 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Kubernetes CronJob semantics](https://kubernetes.io/docs/concepts/workloads/controllers/cron-jobs/) (supporting reference) - Explicit concurrency policy, starting deadlines and time zones illustrate scheduler contracts; execlaw implements them in SQLite rather than requiring Kubernetes.
+    <!-- /implementation-sources:H070 -->
+
+
 71. [ ] <a id="enhancement-071"></a> **Provide safe dead-letter inspection and controlled redrive.**
     **P1 / M; extends 11/24/35.** Add an operator view for exhausted outbox,
     extraction, and automation jobs with sanitized cause, attempts, affected
@@ -1206,6 +1839,12 @@ decision, not silently dropped from the plan.
     **Accept:** one poison job cannot monopolize a queue; repeated redrive
     cannot duplicate a known accepted effect; unknown delivery is resolved
     or surfaced before retry. Bulk actions retain per-job audit records.
+
+    <!-- implementation-sources:H071 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [RabbitMQ dead-letter exchanges](https://www.rabbitmq.com/docs/dlx) (supporting reference) - Dead-letter routing, cycles and delivery safety illustrate why redrive needs explicit identity/reconciliation rather than blind retries.
+    <!-- /implementation-sources:H071 -->
+
 
 ### Isolation and local resources
 
@@ -1218,6 +1857,13 @@ decision, not silently dropped from the plan.
     cannot access unrelated conversations or the control-plane vault through
     its declared runtime resources. Record platform-specific residual risks.
 
+    <!-- implementation-sources:H072 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Docker seccomp profiles](https://docs.docker.com/engine/security/seccomp/) (supporting reference) - Constrain syscalls per runtime job.
+    **Implementation source:** [Docker rootless mode](https://docs.docker.com/engine/security/rootless/) (supporting reference) - Document privilege-reduction prerequisites and limitations; containers are not permission grants.
+    <!-- /implementation-sources:H072 -->
+
+
 73. [ ] <a id="enhancement-073"></a> **Qualify isolation on every supported operating system.**
     **P1 / M; depends on 72.** Test the real packaged runtime boundaries,
     including Windows junctions, macOS file permissions, Linux mounts, and
@@ -1226,6 +1872,13 @@ decision, not silently dropped from the plan.
     isolated passes the same negative-access contract on each supported
     platform; fallback to a native process cannot silently expand access.
     Unsupported profiles fail before launching tools.
+
+    <!-- implementation-sources:H073 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Windows container isolation](https://learn.microsoft.com/en-us/virtualization/windowscontainers/manage-containers/hyperv-container) (supporting reference) - Process and Hyper-V isolation have different boundaries; qualify the actual configured platform.
+    **Implementation source:** [Docker Desktop VM isolation](https://docs.docker.com/desktop/enterprise/hardened-desktop/enhanced-container-isolation/) (supporting reference) - Desktop VM/container boundaries differ from native Linux; optional product controls must not be assumed universally available.
+    <!-- /implementation-sources:H073 -->
+
 
 74. [ ] <a id="enhancement-074"></a> **Budget processes, disk, descriptors, and output as well as memory.**
     **P1 / M; extends 19/30.** Add per-run/plugin limits for child processes,
@@ -1236,6 +1889,13 @@ decision, not silently dropped from the plan.
     conversation stays responsive; cleanup releases accounting after crashes.
     A timeout alone is not a resource limit.
 
+    <!-- implementation-sources:H074 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Linux cgroup v2](https://docs.kernel.org/admin-guide/cgroup-v2.html) (supporting reference) - Hierarchical process/memory/I/O controllers inform aggregate descendant limits; output and artifact quotas need additional host enforcement.
+    **Implementation source:** [Windows Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects) (supporting reference) - Group process lifetime and resource limits on Windows; handle platform-specific escape and cleanup semantics.
+    <!-- /implementation-sources:H074 -->
+
+
 75. [ ] <a id="enhancement-075"></a> **Drain safely during shutdown, update, and host suspend.**
     **P1 / M; extends 23/28.** Stop admitting new work, checkpoint eligible
     steps, preserve approval waits, terminate owned process trees, and record
@@ -1244,6 +1904,12 @@ decision, not silently dropped from the plan.
     requests at every run phase leave no unowned background process or
     falsely successful run; expired leases cannot let an old worker commit
     after its replacement starts.
+
+    <!-- implementation-sources:H075 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [Tokio graceful shutdown](https://tokio.rs/tokio/topics/shutdown) (supporting reference) - Stop admission, notify tasks and await completion; durable checkpoints and effect uncertainty require additional execlaw handling.
+    <!-- /implementation-sources:H075 -->
+
 
 76. [ ] <a id="enhancement-076"></a> **Reduce secret lifetime and document host-compromise limits.**
     **P1 / M; extends 20/54.** Inventory copies of signing and credential
@@ -1255,6 +1921,13 @@ decision, not silently dropped from the plan.
     State clearly that encrypted storage cannot protect plaintext already
     accessible to a fully compromised authorized host process.
 
+    <!-- implementation-sources:H076 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [RustCrypto zeroize](https://docs.rs/zeroize/latest/zeroize/) (supporting reference) - Use deliberate zeroization where effective and heed documented limitations; it does not erase all historical copies or defeat host compromise.
+    **Implementation source:** [OWASP Secrets Management Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Secrets_Management_Cheat_Sheet.html) (supporting reference) - Minimize exposure, rotate credentials and avoid leaking through logs, temporary storage or broad process environments.
+    <!-- /implementation-sources:H076 -->
+
+
 77. [ ] <a id="enhancement-077"></a> **Give artifacts transactional references and safe garbage collection.**
     **P1 / M; extends 31/48.** Coordinate blob creation, hashes, SQLite
     references, reference lifetimes, and deletion so a crash cannot expose
@@ -1264,6 +1937,12 @@ decision, not silently dropped from the plan.
     readers retain a valid reference. Sharing a content hash never authorizes
     access or reveals another conversation's artifact existence.
 
+    <!-- implementation-sources:H077 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [CNCF Distribution garbage collection](https://distribution.github.io/distribution/about/garbage-collection/) (supporting reference) - Content-addressed blob collection has reachability and concurrent-write hazards; execlaw must coordinate SQLite references with filesystem publication.
+    <!-- /implementation-sources:H077 -->
+
+
 78. [ ] <a id="enhancement-078"></a> **Qualify useful hardware tiers beyond the primary GPU path.**
     **P2 / L; extends 19/34/49.** Establish measured CPU, Apple, Intel, AMD,
     and NVIDIA profiles only where locally supported, with live resource
@@ -1272,6 +1951,13 @@ decision, not silently dropped from the plan.
     advertised tier has a reproducible task/latency/quality report; missing
     telemetry does not become fictitious free capacity. Fallback to another
     approved local model must be visible and preserve capability requirements.
+
+    <!-- implementation-sources:H078 -->
+    **Source basis:** Earlier strategy explicitly compares llama.cpp and OpenVINO GenAI for broad local hardware support; execlaw's measured tier qualification is an added acceptance requirement.
+    **Implementation source:** [llama.cpp repository](https://github.com/ggml-org/llama.cpp) (documented inspiration) - Local CPU/GPU/backend breadth is a starting compatibility inventory, not a benchmark result for execlaw.
+    **Implementation source:** [OpenVINO GenAI repository](https://github.com/openvinotoolkit/openvino.genai) (documented inspiration) - Intel CPU/GPU/NPU local-runtime reference; qualify exact supported hardware/model combinations.
+    <!-- /implementation-sources:H078 -->
+
 
 ### Plugin and integration ecosystem
 
@@ -1284,6 +1970,12 @@ decision, not silently dropped from the plan.
     undeclared authority, and unsafe upgrades fail with actionable messages.
     Keep the manifest schema the single source for generated documentation.
 
+    <!-- implementation-sources:H079 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [MCP conformance test suite](https://github.com/modelcontextprotocol/conformance) (supporting reference) - A protocol conformance suite is a useful model for reusable plugin contract fixtures; it does not certify execlaw plugins automatically.
+    <!-- /implementation-sources:H079 -->
+
+
 80. [ ] <a id="enhancement-080"></a> **Negotiate plugin API compatibility explicitly.** **P1 / M;
     extends 27/44.** Version host primitives and protocol capabilities;
     record supported ranges and required features separately from cosmetic
@@ -1292,6 +1984,13 @@ decision, not silently dropped from the plan.
     not mid-turn; supported older bundles pass compatibility fixtures.
     Deprecation diagnostics identify the primitive and replacement without
     silently changing its trust or effect meaning.
+
+    <!-- implementation-sources:H080 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [MCP lifecycle negotiation](https://modelcontextprotocol.io/specification/2025-06-18/basic/lifecycle) (supporting reference) - Negotiate protocol version and capabilities explicitly before dependent operations.
+    **Implementation source:** [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (supporting reference) - Separate compatibility meaning from cosmetic version labels; security-critical feature support still needs explicit checks.
+    <!-- /implementation-sources:H080 -->
+
 
 81. [ ] <a id="enhancement-081"></a> **Pin executable tool versions for in-flight runs.** **P1 / L;
     extends 16/27.** Bind local plugin dispatch to verified implementation
@@ -1305,6 +2004,12 @@ decision, not silently dropped from the plan.
     rollback and concurrent old/new runs preserve deterministic identities
     without resurrecting revoked artifacts.
 
+    <!-- implementation-sources:H081 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [OCI image descriptor](https://github.com/opencontainers/image-spec/blob/main/descriptor.md) (supporting reference) - Descriptors bind content identity by digest and size; retaining/authorizing a digest for a run is execlaw-specific.
+    <!-- /implementation-sources:H081 -->
+
+
 82. [ ] <a id="enhancement-082"></a> **Support publisher revocation and offline compromise response.**
     **P1 / M; extends 27/28.** Build on `core/src/artifact_provenance.rs`
     with operator-approved publisher/digest revocations, inventory impact,
@@ -1314,6 +2019,13 @@ decision, not silently dropped from the plan.
     follows a documented stop/drain policy. Offline revocation imports record
     their source and freshness limitations.
 
+    <!-- implementation-sources:H082 -->
+    **Source basis:** Earlier strategy documents Sigstore/SLSA artifact provenance; publisher revocation and offline response are additional execlaw-specific controls.
+    **Implementation source:** [Sigstore verification overview](https://docs.sigstore.dev/cosign/verifying/verify/) (documented inspiration) - Verify signer identity and artifact binding; a valid signature alone is not a safety or revocation decision.
+    **Implementation source:** [The Update Framework specification](https://theupdateframework.github.io/specification/latest/) (supporting reference) - Trusted metadata/key rotation and rollback/freeze defenses inform offline revocation freshness and compromise recovery.
+    <!-- /implementation-sources:H082 -->
+
+
 83. [ ] <a id="enhancement-083"></a> **Make plugin hook ordering, failure, and reentrancy predictable.**
     **P1 / M; extends 23/79.** Specify hook order, allowed operations,
     resource budgets, recursion depth, and whether a failure aborts or isolates
@@ -1322,6 +2034,12 @@ decision, not silently dropped from the plan.
     or recursively triggered hooks cannot deadlock the host or silently run
     twice after restart. Conformance traces identify which hook altered a
     result and under which plugin version.
+
+    <!-- implementation-sources:H083 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [pluggy hook specification and ordering](https://pluggy.readthedocs.io/en/stable/) (supporting reference) - Explicit hook ordering, wrappers, result and exception semantics provide a comparison for a predictable host contract; no Python dependency is proposed.
+    <!-- /implementation-sources:H083 -->
+
 
 84. [ ] <a id="enhancement-084"></a> **Trial a restricted WebAssembly plugin tier.** **Lab / L;
     depends on 65/72/79.** Prototype pure transforms and parsers with an
@@ -1333,6 +2051,13 @@ decision, not silently dropped from the plan.
     [security model](https://docs.wasmtime.dev/security.html); WebAssembly
     alone does not establish safe host APIs.
 
+    <!-- implementation-sources:H084 -->
+    **Source basis:** Documented earlier in docs/execlaw_impr_doc.md section9.4 (WASI component tier); H084 already links Wasmtime's security model.
+    **Implementation source:** [Wasmtime security model](https://docs.wasmtime.dev/security.html) (documented inspiration) - Embedding APIs, imports and capability exposure define the actual sandbox boundary.
+    **Implementation source:** [Wasmtime interruption](https://docs.wasmtime.dev/examples-interrupting-wasm.html) (supporting reference) - Fuel/epoch interruption supports bounded computation; qualify memory and host-call limits separately.
+    <!-- /implementation-sources:H084 -->
+
+
 85. [ ] <a id="enhancement-085"></a> **Trial delegation between explicitly paired operator-owned hosts.**
     **Lab / L; depends on 25/42/45.** Consider an external-agent protocol
     adapter only for verified local/VPN operator hardware, with peer identity,
@@ -1342,6 +2067,12 @@ decision, not silently dropped from the plan.
     cloud-inference peer is rejected; received instructions cannot grant
     authority. Adopt only if measured hardware/task distribution benefits
     justify the additional trust and recovery surface.
+
+    <!-- implementation-sources:H085 -->
+    **Source basis:** Documented earlier in docs/execlaw_impr_doc.md protocol comparison and A2A proposal; operator-owned/local-only pairing restrictions are execlaw-specific.
+    **Implementation source:** [A2A specification](https://a2a-protocol.org/latest/specification/) (documented inspiration) - Task state, artifacts, streaming and authentication are external protocol building blocks; an Agent Card does not establish local inference or permission.
+    <!-- /implementation-sources:H085 -->
+
 
 ### Context and knowledge
 
@@ -1354,6 +2085,13 @@ decision, not silently dropped from the plan.
     message cannot broaden capabilities; the operator can inspect which
     legitimate instruction applied without exposing hidden secrets.
 
+    <!-- implementation-sources:H086 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [The Instruction Hierarchy research paper](https://arxiv.org/abs/2404.13208) (supporting reference) - Research reference for distinguishing instruction privilege; execlaw still enforces capabilities outside model behavior.
+    **Implementation source:** [OWASP LLM Prompt Injection Prevention Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/LLM_Prompt_Injection_Prevention_Cheat_Sheet.html) (supporting reference) - Treat retrieved documents and tool outputs as untrusted input and validate consequential actions separately.
+    <!-- /implementation-sources:H086 -->
+
+
 87. [ ] <a id="enhancement-087"></a> **Detect dependency cycles and capacity deadlocks.** **P1 / M;
     depends on 30/42/68.** Maintain a bounded wait graph for child joins,
     inference slots, tool resource locks, and approval waits. Reject cyclic
@@ -1362,6 +2100,13 @@ decision, not silently dropped from the plan.
     waiting for a child that needs it; cyclic joins yield an actionable
     blocker. Valid long waits remain healthy rather than being cancelled
     simply because a generic inactivity timer expires.
+
+    <!-- implementation-sources:H087 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [petgraph topological sort](https://docs.rs/petgraph/latest/petgraph/algo/fn.toposort.html) (supporting reference) - Detect dependency cycles deterministically; wait-for capacity edges and reclaimable reservations remain execlaw design.
+    **Implementation source:** [Tokio Semaphore](https://docs.rs/tokio/latest/tokio/sync/struct.Semaphore.html) (supporting reference) - Permit ownership/fairness semantics matter when parents and children compete for bounded capacity.
+    <!-- /implementation-sources:H087 -->
+
 
 88. [ ] <a id="enhancement-088"></a> **Cache qualified read results with authorization and freshness checks.**
     **P2 / M; depends on 38/48/65.** Cache only approved read operations,
@@ -1373,6 +2118,12 @@ decision, not silently dropped from the plan.
     prefix caching and never interpret a cached effect result as permission
     to replay that effect.
 
+    <!-- implementation-sources:H088 -->
+    **Source basis:** Execlaw-specific synthesis; the linked primary source is supporting guidance added in this annotation, not a claimed historical origin.
+    **Implementation source:** [RFC 9111 HTTP caching](https://www.rfc-editor.org/rfc/rfc9111.html) (supporting reference) - Freshness, validation and restrictions on authenticated responses guide cache safety; execlaw adds principal/tool-version/authority keys.
+    <!-- /implementation-sources:H088 -->
+
+
 89. [ ] <a id="enhancement-089"></a> **Resolve entities without silently merging identities.** **P1 / M;
     extends 37/38.** Add evidence-backed aliases and proposed entity merges
     for people, projects, places, and resources. Keep identity authorization
@@ -1381,6 +2132,12 @@ decision, not silently dropped from the plan.
     until authoritative evidence resolves them; a mistaken merge can be
     reversed without rewriting source events or inheriting another entity's
     trust. Retrieval exposes ambiguity when multiple identities still fit.
+
+    <!-- implementation-sources:H089 -->
+    **Source basis:** Earlier strategy uses Graphiti as a reference for temporal entities and provenance; reversible, trust-preserving identity merge governance is execlaw-specific.
+    **Implementation source:** [Graphiti repository](https://github.com/getzep/graphiti) (documented inspiration) - Temporal entity resolution and evidence-backed graphs are an existing comparison point; semantic merging must not grant identity authority.
+    <!-- /implementation-sources:H089 -->
+
 
 90. [ ] <a id="enhancement-090"></a> **Separate explicit preferences from inferred personalization.**
     **P1 / M; extends 37/39.** Store operator-declared preferences separately
@@ -1391,6 +2148,13 @@ decision, not silently dropped from the plan.
     correcting or removing a preference changes subsequent loadouts; a
     third-party message cannot impersonate the operator's preference.
 
+    <!-- implementation-sources:H090 -->
+    **Source basis:** Earlier strategy cites LangMem for typed foreground/background memory and Letta for editable memory; explicit-versus-inferred preference governance is execlaw-specific.
+    **Implementation source:** [LangMem repository](https://github.com/langchain-ai/langmem) (documented inspiration) - Memory extraction and semantic updates are prior comparison material, not authorization to persist inferred preferences automatically.
+    **Implementation source:** [W3C PROV-O](https://www.w3.org/TR/prov-o/) (supporting reference) - Retain attribution and derivation so explicit declarations can be distinguished from extracted inferences.
+    <!-- /implementation-sources:H090 -->
+
+
 91. [ ] <a id="enhancement-091"></a> **Ingest documents with page, cell, and region evidence.**
     **P1 / L; extends 31/37/46.** Add optional local extraction/OCR plugins
     for PDFs, scans, tables, and office documents, using attachment hashes,
@@ -1400,6 +2164,12 @@ decision, not silently dropped from the plan.
     silently omitted; extraction is sandboxed and bounded. Embedded macros,
     links, and instructions never execute merely because a document is read.
 
+    <!-- implementation-sources:H091 -->
+    **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+    **Implementation source:** [Docling document model](https://docling-project.github.io/docling/reference/docling_document/) (supporting reference) - Adapt page provenance, bounding boxes and document-item references into bounded local extraction artifacts.
+    <!-- /implementation-sources:H091 -->
+
+
 92. [ ] <a id="enhancement-092"></a> **Maintain a revision-aware local code and documentation index.**
     **P1 / L; extends 38/40.** Build on the memory roadmap's CodeGraph/wiki
     tables and developer Graphify integration with incremental symbol,
@@ -1408,6 +2178,12 @@ decision, not silently dropped from the plan.
     renames/deletions update affected nodes; excluded paths and secrets stay
     out; stale or incomplete indexes cannot justify claiming no callers or
     no affected tests. Measure usefulness against plain text search.
+
+    <!-- implementation-sources:H092 -->
+    **Source basis:** H092 explicitly builds on execlaw's existing CodeGraph/wiki and Graphify work; SCIP is a supporting schema reference added now.
+    **Implementation source:** [SCIP code-intelligence schema](https://github.com/scip-code/scip/blob/main/scip.proto) (supporting reference) - Adapt document/symbol/occurrence identities and retain a separate workspace revision and coverage receipt.
+    <!-- /implementation-sources:H092 -->
+
 
 ### Coding execution
 
@@ -1420,6 +2196,12 @@ decision, not silently dropped from the plan.
     finish the owned change set; malformed patches cannot write beyond the
     workspace. Return a verified diff rather than an optimistic edit summary.
 
+    <!-- implementation-sources:H093 -->
+    **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+    **Implementation source:** [Git apply validation and index preconditions](https://git-scm.com/docs/git-apply) (supporting reference) - Adapt check/index preconditions and fail-before-apply behavior; add execlaw-owned crash recovery and containment.
+    <!-- /implementation-sources:H093 -->
+
+
 94. [ ] <a id="enhancement-094"></a> **Use structured command specifications and platform-aware execution.**
     **P1 / M; depends on 40/54.** Prefer executable/argument arrays, declared
     working directories, bounded stdin, and sanitized inherited environments;
@@ -1428,6 +2210,12 @@ decision, not silently dropped from the plan.
     **Accept:** spaces, Unicode, shell metacharacters, and quoted paths cannot
     alter command intent; credentials never appear in arguments or echoes;
     process exit, timeout, and cancellation remain distinguishable.
+
+    <!-- implementation-sources:H094 -->
+    **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+    **Implementation source:** [Rust Command argument and environment semantics](https://doc.rust-lang.org/std/process/struct.Command.html) (supporting reference) - Adapt argument arrays, cwd and cleared environments; preserve documented Windows argument-escaping limitations.
+    <!-- /implementation-sources:H094 -->
+
 
 95. [ ] <a id="enhancement-095"></a> **Manage development servers as owned run resources.** **P1 / M;
     depends on 40/74/75.** Give background servers and terminal jobs durable
@@ -1438,6 +2226,12 @@ decision, not silently dropped from the plan.
     when its ownership expires; the UI can distinguish starting, ready,
     failed, and intentionally detached jobs.
 
+    <!-- implementation-sources:H095 -->
+    **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+    **Implementation source:** [Playwright managed web servers](https://playwright.dev/docs/test-webserver) (supporting reference) - Adapt readiness URLs, server ownership, reuse policy and graceful shutdown for run-owned previews.
+    <!-- /implementation-sources:H095 -->
+
+
 96. [ ] <a id="enhancement-096"></a> **Make test and build evidence independently verifiable.**
     **P1 / M; depends on 22/40.** Record the actual command, exit status,
     checked revision, environment identity, and bounded output digest from
@@ -1447,6 +2241,12 @@ decision, not silently dropped from the plan.
     test does not satisfy its acceptance criterion. Preserve the operator's
     right to approve a legitimate test correction explicitly.
 
+    <!-- implementation-sources:H096 -->
+    **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+    **Implementation source:** [in-toto attestation statement](https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md) (supporting reference) - Bind executor-produced evidence to identified artifacts and typed predicates; a statement alone does not prove a test passed.
+    <!-- /implementation-sources:H096 -->
+
+
 97. [ ] <a id="enhancement-097"></a> **Treat dependency installation as an explicit execution boundary.**
     **P1 / M; depends on 25/40/72.** Use locked dependencies, declared package
     sources, controlled caches, and policy for lifecycle/build scripts in
@@ -1455,6 +2255,13 @@ decision, not silently dropped from the plan.
     install script cannot access the host vault or arbitrary network;
     offline cached builds remain reproducible; changing the lockfile produces
     a reviewable dependency diff and invalidates stale build evidence.
+
+    <!-- implementation-sources:H097 -->
+    **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+    **Implementation source:** [npm ci lifecycle-script policy](https://docs.npmjs.com/cli/v11/commands/npm-ci/) (supporting reference) - Adapt lockfile-consistent installs and explicit script policy; sandbox executed dependency code separately.
+    **Implementation source:** [Cargo build scripts](https://doc.rust-lang.org/cargo/reference/build-scripts.html) (supporting reference) - Treat build.rs and native build tooling as code execution, not a harmless download.
+    <!-- /implementation-sources:H097 -->
+
 
 98. [ ] <a id="enhancement-098"></a> **Validate application migrations against disposable local databases.**
     **P2 / M; depends on 40/66/96.** Provide a coding-plugin workflow for
@@ -1466,6 +2273,12 @@ decision, not silently dropped from the plan.
     the model cannot switch database targets by editing a command or config
     file after approval. This is separate from execlaw's own migrations in 64.
 
+    <!-- implementation-sources:H098 -->
+    **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+    **Implementation source:** [Sqitch verify command](https://sqitch.org/docs/manual/sqitch-verify/) (supporting reference) - Adapt explicit migration verification on disposable targets with a pinned database identity.
+    <!-- /implementation-sources:H098 -->
+
+
 99. [ ] <a id="enhancement-099"></a> **Verify UI changes in an isolated browser with attributable evidence.**
     **P1 / M; depends on 40/46/95.** Run user journeys against the owned
     preview, capture revision-bound screenshots and accessibility results,
@@ -1475,6 +2288,13 @@ decision, not silently dropped from the plan.
     navigation off the approved app is gated; results cite the test action,
     viewport, and revision. Sensitive regions are excluded from shareable
     captures under the operator's policy.
+
+    <!-- implementation-sources:H099 -->
+    **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+    **Implementation source:** [Playwright browser isolation](https://playwright.dev/docs/browser-contexts) (supporting reference) - Use separate browser contexts for task cookies/storage and explicit test isolation.
+    **Implementation source:** [Playwright trace viewer](https://playwright.dev/docs/trace-viewer) (supporting reference) - Adapt attributable action traces, snapshots and network evidence, with execlaw redaction and revision binding.
+    <!-- /implementation-sources:H099 -->
+
 
 ### Messaging and multimodal work
 
@@ -1487,6 +2307,12 @@ decision, not silently dropped from the plan.
      history is not silently carried into a wider audience. Show the affected
      audience without assuming display names establish identity.
 
+     <!-- implementation-sources:H100 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [MLS group epochs](https://www.rfc-editor.org/rfc/rfc9420.html#section-3) (supporting reference) - Use group-state epochs as a reference for audience changes invalidating stale disclosure authority; no requirement to adopt MLS.
+     <!-- /implementation-sources:H100 -->
+
+
 101. [ ] <a id="enhancement-101"></a> **Normalize message edits, deletion, reactions, and reply lineage.**
      **P1 / L; extends 12/48.** Extend transport/archive contracts with
      append-only revisions and manifest-declared support for these operations.
@@ -1497,6 +2323,12 @@ decision, not silently dropped from the plan.
      Reactions do not become approvals unless explicitly bound to a secure
      approval protocol.
 
+     <!-- implementation-sources:H101 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Matrix event replacement and relationships](https://spec.matrix.org/latest/client-server-api/#event-replacements) (supporting reference) - Adapt stable relation targets, edit semantics, redaction and reply lineage into normalized transport records.
+     <!-- /implementation-sources:H101 -->
+
+
 102. [ ] <a id="enhancement-102"></a> **Make cross-channel continuity an explicit identity operation.**
      **P1 / M; extends 26/37.** Allow verified account linking and controlled
      context transfer between the operator's channels, recording origin,
@@ -1506,6 +2338,12 @@ decision, not silently dropped from the plan.
      history; replying through one transport preserves the intended thread.
      All channel adapters use the same host contract.
 
+     <!-- implementation-sources:H102 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [OpenID Connect subject identifiers](https://openid.net/specs/openid-connect-core-1_0.html#SubjectIDTypes) (supporting reference) - Use issuer-scoped stable subject identifiers rather than display names; linking and disclosure still require local approval.
+     <!-- /implementation-sources:H102 -->
+
+
 103. [ ] <a id="enhancement-103"></a> **Coalesce trigger bursts without losing event meaning.**
      **P1 / M; extends 30/42.** Add per-source debounce, bounded batching,
      event identity, and stale-event policies ahead of agent/workflow
@@ -1514,6 +2352,12 @@ decision, not silently dropped from the plan.
      generates the configured bounded work while every original event remains
      attributable; restart preserves pending windows; a later correction
      supersedes stale proposed work without deleting its audit trail.
+
+     <!-- implementation-sources:H103 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Inngest debouncing guide](https://www.inngest.com/docs/durable-execution/flow-control/debounce) (supporting reference) - Adapt keyed debounce windows and bounded burst semantics into SQLite scheduling; do not add a hosted dependency.
+     <!-- /implementation-sources:H103 -->
+
 
 104. [ ] <a id="enhancement-104"></a> **Qualify webhook replay resistance and credential rollover.**
      **P1 / M; extends 25/79.** Test plugin-declared webhook authentication
@@ -1525,6 +2369,13 @@ decision, not silently dropped from the plan.
      requests remain distinguishable in sanitized metrics. Do not assume
      every external provider offers the same signature mechanism.
 
+     <!-- implementation-sources:H104 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Slack signed-request verification](https://docs.slack.dev/authentication/verifying-requests-from-slack/) (supporting reference) - Adapt exact-body HMAC verification and timestamp replay checks where the provider supports them.
+     **Implementation source:** [Stripe webhook signature rotation](https://docs.stripe.com/webhooks) (supporting reference) - Adapt bounded old/new-secret overlap and timestamp verification; retain each provider's acknowledgment contract.
+     <!-- /implementation-sources:H104 -->
+
+
 105. [ ] <a id="enhancement-105"></a> **Support an explicit operator takeover and hand-back state.**
      **P1 / M; extends 22/43.** Let the operator take responsibility for a
      conversation/task while preserving drafts, pending approvals, and run
@@ -1534,6 +2385,12 @@ decision, not silently dropped from the plan.
      reconnect preserves ownership; handing back includes the operator's
      intervening actions so the agent does not repeat them.
 
+     <!-- implementation-sources:H105 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Microsoft bot-to-human handoff protocol](https://learn.microsoft.com/en-us/azure/bot-service/bot-service-design-pattern-handoff-human?view=azure-bot-service-4.0) (supporting reference) - Adapt explicit handoff initiation/status and context transfer; implement ownership fencing locally rather than adopting Azure.
+     <!-- /implementation-sources:H105 -->
+
+
 106. [ ] <a id="enhancement-106"></a> **Preserve multimodal grounding through transformations.**
      **P2 / L; extends 34/46/47/91.** Link crops, OCR spans, captions, and
      audio segments to original artifact hashes, coordinates, and time ranges.
@@ -1542,6 +2399,13 @@ decision, not silently dropped from the plan.
      old action coordinates; text in images cannot become trusted policy;
      noisy/occluded fixtures measure unsupported claims separately from text
      quality. All references must resolve within the caller's artifact scope.
+
+     <!-- implementation-sources:H106 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [W3C Web Annotation selectors](https://www.w3.org/TR/annotation-model/#selectors) (supporting reference) - Adapt source selectors and state-specific region/text references for transformed multimodal evidence.
+     **Implementation source:** [W3C Media Fragments](https://www.w3.org/TR/media-frags/) (supporting reference) - Use spatial and temporal media fragments as an interoperable reference for crop and audio-segment coordinates.
+     <!-- /implementation-sources:H106 -->
+
 
 ### Evaluation and agent judgment
 
@@ -1554,6 +2418,13 @@ decision, not silently dropped from the plan.
      becomes a source-level regression. Treat the model as a checked contract,
      not proof that unmodeled external services behave correctly.
 
+     <!-- implementation-sources:H107 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Stateright Rust model checking](https://github.com/stateright/stateright) (supporting reference) - Adapt bounded state exploration and counterexample traces for run/lease/approval invariants.
+     **Implementation source:** [Loom concurrency model testing](https://github.com/tokio-rs/loom) (supporting reference) - Exercise implementation-level scheduling interleavings separately from the abstract protocol model.
+     <!-- /implementation-sources:H107 -->
+
+
 108. [ ] <a id="enhancement-108"></a> **Fuzz full protocol conversations and untrusted parsers.**
      **P1 / M; extends 17/29/45.** Cover runner registration, unsolicited
      tool results, reordered/duplicate frames, version skew, ZIP manifests,
@@ -1563,6 +2434,13 @@ decision, not silently dropped from the plan.
      states yield minimized reproducible fixtures. Run parser fuzzing without
      live credentials, network effects, or the operator database.
 
+     <!-- implementation-sources:H108 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Rust Fuzz cargo-fuzz guide](https://rust-fuzz.github.io/book/cargo-fuzz.html) (supporting reference) - Adapt isolated fuzz targets, corpus retention and crash minimization.
+     **Implementation source:** [proptest state-machine testing](https://docs.rs/proptest-state-machine/latest/proptest_state_machine/) (supporting reference) - Generate and shrink valid/invalid protocol operation sequences against a reference model.
+     <!-- /implementation-sources:H108 -->
+
+
 109. [ ] <a id="enhancement-109"></a> **Mutation-test the enforcement tests themselves.** **P1 / M;
      extends 17/107.** In disposable builds, deliberately remove selected
      trust, capability, approval-hash, pairing, and scope checks. Measure
@@ -1571,6 +2449,12 @@ decision, not silently dropped from the plan.
      explicitly justified as equivalent; surviving meaningful mutations
      block that component's release. This tests the sensitivity of the test
      suite rather than treating a large passing test count as evidence alone.
+
+     <!-- implementation-sources:H109 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [cargo-mutants result interpretation](https://mutants.rs/using-results.html) (supporting reference) - Adapt survived/caught/unviable mutation reporting and enforce a scoped critical-check mutation gate.
+     <!-- /implementation-sources:H109 -->
+
 
 110. [ ] <a id="enhancement-110"></a> **Prove local-only operation with denied-network integration tests.**
      **P1 / M; extends 25/34.** Run the complete inference, embeddings,
@@ -1582,6 +2466,12 @@ decision, not silently dropped from the plan.
      failure fallback, upgrades, and optional components, not only normal
      chat requests.
 
+     <!-- implementation-sources:H110 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Docker isolated network driver](https://docs.docker.com/engine/network/drivers/none/) (supporting reference) - Use denied-network test environments as one fixture technique; explicitly separate permitted local inference fixtures and integration endpoints.
+     <!-- /implementation-sources:H110 -->
+
+
 111. [ ] <a id="enhancement-111"></a> **Protect held-out tasks and calibrate local judges.** **P1 / M;
      extends 21/39/96.** Keep protected answers and verifier policy outside
      the task workspace; prevent their capture into memory or promoted
@@ -1590,6 +2480,13 @@ decision, not silently dropped from the plan.
      words or editing a verifier cannot manufacture success; holdout canaries
      never enter task prompts or training captures. Separate clean evaluation
      runs from demonstrations that intentionally reveal solutions.
+
+     <!-- implementation-sources:H111 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [SWE-bench evaluation harness](https://www.swebench.com/SWE-bench/guides/evaluation/) (supporting reference) - Adapt isolated executable task verification and separation of predictions from authoritative test evaluation.
+     **Implementation source:** [Judging LLM-as-a-Judge research](https://arxiv.org/abs/2306.05685) (supporting reference) - Use the documented judge biases and human-agreement analysis to design calibration rather than trusting judge scores alone.
+     <!-- /implementation-sources:H111 -->
+
 
 112. [ ] <a id="enhancement-112"></a> **Measure when to clarify, proceed conservatively, or abstain.**
      **P1 / M; extends 22/43.** Evaluate missing requirements, ambiguous
@@ -1600,6 +2497,13 @@ decision, not silently dropped from the plan.
      targets are never guessed. A safe partial result should retain useful
      work and state exactly what information is missing.
 
+     <!-- implementation-sources:H112 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [AmbigQA dataset and evaluation](https://github.com/shmsw25/AmbigQA) (supporting reference) - Adapt ambiguous-question fixtures and disambiguation evaluation, adding action-safety and unnecessary-question metrics.
+     **Implementation source:** [Language Models (Mostly) Know What They Know](https://arxiv.org/abs/2207.05221) (supporting reference) - Use calibration research as a baseline; do not make self-reported confidence sufficient authority for an effect.
+     <!-- /implementation-sources:H112 -->
+
+
 113. [ ] <a id="enhancement-113"></a> **Detect non-progress and bound strategy changes.** **P1 / M;
      extends 22/30.** Extend identical-call limits with durable evidence of
      progress: changed artifacts, improving verifier outcomes, new source
@@ -1608,6 +2512,12 @@ decision, not silently dropped from the plan.
      oscillating fixtures stop or perform one budgeted replan; legitimate
      iterative repair continues when evidence improves. Report partial work
      and blockers instead of spending the remaining budget on repeated plans.
+
+     <!-- implementation-sources:H113 -->
+     **Source basis:** The earlier strategy explicitly cites OpenCode repeated-call safeguards (docs/execlaw_impr_doc.md comparison table); H113's broader progress detection is execlaw's extension.
+     **Implementation source:** [OpenCode doom-loop permissions](https://opencode.ai/docs/permissions/) (supporting reference) - Extend repeated-identical-call safeguards into durable evidence-based progress detection; permissions documentation is a current supporting reference.
+     <!-- /implementation-sources:H113 -->
+
 
 ### Operations and maintainability
 
@@ -1620,6 +2530,13 @@ decision, not silently dropped from the plan.
      artifacts and affected surfaces. License and provenance checks are
      evaluated for the complete package, not just the Rust dependency graph.
 
+     <!-- implementation-sources:H114 -->
+     **Source basis:** The earlier strategy names SLSA/Sigstore and OCI provenance; the reproducible-build definition is an additional engineering source for H114.
+     **Implementation source:** [Reproducible Builds definition](https://reproducible-builds.org/docs/definition/) (supporting reference) - Define reproducibility in terms of declared build inputs and independently comparable outputs.
+     **Implementation source:** [SLSA build provenance](https://slsa.dev/spec/v1.2/provenance) (supporting reference) - Bind inputs/build identity to outputs, alongside complete dependency inventories.
+     <!-- /implementation-sources:H114 -->
+
+
 115. [ ] <a id="enhancement-115"></a> **Export standard telemetry through a replaceable local adapter.**
      **P2 / M; extends 35/49.** Map durable IDs and numeric measurements to
      a pinned [OpenTelemetry GenAI convention revision](https://github.com/open-telemetry/semantic-conventions-genai).
@@ -1628,6 +2545,12 @@ decision, not silently dropped from the plan.
      local collector can correlate runs/model/tool spans; a failed collector
      cannot stall execution or grow storage indefinitely; convention upgrades
      pass compatibility/redaction fixtures without rewriting event history.
+
+     <!-- implementation-sources:H115 -->
+     **Source basis:** Both H115 and the earlier strategy explicitly link OpenTelemetry GenAI conventions.
+     **Implementation source:** [OpenTelemetry GenAI conventions repository](https://github.com/open-telemetry/semantic-conventions-genai) (documented inspiration) - Retain an adapter boundary and pin the convention revision independently of SQLite.
+     <!-- /implementation-sources:H115 -->
+
 
 116. [ ] <a id="enhancement-116"></a> **Provide a complete air-gapped installation and update path.**
      **P2 / L; extends 28/50.** Assemble an operator-verifiable offline kit
@@ -1638,6 +2561,14 @@ decision, not silently dropped from the plan.
      fresh disconnected host; no runtime download is unexpectedly required;
      updates verify all inputs before altering the installation.
 
+     <!-- implementation-sources:H116 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Docker image save](https://docs.docker.com/reference/cli/docker/image/save/) (supporting reference) - Package required runtime images for offline transfer with a separately verified digest manifest.
+     **Implementation source:** [Cargo vendor](https://doc.rust-lang.org/cargo/commands/cargo-vendor.html) (supporting reference) - Package locked Rust dependencies for an offline build/recovery kit.
+     **Implementation source:** [Ollama importing a model](https://docs.ollama.com/import) (supporting reference) - Include locally importable model artifacts and their license/version manifests instead of runtime downloads.
+     <!-- /implementation-sources:H116 -->
+
+
 117. [ ] <a id="enhancement-117"></a> **Separate host-service authority from desktop and tool processes.**
      **P1 / M; extends 26/72/76.** Document and minimize OS account,
      keyring, IPC, and filesystem rights for the control plane, desktop UI,
@@ -1646,6 +2577,13 @@ decision, not silently dropped from the plan.
      process cannot impersonate a runner or read service secrets; installing
      or launching the UI does not unnecessarily elevate tool execution.
      Test the actual per-OS service installation configuration.
+
+     <!-- implementation-sources:H117 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [systemd execution sandboxing manual source](https://github.com/systemd/systemd/blob/main/man/systemd.exec.xml) (supporting reference) - Adapt service account, filesystem, credential and privilege boundaries with platform-specific tests.
+     **Implementation source:** [Windows named-pipe access control](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights) (supporting reference) - Authenticate and authorize Windows IPC rather than relying on local reachability.
+     <!-- /implementation-sources:H117 -->
+
 
 118. [ ] <a id="enhancement-118"></a> **Rehearse recovery after loss of the entire machine.**
      **P1 / M; extends 20/28.** Inventory the separate recovery requirements
@@ -1656,6 +2594,13 @@ decision, not silently dropped from the plan.
      verify integrity and reconcile pending effects before restarting sends.
      Report any unrecoverable sidecar state or expired external credentials.
 
+     <!-- implementation-sources:H118 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [restic restoration procedures](https://restic.readthedocs.io/en/stable/050_restore.html) (supporting reference) - Adapt clean-host restore drills and integrity verification; separately inventory execlaw encryption/signing keys.
+     **Implementation source:** [SQLCipher export API](https://www.zetetic.net/sqlcipher/sqlcipher-api/) (supporting reference) - Use supported encrypted database copy/export semantics during recovery qualification.
+     <!-- /implementation-sources:H118 -->
+
+
 119. [ ] <a id="enhancement-119"></a> **Version configuration changes and preview their operational impact.**
      **P1 / M; extends 57/80.** Keep SQLite configuration authoritative while
      adding revisioned change sets, validation, actor/reason audit, and
@@ -1665,6 +2610,12 @@ decision, not silently dropped from the plan.
      change set does not partially apply; rollback respects schema and
      credential revocation constraints instead of replaying stale secrets.
 
+     <!-- implementation-sources:H119 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [etcd transactional compare-and-swap](https://etcd.io/docs/v3.6/learning/api/) (supporting reference) - Adapt revision-precondition change sets to native SQLite transactions; do not add etcd as canonical configuration storage.
+     <!-- /implementation-sources:H119 -->
+
+
 120. [ ] <a id="enhancement-120"></a> **Generate capability and support documentation from verified evidence.**
      **P1 / M; extends 21/28/50.** Maintain a capability inventory linking
      feature flags, runtime paths, manifests, test commands, platforms, and
@@ -1673,6 +2624,13 @@ decision, not silently dropped from the plan.
      cannot appear as production-ready solely because its enum exists;
      examples run against disposable fixtures; release docs distinguish
      designed, implemented, tested, and qualified capabilities.
+
+     <!-- implementation-sources:H120 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Rust documentation tests](https://doc.rust-lang.org/rustdoc/write-documentation/documentation-tests.html) (supporting reference) - Make runnable examples part of documented capability evidence.
+     **Implementation source:** [Cargo machine-readable metadata](https://doc.rust-lang.org/cargo/commands/cargo-metadata.html) (supporting reference) - Generate feature/package inventories from actual build metadata, then join platform test receipts.
+     <!-- /implementation-sources:H120 -->
+
 
 ### Documents and automation UX
 
@@ -1685,6 +2643,12 @@ decision, not silently dropped from the plan.
      behave deterministically; unfinished files cannot enter context;
      abandoned temporary bytes are reclaimed without deleting active uploads.
 
+     <!-- implementation-sources:H121 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [tus resumable upload protocol](https://tus.io/protocols/resumable-upload) (supporting reference) - Adapt upload offsets, checksums, expiry and termination into authenticated quota-governed attachment sessions.
+     <!-- /implementation-sources:H121 -->
+
+
 122. [ ] <a id="enhancement-122"></a> **Provide a deliverable library with previews and non-code revisions.**
      **P1 / M; extends 22/77.** Extend attachments/cards with searchable
      reports, tables, charts, source runs, input hashes, approved versions,
@@ -1693,6 +2657,12 @@ decision, not silently dropped from the plan.
      deliverables without searching raw chat; a preview matches the verified
      download bytes; an updated report does not silently replace the version
      previously approved or shared. Apply artifact scope to every preview.
+
+     <!-- implementation-sources:H122 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [W3C PROV ontology](https://www.w3.org/TR/prov-o/) (supporting reference) - Model artifacts, generating activities, attribution and revisions; keep access and publication approval in execlaw policy.
+     <!-- /implementation-sources:H122 -->
+
 
 123. [ ] <a id="enhancement-123"></a> **Package reproducible data-analysis runs.** **P1 / L;
      extends 22/77/97.** Build on `server/src/python_sandbox/` with analysis
@@ -1703,6 +2673,13 @@ decision, not silently dropped from the plan.
      explain drift; a chart links to its input data and transformation;
      packaging does not include credentials or unrelated conversation files.
 
+     <!-- implementation-sources:H123 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Jupyter nbclient execution](https://nbclient.readthedocs.io/en/latest/client.html) (supporting reference) - Reexecute notebooks in clean kernels with explicit parameters/timeouts and capture execution failures.
+     **Implementation source:** [Jupyter notebook format](https://nbformat.readthedocs.io/en/latest/format_description.html) (supporting reference) - Preserve cell execution order, outputs and notebook metadata in a hashed analysis capsule.
+     <!-- /implementation-sources:H123 -->
+
+
 124. [ ] <a id="enhancement-124"></a> **Pin automation runs to immutable published workflow revisions.**
      **P1 / M; extends 16/81.** Add draft/published graph revisions,
      definition hashes, reviewable diffs, and run-pinned revision IDs to
@@ -1712,6 +2689,12 @@ decision, not silently dropped from the plan.
      rollback affects future triggers without replaying completed effects.
      Invalid drafts remain editable but cannot be activated.
 
+     <!-- implementation-sources:H124 -->
+     **Source basis:** The earlier strategy cites LangGraph checkpoints and resume; Temporal is a supporting version-pinning reference added now, not claimed historical inspiration.
+     **Implementation source:** [Temporal worker versioning](https://docs.temporal.io/worker-versioning) (supporting reference) - Adapt execution-version pinning and controlled promotion; persist immutable graph revisions in SQLite.
+     <!-- /implementation-sources:H124 -->
+
+
 125. [ ] <a id="enhancement-125"></a> **Finish durable approval, wait, composition, and join nodes.**
      **P1 / L; depends on 23/30/69/87/124.** Implement the declared workflow
      control nodes with persisted waits, typed child inputs/results, bounded
@@ -1720,6 +2703,13 @@ decision, not silently dropped from the plan.
      wait resumes the same node; cycles and unbounded fan-out fail validation;
      rejection/cancellation ends the correct branches without orphaned work
      or treating a partial join as complete.
+
+     <!-- implementation-sources:H125 -->
+     **Source basis:** The earlier strategy explicitly cites LangGraph graph checkpoints, interrupts, pending writes and node-level resume; these are precise supporting docs for that documented inspiration.
+     **Implementation source:** [LangGraph interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts) (supporting reference) - Adapt durable interrupt/resume contracts and explicit approval input without adopting LangGraph as the runtime.
+     **Implementation source:** [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/persistence) (supporting reference) - Use checkpoints and pending-write semantics as references for native SQLite wait/join recovery.
+     <!-- /implementation-sources:H125 -->
+
 
 126. [ ] <a id="enhancement-126"></a> **Make automation scenarios effect-free and support shadow evaluation.**
      **P0 / M; extends 21/66/124.** The existing editor test-run path is
@@ -1732,6 +2722,12 @@ decision, not silently dropped from the plan.
      different, explicitly authorized operation with a durable run record.
      See F18.
 
+     <!-- implementation-sources:H126 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Temporal Go testing and activity mocks](https://docs.temporal.io/develop/go/best-practices/testing-suite) (supporting reference) - Adapt isolated workflow tests, mock activities and controlled time; require explicit rejection of live effects in execlaw simulation.
+     <!-- /implementation-sources:H126 -->
+
+
 127. [ ] <a id="enhancement-127"></a> **Give reply drafts a freshness-aware review inbox.**
      **P1 / M; extends 53/100/105.** Build on existing agent reply drafts
      with source-message IDs, draft revisions, recipient/audience snapshots,
@@ -1741,6 +2737,12 @@ decision, not silently dropped from the plan.
      versions; editing approved content requires appropriate renewed review.
      Rejected and superseded drafts remain auditable under retention policy.
 
+     <!-- implementation-sources:H127 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [HTTP If-Match preconditions](https://www.rfc-editor.org/rfc/rfc9110.html#section-13.1.1) (supporting reference) - Adapt revision preconditions to draft edit/review/send so stale approvals and concurrent reviewers conflict.
+     <!-- /implementation-sources:H127 -->
+
+
 128. [ ] <a id="enhancement-128"></a> **Manage operator attention with quiet hours and actionable digests.**
      **P2 / M; extends 35/71.** Extend alert fingerprints, snooze, and
      acknowledgment with SQLite policies for source/severity/channel,
@@ -1749,6 +2751,12 @@ decision, not silently dropped from the plan.
      low-priority events form one linked digest; acknowledgment cancels
      escalation across restart; suppressed approval notifications do not
      count as consent or hide a blocked task's durable status.
+
+     <!-- implementation-sources:H128 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Prometheus Alertmanager grouping and inhibition](https://prometheus.io/docs/alerting/latest/alertmanager/) (supporting reference) - Adapt grouping, inhibition, silence and routing policies to SQLite-backed operator attention controls.
+     <!-- /implementation-sources:H128 -->
+
 
 129. [ ] <a id="enhancement-129"></a> **Qualify multilingual behavior beyond translated UI strings.**
      **P1 / M; extends 21/31/50.** Test multilingual retrieval, date/number
@@ -1760,6 +2768,13 @@ decision, not silently dropped from the plan.
      safety and identity decisions do not change solely because labels are
      translated. Measure task quality per qualified language/model pair.
 
+     <!-- implementation-sources:H129 -->
+     **Source basis:** Supporting engineering reference added in this review; no original external provenance claimed.
+     **Implementation source:** [Unicode locale data markup](https://www.unicode.org/reports/tr35/) (supporting reference) - Use standard locale/date/number rules to construct multilingual interpretation fixtures.
+     **Implementation source:** [W3C inline bidirectional text guidance](https://www.w3.org/International/articles/inline-bidi-markup/) (supporting reference) - Adapt isolation/direction handling for mixed RTL/LTR identities and tool results.
+     <!-- /implementation-sources:H129 -->
+
+
 130. [ ] <a id="enhancement-130"></a> **Offer incrementally synchronized local knowledge collections.**
      **P1 / L; extends 38/48/91.** Build on the wiki lifecycle and memory
      stores with optional collection adapters for approved folders and
@@ -1769,6 +2784,12 @@ decision, not silently dropped from the plan.
      interrupted imports resume without duplication; excluded secrets never
      enter extraction. Detaching a collection clearly distinguishes retained
      approved assertions from removable indexes and source copies.
+
+     <!-- implementation-sources:H130 -->
+     **Source basis:** H130 builds on existing execlaw Wiki/memory collection work; Syncthing is a synchronization engineering reference added now.
+     **Implementation source:** [Syncthing synchronization semantics](https://docs.syncthing.net/users/syncing.html) (supporting reference) - Adapt scan/watch reconciliation, versioned change detection and deletion semantics for approved local collections.
+     <!-- /implementation-sources:H130 -->
+
 
 ### 2026-09-30 agent event/schedule slice
 
@@ -1819,14 +2840,490 @@ operator demand, security severity, dependency readiness, and measured
 benefit. Record an owner, evidence artifact, and supported-platform scope
 before checking off any item. Experimental tiers and delegation adapters remain
 in scope as qualified trials; changing or removing a requirement needs an
-explicit recorded operator decision. The implementation ledger tracks all 130.
+explicit recorded operator decision. The implementation ledger tracks all 154.
+
+<a id="paperclip-roadmap"></a>
+
+## Paperclip: native agent management and optional worker interoperability
+
+Review date: **2026-10-06**. Upstream inspected:
+[`paperclipai/paperclip@f77fcbf4bfc2bf1fb995abda63f2345a34652dd4`](https://github.com/paperclipai/paperclip/tree/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4).
+The default branch was resolved once and source/docs were read at that commit;
+the links below are pinned to it. Upstream instructions were reviewed as
+protocol/documentation data, not executed. No Paperclip installation, agent
+creation, company mutation, or live integration test was performed.
+
+**Recommendation:** adopt Paperclip's separation of persistent work management
+from finite executions. Extend execlaw's existing machinery rather than adding
+another competing agent loop. Independently provide an optional bridge so
+Paperclip can assign work to execlaw and receive attributable progress/results.
+Execlaw must remain usable without Paperclip, including its native management UI.
+
+The review refreshed the workspace layout, current H/NX ledger, and agent,
+run, client, workspace, policy, plugin, and UI implementation paths. It is not
+a new line-by-line security audit or a rerun of all implementation tests. In
+particular, September's missing-feature observations must not override code
+that has landed since then. **H131-H154 are proposed work**; the
+[implementation ledger](implementation-plan.md#paperclip-coordination-and-interoperability)
+includes H131-H154 in the main item ledger; NX01-NX30 remain a separate visual backlog.
+
+### Current execlaw foundation to reuse
+
+| Surface inspected | Existing implementation | Remaining Paperclip-relevant work |
+|---|---|---|
+| `crates/core/src/agents.rs`, `agent_contract.rs` | Immutable definition versions, provenance-bearing mailbox entries, schedule receipts, typed outcomes, and completion requirements/reports | Persistent goals/projects/work assignments spanning several executions; management ownership separate from a mailbox entry |
+| `crates/core/src/runs.rs`, `server/src/tool_apis_subagent.rs` | Durable child contracts, dependencies, reservations, results/artifacts, joins and cancellation | Current child analysis contracts deliberately have no tools/delegation; a general coding worker needs an explicit narrowed execution profile |
+| `server/src/agent_supervisor.rs` | Always-on/event-driven workers with bounded archive read/search and durable run/mailbox completion | Do not advertise this loop as arbitrary coding-worker execution; select the appropriate existing executor through a governed worker contract |
+| `core/src/agent_ownership.rs`, server draft/review APIs | Generation-fenced transport ownership, Controller takeover, reply review and stale-draft handling | Transport ownership is not project/task checkout ownership; keep both scopes distinct |
+| `server/src/client_contract.rs`, `cli/src/api_client.rs`, `core/src/turn_controls.rs` | Versioned public client contract, idempotent submission, saved-run access, workspace operations, durable turn controls | A scoped machine/worker admission protocol and complete adapter lifecycle; the current CLI authenticates using a Controller refresh session |
+| `core/src/runs.rs`, inference admission, policy/vault/egress modules | Per-run/child resource accounting and real H051-H057 enforcement slices | Project-level allocation, integration credentials, complete boundary coverage and release qualification |
+| `web/src/routes/Agents.tsx` and run/completion review components | Agent setup, schedules, trigger/model preview, verifiers, ownership/review and delegated-run inspection | Goal/task/organization views across runs, with evidence-linked management decisions |
+
+The current ledger records H041/H042/H044/H045 as implemented with revalidation
+remaining and H043 as partial. Other related items also have open gates. This
+review uses their code as foundations; it does not promote those statuses or
+reuse earlier passing test counts as fresh evidence. No functional Paperclip
+bridge was found in the inspected production integration surfaces.
+
+### What transfers from Paperclip
+
+Paperclip's schema separates an agent's organizational role/reporting line from
+permissions; task records separately reference goals, projects, parent tasks,
+assignees and execution/check-out identities. This is the useful model to
+borrow. A manager relationship, task dependency, and parent/child run are
+different graphs. Likewise, agent availability, run outcome and task workflow
+status are different state machines. See the pinned [agent schema][pc-agents],
+[issue schema][pc-issues-schema], and [goal schema][pc-goals-schema].
+
+Its documented workflow uses atomic task checkout, explicit conflict handling,
+durable progress, revision-bound confirmations, delegation and escalation.
+Transfer these contracts with execlaw's own tests; do not infer all documented
+guarantees solely from schema fields. The [task workflow][pc-task-workflow]
+and [heartbeat guide][pc-heartbeat] are protocol references, not proof that a
+new adapter already conforms.
+
+Use the documented [native status arbitration][pc-status] and
+[continuation scheduler][pc-continuation] as design references. Preserve
+execlaw's explicit acceptance evidence: Paperclip's documented low-risk
+claim-based completion policy is not the same as independently verified task
+success. Its inspected [budget service][pc-budgets] accounts for billed money;
+execlaw additionally needs local tokens, time, concurrency and hardware limits.
+
+### Two independent modes and their authority boundaries
+
+| Concern | Execlaw managing its own agents | Execlaw participating in Paperclip |
+|---|---|---|
+| Objective and assignment authority | Operator-approved execlaw goals/projects/work items | Paperclip owns external goals/issues/assignments; execlaw stores scoped execution records and an explicit projection |
+| Execution authority | Execlaw policy, local executors and resource admission | The same execlaw controls; a remote assignment cannot broaden them |
+| Durable state | SQLite and authenticated event/effect records | Each system retains its own store; no direct reads/writes of Paperclip's database |
+| Wake scheduling | Execlaw's existing supervisor and durable queues | One declared scheduling owner per external task; internal retries do not create independent duplicate assignments |
+| Approval | Execlaw's Controller and exact-effect approval policy | Paperclip board approval and execlaw effect approval remain distinct, both enforced where applicable |
+| Worker/lead/executive title | Responsibility and escalation configuration | Paperclip role metadata; never a mapping to execlaw Controller trust |
+| Inference | Approved operator-owned local endpoints only | Still local only, including execlaw-controlled delegated execution; no inherited cloud-provider fallback |
+
+Start with one explicitly paired self-hosted Paperclip instance and one
+company/agent binding. Company/project identifiers organize and isolate
+integration work; they do not turn execlaw into a multi-tenant SaaS or grant
+access to every conversation. Broader bindings require their own authority,
+workspace, secret and retention scopes. A Paperclip organization may contain
+other runtimes, but execlaw must not initiate cloud inference by delegating
+through it or export private context to an unqualified executor.
+
+### Proposed integration architecture
+
+```mermaid
+flowchart LR
+    B["Human board / execlaw Controller"] --> P["Self-hosted Paperclip: goals and assignments"]
+    P --> A["External execlaw adapter: invocation and cancellation"]
+    A --> J["Generic scoped worker API / admission"]
+    J --> X["Execlaw work items and local runs"]
+    X --> L["Local model and narrowed worker tools"]
+    X --> O["Durable effect outbox"]
+    O --> C["Optional Paperclip bridge plugin"]
+    C --> P
+    B --> X
+```
+
+Proposed packaging, not existing directories: an execlaw ZIP bridge such as
+`plugins/paperclip-bridge/`, plus an independently versioned Paperclip-side
+adapter such as `integrations/paperclip-execlaw-adapter/`. Provider-specific
+IDs, REST mappings, callback rules and configuration UI belong at those edges.
+The Rust host exposes generic work/run/auth/effect primitives through
+manifest-declared/public surfaces; it must not branch on a Paperclip plugin ID.
+
+Use the documented [external-adapter package interface][pc-external-adapters]
+and pinned [adapter types][pc-adapter-types] rather than forking Paperclip's
+core or importing its Node/PostgreSQL stack into execlaw. The adapter should
+translate invocation context, report progress/usage/session handles, and
+explicitly stop the daemon-backed job when cancelled. The bridge performs
+authorized Paperclip reads and outbox-mediated changes. A successful POST,
+process exit, model response and verified task completion are four different
+events.
+
+Persist linkage under at least `(binding, instance, company, agent, issue,
+external run)` with payload/revision hashes, local work/run/conversation IDs,
+assignment generation, scope, lease/budget references, synchronization state,
+and last acknowledged external mutation. Task identity survives multiple
+heartbeat runs; the external run ID deduplicates an invocation, not all future
+work on that issue. Keep actor identity and source provenance on imported
+comments/instructions. Do not store credentials in linkage records or prompts.
+
+### Compatibility findings: do not implement from quick-start prose alone
+
+These are integration constraints at the pinned snapshot, not a claim of a
+complete Paperclip audit or automatically exploitable vulnerabilities.
+
+| Surface | Inspected behavior | Required bridge response |
+|---|---|---|
+| Generic [HTTP adapter source][pc-http] | Reads `timeoutMs`; adds agent/run/context fields; no automatic top-level company ID or normal API credential; ignores response body and treats any successful HTTP status as invocation success | Treat it as a limited wake/ack prototype, not a complete asynchronous worker contract. A 202 must never mean issue done. Validate a typed durable admission receipt via a qualified adapter. |
+| Generic [process adapter source][pc-process] | Separate executable and argument array; minted API token when supplied; captured stdout/stderr and exit status; no complete task-context/session/usage translation | Use a small compatibility shim only as a constrained pilot. Do not assume the quick-start shell string or all task/wake environment variables are delivered. |
+| [Cancellation/session/result types][pc-adapter-types] | Custom adapters have cancellation callbacks/signals, session codec support and structured results/recovery evidence; generic process/HTTP paths do not supply the full daemon lifecycle | Implement acknowledged remote stop and scoped resumption. Killing an RPC client does not prove execlaw stopped; never invent recovery evidence. |
+| [Paperclip authentication][pc-jwt] | Run-scoped claims include agent/company/run; the inspected default TTL is 48 hours | Treat it as Paperclip API authority only. Use a separate scoped execlaw integration credential, fail closed if required auth is absent, and never share Paperclip's signing secret. |
+| [Private HTTP endpoint guard][pc-http-guard] | Generic HTTP private origins need the exact-origin `PAPERCLIP_HTTP_ADAPTER_PRIVATE_ENDPOINT_ALLOWLIST`; DNS/socket checks still apply | Do not assume localhost/LAN integration works by entering a URL. This is Paperclip-side configuration, not permission to introduce execlaw environment-based configuration. |
+| Execlaw script-plugin networking | `server/src/local_endpoint_policy.rs::check_plugin_http_addresses` rejects loopback before private-integration approval lookup | Use a qualified private integration address, registered bridge sidecar, or narrowly scoped generic connector capability. Do not disable the loopback/SSRF guard globally. |
+| Execlaw webhook authentication | The current manifest supports query tokens/body HMAC, not an arbitrary generic bearer worker mode | Prefer signed, replay-protected admission or a proper scoped worker API. Existing provider webhook 200 acknowledgments are not proof of accepted worker execution; preserve those provider contracts. |
+| [External Task Protocol][pc-external-task] | Explicitly Draft v1 for task-manager connectors | Borrow linking/reconciliation ideas; it is not the implemented external-agent runtime protocol or a ready-made execlaw adapter. |
+
+The HTTP prose and implementation differ on timeout naming, company-field
+injection and captured results. External adapter helper signatures must also
+be compiled against the pinned SDK, not copied blindly from examples. Keep
+contract fixtures for these differences and requalify when either side changes.
+Declare the tested execution/finalization mode as part of that matrix. Do not
+mix legacy agent-managed status updates with native server-arbitrated task
+disposition; send the evidence/claims required by the selected supported mode.
+
+Paperclip's `PAPERCLIP_*` variables are its invocation convention. A boundary
+shim may consume transient identity/context there, then pass a structured
+request and protected credential reference. Execlaw configuration stays in
+SQLite, secrets in its vault, and ephemeral run credentials out of prompts,
+logs, signed event payloads, argv and ordinary session handles. Do not expose
+the current CLI's Controller refresh credential as the worker credential.
+Do not rely on Paperclip's local-trusted board mode as authentication.
+
+### Worker and executive operating contracts
+
+| Role | Intended responsibilities | Explicit limits |
+|---|---|---|
+| Worker | Claim assigned issue, inspect approved context, execute a bounded local run, return artifacts/evidence and next state | No organization-wide management, unrelated workspaces, policy edits, or automatic escalation of trust |
+| Lead/reviewer | Decompose approved work, assign authorized reports, request revision-bound review, reconcile dependencies and report blockers | Parent/goal linkage is not a capability grant; reviews cannot silently bypass required evidence |
+| Executive | Propose priorities/strategy, allocate approved envelopes, coordinate permitted specialists, raise staffing/budget requests, brief the board | No self-approval of hiring, budget increases, new objectives, secret access or sensitive external actions; no cloud delegation as a fallback |
+
+An external run should authenticate both boundaries, validate binding and wake
+context, obtain/verify the Paperclip checkout before doing issue work, and
+persist the local admission identity. A checkout conflict is an ownership
+conflict, not a transient error to retry until takeover. Retrieve authoritative
+task/plan revisions and bounded context; issue text and connection instructions
+remain data, not host-level policy. After work, publish progress, artifacts and
+the configured handoff state through explicit effects with the same attributed
+run identity. The [heartbeat workflow][pc-heartbeat] requires run-attributed
+mutations; the adapter must preserve those references through restart.
+
+Use the intersection of external assignment permissions, operator-approved
+worker grants, current execlaw policy, model capability and remaining budgets.
+External approval of a plan is not approval of arbitrary local effects. Bind
+each required decision to its own revision, actor, expiry and action hash;
+preserve sideband Controller requirements. A rejected/stale/unauthenticated
+decision cannot be converted into authority by an executive agent.
+
+### Enhancements 131-154
+
+These enhancements extend earlier H work; they do not restart implemented run, mailbox,
+review, workspace, or scheduling primitives. Priority/effort use the existing
+roadmap scale. Existing H qualification gates remain applicable.
+
+131. [ ] <a id="enhancement-131"></a> **Persistent goals, projects and work items above runs.** **P1 / L.**
+    Add provider-neutral SQLite work identities, parent/dependency links, project
+    workspaces, assignee, priority, acceptance-contract revision and evidence
+    references. Associate many attempts with one work item. Imported Paperclip
+    fields remain a projection with declared ownership. **Accept:** restart,
+    reassignment and multiple heartbeat executions preserve objective and history;
+    an execution finishing does not automatically finish its work item. Append
+    new migrations; retain H022/H042 completion and child-run machinery.
+    Implementation reference: [Paperclip issue schema][pc-issues-schema] and [goal schema][pc-goals-schema].
+
+132. [ ] <a id="enhancement-132"></a> **Reporting structure and versioned operating charters.** **P1 / M.**
+    Give native agents responsibilities, manager/escalation links, and an explicit
+    worker/lead/executive mandate separate from trust, model and tools. Validate
+    cycles and represent cross-team task dependencies without changing the reporting
+    tree. **Accept:** reparenting or renaming an agent grants no new secret/tool/data
+    access; each delegation retains its approved goal, scope and resource envelope.
+    The human operator remains the final authority. Extends H042/H052/H086/H087.
+    Implementation reference: [Paperclip agent schema][pc-agents].
+
+133. [ ] <a id="enhancement-133"></a> **Atomic work checkout and reassignment fencing.** **P1 / L.**
+    Separate responsible assignee, checkout owner, active execution, and assignment
+    generation. Reuse transactional stores while keeping task leases distinct
+    from runner leases and transport ownership. **Accept:** racing workers produce
+    one accepted owner; a stale/reassigned worker cannot publish accepted completion
+    or new effects; handoff preserves unfinished work and settled receipts. External
+    409 checkout conflicts stop that claim rather than entering a generic retry
+    loop. Extends H023/H024/H042/H052/H069.
+    Implementation reference: [Paperclip checkout workflow][pc-task-workflow].
+
+134. [ ] <a id="enhancement-134"></a> **Evidence-based task disposition, review and structured blockers.** **P1 / L.**
+    Extend completion reports with a task-revision arbiter, bounded reviewer
+    assignments, blocker owner/condition, and typed questions. Persist reason codes
+    and compare-and-swap status revisions. **Accept:** a stale worker/reviewer cannot
+    close newer work; changed artifacts invalidate review; a pending required
+    decision prevents verified completion. Distinguish report-ready, review-ready,
+    blocked and done; explicitly label any permitted low-risk claim-only outcome.
+    Extends H022/H053/H096/H105/H112/H127.
+    Implementation reference: [Paperclip status arbitration design][pc-status].
+
+135. [ ] <a id="enhancement-135"></a> **Durable continuation and stranded-work reconciliation.** **P1 / M.**
+    Require every assigned open work item to have an active run, durable wait,
+    scheduled continuation or visible blocker. Distinguish transport retries,
+    process recovery and semantic no-progress continuation. **Accept:** restart
+    recreates the same pending continuation without resetting budgets; operator
+    pause/cancel intent wins; repeated plan-only/empty output reaches a bounded
+    escalation rather than an endless manager/worker loop. Continue independent
+    work while one branch is blocked. Extends H023/H043/H069/H103/H113.
+    Implementation reference: [Paperclip continuation scheduler design][pc-continuation].
+
+136. [ ] <a id="enhancement-136"></a> **Portfolio allocation for local execution resources.** **P1 / M.**
+    Extend existing reservations into work-item/project/agent/time-window envelopes
+    for tokens, concurrency, elapsed time, effects and measured hardware use where
+    available. Keep budget-induced pauses distinct from operator pauses. **Accept:**
+    splitting work across agents/heartbeats cannot create extra capacity; reservations
+    settle across restart and cancellation; executives can propose reallocation but
+    cannot mint budget. Report monetary estimates separately from real billed cost.
+    Extends H030/H049/H074/H119.
+    Implementation reference: [Paperclip budget service][pc-budgets].
+
+137. [ ] <a id="enhancement-137"></a> **Governed staffing, specialization and retirement.** **P1 / M.**
+    Let managers propose a concrete new/changed agent definition, including tool
+    ceiling, local backend, mandate, memory scope and resource limits. Prefer an
+    existing qualified specialist when appropriate. Support drain/replacement and
+    retirement without deleting identity/history. **Accept:** version-bound required
+    approval precedes activation; changed authority invalidates it; retirement
+    cannot orphan assignments, reviews, transport ownership or reservations.
+    Extends H013/H026/H056/H075/H105/H119.
+    Implementation reference: [Paperclip agent schema][pc-agents].
+
+138. [ ] <a id="enhancement-138"></a> **Management dashboard and evidence-backed executive briefings.** **P1 / M.**
+    Extend the existing Agents surface with goal/project/task views, responsible
+    owners, blockers, review queue, resource envelopes and next actions. Show org,
+    dependency and run graphs as separate lenses. **Accept:** a green run cannot
+    hide an unfinished task; idle-without-work differs from blocked/waiting; briefing
+    claims link to authorized durable records and artifacts. Keep private reasoning
+    and secrets out of reports. Reuse H035/H042/H115/H128 and NX inspection patterns.
+    Implementation reference: [Paperclip issue schema][pc-issues-schema] and [goal schema][pc-goals-schema].
+
+139. [ ] <a id="enhancement-139"></a> **Explicit analysis, coding-worker and manager execution profiles.** **P1 / L.**
+    Retain the current tools-disabled child analysis contract. Add separately
+    governed profiles that select an appropriate existing executor and snapshot
+    narrowed tools, workspace, local model, memory and budgets per work assignment.
+    **Accept:** a coding profile completes a real bounded repair with verified
+    artifacts; an analysis child cannot silently acquire tools; a manager cannot
+    delegate more authority than it holds. Honor H040's remaining write-authority
+    qualification and H042/H051/H052/H056 isolation gates.
+    Implementation reference: [Paperclip adapter contracts][pc-adapter-types].
+
+140. [ ] <a id="enhancement-140"></a> **A generic scoped worker admission and lifecycle API.** **P1 / L.**
+    Extend H044's public contract with authenticated invocation, durable receipt,
+    status/events, artifact references, cancellation and scoped resume. Bind a
+    versioned request to a work item, immutable contract and idempotency hash;
+    advertise supported features explicitly. **Accept:** duplicates return the
+    same admission, conflicting reuse fails, and acknowledgment is not completion;
+    worker credentials cannot reach unrelated admin or conversation APIs. Keep
+    provider-specific Paperclip fields in an integration envelope, not host branches.
+    Implementation reference: [Paperclip adapter contracts][pc-adapter-types] and [heartbeat workflow][pc-heartbeat].
+
+141. [ ] <a id="enhancement-141"></a> **A first-class external Paperclip adapter for execlaw.** **P1 / L.**
+    Implement the pinned `createServerAdapter` interface with environment diagnostics,
+    structured execution results, session codec, transcript mapping and acknowledged
+    cancellation. Translate context into H140's contract and return only proven
+    usage/recovery facts. **Accept:** Paperclip can invoke, observe, suspend/resume
+    and stop a local execlaw job without a source fork; the adapter does not return
+    terminal success for an unobserved queued job. Generic process/HTTP pilots must
+    be labelled limited and may not inherit these production claims.
+    Implementation reference: [Paperclip external adapter interface][pc-external-adapters].
+
+142. [ ] <a id="enhancement-142"></a> **An optional manifest-driven Paperclip bridge plugin.** **P1 / L.**
+    Implement provider-specific task reads, status mappings, organization tools,
+    configuration UI and synchronization in a ZIP plugin using generic host APIs.
+    Store durable bindings/projections in SQLite and secrets in plugin-scoped vault
+    references. **Accept:** install/disable/upgrade follow existing lifecycle policy;
+    native execlaw remains functional without the plugin; no production host crate
+    special-cases its ID. Version the bridge independently of the upstream adapter.
+    Extends H027/H044/H065/H079/H080/H081.
+    Implementation reference: [Paperclip task workflow][pc-task-workflow].
+
+143. [ ] <a id="enhancement-143"></a> **Pairing and least-privilege credentials at both boundaries.** **P0 / M.**
+    Bind an approved Paperclip instance/company/agent to an execlaw principal,
+    operations, workspace roots, disclosure scope and expiry. Use a separate
+    revocable integration credential; protect signed admission envelopes with
+    timestamp/nonce validation and durable retry identities. **Accept:** wrong
+    company/agent/instance, missing token, tampered payload, expired/revoked grant
+    and replayed nonces cannot admit new work. Never forward the Controller refresh
+    token or Paperclip signing secret. Extends H026/H052/H054/H056.
+    Implementation reference: [Paperclip run-token implementation][pc-jwt].
+
+144. [ ] <a id="enhancement-144"></a> **Durable wake normalization with one scheduling owner.** **P1 / M.**
+    Normalize assignment, comment, approval, schedule, reassignment and cancellation
+    wakes with source IDs/revisions and bounded context. Reuse mailbox deduplication
+    and retain a stable task mapping across distinct external runs. **Accept:**
+    duplicate/out-of-order wakes do not duplicate work or lose corrections; Paperclip
+    checkout is verified before issue work; local schedules cannot independently
+    run the same externally owned assignment. Separate allowed technical recovery
+    from semantic continuation. Extends H024/H043/H070/H103/H104.
+    Implementation reference: [Paperclip heartbeat workflow][pc-heartbeat].
+
+145. [ ] <a id="enhancement-145"></a> **Explicit external task, invocation and local-run state mapping.** **P1 / M.**
+    Define a tested table for accepted, queued, running, waiting, partial, blocked,
+    failed, cancelled and verified-complete states. Configure the external handoff
+    as progress/review/done according to workflow policy and evidence. **Accept:**
+    HTTP 202, zero process exit, a final model answer or report-ready agent output
+    cannot independently mark an issue done; an external edit/reassignment conflicts
+    visibly with stale completion. Extends H134 and H022/H024/H035.
+    Implementation reference: [Paperclip status arbitration design][pc-status].
+
+146. [ ] <a id="enhancement-146"></a> **Cross-system cancellation, restart and session resumption.** **P0 / L.**
+    Observe Paperclip's cancellation signal/callbacks, persist the stop intent,
+    stop the mapped execlaw work and await acknowledged settlement. Persist only
+    opaque scoped resume handles in adapter session state. **Accept:** killing the
+    adapter client does not orphan daemon work; restart resumes the mapped task
+    without repeating effects; already-dispatched uncertainty remains visible.
+    Test expired credentials and replaced assignments during waits. Never claim
+    `executionRecovery` unless its stop/session/effect predicates hold. Extends H023/H043.
+    Implementation reference: [Paperclip cancellation and session types][pc-adapter-types].
+
+147. [ ] <a id="enhancement-147"></a> **Outbox-mediated Paperclip mutations and reconciliation.** **P0 / L.**
+    Journal checkout, release, comments, status, task creation and other authorized
+    mutations with effect identity, actor/run attribution, payload hash and expected
+    remote revision. Reconcile unknown outcomes instead of blindly retrying POSTs.
+    **Accept:** crash after remote acceptance cannot duplicate child issues/comments;
+    conflicts retain local evidence; remote outage cannot falsely report publication.
+    Where an upstream endpoint lacks idempotency or discoverable receipts, expose
+    an explicit unresolved outcome. Extends H024/H065/H066/H071.
+    Implementation reference: [Paperclip task mutation workflow][pc-task-workflow].
+
+148. [ ] <a id="enhancement-148"></a> **Isolated task context, memory and workspace binding.** **P0 / M.**
+    Scope every session, loadout, artifact and checkout by integration identity and
+    task/project policy. Map approved workspace IDs to local roots; never accept
+    an arbitrary upstream path, repo ref, instruction file or tool endpoint as
+    authority. **Accept:** reused external IDs across instances/companies cannot
+    cross-read data; reassignment transfers only approved context; malicious issue
+    text cannot promote itself into system policy. Preserve revocation/deletion
+    across projections and resumes. Extends H037/H041/H048/H051/H086.
+    Implementation reference: [Paperclip issue scope fields][pc-issues-schema].
+
+149. [ ] <a id="enhancement-149"></a> **Safe work-product, progress and usage reporting.** **P1 / M.**
+    Publish approved artifact metadata/hashes, verifier evidence and bounded
+    progress through the bridge. Report measured token usage with explicit
+    per-run versus cumulative basis, and separate estimated local hardware cost
+    from billed money. **Accept:** reconnect does not double-count usage; inaccessible
+    artifacts/paths and secrets stay private; unknown measurements remain unknown,
+    not invented zeros. Do not export raw prompts, reasoning, or arbitrary stdout
+    as the default transcript. Extends H035/H049/H054/H055/H077/H122.
+    Implementation reference: [Paperclip result and usage types][pc-adapter-types].
+
+150. [ ] <a id="enhancement-150"></a> **Revision-bound approvals and questions without authority laundering.** **P0 / L.**
+    Map external confirmations, plan reviews and board decisions to typed references,
+    not blanket local approval. Preserve separate authorities for staffing,
+    organizational spending and execlaw sensitive effects. **Accept:** approval for
+    one plan revision cannot authorize a replacement; rejection/cancellation
+    survives restart; a manager cannot approve its own escalation by generating
+    text. Human decisions can resume only the matching pending work under current
+    grants and sideband policy. Extends H010/H053/H105/H112.
+    Implementation reference: [Paperclip revision-bound confirmation workflow][pc-task-workflow].
+
+151. [ ] <a id="enhancement-151"></a> **Qualified local networking and local-only delegated inference.** **P0 / M.**
+    Verify both directions of the connection, exact approved origins, TLS/transport
+    protection, DNS/redirect policy and secret brokerage. Preserve the script
+    loopback boundary; provide a narrow supported route where needed. **Accept:**
+    blocked local endpoints fail with actionable diagnostics, not a global SSRF
+    override; no adapter/model fallback contacts a cloud LLM; execlaw-initiated
+    delegation rejects peers whose approved local execution cannot be established.
+    Extends H025/H034/H054/H085/H110.
+    Implementation reference: [Paperclip private endpoint guard][pc-http-guard].
+
+152. [ ] <a id="enhancement-152"></a> **Qualified Paperclip worker, lead and executive operating profiles.** **P1 / L.**
+    Ship reviewed profiles for assigned task execution, bounded delegation/review,
+    and executive planning/briefing. Use scoped tools for goals, child issues,
+    permitted assignees, progress, and governance requests; keep board-only actions
+    outside the agent grant. **Accept:** execlaw serves each role in a self-hosted
+    test company while remaining a constrained principal; executive decomposition
+    preserves goal/parent scope and cannot self-hire, raise budget, or appoint itself
+    Controller. Treat staffing proposals as reviewable artifacts, not activation.
+    Implementation reference: [Paperclip assignment and delegation workflow][pc-heartbeat].
+
+153. [ ] <a id="enhancement-153"></a> **Pinned compatibility, upgrade and supply-chain qualification.** **P1 / M.**
+    Maintain a matrix of execlaw client/bridge versions, Paperclip commit/release,
+    adapter SDK and capability flags. Compile contract fixtures against actual
+    types and preserve independently recoverable configuration/session state.
+    **Accept:** unsupported versions fail before work; upgrades invalidate stale
+    grants or schema assumptions; rollback cannot revive revoked credentials.
+    If upstream code is reused, record its pinned source and preserve the
+    [MIT notices][pc-license], with normal dependency review. Extends H028/H079-H082/H114.
+    Implementation reference: [Paperclip external adapter interface][pc-external-adapters] and [license][pc-license].
+
+154. [ ] <a id="enhancement-154"></a> **Staged integration drills and management-quality evaluation.** **P1 / L.**
+    Qualify read-only observation, one bounded local worker, multi-step delegation,
+    then executive management in disposable self-hosted instances. Exercise actual
+    adapter/plugin binaries and authoritative API contracts, not only mock payloads.
+    **Accept:** deterministic tests cover spoofed scope, conflicting checkout,
+    duplicate wakes, restart, timeout, cancel, budget exhaustion, stale approvals,
+    remote-write uncertainty and credential expiry. Measure completion, duplicated
+    effects, operator interventions and delegation overhead on held-out local tasks.
+    No application is declared Paperclip-compatible from a successful HTTP ping.
+    Implementation reference: [Paperclip HTTP execution][pc-http], [process execution][pc-process], and [adapter types][pc-adapter-types].
+
+### Delivery order and qualification
+
+The native management stream (H131-H139) is independently useful. Begin with
+persistent work identity/ownership and an evidence-backed task lifecycle, then
+add reporting structure, continuation, budgets and management UI. Do not defer
+these capabilities until a Paperclip deployment exists.
+
+For interoperability, start with H140-H143 and H148/H151/H153 using one paired
+company in observation-only mode: no issue checkout, assigned-task execution,
+progress writes or status changes. Before the first assigned worker pilot,
+add H144-H147, H149-H150 and H154's applicable failure matrix. Even a locally
+read-only task requires acknowledged cancellation and outbox-attributed checkout,
+release and reporting with unknown-outcome reconciliation; H146/H147 cannot
+wait until local tool effects are enabled. A worker pilot must
+produce a verified local artifact, reconnect to the same work, and acknowledge
+cancellation before promotion. Add lead/executive H152 only after ordinary
+worker lifecycle and governance gates pass. Generic HTTP acceptance is not an
+alternate route around those gates.
+
+Successful acceptance includes two independent demonstrations: execlaw manages
+its own agents without Paperclip, and a self-hosted Paperclip company can use
+execlaw in the selected worker/lead/executive role without bypassing local
+inference, authority, isolation or outbox rules. Existing H qualification
+remains required; this documentation-only review changes no implementation
+status, installs no upstream runtime, and reports no integration test passes.
+
+### Pinned Paperclip source references
+
+The source links below were inspected at the review commit. Internal design
+documents and Draft v1 material are labelled design references, not executable
+conformance evidence. Follow implemented types and code when prose differs.
+
+[pc-agents]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/packages/db/src/schema/agents.ts
+[pc-issues-schema]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/packages/db/src/schema/issues.ts
+[pc-goals-schema]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/packages/db/src/schema/goals.ts
+[pc-task-workflow]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/docs/guides/agent-developer/task-workflow.md
+[pc-heartbeat]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/docs/guides/agent-developer/heartbeat-protocol.md
+[pc-status]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/doc/architecture/native-status-arbitration.md
+[pc-continuation]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/doc/architecture/durable-continuation-scheduler.md
+[pc-budgets]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/server/src/services/budgets.ts
+[pc-external-adapters]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/docs/adapters/external-adapters.md
+[pc-adapter-types]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/packages/adapter-utils/src/types.ts
+[pc-http]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/server/src/adapters/http/execute.ts
+[pc-process]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/server/src/adapters/process/execute.ts
+[pc-jwt]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/server/src/agent-auth-jwt.ts
+[pc-http-guard]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/server/src/adapters/http/remote-fetch.ts
+[pc-external-task]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/docs/specs/external-task-protocol.md
+[pc-license]: https://github.com/paperclipai/paperclip/blob/f77fcbf4bfc2bf1fb995abda63f2345a34652dd4/LICENSE
 
 <a id="nexus-visual-roadmap"></a>
 
 ## Nexus: optional visual conversation workspace
 
 Review date: 2026-09-27. **NX01-NX30** are a focused visual/interaction
-extension to this roadmap. They do not renumber or change the H001-H130
+extension to this roadmap. They do not renumber or change the H001-H154
 baseline; their separate delivery rows live in
 [`implementation-plan.md`](implementation-plan.md#nexus-visual-extension).
 All entries below are proposed implementation work, not shipped UI changes.
@@ -2800,13 +4297,14 @@ and the specified verification are completed.
 
 ### F17 - High: power-loss durability is weaker than process-crash recovery
 
-**Evidence:** `crates/core/src/db.rs::apply_init_pragmas` selects WAL and
-`synchronous=NORMAL`. SQLite explicitly distinguishes this from commits
-synchronized on each transaction: recent committed transactions can roll
-back after power loss or hard reset under that setting. See the
+**Evidence:** `crates/core/src/db.rs::apply_init_pragmas` selects WAL and now
+uses `synchronous=FULL`. A subprocess-abort test reopens the DB and sees the
+committed row; an injected `SQLITE_FULL` transaction failure leaves prior
+committed state intact. The Criterion measurement on the current Windows/
+OneDrive storage path reports NORMAL 109.70 µs and FULL 1.0315 ms for the
+256-byte commit workload. These checks do not simulate hard-reset loss or a
+device that dishonors flush requests. See the
 [SQLite WAL performance/durability discussion](https://sqlite.org/wal.html).
-This is a verified configuration/contract mismatch, not a reproduced disk
-failure or a claim that ordinary process termination always loses data.
 
 **Impact and conditions:** if an externally accepted effect follows a locally
 acknowledged transaction that subsequently disappears after a hard reset,
@@ -2814,11 +4312,11 @@ recovery can lack the intent/result needed for reconciliation. Passing
 process-kill tests alone cannot establish power-loss durability. Actual
 guarantees also depend on the filesystem and storage device honoring sync.
 
-**Fix/gate:** define and enforce an effect-critical persistence boundary before
-dispatch, evaluate `FULL` or an equivalent supported design, and measure its
-cost. Use disposable storage-fault/hard-reset tests with a separately observed
-mock sink; report the guarantee and hardware assumptions accurately. Roadmap
-58, alongside 23-24. No durability setting was changed in this review.
+**Fix/gate:** the effect-critical event/outbox commit now uses FULL sync and its
+cost is measured. Run disposable hard-reset tests on supported storage with a
+separately observed mock sink; report the guarantee and hardware assumptions
+accurately. Roadmap 58, alongside 23-24. F17 remains open pending that
+storage-specific qualification.
 
 <a id="finding-f18"></a>
 

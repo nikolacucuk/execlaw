@@ -711,6 +711,7 @@ async fn run_voice_chat_turn(
 
     let request = crate::chats::SendMessageRequest {
         text: transcript,
+        safety_profile_id: None,
         completion_contract: None,
         resume_run_id: None,
         sender_principal_id: Some("controller".to_owned()),

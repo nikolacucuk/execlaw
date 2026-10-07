@@ -1,6 +1,6 @@
 # Documentation and implementation tracking
 
-The accepted plan is to implement **all 130 enhancements, H001-H130**.
+The accepted plan is to implement **all 154 enhancements, H001-H154**.
 Start with the [implementation ledger](implementation-plan.md) for ownership,
 status, sequencing, and evidence. The [harness roadmap](llm-harness-roadmap.md)
 owns requirements and acceptance criteria, including the F01-F19 review
@@ -10,11 +10,13 @@ shipped, and historical checklists do not override the ledger.
 
 ## Planning and architecture
 
-| Document | Role in the 130-item plan |
+| Document | Role in the 154-item plan |
 |---|---|
-| [Implementation plan](implementation-plan.md) | Complete H001-H130 status/owner/evidence ledger and F01-F19 closure mapping |
+| [Implementation plan](implementation-plan.md) | Complete H001-H154 status/owner/evidence ledger and F01-F19 closure mapping |
 | [Harness roadmap](llm-harness-roadmap.md) | Stable requirement IDs, priorities, dependencies, acceptance criteria, and findings |
-| [Nexus visual extension](llm-harness-roadmap.md#nexus-visual-roadmap) | NX01-NX30 proposals, settings/off contract, synthetic/live screenshots, and NXF01-NXF11 findings; tracked separately from H001-H130 |
+| [Implementation source guide](implementation-sources.md) | Per-item source provenance for H001-H130, verified upstream repository directory, adaptation guidance, and a machine-readable reference catalog |
+| [Nexus visual extension](llm-harness-roadmap.md#nexus-visual-roadmap) | NX01-NX30 proposals, settings/off contract, synthetic/live screenshots, and NXF01-NXF11 findings; tracked separately from H001-H154 |
+| [Paperclip coordination and interoperability](llm-harness-roadmap.md#paperclip-roadmap) | H131-H154: current implementation comparison, pinned upstream contracts, native management and optional worker/lead/executive integration; tracked as H131-H154 in the main ledger |
 | [Immediate queue](remaining-improvements-todo.md) | Release blockers and unresolved validation; not the whole backlog |
 | [Architecture](architecture.md) | System boundaries and design invariants; historical milestones are labelled |
 | [Agent model](agent-model.md) | Turn execution, context, trust, memory, and delegation contracts |
@@ -79,7 +81,7 @@ evidence. Keep historical reports dated rather than presenting them as fresh
 test results. New APIs, permission changes, migrations, model/platform support,
 and operational recovery steps need corresponding reference updates.
 
-Do not copy the 130-item status table into other documents. Link stable
+Do not copy the 154-item status table into other documents. Link stable
 `enhancement-NNN` and `finding-fNN` anchors instead. An implementation does not
 become release-qualified until the [plan's evidence gates](implementation-plan.md#qualification-and-evidence-required-for-completion)
 are satisfied. This documentation update itself implements no runtime feature.

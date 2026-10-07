@@ -5,7 +5,7 @@ below. Its presence does not qualify end-to-end agent voice behavior.
 
 ## Implementation delivery plan
 
-All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+All H001-H154 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
 These former deferrals now feed [H047 local voice delivery](llm-harness-roadmap.md#enhancement-047),
 with [H030 inference scheduling](llm-harness-roadmap.md#enhancement-030),
 [H043 stop/steering](llm-harness-roadmap.md#enhancement-043),

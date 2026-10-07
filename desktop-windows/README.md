@@ -184,7 +184,7 @@ fiddly pieces automatically so the operator doesn't have to:
 
 ## Implementation plan
 
-All 130 enhancements are committed implementation scope under the
+All 154 enhancements are committed implementation scope under the
 [implementation plan](../docs/implementation-plan.md). This commitment is not a
 claim that they have shipped: the plan owns implementation status, and the
 [roadmap](../docs/llm-harness-roadmap.md) owns acceptance criteria.
@@ -200,7 +200,7 @@ Relevant work for this component:
 - [H118: machine-loss recovery](../docs/llm-harness-roadmap.md#enhancement-118).
 
 Production encryption verification remains pending under
-[F04](../docs/llm-harness-roadmap.md#f04---high-desktop-release-builds-omit-production-sqlcipher).
+[F04](../docs/llm-harness-roadmap.md#finding-f04).
 The reviewed packaging scripts omit the SQLCipher feature; do not infer
 encrypted-at-rest protection from a successful desktop build. H028 requires
 verification of the actual packaged binary before release qualification.

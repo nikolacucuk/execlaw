@@ -3,7 +3,7 @@
 ## Release qualification plan
 
 The [implementation plan](implementation-plan.md) tracks all committed
-H001-H130 enhancements. This page describes package structure; it does not
+H001-H154 enhancements. This page describes package structure; it does not
 certify an artifact against the [open findings F01-F19](llm-harness-roadmap.md#review-findings-and-unresolved-verification).
 The Linux, macOS, and Windows build scripts explicitly enable SQLCipher.
 Each native bundle workflow runs the packaged binary's `doctor` check; the

@@ -18,7 +18,7 @@ authoritative reference for first-run setup on a Mac.
 
 ## Implementation delivery plan
 
-All H001-H130 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
+All H001-H154 are accepted scope in [`implementation-plan.md`](implementation-plan.md).
 Discovery and native protocol support are existing implementations, not proof
 that every model/backend combination is qualified. Complete
 [H005 retries](llm-harness-roadmap.md#enhancement-005),

@@ -104,7 +104,17 @@ impl<'db> AttachmentStore<'db> {
                 ],
             )?;
             Ok(())
-        })
+        })?;
+        self.ensure_information_label(
+            crate::information_store::InformationSubject {
+                kind: "attachment".into(),
+                id: row.id.as_str().into(),
+                sha256: row.sha256.clone(),
+            },
+            Some(row.conversation_id.as_str()),
+            "attachment_upload",
+            row.received_at,
+        )
     }
 
     /// List every attachment for one conversation. Used by the
@@ -241,7 +251,17 @@ impl<'db> AttachmentStore<'db> {
                 ],
             )?;
             Ok(())
-        })
+        })?;
+        self.ensure_information_label(
+            crate::information_store::InformationSubject {
+                kind: "artifact".into(),
+                id: row.id.clone(),
+                sha256: row.sha256.clone(),
+            },
+            row.plugin_id.as_deref(),
+            "artifact_output",
+            row.created_at,
+        )
     }
 
     /// Persist a large JSON tool result under a conversation/run-scoped ID.
@@ -361,11 +381,57 @@ impl<'db> AttachmentStore<'db> {
             }
             Ok(())
         })?;
+        let subject = crate::information_store::InformationSubject {
+            kind: "artifact".into(),
+            id: artifact_id.to_owned(),
+            sha256: sha256.clone(),
+        };
+        let labels = crate::information_store::InformationLabelStore::new(self.db);
+        if labels.get(&subject)?.is_none() {
+            if let Some((run_subject, _)) = labels.latest_for_identity("run", run_id)? {
+                labels.transform(
+                    &subject,
+                    &[run_subject],
+                    "child_run_result",
+                    "host:child-run",
+                    now,
+                )?;
+            } else {
+                self.ensure_information_label(
+                    subject.clone(),
+                    Some(conversation_id.as_str()),
+                    "child_run_result",
+                    now,
+                )?;
+            }
+        }
         Ok(PluginArtifactCreated {
             attachment_id: artifact_id.to_owned(),
             sha256,
             size_bytes: bytes.len() as u64,
         })
+    }
+
+    fn ensure_information_label(
+        &self,
+        subject: crate::information_store::InformationSubject,
+        owner_id: Option<&str>,
+        source_kind: &str,
+        at: i64,
+    ) -> Result<(), DbError> {
+        let labels = crate::information_store::InformationLabelStore::new(self.db);
+        if labels.get(&subject)?.is_some() {
+            return Ok(());
+        }
+        let label = crate::information::InformationLabel::observed(
+            crate::information::Sensitivity::Sensitive,
+            owner_id.map(str::to_owned),
+            "UnknownPending",
+            source_kind,
+            &subject.id,
+            std::iter::empty(),
+        );
+        labels.observe(&subject, &label, "host:attachment-store", at)
     }
 
     /// Read at most 8 KiB from an unexpired artifact belonging to this run.
@@ -864,6 +930,23 @@ mod tests {
             )
             .unwrap();
         assert_eq!(a.attachment_id, b.attachment_id);
+        let label = crate::information_store::InformationLabelStore::new(&db)
+            .get(&crate::information_store::InformationSubject {
+                kind: "artifact".into(),
+                id: a.attachment_id.clone(),
+                sha256: a.sha256.clone(),
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            label.sensitivity,
+            crate::information::Sensitivity::Sensitive
+        );
+        assert_eq!(label.provenance[0].source_kind, "run_input");
+        assert_eq!(
+            label.provenance[0].transformation.as_deref(),
+            Some("child_run_result")
+        );
         assert!(
             store
                 .insert_tool_result_artifact_with_id(
@@ -909,7 +992,7 @@ mod tests {
                 conversation_id: ConversationId::from("c"),
                 mime_type: "image/jpeg".into(),
                 path: "/tmp/x.jpg".into(),
-                sha256: "abc".into(),
+                sha256: "a".repeat(64),
                 received_at: 1,
                 filename: None,
             })
@@ -922,7 +1005,7 @@ mod tests {
                 kind: "research_pdf".into(),
                 mime_type: "application/pdf".into(),
                 path: "/tmp/r.pdf".into(),
-                sha256: "def".into(),
+                sha256: "b".repeat(64),
                 bytes: Some(12345),
                 created_at: 2,
                 plugin_id: None,
@@ -991,7 +1074,7 @@ mod tests {
                     conversation_id: cid.clone(),
                     mime_type: "text/csv".into(),
                     path: format!("/blobs/{name}"),
-                    sha256: format!("sha-{name}"),
+                    sha256: hex::encode(Sha256::digest(name.as_bytes())),
                     received_at,
                     filename: Some(name.into()),
                 })
@@ -1035,7 +1118,7 @@ mod tests {
                 conversation_id: ConversationId::from("c1"),
                 mime_type: "text/csv".into(),
                 path: "/tmp/sales.csv".into(),
-                sha256: "deadbeef".into(),
+                sha256: "deadbeef".repeat(8),
                 received_at: 100,
                 filename: Some("sales.csv".into()),
             })
@@ -1051,7 +1134,7 @@ mod tests {
                 conversation_id: ConversationId::from("c1"),
                 mime_type: "text/csv".into(),
                 path: "/tmp/other.csv".into(),
-                sha256: "cafebabe".into(),
+                sha256: "cafebabe".repeat(8),
                 received_at: 200,
                 filename: None,
             })

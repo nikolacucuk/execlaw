@@ -213,6 +213,7 @@ fn write_bind_to_db(db_path: &Path, bind: &str) -> anyhow::Result<()> {
                 bind_address: Some(bind.to_owned()),
                 setup_wizard_dismissed: None,
                 history_retention_days: None,
+                https_only_session_cookies: None,
             },
             chrono::Utc::now().timestamp(),
         )
