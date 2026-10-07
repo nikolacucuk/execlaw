@@ -376,6 +376,42 @@ pub struct DryRunResult {
 /// actually invoke the LLM through the same path as live dispatch.
 /// Callers that don't want to hit the model should swap the pool's
 /// invoker (the M3 test fixtures show how â€” `StubAgentInvoker`).
+/// Resume Controller-authorized automation redrives stranded by a process stop.
+///
+/// The durable audit row is the authorization boundary: ordinary pending runs
+/// are left to their original dispatcher, while audited pending or running
+/// runs resume from their frozen definition and checkpointed trace.
+pub fn recover_authorized_redrives(ctx: &ExecutorContext) -> Result<usize, String> {
+    let run_store = AutomationRunStore::new(&ctx.db);
+    let run_ids = run_store
+        .authorized_redrive_ids(200)
+        .map_err(|error| format!("list authorized automation redrives: {error}"))?;
+    let mut recovered = 0;
+    for run_id in run_ids {
+        let run = run_store
+            .get(&run_id)
+            .map_err(|error| format!("load authorized automation run {run_id}: {error}"))?
+            .ok_or_else(|| format!("authorized automation run {run_id} disappeared"))?;
+        if !matches!(run.status, AutomationRunStatus::Pending | AutomationRunStatus::Running) {
+            continue;
+        }
+        let definition_json = run_store
+            .definition_snapshot(&run_id)
+            .map_err(|error| format!("load frozen definition for {run_id}: {error}"))?
+            .ok_or_else(|| format!("authorized automation run {run_id} has no definition snapshot"))?;
+        let definition: AutomationDef = serde_json::from_str(&definition_json)
+            .map_err(|error| format!("decode frozen definition for {run_id}: {error}"))?;
+        let event = execlaw_core::automation_bus::BusEventStore::new(&ctx.db)
+            .get(&run.event_id)
+            .map_err(|error| format!("load source event for {run_id}: {error}"))?
+            .ok_or_else(|| format!("source event for authorized automation run {run_id} is missing"))?;
+        run_one(ctx, &run.automation_id, &definition, &event, &event_context(&event))
+            .map_err(|error| format!("recover authorized automation run {run_id}: {error}"))?;
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
 pub fn dry_run(
     ctx: &ExecutorContext,
     automation: &AutomationRow,
@@ -2798,6 +2834,44 @@ mod tests {
             })
             .unwrap();
         assert_eq!(redrives, 1);
+    }
+
+    #[test]
+    fn startup_recovers_controller_authorized_pending_redrive() {
+        let db = fresh_db();
+        let context = noop_ctx(&db);
+        let event = seed_bus_event(&db, "recover-redrive-event", serde_json::json!({}));
+        let definition = def_call_plugin(serde_json::json!({
+            "tool": "missing.plugin_tool",
+            "args": {},
+        }));
+        run_one(
+            &context,
+            "recover-redrive-automation",
+            &definition,
+            &event,
+            &event_context(&event),
+        )
+        .unwrap();
+
+        let store = AutomationRunStore::new(&db);
+        let failed = store.list_failed(10).unwrap().pop().unwrap();
+        store
+            .redrive_failed(
+                &failed.id,
+                "controller-1",
+                "resume after simulated process interruption",
+                chrono::Utc::now().timestamp_millis(),
+            )
+            .unwrap();
+        assert_eq!(store.authorized_redrive_ids(10).unwrap(), vec![failed.id.clone()]);
+
+        assert_eq!(recover_authorized_redrives(&context).unwrap(), 1);
+        let recovered = store.get(&failed.id).unwrap().unwrap();
+        assert_eq!(recovered.status, AutomationRunStatus::Failed);
+        assert!(recovered.finished_at.is_some());
+        assert!(store.authorized_redrive_ids(10).unwrap().is_empty());
+        assert_eq!(recovered.event_id, event.id);
     }
 
     #[test]

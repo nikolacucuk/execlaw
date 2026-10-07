@@ -1753,9 +1753,14 @@ mod tests {
                 "thermal_celsius".into(),
                 "thermal_throttle_count".into(),
             ],
+            gpu_devices: vec![GpuObservation {
+                vendor: "Intel".into(),
+                model: Some("fixture GPU".into()),
+                memory_mb: None,
+            }],
             ..Default::default()
         };
-        let mut after = HardwareObservations {
+        let after = HardwareObservations {
             available_ram_mb_before: Some(3072),
             battery_percent_before: None,
             thermal_celsius_before: None,
@@ -1765,11 +1770,6 @@ mod tests {
             unavailable: before.unavailable.clone(),
             ..Default::default()
         };
-        after.gpu_devices.push(GpuObservation {
-            vendor: "Intel".into(),
-            model: Some("fixture GPU".into()),
-            memory_mb: None,
-        });
         let combined = combine_hardware_observations(before, after);
         assert_eq!(combined.available_ram_mb_before, Some(4096));
         assert_eq!(combined.available_ram_mb_after, Some(3072));

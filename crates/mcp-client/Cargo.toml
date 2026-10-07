@@ -9,6 +9,7 @@ authors.workspace = true
 description = "MCP (Model Context Protocol) client for execlaw — talks to external MCP servers over stdio or Streamable HTTP and surfaces their tools + resources."
 
 [dependencies]
+execlaw-core = { path = "../core" }
 tokio = { workspace = true, features = ["process", "io-util", "sync", "macros", "rt", "time"] }
 tokio-util.workspace = true
 serde.workspace = true

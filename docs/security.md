@@ -183,6 +183,12 @@ user.
   process memory, dump the OS keyring, or replace the binary. Host
   compromise is total compromise. We rely on the operator's host
   hygiene.
+- **Plaintext already loaded by the authorized process.** Key buffers are
+  zeroized on ordinary drop paths where Rust ownership permits it, and helper
+  processes receive a minimal inherited environment. SQLCipher, HMAC signing,
+  OS keyring libraries, debuggers, hibernation images, kernel crash dumps, and
+  a compromised host can still retain or recover copies. Zeroization is best
+  effort; it is not a boundary against process or host compromise.
 - **Malicious plugins.** Plugins are *trusted code* (see §4 below).
   An installed plugin can read the vault, mint outbound messages,
   scrape memory, and inject events. The control surface for malice

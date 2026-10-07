@@ -335,6 +335,26 @@ impl<'a> AutomationRunStore<'a> {
         Ok(rows)
     }
 
+    /// Find redrives authorized by a Controller but not yet committed terminal.
+    /// Startup recovery uses this durable list after a process interruption.
+    pub fn authorized_redrive_ids(&self, limit: usize) -> Result<Vec<String>, AutomationRunError> {
+        self.db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare_cached(
+                    "SELECT r.id FROM state_automation_runs r \
+                     WHERE r.status IN ('pending','running') AND EXISTS ( \
+                       SELECT 1 FROM state_job_redrive_events d \
+                       WHERE d.job_kind='automation' AND d.job_id=r.id \
+                     ) ORDER BY r.started_at,r.id LIMIT ?1",
+                )?;
+                statement
+                    .query_map([limit.clamp(1, 200)], |row| row.get(0))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(DbError::from)
+            })
+            .map_err(AutomationRunError::from)
+    }
+
     /// Requeue a failed run in place, preserving its run id, frozen graph,
     /// event identity, and completed-step trace for safe resume.
     pub fn redrive_failed(

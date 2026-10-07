@@ -3,6 +3,7 @@
 Reference for the plugin framework. This is what a contributor needs in order to extend execlaw without touching host crates.
 
 Before publishing an independently authored plugin, run the [offline conformance kit](plugin-conformance.md).
+The machine-readable manifest schema is generated from the plugin SDK structs at [`plugin-manifest.schema.json`](plugin-manifest.schema.json).
 
 Relationship to other docs:
 

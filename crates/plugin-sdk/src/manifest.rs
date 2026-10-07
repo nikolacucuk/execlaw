@@ -1275,6 +1275,13 @@ mod tests {
     }
 
     #[test]
+    fn generated_manifest_schema_includes_host_compatibility_contract() {
+        let schema = serde_json::to_value(PluginManifest::json_schema()).unwrap();
+        assert!(schema["properties"]["compatibility"].is_object());
+        assert!(schema["definitions"].is_object() || schema["$defs"].is_object());
+    }
+
+    #[test]
     fn workspace_coding_plugin_declares_host_contracts_without_a_plugin_id_branch() {
         let manifest = PluginManifest::parse(include_str!(
             "../../../plugins/workspace-coding/plugin.toml"

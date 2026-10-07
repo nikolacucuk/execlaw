@@ -250,6 +250,45 @@ not require changing or removing `execlaw.db` or `.execlaw/master.key`. This
 doctor check verifies the binary's SQLCipher support; it does not verify the
 encryption format or key of the existing database.
 
+### Recover from a failed image upgrade or missing settings column
+
+If the build ends with `E0433` in `crates/mcp-client/src/stdio.rs`, the new
+control-plane image was not produced. A running Compose service can still serve
+its previous image, even after `git pull`; check the build exit status before
+recreating it. The source revision must declare `execlaw-core` in
+`crates/mcp-client/Cargo.toml`. Rebuild the image after obtaining that fix.
+
+An error about `config_general.https_only_session_cookies` means the database
+used by the running server lacks migration 0077. The current `serve` command
+applies pending migrations before it starts listening. After a successful image
+build, stop the service, make an encrypted backup with the same image and
+mounted data directory, apply migrations, and start the new image:
+
+```bash
+sudo docker compose build --no-cache execlaw runner-image
+sudo docker compose run --rm execlaw doctor
+sudo docker compose stop execlaw
+sudo docker compose run --rm execlaw backup \
+  --db /var/lib/execlaw/execlaw.db \
+  --to /var/lib/execlaw/backups/before-upgrade-$(date +%F-%H%M%S).db
+sudo docker compose run --rm execlaw db migrate \
+  --db /var/lib/execlaw/execlaw.db
+sudo docker compose up -d --force-recreate execlaw
+sudo docker compose logs --tail=100 execlaw
+```
+
+Check **Settings -> General** again for **Require HTTPS for session cookies**.
+For the direct HTTP LAN URL, turn it off and sign out and back in. If migration
+fails, retain the backup, database, and master key; inspect the reported
+migration error and the Compose data mount before trying another change. Do not
+manually add the column or reset the database.
+
+The **Workspace edit unavailable** banner is a separate task-safety-profile
+status. Configure a digest-pinned toolchain image in **Settings -> Workspace
+execution** only when workspace editing is needed. It does not explain an
+`inference_unavailable` chat turn. For that alert, follow the Local inference
+approvals and resolver-log checks above, then confirm with a new chat turn.
+
 ### Convert an existing plaintext database
 
 If startup reports `file is not a database`, stop the service and inspect the

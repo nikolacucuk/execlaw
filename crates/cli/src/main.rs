@@ -3887,16 +3887,26 @@ async fn cmd_serve(
                 inference_metrics.clone(),
             ),
         ));
+    let automation_context = execlaw_server::automation_runtime::ExecutorContext::new(
+        db.clone(),
+        automation_agent_pool.clone(),
+        Some(plugin_host.clone()),
+    );
+    let recovery_context = automation_context.clone();
+    match tokio::task::spawn_blocking(move || {
+        execlaw_server::automation_runtime::recover_authorized_redrives(&recovery_context)
+    })
+    .await
+    {
+        Ok(Ok(0)) => {}
+        Ok(Ok(recovered)) => tracing::info!(recovered, "resumed authorized automation redrives"),
+        Ok(Err(error)) => tracing::error!(error = %error, "authorized automation redrive recovery failed"),
+        Err(error) => tracing::error!(error = %error, "authorized automation redrive recovery worker failed"),
+    }
     let (automation_bus, automation_bus_tasks) =
         execlaw_server::automation_bus::AutomationBus::spawn(
             db.clone(),
-            execlaw_server::automation_runtime::build_handler(
-                execlaw_server::automation_runtime::ExecutorContext::new(
-                    db.clone(),
-                    automation_agent_pool.clone(),
-                    Some(plugin_host.clone()),
-                ),
-            ),
+            execlaw_server::automation_runtime::build_handler(automation_context),
             automation_bus_stop.clone(),
         );
 

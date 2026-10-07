@@ -1,0 +1,1108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PluginManifest",
+  "description": "Top-level manifest.",
+  "type": "object",
+  "properties": {
+    "admin_routes": {
+      "description": "Plugin-served admin endpoints (§ channel-plugin surface).\nEach entry maps an HTTP method + path under\n`/api/admin/plugins/{plugin_id}/...` to a Rhai handler\nfunction the host invokes per request. Lets channel\nplugins (Signal pairing flows, future WhatsApp QR, etc.)\nexpose admin UI without having to live in the host crate.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AdminRouteDecl"
+      }
+    },
+    "alert_sources": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/AlertSourceDecl"
+      }
+    },
+    "chat_components": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ChatComponentDecl"
+      }
+    },
+    "compatibility": {
+      "description": "Explicit compatibility contract for host API ranges and required\nprotocol features. Omitted for pre-negotiation bundles, which retain\ntheir legacy compatibility path.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/PluginCompatibility"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "event_subscriptions": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/EventSubscriptionDecl"
+      }
+    },
+    "hardware_probe": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/HardwareProbeDecl"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "health_checks": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/HealthCheckDecl"
+      }
+    },
+    "identity_provider": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/IdentityProviderDecl"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "inference_backend": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/InferenceBackendDecl"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "oauth_accounts": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/OauthAccountDecl"
+      }
+    },
+    "plugin": {
+      "$ref": "#/$defs/PluginHeader"
+    },
+    "runtime": {
+      "description": "Runtime declaration — which isolation tier (§4.4) the plugin\nruns in and how to spawn it. Optional because tool-only\nplugins can sometimes be resolved in-process (Phase 3+\nfeature). For Phase 2 every plugin that declares tools or a\ntransport MUST set `[runtime]`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RuntimeDecl"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "services": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ServiceDecl"
+      }
+    },
+    "skills": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/SkillDecl"
+      }
+    },
+    "tools": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/ToolDecl"
+      }
+    },
+    "transport": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TransportDecl"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "ui_panels": {
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/UiPanelDecl"
+      }
+    },
+    "webhook_routes": {
+      "description": "Public webhook routes the plugin exposes for receiving\ncallbacks from third-party services. Mounted UNAUTHENTICATED\nat `/api/webhooks/{plugin_id}{path}` — see `WebhookRouteDecl`\nfor the security contract (handlers MUST validate a shared\nsecret in the URL or body). First user: WhatsApp / wuzapi\nposting message events here.",
+      "type": "array",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/WebhookRouteDecl"
+      }
+    }
+  },
+  "required": [
+    "plugin"
+  ],
+  "$defs": {
+    "AdminRouteDecl": {
+      "description": "Plugin-served admin endpoint — declared in the plugin's\nmanifest, routed by the host under\n`/api/admin/plugins/{plugin_id}{path}`, dispatched into the\nplugin's Rhai script via the named handler function.\n\nLets channel plugins surface admin operations (Signal pairing,\nfuture WhatsApp QR, future webhook secret rotation, etc.)\nwithout their handler code having to live in the host crate.\n\nExample:\n```toml\n[[admin_routes]]\nmethod = \"POST\"\npath = \"/pair\"\nhandler = \"on_pair_request\"\n```\n\nThe Rhai handler signature is\n`fn on_pair_request(args)` — `args` is a map containing\n`method`, `path`, `query` (params parsed from the URL),\n`body` (decoded JSON when the request was JSON; raw string\notherwise), and `headers` (subset the host whitelisted).\nReturn value is JSON the host serialises into the HTTP\nresponse. Plugins can throw a Rhai error to surface a 500.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "Optional human-readable description shown in plugin\ncatalog / docs UIs.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handler": {
+          "description": "Rhai top-level function name to invoke per request.",
+          "type": "string"
+        },
+        "method": {
+          "description": "HTTP method — `\"GET\"`, `\"POST\"`, `\"DELETE\"`, etc. The host\nuppercases before matching, so `\"post\"` is fine too.",
+          "type": "string"
+        },
+        "path": {
+          "description": "Path under `/api/admin/plugins/{plugin_id}`. Leading slash\nrecommended for readability — the host normalises.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "path",
+        "handler"
+      ]
+    },
+    "AlertSourceDecl": {
+      "type": "object",
+      "properties": {
+        "fingerprint_prefix": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fingerprint_prefix"
+      ]
+    },
+    "ChatComponentDecl": {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "entry"
+      ]
+    },
+    "DeprecatedPrimitiveUse": {
+      "description": "A plugin-declared use of a deprecated primitive and its compatible replacement.",
+      "type": "object",
+      "properties": {
+        "primitive": {
+          "type": "string"
+        },
+        "replacement": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "primitive",
+        "replacement"
+      ]
+    },
+    "EventSubscriptionDecl": {
+      "type": "object",
+      "properties": {
+        "handler": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "on": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "on"
+      ]
+    },
+    "HardwareProbeDecl": {
+      "type": "object",
+      "properties": {
+        "image": {
+          "description": "Docker image tag the control plane runs.",
+          "type": "string"
+        },
+        "vendors": {
+          "description": "Which GPU vendors this probe handles.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "image"
+      ]
+    },
+    "HealthCheckDecl": {
+      "type": "object",
+      "properties": {
+        "failure_threshold": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "interval": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "on_fail_severity": {
+          "type": "string",
+          "default": "Error"
+        },
+        "probe": {
+          "$ref": "#/$defs/HealthCheckProbe"
+        },
+        "recovery_threshold": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "default": null,
+          "minimum": 0
+        },
+        "timeout": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "interval",
+        "probe"
+      ]
+    },
+    "HealthCheckProbe": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "expect_status": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "default": null,
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "kind": {
+              "type": "string",
+              "const": "http"
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "host": {
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "tcp"
+            },
+            "port": {
+              "type": "integer",
+              "format": "uint16",
+              "maximum": 65535,
+              "minimum": 0
+            }
+          },
+          "required": [
+            "kind",
+            "host",
+            "port"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "command": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "kind": {
+              "type": "string",
+              "const": "exec"
+            }
+          },
+          "required": [
+            "kind",
+            "command"
+          ]
+        }
+      ]
+    },
+    "IdentityProviderDecl": {
+      "type": "object",
+      "properties": {
+        "confidence_ceiling": {
+          "description": "Plugin-self-imposed confidence ceiling (0..1).",
+          "type": "number",
+          "format": "float",
+          "default": 0.949999988079071
+        },
+        "resolves": {
+          "description": "Identifier kinds this provider can resolve. E.g.\n`[\"phone\", \"email\", \"signal_uuid\"]`.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "trust_hint_default": {
+          "description": "Default trust hint the provider will publish when it matches with\nreasonable confidence.",
+          "type": "string",
+          "default": "Contact"
+        }
+      }
+    },
+    "InferenceBackendDecl": {
+      "type": "object",
+      "properties": {
+        "openai_compatible_endpoint": {
+          "type": "string"
+        },
+        "runtimes": {
+          "description": "Deployment runtimes this backend can run under. Each entry is\na lowercase identifier matching the supervisor's runtime\ndispatch (`\"docker\"`, `\"native\"`). When omitted, the supervisor\nassumes `[\"docker\"]` — every existing managed-mode preset\n(vLLM, Whisper, Kokoro, Piper) ships as a Docker container.\n\nThe first non-Docker entry is `service-ollama`, which on Apple\nSilicon must run as a native macOS subprocess because Docker\nDesktop on macOS has no Metal passthrough — that plugin\ndeclares `runtimes = [\"native\"]` so the wizard's plugin store\ncan warn ahead of time when the operator is on a host class\nthe backend can't deploy to (e.g. an Ollama-native plugin\nshouldn't appear \"Ready\" on a Linux/NVIDIA host where the\nvLLM Docker preset is the right choice).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "supports_streaming": {
+          "type": "boolean"
+        },
+        "supports_tools": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "openai_compatible_endpoint",
+        "supports_streaming",
+        "supports_tools"
+      ]
+    },
+    "MountDecl": {
+      "description": "One bind mount declared by a sidecar. Source paths come in three\nflavors so plugin authors don't need to hardcode absolute host\npaths the operator's machine doesn't necessarily share:\n\n  * `stage://relative/path` — resolves against the plugin's\n    extracted stage directory. Used to mount shipped scripts,\n    config files, or other read-only resources baked into the\n    plugin zip. Defaults to read-only.\n  * `state://name` — resolves to a managed per-sidecar host\n    directory (`<execlaw>/sidecars/<plugin_id>/<sidecar_name>/<name>/`)\n    that the supervisor creates on first spawn and persists\n    across restarts. Used for stateful sidecar data (signal-cli\n    account keystore, etc.). Read-write.\n  * absolute `/path` — host-absolute. Operator-controlled,\n    e.g. mounting a shared dataset into an OCR worker. Direct\n    pass-through.\n\nThe `target` is always the absolute container-side path.",
+      "type": "object",
+      "properties": {
+        "read_only": {
+          "type": "boolean",
+          "default": false
+        },
+        "source": {
+          "type": "string"
+        },
+        "target": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "target"
+      ]
+    },
+    "OauthAccountDecl": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "proactive_refresh_window": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "provider": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "token_store": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "warn_before_expiry": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "provider"
+      ]
+    },
+    "PanelRpcCapability": {
+      "description": "Narrow host services a sandboxed panel may request through RPC.",
+      "oneOf": [
+        {
+          "description": "Call only this plugin's own manifest-declared `admin_routes`.",
+          "type": "string",
+          "const": "plugin_admin_routes"
+        },
+        {
+          "description": "Read or change OAuth account configuration declared by this plugin.",
+          "type": "string",
+          "const": "own_oauth_accounts"
+        },
+        {
+          "description": "Read or change this plugin's namespaced settings entries.",
+          "type": "string",
+          "const": "own_plugin_settings"
+        },
+        {
+          "description": "Read this plugin's sidecar status only.",
+          "type": "string",
+          "const": "own_sidecar_status"
+        },
+        {
+          "description": "Read the controller's configured identifiers for this plugin's panel.",
+          "type": "string",
+          "const": "controller_identifiers"
+        }
+      ]
+    },
+    "PluginCompatibility": {
+      "description": "Host API requirements kept separate from the plugin's cosmetic release.",
+      "type": "object",
+      "properties": {
+        "deprecated_primitives": {
+          "description": "Deprecated calls retained with identical semantics. The host emits\ndiagnostics naming the replacement; this metadata never changes policy.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/DeprecatedPrimitiveUse"
+          }
+        },
+        "host_api": {
+          "description": "Semver requirement against [`HOST_API_VERSION`], for example\n`\">=1.0.0, <2.0.0\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "required_features": {
+          "description": "Required host protocol features. Unknown values fail closed.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "PluginHeader": {
+      "type": "object",
+      "properties": {
+        "author": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "core_version": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "homepage": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "type": "string"
+        },
+        "license": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "version"
+      ]
+    },
+    "RuntimeDecl": {
+      "description": "How the plugin's code actually runs.\n\nTwo tiers are supported:\n\n* **`subprocess`** — the original isolation tier. Plugin is a\n  binary the host spawns; communication is JSON-RPC over stdio.\n  Use for plugins that need native code (audio pipelines, ffmpeg,\n  signal-cli, ONNX vision models, etc.). Requires `executable`.\n\n* **`script`** — embedded Rhai interpreter. Plugin is a `.rhai`\n  file the host loads + runs in-process under a sandbox.\n  Use for HTTP-API wrappers, identity providers, simple\n  transforms — anything that doesn't need native deps.\n  Requires `source`. **No compilation cost; install ZIP is\n  the script + the manifest.**\n\nThe validator enforces the right field is set per tier so a\nscript plugin can't accidentally smuggle in a binary executable\npath and vice versa.",
+      "type": "object",
+      "properties": {
+        "args": {
+          "description": "Arguments passed to the executable, in order.\n(Subprocess tier only; ignored for script.)",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "description": "Environment variables to set for the child. Secret references\n(`secret://<plugin_id>/<name>`) are resolved by the host\nagainst the vault before spawn.\n(Subprocess tier only; ignored for script.)",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "executable": {
+          "description": "Path to the executable, relative to the plugin's staged root.\nExamples: `\"node\"` (resolved via PATH), `\"./dist/plugin\"`.\nRequired for `tier = \"subprocess\"`; ignored for `\"script\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "source": {
+          "description": "Path to the Rhai source file, relative to the plugin's\nstaged root. Example: `\"main.rhai\"`. Required for\n`tier = \"script\"`; ignored for `\"subprocess\"`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tier": {
+          "description": "`\"subprocess\"` or `\"script\"`. WASM lands later.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tier"
+      ]
+    },
+    "ServiceDecl": {
+      "type": "object",
+      "properties": {
+        "entrypoint": {
+          "description": "Override the container image's `ENTRYPOINT`. When `None` (the\ndefault), the image's built-in entrypoint runs. Sidecars that\nneed to wrap the upstream entrypoint (e.g. patching\nsupervisord configs before exec'ing the original) set this.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "image": {
+          "type": "string"
+        },
+        "mounts": {
+          "description": "Bind mounts the supervisor wires into the spawned container.\nEach entry resolves through [`MountDecl::source`] semantics —\nstage-relative for shipped scripts, plugin-state for\npersistent volumes, or absolute host paths for operator\noverrides. Empty by default; sidecars that need persistent\nstate (e.g. signal-cli's account keystore) or shipped\nscripts (e.g. an entrypoint wrapper) declare them here.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/MountDecl"
+          }
+        },
+        "name": {
+          "type": "string"
+        },
+        "ports": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "sidecar": {
+          "description": "When present, this service is a **supervised sidecar** — a\ncompanion container the sidecar supervisor takes\nresponsibility for: spawn, healthcheck, restart, alert on\nstuck. The sidecar's identity is the parent service's `name`\n(which the supervisor enforces is globally unique across\ninstalled plugins, so docker container names don't collide).\n\nThe sidecar system is intentionally generic: signal-cli,\nWhatsApp Bridge, an ffmpeg pool, an OCR worker — all the\nsupervisor needs is \"a container to keep running on this\nport.\" Transport bridges happen to be the first set of\nsidecars we ship, but `SidecarMeta` carries no transport-\nspecific knobs.\n\nPlain `[[services]]` entries that omit this table are\n**unsupervised** helper daemons — the manifest registers\nthem but the supervisor leaves them alone.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SidecarMeta"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "image"
+      ]
+    },
+    "SidecarMeta": {
+      "description": "Sidecar-specific metadata on a `ServiceDecl`. Combined with the\nparent service's `name` + `image` + `ports`, this is everything\nthe sidecar supervisor needs to run + monitor a companion\ncontainer.\n\nDeliberately tiny: the supervisor's job is generic\ncontainer-lifecycle, not a transport-specific abstraction.\nAnything transport-specific lives in the plugin's tool layer or\nin a future separate `[transport]` declaration; the sidecar meta\nonly carries fields the supervisor actually uses (RPC port to\npublish + health path to probe).",
+      "type": "object",
+      "properties": {
+        "rpc_health_path": {
+          "description": "HTTP path on the RPC port that the supervisor probes for\nliveness. Defaults to `/healthz`. Sidecars that expose a\ndifferent convention (signal-cli's `/v1/about`, an OCR\nworker's `/ready`, ...) override here.",
+          "type": "string",
+          "default": "/healthz"
+        },
+        "rpc_port": {
+          "description": "Container port serving the sidecar's local RPC. The\nsupervisor publishes this as `127.0.0.1:<host_port>` and\nprobes `<rpc_health_path>` against it.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "rpc_port"
+      ]
+    },
+    "SkillDecl": {
+      "description": "One skill shipped by a plugin (Phase B, 2026-05-03).\n\nAt install time the host:\n  1. Reads `entry` (relative to the staged plugin root) as a UTF-8\n     markdown file — the skill's body.\n  2. Sanitizes `name` (lowercase, alphanumeric + hyphen, slashes\n     stripped) and prepends `<plugin_id>/` so the stored skill\n     name is always `<plugin_id>/<sanitized_name>`. The plugin\n     author cannot author a skill outside their own namespace.\n  3. Builds a structured frontmatter from `description` + `tags`\n     and inserts the row via `execlaw_skills::SkillStore` with\n     `registration_kind = \"shipped\"` and `owning_plugin_id` set.\n\nOn plugin uninstall, every skill with this `owning_plugin_id` is\narchived. Admins can re-author a clean copy via `skills.create` if\nthey want to keep the procedure after removing the plugin.",
+      "type": "object",
+      "properties": {
+        "description": {
+          "description": "One- or two-sentence description shown to the LLM in\n`skills.list`. Required so the agent can decide whether to\nactivate the skill without reading the body first.",
+          "type": "string"
+        },
+        "entry": {
+          "description": "Path to the skill's body markdown file, relative to the plugin's\nstaged root. Example: `\"skills/query-builder.md\"`.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Local skill name (without the `<plugin_id>/` prefix). Lowercase\nalphanumeric + hyphen. Slashes are sanitized to hyphens.",
+          "type": "string"
+        },
+        "tags": {
+          "description": "Optional tags surfaced in the structured frontmatter. Useful for\nadmin-UI filtering; the LLM doesn't see them directly.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "description",
+        "entry"
+      ]
+    },
+    "ToolCancellation": {
+      "type": "string",
+      "enum": [
+        "safe",
+        "best_effort",
+        "not_cancellable",
+        "unknown"
+      ]
+    },
+    "ToolConcurrency": {
+      "type": "string",
+      "enum": [
+        "read_only",
+        "exclusive",
+        "keyed",
+        "unknown"
+      ]
+    },
+    "ToolDecl": {
+      "type": "object",
+      "properties": {
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "effect_contract": {
+          "description": "Descriptive effect and scheduling semantics. This metadata narrows\nwhat the host may automate; it never grants a capability or bypasses\noperator policy. Omitted declarations normalize to conservative\n`unknown` values.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ToolEffectContract"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "host_implemented": {
+          "description": "Phase 3 (signal sidecar): when `true`, the tool's\nimplementation lives in the host crate as an\n`Arc<dyn ToolImpl>` builtin — the plugin manifest only\ndeclares its presence so install/upgrade can validate the\nsidecar dependency, set per-tool metadata (description,\ntrust_floor), and surface the tool under the plugin's\nattribution in catalog UIs. The plugin's runtime\n(rhai/subprocess) is **not** consulted on dispatch.\n\nPractically, the registry's `enable_with_stage` skips\ninserting a host-implemented tool into `tools_by_name`,\nwhich means a builtin the host registers under the same\nname is no longer a conflict. Used today by\n`signal.send_message` and `signal.reply` — tools that need\nthe host-side `TransportApi` capability that rhai scripts\ncan't reach. Group ops stay rhai-implemented.",
+          "type": "boolean"
+        },
+        "host_internal": {
+          "description": "When true, the tool registers with the host's `call_tool`\ndispatch table (so auto-bridge code can dial in) but does\nNOT surface in the agent's tool catalog. Used for \"host\ncalls these on behalf of the agent\" convention tools like\n`signal.set_typing` and `signal.send_with_attachments`\nwhere letting the planner see them causes tool-call loops\n(the model decides \"let me set typing!\" repeatedly until\nmax_tool_rounds trips).",
+          "type": "boolean"
+        },
+        "latency": {
+          "description": "`low` | `medium` | `high` — voice runner only exposes tools with\n`low`.",
+          "$ref": "#/$defs/ToolLatency",
+          "default": "medium"
+        },
+        "name": {
+          "type": "string"
+        },
+        "required_capabilities": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "result_schema": {
+          "description": "Optional path to a JSON Schema describing successful structured output.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "schema": {
+          "description": "Path (relative to the plugin root) to a JSON Schema describing\nthe tool's arguments.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "trust_floor": {
+          "description": "Minimum trust level required to invoke this tool. Mirrors\nselfhosted-claw's `controllerOnly: true` knob but generalised\n— operators can pin a tool at `Controller` (admin only),\n`KnownTrusted`, etc. Tools omitting this field have no trust\nfloor (anyone whose conversation reaches the dispatcher may\ninvoke them, subject to the existing `required_capabilities`\ngate).\n\nThe string is parsed against `execlaw_policy::TrustLevel`;\nunknown strings cause manifest validation to fail loudly so a\ntypo doesn't silently downgrade to \"no floor\". Concretely, a\n`signal.send_message` tool that pinned to `\"Controller\"`\nprevents a Signal contact (KnownLimited / KnownTrusted) from\nusing the controller's outbound transport to spam other\npeople — selfhosted-claw learned this the hard way.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "ToolEffectContract": {
+      "description": "Declarative tool behavior shared by script and subprocess plugins.",
+      "type": "object",
+      "properties": {
+        "cancellation": {
+          "$ref": "#/$defs/ToolCancellation",
+          "default": "unknown"
+        },
+        "concurrency": {
+          "$ref": "#/$defs/ToolConcurrency",
+          "default": "unknown"
+        },
+        "external_effect": {
+          "$ref": "#/$defs/ToolExternalEffect",
+          "default": "unknown"
+        },
+        "idempotency": {
+          "$ref": "#/$defs/ToolIdempotency",
+          "default": "unknown"
+        },
+        "reconciliation": {
+          "$ref": "#/$defs/ToolReconciliation",
+          "default": "unknown"
+        },
+        "resources": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/ToolResourceAccess"
+          }
+        },
+        "sensitivity": {
+          "$ref": "#/$defs/ToolSensitivity",
+          "default": "unknown"
+        }
+      },
+      "additionalProperties": false
+    },
+    "ToolExternalEffect": {
+      "type": "string",
+      "enum": [
+        "none",
+        "read_only",
+        "local_write",
+        "external_write",
+        "unknown"
+      ]
+    },
+    "ToolIdempotency": {
+      "type": "string",
+      "enum": [
+        "none",
+        "framework_key",
+        "plugin_key",
+        "unknown"
+      ]
+    },
+    "ToolLatency": {
+      "type": "string",
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ]
+    },
+    "ToolReconciliation": {
+      "type": "string",
+      "enum": [
+        "none",
+        "read_after_write",
+        "idempotency_lookup",
+        "manual",
+        "unknown"
+      ]
+    },
+    "ToolResourceAccess": {
+      "description": "A stable, plugin-defined resource name and the access mode used by a tool.",
+      "type": "object",
+      "properties": {
+        "access": {
+          "$ref": "#/$defs/ToolResourceMode"
+        },
+        "resource": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "resource",
+        "access"
+      ]
+    },
+    "ToolResourceMode": {
+      "type": "string",
+      "enum": [
+        "read",
+        "write",
+        "unknown"
+      ]
+    },
+    "ToolSensitivity": {
+      "type": "string",
+      "enum": [
+        "public",
+        "personal",
+        "sensitive",
+        "unknown"
+      ]
+    },
+    "TransportDecl": {
+      "type": "object",
+      "properties": {
+        "icon": {
+          "description": "Bootstrap-icons name (without the `bi-` prefix) the SPA renders\nnext to thread titles for conversations bridged on this\ntransport. Lets the operator visually distinguish \"Web chat\",\n\"Signal group\", \"WhatsApp\", etc. at a glance. Defaults to\n`\"phone\"` when omitted — picked because most external-channel\ntransports are phone-based messengers; plugins SHOULD override\nwith a more specific icon (e.g. `\"chat-quote\"` for Signal,\n`\"envelope\"` for email).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "supports_attachments": {
+          "type": "boolean",
+          "default": false
+        },
+        "supports_groups": {
+          "type": "boolean",
+          "default": false
+        },
+        "transport_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "transport_id"
+      ]
+    },
+    "UiPanelDecl": {
+      "type": "object",
+      "properties": {
+        "entry": {
+          "type": "string"
+        },
+        "mount": {
+          "type": "string"
+        },
+        "rpc_capabilities": {
+          "description": "Host RPC scopes exposed to this panel inside its sandbox.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PanelRpcCapability"
+          }
+        }
+      },
+      "required": [
+        "mount",
+        "entry"
+      ]
+    },
+    "WebhookAuthDecl": {
+      "description": "How the host should authenticate an inbound webhook before\npublishing it to the automation bus or dispatching the handler.\n\nAll variants resolve their secret via the plugin's vault\n(`vault_secrets` table, scoped to the plugin id) so the operator\ncan rotate the secret without code changes. Comparisons are\nconstant-time. A missing or empty vault value is treated as an\nauthentication failure (NOT as \"no auth required\").",
+      "oneOf": [
+        {
+          "description": "Match `?<query>=<value>` constant-time against the plugin's\nvault entry `vault_key`. The query field is redacted from\nthe automation-bus payload before persistence.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "query_token"
+            },
+            "query": {
+              "description": "Query-string key the secret travels in. Typically `token`.",
+              "type": "string"
+            },
+            "vault_key": {
+              "description": "Name of the per-plugin vault row holding the expected secret.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "query",
+            "vault_key"
+          ]
+        },
+        {
+          "description": "Compute `HMAC-SHA256(vault[vault_key], body)` and compare\nagainst the request header `header`. Accepts both raw hex\nand `sha256=<hex>` (GitHub's `X-Hub-Signature-256` style).",
+          "type": "object",
+          "properties": {
+            "header": {
+              "description": "HTTP header carrying the signature, e.g. `X-Hub-Signature-256`.",
+              "type": "string"
+            },
+            "kind": {
+              "type": "string",
+              "const": "hmac_sha256_header"
+            },
+            "vault_key": {
+              "description": "Name of the per-plugin vault row holding the shared secret.",
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "header",
+            "vault_key"
+          ]
+        },
+        {
+          "description": "Explicit opt-out: declare that this route is not host-authenticated\nand the handler is solely responsible for validating the caller.\nDistinct from omitting `auth` only in that no deprecation warning\nis logged — operators have acknowledged the model.",
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "none"
+            }
+          },
+          "required": [
+            "kind"
+          ]
+        }
+      ]
+    },
+    "WebhookRouteDecl": {
+      "description": "Public webhook route a plugin exposes for receiving callbacks\nfrom third-party services (e.g. wuzapi → execlaw event POSTs).\nMounted by the host under `/api/webhooks/{plugin_id}{path}` —\nno execlaw JWT is checked (external callers can't hold one).\nAuthentication is described by the optional `auth` field below\nand enforced by the host BEFORE the request is published to the\nautomation bus or dispatched to the plugin's handler.\n\n```toml\n[[webhook_routes]]\nmethod = \"POST\"\npath   = \"/event\"\nhandler = \"on_webhook_event\"\ndescription = \"wuzapi posts WhatsApp message events here.\"\nauth = { kind = \"query_token\", query = \"token\", vault_key = \"webhook_secret\" }\n```\n\nThe Rhai handler signature mirrors `[[admin_routes]]` —\n`fn on_webhook_event(args)` — `args` carries `method`, `path`,\n`query`, `body`. Return value becomes the HTTP response body\n(JSON-serialised). Throw to surface a 500.\n\n**Security**: this surface is reachable from anyone who can\nhit the host's bind address. Declare `auth` so the host (not\nthe handler) enforces the check before any side effect. Omitting\n`auth` is permitted for backward compatibility but logs a\n`webhook_route_auth_unset` warning at plugin enable and leaves\nthe handler solely responsible for validating the caller —\nmigrate to a declared `auth` mode as soon as practical.",
+      "type": "object",
+      "properties": {
+        "auth": {
+          "description": "Host-enforced authentication declaration. When set, the\nwebhook dispatcher validates the request BEFORE publishing\nto the automation bus or invoking the handler. When unset,\nbehavior falls back to the legacy \"handler validates\" model.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WebhookAuthDecl"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "description": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "handler": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "method",
+        "path",
+        "handler"
+      ]
+    }
+  }
+}
