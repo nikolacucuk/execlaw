@@ -2562,6 +2562,7 @@ mod tests {
             retrieval_query_sha256: None,
             assets: Vec::new(),
             retrieved_assets: Vec::new(),
+            instruction_sources: Vec::new(),
         };
         let exec = TurnExecutor::new(
             InferenceClient::new(format!("http://{addr}/v1")),
