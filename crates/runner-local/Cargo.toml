@@ -13,7 +13,9 @@ execlaw-core = { path = "../core" }
 execlaw-inference-api = { path = "../inference-api" }
 execlaw-context-window = { path = "../context-window" }
 execlaw-session = { path = "../session" }
+execlaw-plugin-sdk = { path = "../plugin-sdk" }
 tokio.workspace = true
+futures.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 jsonschema.workspace = true

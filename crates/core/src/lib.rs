@@ -70,6 +70,7 @@ pub mod projection_rebuild;
 pub mod refresh_tokens;
 pub mod reply_drafts;
 pub mod research;
+pub mod resource_versions;
 pub mod retention;
 pub mod routine_run_retention;
 pub mod routines;

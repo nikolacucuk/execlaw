@@ -23,6 +23,12 @@ struct StoredStep {
     label: String,
     effect_kind: Option<String>,
     payload: Value,
+    #[serde(default)]
+    resource_preconditions: Vec<execlaw_core::resource_versions::ResourceVersionPrecondition>,
+    #[serde(default)]
+    compensation: Option<CompensationSpec>,
+    #[serde(default)]
+    idempotency_key_override: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -30,6 +36,23 @@ struct StoredPlan {
     objective: String,
     constraints: Vec<String>,
     steps: Vec<StoredStep>,
+    #[serde(default)]
+    compensation_for: Option<CompensationOrigin>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CompensationSpec {
+    label: String,
+    effect_kind: String,
+    payload: Value,
+    #[serde(default)]
+    resource_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CompensationOrigin {
+    original_run_id: String,
+    original_step_index: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -39,6 +62,10 @@ struct PlanInputStep {
     effect_kind: Option<String>,
     #[serde(default)]
     payload: Option<Value>,
+    #[serde(default)]
+    resource_keys: Vec<String>,
+    #[serde(default)]
+    compensation: Option<CompensationSpec>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,6 +77,11 @@ struct ChainPlanArgs {
     max_steps: Option<u32>,
     #[serde(default)]
     steps: Option<Vec<PlanInputStep>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ChainPreviewArgs {
+    plan_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,25 +157,44 @@ impl ChainRuntime {
         }
         let max_steps = args.max_steps.unwrap_or(6).clamp(1, 12) as usize;
 
-        let mut steps: Vec<StoredStep> = match args.steps {
-            Some(custom) if !custom.is_empty() => custom
-                .into_iter()
-                .take(max_steps)
-                .enumerate()
-                .map(|(i, s)| StoredStep {
-                    step_index: i as u32,
-                    label: s.label,
-                    effect_kind: s.effect_kind,
-                    payload: s.payload.unwrap_or(Value::Null),
-                })
-                .collect(),
-            _ => vec![StoredStep {
+        let mut steps: Vec<StoredStep> = Vec::new();
+        match args.steps {
+            Some(custom) if !custom.is_empty() => {
+                let versions = execlaw_core::resource_versions::ResourceVersionStore::new(&self.db);
+                for (index, step) in custom.into_iter().take(max_steps).enumerate() {
+                    if step.compensation.as_ref().is_some_and(|compensation| {
+                        compensation.label.trim().is_empty()
+                            || compensation.effect_kind.trim().is_empty()
+                    }) {
+                        return Err("compensation label and effect_kind are required".into());
+                    }
+                    if step.compensation.is_some() && step.effect_kind.is_none() {
+                        return Err("only effectful steps may declare compensation".into());
+                    }
+                    let resource_preconditions = versions
+                        .capture(&step.resource_keys)
+                        .map_err(|error| format!("capture resource versions: {error}"))?;
+                    steps.push(StoredStep {
+                        step_index: index as u32,
+                        label: step.label,
+                        effect_kind: step.effect_kind,
+                        payload: step.payload.unwrap_or(Value::Null),
+                        resource_preconditions,
+                        compensation: step.compensation,
+                        idempotency_key_override: None,
+                    });
+                }
+            }
+            _ => steps.push(StoredStep {
                 step_index: 0,
                 label: "analyze objective".to_string(),
                 effect_kind: None,
                 payload: json!({"objective": objective}),
-            }],
-        };
+                resource_preconditions: Vec::new(),
+                compensation: None,
+                idempotency_key_override: None,
+            }),
+        }
         for (idx, s) in steps.iter_mut().enumerate() {
             s.step_index = idx as u32;
         }
@@ -153,6 +204,7 @@ impl ChainRuntime {
             objective: objective.clone(),
             constraints: args.constraints.clone(),
             steps,
+            compensation_for: None,
         };
         let plan_json = serde_json::to_vec(&plan).map_err(|e| format!("serialize plan: {e}"))?;
         let constraints_json = serde_json::to_string(&args.constraints)
@@ -212,6 +264,46 @@ impl ChainRuntime {
         let plan: StoredPlan =
             serde_json::from_slice(&blob).map_err(|e| format!("decode stored plan: {e}"))?;
         Ok((plan, fx != 0, conv))
+    }
+
+    fn preview_plan(&self, plan_id: &str, conversation_id: &str) -> Result<Value, String> {
+        let (plan, has_external_effects, owner) = self.load_plan(plan_id)?;
+        if owner != conversation_id {
+            return Err("plan belongs to a different conversation".into());
+        }
+        let store = execlaw_core::resource_versions::ResourceVersionStore::new(&self.db);
+        let mut stale = false;
+        let mut unsupported_conditional_update = false;
+        let mut steps = Vec::with_capacity(plan.steps.len());
+        for step in &plan.steps {
+            let checks = store
+                .check(&step.resource_preconditions)
+                .map_err(|error| format!("check resource versions: {error}"))?;
+            stale |= checks.iter().any(|check| !check.matches);
+            unsupported_conditional_update |= step.effect_kind.is_some()
+                && checks
+                    .iter()
+                    .any(|check| check.matches && !check.conditional_updates);
+            steps.push(json!({
+                "step_index": step.step_index,
+                "label": step.label,
+                "effect_kind": step.effect_kind,
+                "preconditions": checks,
+            }));
+        }
+        let status = if stale {
+            "stale"
+        } else if unsupported_conditional_update {
+            "conditional_update_unsupported"
+        } else {
+            "ready"
+        };
+        Ok(json!({
+            "plan_id": plan_id,
+            "status": status,
+            "has_external_effects": has_external_effects,
+            "steps": steps,
+        }))
     }
 
     fn create_run(
@@ -345,6 +437,241 @@ impl ChainRuntime {
             .map_err(|e| format!("outbox key lookup failed: {e}"))
     }
 
+    fn compensation_review_for_origin(
+        &self,
+        original_run_id: &str,
+        original_step_index: u32,
+    ) -> Result<Option<(String, String)>, String> {
+        self.db
+            .with_conn(|connection| {
+                connection
+                    .query_row(
+                        "SELECT c.id,r.approval_id FROM state_chain_compensations c \
+                         JOIN state_chain_runs r ON r.id=c.approval_run_id \
+                         WHERE c.original_run_id=?1 AND c.original_step_index=?2",
+                        params![original_run_id, original_step_index],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(execlaw_core::DbError::from)
+            })
+            .map_err(|error| format!("load compensation review: {error}"))
+    }
+
+    fn create_compensation_review(
+        &self,
+        original_run_id: &str,
+        original_step: &StoredStep,
+        original_outbox_key: &str,
+        spec: &CompensationSpec,
+        now: i64,
+    ) -> Result<(String, String), String> {
+        if let Some((compensation_id, approval_id)) =
+            self.compensation_review_for_origin(original_run_id, original_step.step_index)?
+        {
+            return Ok((compensation_id, approval_id));
+        }
+        let conversation_id: String = self
+            .db
+            .with_conn(|connection| {
+                connection
+                    .query_row(
+                        "SELECT conversation_id FROM state_chain_runs WHERE id=?1",
+                        [original_run_id],
+                        |row| row.get(0),
+                    )
+                    .map_err(execlaw_core::DbError::from)
+            })
+            .map_err(|error| format!("load original run for compensation: {error}"))?;
+        let cid = ConversationId::from(conversation_id.clone());
+        let preconditions = execlaw_core::resource_versions::ResourceVersionStore::new(&self.db)
+            .capture(&spec.resource_keys)
+            .map_err(|error| format!("capture compensation resource versions: {error}"))?;
+        let compensation_key = IdempotencyKey::from_string(format!(
+            "chain-compensation:{original_run_id}:{}",
+            original_step.step_index
+        ));
+        let compensation_plan = StoredPlan {
+            objective: format!(
+                "Compensate step {} from run {original_run_id}",
+                original_step.step_index
+            ),
+            constraints: vec![
+                "Compensation is a separate effect and requires a fresh approval.".into(),
+            ],
+            steps: vec![StoredStep {
+                step_index: 0,
+                label: spec.label.clone(),
+                effect_kind: Some(spec.effect_kind.clone()),
+                payload: spec.payload.clone(),
+                resource_preconditions: preconditions,
+                compensation: None,
+                idempotency_key_override: Some(compensation_key.as_str().to_owned()),
+            }],
+            compensation_for: Some(CompensationOrigin {
+                original_run_id: original_run_id.to_owned(),
+                original_step_index: original_step.step_index,
+            }),
+        };
+        let compensation_plan_id = uuid::Uuid::new_v4().to_string();
+        let plan_json = serde_json::to_vec(&compensation_plan)
+            .map_err(|error| format!("serialize compensation plan: {error}"))?;
+        let constraints_json = serde_json::to_string(&compensation_plan.constraints)
+            .map_err(|error| format!("serialize compensation constraints: {error}"))?;
+        self.db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO state_chain_plans \
+                     (id,conversation_id,objective,constraints_json,plan_json,has_external_effects,created_by_trust,created_at,updated_at) \
+                     VALUES (?1,?2,?3,?4,?5,1,'Controller',?6,?6)",
+                    params![
+                        compensation_plan_id,
+                        conversation_id,
+                        compensation_plan.objective,
+                        constraints_json,
+                        plan_json,
+                        now,
+                    ],
+                )?;
+                Ok(())
+            })
+            .map_err(|error| format!("store compensation plan: {error}"))?;
+        let (approval_run_id, _) = self.create_run(&compensation_plan_id, &cid, "running", now)?;
+        let approval_id = self.mark_run_waiting_approval(
+            &approval_run_id,
+            &approval_effect_hash(&compensation_plan),
+            now,
+        )?;
+        let compensation_id = uuid::Uuid::new_v4().to_string();
+        self.db
+            .with_conn(|connection| {
+                connection.execute(
+                    "INSERT INTO state_chain_compensations \
+                     (id,original_run_id,original_step_index,original_outbox_key,compensation_plan_id,approval_run_id,status,created_at,updated_at) \
+                     VALUES (?1,?2,?3,?4,?5,?6,'awaiting_approval',?7,?7)",
+                    params![
+                        compensation_id,
+                        original_run_id,
+                        original_step.step_index,
+                        original_outbox_key,
+                        compensation_plan_id,
+                        approval_run_id,
+                        now,
+                    ],
+                )?;
+                Ok(())
+            })
+            .map_err(|error| format!("record compensation review: {error}"))?;
+        Ok((compensation_id, approval_id))
+    }
+
+    fn mark_compensation_review_status(
+        &self,
+        approval_run_id: &str,
+        status: &str,
+        now: i64,
+    ) -> Result<(), String> {
+        self.db
+            .with_conn(|connection| {
+                connection.execute(
+                    "UPDATE state_chain_compensations SET status=?2,updated_at=?3 WHERE approval_run_id=?1 AND status='awaiting_approval'",
+                    params![approval_run_id, status, now],
+                )?;
+                Ok(())
+            })
+            .map_err(|error| format!("update compensation review: {error}"))
+    }
+
+    fn partial_failure_report(
+        &self,
+        run_id: &str,
+        error: &str,
+        plan: &StoredPlan,
+        now: i64,
+    ) -> Result<Value, String> {
+        let completed: Vec<(u32, Option<String>)> = self
+            .db
+            .with_conn(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT step_index,outbox_idempotency_key FROM state_chain_run_steps \
+                     WHERE run_id=?1 AND kind='effect' AND status='completed' ORDER BY step_index",
+                )?;
+                statement
+                    .query_map([run_id], |row| Ok((row.get::<_, u32>(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(execlaw_core::DbError::from)
+            })
+            .map_err(|error| format!("load partial chain history: {error}"))?;
+        let mut approvals = Vec::new();
+        let mut residual = Vec::new();
+        for (step_index, outbox_key) in &completed {
+            let Some(outbox_key) = outbox_key else {
+                residual.push(json!({"step_index":step_index,"status":"effect_identity_missing","reversible":false}));
+                continue;
+            };
+            let outbox_status: Option<String> = self
+                .db
+                .with_conn(|connection| {
+                    connection
+                        .query_row(
+                            "SELECT status FROM state_outbox WHERE idempotency_key=?1",
+                            [outbox_key],
+                            |row| row.get(0),
+                        )
+                        .optional()
+                        .map_err(execlaw_core::DbError::from)
+                })
+                .map_err(|error| format!("read original effect status: {error}"))?;
+            let Some(step) = plan
+                .steps
+                .iter()
+                .find(|step| step.step_index == *step_index)
+            else {
+                residual.push(json!({"step_index":step_index,"status":"step_definition_missing","reversible":false}));
+                continue;
+            };
+            if outbox_status.as_deref() != Some("delivered") {
+                residual.push(json!({
+                    "step_index": step_index,
+                    "outbox_status": outbox_status.unwrap_or_else(|| "missing".into()),
+                    "reversible": step.compensation.is_some(),
+                    "consequence": "original delivery is not confirmed; compensation was not attempted"
+                }));
+                continue;
+            }
+            if let Some(spec) = &step.compensation {
+                let (compensation_id, approval_id) =
+                    self.create_compensation_review(run_id, step, outbox_key, spec, now)?;
+                approvals.push(json!({
+                    "compensation_id": compensation_id,
+                    "approval_id": approval_id,
+                    "original_step_index": step_index,
+                    "status": "awaiting_approval"
+                }));
+                residual.push(json!({
+                    "step_index": step_index,
+                    "outbox_status": "delivered",
+                    "consequence": "original effect remains recorded; a separate compensating effect is awaiting approval"
+                }));
+            } else {
+                residual.push(json!({
+                    "step_index": step_index,
+                    "outbox_status": "delivered",
+                    "reversible": false,
+                    "consequence": "original effect remains; no compensation was declared"
+                }));
+            }
+        }
+        Ok(json!({
+            "status": if completed.is_empty() { "failed" } else { "partially_failed" },
+            "run_id": run_id,
+            "error": error,
+            "completed_effect_steps": completed.iter().map(|(step, _)| step).collect::<Vec<_>>(),
+            "compensation_approvals": approvals,
+            "residual_consequences": residual,
+        }))
+    }
+
     fn conversation_last_seq(&self, cid: &ConversationId) -> EventSeq {
         ConversationStore::new(&self.db)
             .get(cid)
@@ -368,8 +695,29 @@ impl ChainRuntime {
         let mut effects = 0usize;
 
         for step in &plan.steps {
+            let current = execlaw_core::resource_versions::ResourceVersionStore::new(&self.db)
+                .check(&step.resource_preconditions)
+                .map_err(|error| format!("check resource versions: {error}"))?;
+            if current.iter().any(|check| !check.matches) {
+                return Err(format!(
+                    "resource_precondition_conflict at step {}: preview is stale; prepare and preview a new plan",
+                    step.step_index
+                ));
+            }
             if let Some(effect_kind) = &step.effect_kind {
-                let key = IdempotencyKey::mint(cid, TurnSeq(run_seq), step.step_index);
+                if current.iter().any(|check| !check.conditional_updates) {
+                    return Err(format!(
+                        "conditional_update_unsupported at step {}: the provider cannot enforce resource versions; no effect was enqueued",
+                        step.step_index
+                    ));
+                }
+                let key = step
+                    .idempotency_key_override
+                    .as_ref()
+                    .map(|key| IdempotencyKey::from_string(key.clone()))
+                    .unwrap_or_else(|| {
+                        IdempotencyKey::mint(cid, TurnSeq(run_seq), step.step_index)
+                    });
                 let key_s = key.as_str().to_string();
                 if !self.outbox_already_has_key(&key)? {
                     let payload = rmp_serde::to_vec_named(&json!({
@@ -377,6 +725,7 @@ impl ChainRuntime {
                         "step_index": step.step_index,
                         "label": step.label,
                         "payload": step.payload,
+                        "resource_preconditions": step.resource_preconditions,
                     }))
                     .map_err(|e| format!("encode outbox payload failed: {e}"))?;
                     outbox
@@ -416,6 +765,9 @@ impl ChainRuntime {
                 )?;
             }
             executed += 1;
+        }
+        if plan.compensation_for.is_some() {
+            self.mark_compensation_review_status(run_id, "enqueued", now)?;
         }
         Ok((executed, effects))
     }
@@ -479,7 +831,28 @@ impl ChainPlanTool {
                                 "properties": {
                                     "label": { "type": "string", "minLength": 1 },
                                     "effect_kind": { "type": "string" },
-                                    "payload": {}
+                                    "payload": {},
+                                    "resource_keys": {
+                                        "type": "array",
+                                        "items": {"type": "string", "minLength": 1, "maxLength": 256},
+                                        "maxItems": 64,
+                                        "description": "Resource keys whose provider versions must still match the prepared proposal before execution."
+                                    },
+                                    "compensation": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"type": "string", "minLength": 1},
+                                            "effect_kind": {"type": "string", "minLength": 1},
+                                            "payload": {},
+                                            "resource_keys": {
+                                                "type": "array",
+                                                "items": {"type": "string", "minLength": 1, "maxLength": 256},
+                                                "maxItems": 64
+                                            }
+                                        },
+                                        "required": ["label", "effect_kind"],
+                                        "additionalProperties": false
+                                    }
                                 },
                                 "required": ["label"],
                                 "additionalProperties": false
@@ -532,6 +905,66 @@ impl ToolImpl for ChainPlanTool {
         ) {
             Ok(v) => ToolOutcome::ok(v),
             Err(e) => ToolOutcome::err("plan_failed", e),
+        }
+    }
+}
+
+pub struct ChainPreviewTool {
+    descriptor: ToolDescriptor,
+    runtime: ChainRuntime,
+}
+
+impl ChainPreviewTool {
+    pub fn new(db: Database) -> Self {
+        Self {
+            descriptor: ToolDescriptor {
+                name: "chain.preview".to_string(),
+                description: "Check a prepared plan's resource versions and conditional-update support without creating effects.".to_string(),
+                schema: json!({
+                    "type": "object",
+                    "properties": {"plan_id": {"type": "string", "minLength": 1}},
+                    "required": ["plan_id"],
+                    "additionalProperties": false
+                }),
+                source: ToolSource::Builtin,
+                latency: ToolLatency::Low,
+                capabilities: vec![],
+                default_allowed_classes: vec!["Controller".to_string()],
+                sensitive: true,
+            },
+            runtime: ChainRuntime::new(db),
+        }
+    }
+}
+
+#[async_trait]
+impl ToolImpl for ChainPreviewTool {
+    fn descriptor(&self) -> &ToolDescriptor {
+        &self.descriptor
+    }
+
+    async fn invoke(&self, ctx: ToolCtx, args: Value) -> ToolOutcome {
+        match self.runtime.plugin_enabled() {
+            Ok(true) => {}
+            Ok(false) => {
+                return ToolOutcome::denied("tool-chain plugin is OFF in Settings -> Plugins");
+            }
+            Err(error) => return ToolOutcome::err("storage_error", error),
+        }
+        let parsed: ChainPreviewArgs = match serde_json::from_value(args) {
+            Ok(value) => value,
+            Err(error) => return ToolOutcome::err("invalid_argument", error.to_string()),
+        };
+        match self
+            .runtime
+            .preview_plan(&parsed.plan_id, ctx.conversation_id.as_str())
+        {
+            Ok(preview) => ToolOutcome::ok(preview),
+            Err(error) if error == "plan not found" => ToolOutcome::err("not_found", error),
+            Err(error) if error == "plan belongs to a different conversation" => {
+                ToolOutcome::denied(error)
+            }
+            Err(error) => ToolOutcome::err("preview_failed", error),
         }
     }
 }
@@ -598,6 +1031,17 @@ impl ToolImpl for ChainExecuteTool {
             return ToolOutcome::denied("plan belongs to a different conversation");
         }
 
+        let preview = match self
+            .runtime
+            .preview_plan(&parsed.plan_id, ctx.conversation_id.as_str())
+        {
+            Ok(preview) => preview,
+            Err(error) => return ToolOutcome::err("preview_failed", error),
+        };
+        if preview["status"] != "ready" {
+            return ToolOutcome::err("resource_precondition_conflict", preview.to_string());
+        }
+
         let allow_external = parsed.allow_external_effects.unwrap_or(false);
         if has_external_effects && !allow_external {
             return ToolOutcome::err(
@@ -656,7 +1100,13 @@ impl ToolImpl for ChainExecuteTool {
                 let _ = self
                     .runtime
                     .mark_run_terminal(&run_id, "failed", Some(&e), now);
-                ToolOutcome::err("execute_failed", e)
+                match self.runtime.partial_failure_report(&run_id, &e, &plan, now) {
+                    Ok(report) => ToolOutcome::ok(report),
+                    Err(report_error) => ToolOutcome::err(
+                        "execute_failed",
+                        format!("{e}; partial report unavailable: {report_error}"),
+                    ),
+                }
             }
         }
     }
@@ -756,6 +1206,7 @@ fn resolve_chain_approval(
     match decision {
         ChainApprovalDecision::Deny => {
             runtime.mark_run_terminal(&run_id, "denied", Some("denied by controller"), now)?;
+            runtime.mark_compensation_review_status(&run_id, "denied", now)?;
             Ok(json!({
                 "status": "denied",
                 "run_id": run_id,
@@ -768,6 +1219,7 @@ fn resolve_chain_approval(
                 Ok(v) => v,
                 Err(e) => {
                     let _ = runtime.mark_run_terminal(&run_id, "failed", Some(&e), now);
+                    let _ = runtime.mark_compensation_review_status(&run_id, "failed", now);
                     return Err(e);
                 }
             };
@@ -778,6 +1230,7 @@ fn resolve_chain_approval(
                     Some("approved effect no longer matches the pending approval"),
                     now,
                 )?;
+                runtime.mark_compensation_review_status(&run_id, "failed", now)?;
                 return Err("approval_effect_mismatch".to_string());
             }
             runtime.mark_run_status(&run_id, "running", now)?;
@@ -785,18 +1238,22 @@ fn resolve_chain_approval(
             match runtime.execute_run_steps(&run_id, run_seq, &cid, &plan, now) {
                 Ok((executed, effects)) => {
                     runtime.mark_run_terminal(&run_id, "completed", None, now)?;
+                    let is_compensation = plan.compensation_for.is_some();
                     Ok(json!({
-                        "status": "completed",
+                        "status": if is_compensation { "compensation_enqueued" } else { "completed" },
                         "run_id": run_id,
                         "approval_id": approval_id,
                         "conversation_id": conv_id,
                         "executed_steps": executed,
-                        "effectful_steps": effects
+                        "effectful_steps": effects,
+                        "original_effect_status": if is_compensation { "remains_recorded" } else { "not_applicable" },
+                        "reversal_confirmed": false
                     }))
                 }
                 Err(e) => {
                     let _ = runtime.mark_run_terminal(&run_id, "failed", Some(&e), now);
-                    Err(e)
+                    runtime.mark_compensation_review_status(&run_id, "failed", now)?;
+                    runtime.partial_failure_report(&run_id, &e, &plan, now)
                 }
             }
         }
@@ -816,6 +1273,7 @@ pub fn resolve_chain_approval_http(
 pub fn tool_chain_tools(db: Database) -> Vec<Arc<dyn ToolImpl>> {
     vec![
         Arc::new(ChainPlanTool::new(db.clone())),
+        Arc::new(ChainPreviewTool::new(db.clone())),
         Arc::new(ChainExecuteTool::new(db.clone())),
         Arc::new(ChainResumeTool::new(db)),
     ]
@@ -1031,5 +1489,251 @@ mod tests {
             .with_conn(|c| Ok(c.query_row("SELECT COUNT(*) FROM state_outbox", [], |r| r.get(0))?))
             .unwrap();
         assert_eq!(outbox_count_after, 1);
+    }
+
+    #[tokio::test]
+    async fn stale_resource_preview_blocks_execution_before_creating_a_run_or_effect() {
+        let db = fresh_db();
+        enable_tool_chain_plugin(&db);
+        let cid = ConversationId::from("conv-chain-precondition");
+        seed_conversation(&db, &cid);
+        let versions = execlaw_core::resource_versions::ResourceVersionStore::new(&db);
+        versions.observe("record/7", "rev-1", true, 10).unwrap();
+
+        let tools = tool_chain_tools(db.clone());
+        let planner = tool_by_name(&tools, "chain.plan");
+        let preview_tool = tool_by_name(&tools, "chain.preview");
+        let executor = tool_by_name(&tools, "chain.execute");
+        let plan_id = match planner
+            .invoke(
+                controller_ctx(&cid),
+                json!({
+                    "objective": "update the record if its version is unchanged",
+                    "steps": [{
+                        "label": "update record",
+                        "effect_kind": "record.update",
+                        "payload": {"id": 7, "name": "new"},
+                        "resource_keys": ["record/7"]
+                    }]
+                }),
+            )
+            .await
+        {
+            ToolOutcome::Ok(value) => value["plan_id"].as_str().unwrap().to_owned(),
+            other => panic!("unexpected plan outcome: {other:?}"),
+        };
+        assert_eq!(
+            match preview_tool
+                .invoke(controller_ctx(&cid), json!({"plan_id": plan_id}))
+                .await
+            {
+                ToolOutcome::Ok(value) => value["status"].as_str().unwrap().to_owned(),
+                other => panic!("unexpected preview outcome: {other:?}"),
+            },
+            "ready"
+        );
+
+        versions.observe("record/7", "rev-2", true, 11).unwrap();
+        let stale = preview_tool
+            .invoke(controller_ctx(&cid), json!({"plan_id": plan_id}))
+            .await;
+        match stale {
+            ToolOutcome::Ok(value) => assert_eq!(value["status"], "stale"),
+            other => panic!("unexpected stale preview outcome: {other:?}"),
+        }
+        match executor
+            .invoke(
+                controller_ctx(&cid),
+                json!({"plan_id": plan_id, "allow_external_effects": true}),
+            )
+            .await
+        {
+            ToolOutcome::Err { code, .. } => assert_eq!(code, "resource_precondition_conflict"),
+            other => panic!("stale plan was not rejected: {other:?}"),
+        }
+        let outbox_count: i64 = db
+            .with_conn(|connection| {
+                Ok(connection
+                    .query_row("SELECT COUNT(*) FROM state_outbox", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        let run_count: i64 = db
+            .with_conn(|connection| {
+                Ok(
+                    connection.query_row("SELECT COUNT(*) FROM state_chain_runs", [], |row| {
+                        row.get(0)
+                    })?,
+                )
+            })
+            .unwrap();
+        assert_eq!(outbox_count, 0);
+        assert_eq!(run_count, 0);
+
+        versions.observe("recipient/2", "rev-1", false, 12).unwrap();
+        let unsupported_plan = match planner
+            .invoke(
+                controller_ctx(&cid),
+                json!({
+                    "objective": "send only if the recipient is still current",
+                    "steps": [{
+                        "label": "send",
+                        "effect_kind": "transport.send",
+                        "payload": {"text": "hello"},
+                        "resource_keys": ["recipient/2"]
+                    }]
+                }),
+            )
+            .await
+        {
+            ToolOutcome::Ok(value) => value["plan_id"].as_str().unwrap().to_owned(),
+            other => panic!("unexpected unsupported plan outcome: {other:?}"),
+        };
+        match preview_tool
+            .invoke(
+                controller_ctx(&cid),
+                json!({"plan_id": unsupported_plan.clone()}),
+            )
+            .await
+        {
+            ToolOutcome::Ok(value) => {
+                assert_eq!(value["status"], "conditional_update_unsupported")
+            }
+            other => panic!("unexpected unsupported preview outcome: {other:?}"),
+        }
+        match executor
+            .invoke(
+                controller_ctx(&cid),
+                json!({"plan_id": unsupported_plan, "allow_external_effects": true}),
+            )
+            .await
+        {
+            ToolOutcome::Err { code, .. } => assert_eq!(code, "resource_precondition_conflict"),
+            other => panic!("unsupported conditional update was allowed: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn partial_chain_failure_requires_approved_idempotent_compensation() {
+        let db = fresh_db();
+        enable_tool_chain_plugin(&db);
+        let cid = ConversationId::from("conv-chain-compensation");
+        seed_conversation(&db, &cid);
+        db.with_conn(|connection| {
+            connection.execute_batch(
+                "CREATE TRIGGER accept_first_chain_effect AFTER INSERT ON state_outbox \
+                 WHEN NEW.idempotency_key LIKE '%:0' BEGIN \
+                   UPDATE state_outbox SET status='delivered' WHERE id=NEW.id; END; \
+                 CREATE TRIGGER fail_second_chain_effect BEFORE INSERT ON state_outbox \
+                 WHEN NEW.idempotency_key LIKE '%:1' BEGIN \
+                   SELECT RAISE(ABORT,'injected second effect failure'); END;",
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+        let tools = tool_chain_tools(db.clone());
+        let planner = tool_by_name(&tools, "chain.plan");
+        let executor = tool_by_name(&tools, "chain.execute");
+        let resume = tool_by_name(&tools, "chain.resume");
+        let plan_id = match planner
+            .invoke(
+                controller_ctx(&cid),
+                json!({
+                    "objective": "send two messages with a reviewed compensation",
+                    "steps": [
+                        {
+                            "label": "send first",
+                            "effect_kind": "transport.send",
+                            "payload": {"text": "first"},
+                            "compensation": {
+                                "label": "retract first",
+                                "effect_kind": "transport.retract",
+                                "payload": {"message_id": "first"}
+                            }
+                        },
+                        {"label": "send second", "effect_kind": "transport.send", "payload": {"text": "second"}}
+                    ]
+                }),
+            )
+            .await
+        {
+            ToolOutcome::Ok(value) => value["plan_id"].as_str().unwrap().to_owned(),
+            other => panic!("unexpected plan outcome: {other:?}"),
+        };
+        let original_approval = match executor
+            .invoke(
+                controller_ctx(&cid),
+                json!({"plan_id": plan_id, "allow_external_effects": true}),
+            )
+            .await
+        {
+            ToolOutcome::Ok(value) => value["approval_id"].as_str().unwrap().to_owned(),
+            other => panic!("unexpected execute outcome: {other:?}"),
+        };
+        let partial = match resume
+            .invoke(
+                controller_ctx(&cid),
+                json!({"approval_id": original_approval, "decision": "approve"}),
+            )
+            .await
+        {
+            ToolOutcome::Ok(value) => value,
+            other => panic!("expected partial completion report: {other:?}"),
+        };
+        assert_eq!(partial["status"], "partially_failed");
+        assert_eq!(partial["completed_effect_steps"], json!([0]));
+        assert_eq!(
+            partial["compensation_approvals"].as_array().unwrap().len(),
+            1
+        );
+        assert!(
+            partial["residual_consequences"]
+                .to_string()
+                .contains("remains recorded")
+        );
+
+        let compensation_approval = partial["compensation_approvals"][0]["approval_id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let compensation = match resume
+            .invoke(
+                controller_ctx(&cid),
+                json!({"approval_id": compensation_approval, "decision": "approve"}),
+            )
+            .await
+        {
+            ToolOutcome::Ok(value) => value,
+            other => panic!("unexpected compensation outcome: {other:?}"),
+        };
+        assert_eq!(compensation["status"], "compensation_enqueued");
+        assert_eq!(compensation["reversal_confirmed"], false);
+        let ledger_status: String = db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT status FROM state_chain_compensations",
+                    [],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(ledger_status, "enqueued");
+        match resume
+            .invoke(
+                controller_ctx(&cid),
+                json!({"approval_id": compensation_approval, "decision": "approve"}),
+            )
+            .await
+        {
+            ToolOutcome::Ok(value) => assert_eq!(value["status"], "already_resolved"),
+            other => panic!("unexpected duplicate compensation response: {other:?}"),
+        }
+        let outbox_count: i64 = db
+            .with_conn(|connection| {
+                Ok(connection
+                    .query_row("SELECT COUNT(*) FROM state_outbox", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(outbox_count, 2);
     }
 }

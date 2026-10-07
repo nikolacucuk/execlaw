@@ -225,6 +225,10 @@ pub struct ToolDecl {
 pub struct ToolEffectContract {
     #[serde(default)]
     pub resources: Vec<ToolResourceAccess>,
+    /// Tool names that must complete before this tool. Any declared
+    /// dependency disables same-turn parallel execution conservatively.
+    #[serde(default)]
+    pub dependencies: Vec<String>,
     #[serde(default)]
     pub external_effect: ToolExternalEffect,
     #[serde(default)]
@@ -370,6 +374,7 @@ impl ToolEffectContract {
         policy.allow_parallel_execution
             && self.external_effect == ToolExternalEffect::ReadOnly
             && self.concurrency == ToolConcurrency::ReadOnly
+            && self.dependencies.is_empty()
             && self
                 .resources
                 .iter()

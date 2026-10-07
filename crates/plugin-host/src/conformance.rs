@@ -428,6 +428,20 @@ mod tests {
     }
 
     #[test]
+    fn invalid_schema_fails_with_the_production_host_diagnostic() {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("sample-plugin");
+        generate_project(&project, "sample-plugin", "script").unwrap();
+        std::fs::write(project.join("schemas/echo.json"), b"not-json").unwrap();
+        assert!(
+            check_project(&project)
+                .unwrap_err()
+                .to_string()
+                .contains("schema")
+        );
+    }
+
+    #[test]
     fn upgrade_rejects_authority_expansion_and_relaxed_trust_floor() {
         let old = PluginManifest::parse("[plugin]\nid=\"sample\"\nname=\"Sample\"\nversion=\"1.0.0\"\n[[tools]]\nname=\"sample.write\"\nrequired_capabilities=[\"workspace.write\"]\ntrust_floor=\"Controller\"\n").unwrap();
         let added = PluginManifest::parse("[plugin]\nid=\"sample\"\nname=\"Sample\"\nversion=\"1.1.0\"\n[[tools]]\nname=\"sample.write\"\nrequired_capabilities=[\"workspace.write\",\"network.approved\"]\ntrust_floor=\"Controller\"\n").unwrap();

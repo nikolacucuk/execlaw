@@ -287,6 +287,8 @@ pub struct RegisteredTool {
     /// where surfacing them to the planner causes spurious
     /// tool-call loops.
     pub host_internal: bool,
+    /// Normalized H065 effect contract. Missing legacy declarations remain unknown.
+    pub effect_contract: execlaw_plugin_sdk::manifest::ToolEffectContract,
 }
 
 impl std::fmt::Debug for RegisteredTool {
@@ -765,6 +767,7 @@ impl HookRegistry {
                         result_schema_hash: result_schema.map(|loaded| loaded.hash.clone()),
                         trust_floor: t.trust_floor.clone(),
                         host_internal: t.host_internal,
+                        effect_contract: t.normalized_effect_contract(),
                     }),
                 );
                 continue;
@@ -799,6 +802,7 @@ impl HookRegistry {
                     result_schema_hash: result_schema.map(|loaded| loaded.hash.clone()),
                     trust_floor: t.trust_floor.clone(),
                     host_internal: t.host_internal,
+                    effect_contract: t.normalized_effect_contract(),
                 }),
             );
         }

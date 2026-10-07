@@ -392,21 +392,34 @@ pub fn recover_authorized_redrives(ctx: &ExecutorContext) -> Result<usize, Strin
             .get(&run_id)
             .map_err(|error| format!("load authorized automation run {run_id}: {error}"))?
             .ok_or_else(|| format!("authorized automation run {run_id} disappeared"))?;
-        if !matches!(run.status, AutomationRunStatus::Pending | AutomationRunStatus::Running) {
+        if !matches!(
+            run.status,
+            AutomationRunStatus::Pending | AutomationRunStatus::Running
+        ) {
             continue;
         }
         let definition_json = run_store
             .definition_snapshot(&run_id)
             .map_err(|error| format!("load frozen definition for {run_id}: {error}"))?
-            .ok_or_else(|| format!("authorized automation run {run_id} has no definition snapshot"))?;
+            .ok_or_else(|| {
+                format!("authorized automation run {run_id} has no definition snapshot")
+            })?;
         let definition: AutomationDef = serde_json::from_str(&definition_json)
             .map_err(|error| format!("decode frozen definition for {run_id}: {error}"))?;
         let event = execlaw_core::automation_bus::BusEventStore::new(&ctx.db)
             .get(&run.event_id)
             .map_err(|error| format!("load source event for {run_id}: {error}"))?
-            .ok_or_else(|| format!("source event for authorized automation run {run_id} is missing"))?;
-        run_one(ctx, &run.automation_id, &definition, &event, &event_context(&event))
-            .map_err(|error| format!("recover authorized automation run {run_id}: {error}"))?;
+            .ok_or_else(|| {
+                format!("source event for authorized automation run {run_id} is missing")
+            })?;
+        run_one(
+            ctx,
+            &run.automation_id,
+            &definition,
+            &event,
+            &event_context(&event),
+        )
+        .map_err(|error| format!("recover authorized automation run {run_id}: {error}"))?;
         recovered += 1;
     }
     Ok(recovered)
@@ -2864,7 +2877,10 @@ mod tests {
                 chrono::Utc::now().timestamp_millis(),
             )
             .unwrap();
-        assert_eq!(store.authorized_redrive_ids(10).unwrap(), vec![failed.id.clone()]);
+        assert_eq!(
+            store.authorized_redrive_ids(10).unwrap(),
+            vec![failed.id.clone()]
+        );
 
         assert_eq!(recover_authorized_redrives(&context).unwrap(), 1);
         let recovered = store.get(&failed.id).unwrap().unwrap();

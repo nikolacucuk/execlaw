@@ -33,8 +33,10 @@ use execlaw_inference_api::{
     ChatMessage, ChatRequest, ChatResponse, InferenceClient, InferenceError, InferenceRetryPolicy,
     ModelId, Role, ToolCall, ToolDeclaration,
 };
+use execlaw_plugin_sdk::manifest::{ToolEffectContract, ToolEffectPolicy};
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use thiserror::Error;
@@ -110,6 +112,140 @@ pub trait ToolDispatch: Send + Sync {
     /// Canonical input/result schema hashes used for durable invocation traces.
     async fn schema_hashes(&self, _tool_name: &str) -> (Option<String>, Option<String>) {
         (None, None)
+    }
+
+    /// Declared tool effects used by the bounded read-only scheduler.
+    /// Unknown tools remain sequential.
+    fn effect_contract(&self, _tool_name: &str) -> Option<ToolEffectContract> {
+        None
+    }
+}
+
+const MAX_PARALLEL_READ_TOOLS: usize = 4;
+
+fn parallel_read_batches(
+    tool_names: &[String],
+    contracts: &[Option<ToolEffectContract>],
+) -> Vec<Vec<usize>> {
+    let policy = ToolEffectPolicy {
+        allow_automatic_retries: false,
+        allow_parallel_execution: true,
+    };
+    let safe = tool_names
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            contracts
+                .get(index)
+                .and_then(Option::as_ref)
+                .is_some_and(|contract| {
+                    !contract.resources.is_empty() && contract.allows_parallel_execution(&policy)
+                })
+        })
+        .collect::<Vec<_>>();
+    let mut batches = Vec::new();
+    let mut index = 0;
+    while index < tool_names.len() {
+        if !safe[index] {
+            batches.push(vec![index]);
+            index += 1;
+            continue;
+        }
+        let start = index;
+        while index < tool_names.len() && safe[index] && index - start < MAX_PARALLEL_READ_TOOLS {
+            index += 1;
+        }
+        batches.push((start..index).collect());
+    }
+    batches
+}
+
+fn unsatisfied_same_round_dependencies(
+    tool_names: &[String],
+    contracts: &[Option<ToolEffectContract>],
+) -> HashSet<usize> {
+    tool_names
+        .iter()
+        .enumerate()
+        .filter_map(|(index, _)| {
+            let dependencies = contracts.get(index)?.as_ref()?.dependencies.as_slice();
+            dependencies
+                .iter()
+                .any(|dependency| {
+                    tool_names
+                        .iter()
+                        .enumerate()
+                        .any(|(dependency_index, name)| {
+                            name == dependency && dependency_index >= index
+                        })
+                })
+                .then_some(index)
+        })
+        .collect()
+}
+
+fn failed_declared_dependency<'a>(
+    dependencies: &'a [String],
+    completed: &HashMap<String, bool>,
+) -> Option<&'a str> {
+    dependencies
+        .iter()
+        .find(|dependency| completed.get(*dependency) != Some(&true))
+        .map(String::as_str)
+}
+
+async fn call_parallel_reads(
+    dispatch: Arc<dyn ToolDispatch>,
+    calls: Vec<(String, serde_json::Value)>,
+    timeout: std::time::Duration,
+    cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> Vec<(ToolResultEnvelope, u64)> {
+    futures::future::join_all(calls.into_iter().map(|(name, args)| {
+        let dispatch = dispatch.clone();
+        let cancel_flag = cancel_flag.clone();
+        async move {
+            let started = std::time::Instant::now();
+            let call =
+                std::panic::AssertUnwindSafe(dispatch.call_typed(&name, &args)).catch_unwind();
+            let result = tokio::select! {
+                result = tokio::time::timeout(timeout, call) => match result {
+                    Ok(Ok(outcome)) => outcome,
+                    Ok(Err(_)) => ToolResultEnvelope::Err {
+                        failure: ToolFailure::new(
+                            ToolFailureKind::Permanent,
+                            "parallel_read_panicked",
+                            "parallel read task panicked; sibling results were retained",
+                        ),
+                    },
+                    Err(_) => ToolResultEnvelope::Err {
+                        failure: ToolFailure::new(
+                            ToolFailureKind::Timeout,
+                            "parallel_read_timeout",
+                            "parallel read exceeded the remaining run time budget",
+                        ),
+                    },
+                },
+                _ = wait_for_cancellation(cancel_flag) => ToolResultEnvelope::Err {
+                    failure: ToolFailure::new(
+                        ToolFailureKind::Cancelled,
+                        "parallel_read_cancelled",
+                        "parallel read was cancelled; sibling results were retained",
+                    ),
+                },
+            };
+            (result, started.elapsed().as_millis() as u64)
+        }
+    }))
+    .await
+}
+
+async fn wait_for_cancellation(cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>) {
+    let Some(cancel_flag) = cancel_flag else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    while !cancel_flag.load(Ordering::SeqCst) {
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
 }
 
@@ -1103,6 +1239,7 @@ impl TurnExecutor {
         let mut prompt_tokens: Option<u32> = None;
         let mut completion_tokens: Option<u32> = None;
         let mut schema_failures: HashMap<String, u32> = HashMap::new();
+        let mut completed_tool_dependencies: HashMap<String, bool> = HashMap::new();
         let mut durable_ordinal = 0_i64;
         // 2026-05-12 — turn-timing instrumentation. Routed to the
         // dedicated `agent::turn_timing` target so it stays OFF by
@@ -1421,6 +1558,109 @@ impl TurnExecutor {
                 obs.observe(Phase::AwaitingTool);
             }
 
+            // Read-only declarations may share a bounded batch. Unknown tools,
+            // writes, calls with invalid arguments, and durable replays stay on
+            // the ordered path below.
+            let tool_names = choice
+                .message
+                .tool_calls
+                .iter()
+                .map(|call| call.function.name.clone())
+                .collect::<Vec<_>>();
+            let contracts = tool_names
+                .iter()
+                .map(|name| self.tool_dispatch.effect_contract(name))
+                .collect::<Vec<_>>();
+            let batches = parallel_read_batches(&tool_names, &contracts);
+            let mut parallel_read_outcomes: HashMap<usize, (ToolResultEnvelope, u64, u64)> =
+                HashMap::new();
+            for index in unsatisfied_same_round_dependencies(&tool_names, &contracts) {
+                parallel_read_outcomes.insert(
+                    index,
+                    (
+                        ToolResultEnvelope::Err {
+                            failure: ToolFailure::new(
+                                ToolFailureKind::PolicyDenied,
+                                "tool_dependency_not_ready",
+                                "a declared tool dependency appears later in this model tool batch; retry after that dependency completes",
+                            ),
+                        },
+                        0,
+                        0,
+                    ),
+                );
+            }
+            for batch in batches.into_iter().filter(|batch| batch.len() > 1) {
+                let mut calls = Vec::with_capacity(batch.len());
+                let mut eligible = true;
+                for index in &batch {
+                    let call = &choice.message.tool_calls[*index];
+                    if matches!(
+                        call.function.name.as_str(),
+                        "execlaw.discover_tool" | "execlaw.read_artifact"
+                    ) || schema_failures
+                        .get(&call.function.name)
+                        .copied()
+                        .unwrap_or_default()
+                        >= MAX_SCHEMA_CORRECTIONS
+                    {
+                        eligible = false;
+                        break;
+                    }
+                    let Ok(args) = parse_tool_arguments(&call.function.arguments) else {
+                        eligible = false;
+                        break;
+                    };
+                    if validate_advertised_tool(&tools, &call.function.name, &args).is_err() {
+                        eligible = false;
+                        break;
+                    }
+                    let step_id = format!("tool:{rounds}:{index}");
+                    if execlaw_core::runs::RunStore::new(db)
+                        .get_step(durable.run_id(), &step_id)?
+                        .is_some()
+                    {
+                        eligible = false;
+                        break;
+                    }
+                    calls.push((call.function.name.clone(), args));
+                }
+                if !eligible || calls.len() != batch.len() {
+                    continue;
+                }
+                let budget_now_ms = chrono::Utc::now().timestamp_millis();
+                let Ok(budget) = durable.execution_budget_at(budget_now_ms) else {
+                    continue;
+                };
+                let remaining_ms = budget.deadline_at_ms.saturating_sub(budget_now_ms);
+                if remaining_ms <= 0 {
+                    continue;
+                }
+                let batch_started = std::time::Instant::now();
+                let outcomes = call_parallel_reads(
+                    self.tool_dispatch.clone(),
+                    calls,
+                    std::time::Duration::from_millis(
+                        u64::try_from(remaining_ms).unwrap_or(u64::MAX),
+                    ),
+                    self.cancel_flag.clone(),
+                )
+                .await;
+                let batch_elapsed_ms = batch_started.elapsed().as_millis() as u64;
+                for (position, (index, (outcome, tool_elapsed_ms))) in
+                    batch.into_iter().zip(outcomes).enumerate()
+                {
+                    parallel_read_outcomes.insert(
+                        index,
+                        (
+                            outcome,
+                            tool_elapsed_ms,
+                            if position == 0 { batch_elapsed_ms } else { 0 },
+                        ),
+                    );
+                }
+            }
+
             // Dispatch each tool call, producing paired use/result events.
             // We also time each dispatch so the operator can tell
             // "model spent 4 minutes deciding what to call" from
@@ -1452,6 +1692,20 @@ impl TurnExecutor {
                     "agent dispatching tool",
                 );
                 let tool_started_at = std::time::Instant::now();
+                let mut parallel_outcome = parallel_read_outcomes.remove(&call_index);
+                let parallel_metrics = parallel_outcome
+                    .as_ref()
+                    .map(|(_, elapsed, group_elapsed)| (*elapsed, *group_elapsed));
+                let failed_dependency = contracts
+                    .get(call_index)
+                    .and_then(Option::as_ref)
+                    .and_then(|contract| {
+                        failed_declared_dependency(
+                            &contract.dependencies,
+                            &completed_tool_dependencies,
+                        )
+                    })
+                    .map(str::to_owned);
                 let tool_step_id = format!("tool:{rounds}:{call_index}");
                 let tool_step_input = serde_json::json!({
                     "round": rounds,
@@ -1481,78 +1735,95 @@ impl TurnExecutor {
                 )? {
                     StepDecision::Replay(outcome) => outcome,
                     StepDecision::Execute(_) => {
-                        let outcome = match parsed_args {
-                            Ok(args) => {
-                                if let Err(failure) =
-                                    validate_advertised_tool(&tools, &tc.function.name, &args)
-                                {
-                                    ToolResultEnvelope::Err { failure }
-                                } else if tc.function.name == "execlaw.discover_tool" {
-                                    ToolResultEnvelope::Ok {
-                                        value: discover_tools(
-                                            args.get("query")
-                                                .and_then(serde_json::Value::as_str)
-                                                .unwrap_or(""),
-                                            &cfg.discoverable_tools,
-                                        ),
-                                    }
-                                } else if tc.function.name == "execlaw.read_artifact" {
-                                    read_result_artifact(
-                                        db,
-                                        cfg.tool_result_artifacts_root.as_deref(),
-                                        conversation_id,
-                                        durable.run_id(),
-                                        &args,
-                                    )
-                                    .await
-                                } else if schema_failures
-                                    .get(&tc.function.name)
-                                    .copied()
-                                    .unwrap_or_default()
-                                    >= MAX_SCHEMA_CORRECTIONS
-                                {
-                                    let mut failure = ToolFailure::new(
-                                        ToolFailureKind::Permanent,
-                                        "schema_correction_exhausted",
-                                        "tool arguments remained invalid after bounded correction attempts",
-                                    );
-                                    failure.guidance =
-                                        Some("choose another tool or answer without a tool".into());
-                                    ToolResultEnvelope::Err { failure }
-                                } else {
-                                    let (dispatch_input_hash, result_schema_hash) =
-                                        self.tool_dispatch.schema_hashes(&tc.function.name).await;
-                                    let input_schema_hash = dispatch_input_hash.or_else(|| {
-                                        tools
-                                            .iter()
-                                            .find(|tool| tool.function.name == tc.function.name)
-                                            .map(|tool| tool_schema_hash(&tool.function.parameters))
-                                    });
-                                    self.tool_dispatch.set_effect_ordinal(
-                                        u32::try_from(tool_ordinal).unwrap_or(u32::MAX),
-                                    );
-                                    self.dispatch_with_retry(
-                                        db,
-                                        durable.run_id(),
-                                        &tool_step_id,
-                                        &tc.function.name,
-                                        &args,
-                                        input_schema_hash,
-                                        result_schema_hash,
-                                        cfg.max_tool_rounds.saturating_mul(
-                                            MAX_DISPATCH_ATTEMPTS.saturating_sub(1),
-                                        ),
-                                    )
-                                    .await?
-                                }
-                            }
-                            Err(error) => ToolResultEnvelope::Err {
+                        let result = if let Some((outcome, _, _)) = parallel_outcome.take() {
+                            outcome
+                        } else if let Some(dependency) = failed_dependency {
+                            ToolResultEnvelope::Err {
                                 failure: ToolFailure::new(
-                                    ToolFailureKind::Validation,
-                                    "invalid_json",
-                                    error,
+                                    ToolFailureKind::PolicyDenied,
+                                    "tool_dependency_failed",
+                                    format!("declared dependency '{dependency}' failed"),
                                 ),
-                            },
+                            }
+                        } else {
+                            match parsed_args {
+                                Ok(args) => {
+                                    if let Err(failure) =
+                                        validate_advertised_tool(&tools, &tc.function.name, &args)
+                                    {
+                                        ToolResultEnvelope::Err { failure }
+                                    } else if tc.function.name == "execlaw.discover_tool" {
+                                        ToolResultEnvelope::Ok {
+                                            value: discover_tools(
+                                                args.get("query")
+                                                    .and_then(serde_json::Value::as_str)
+                                                    .unwrap_or(""),
+                                                &cfg.discoverable_tools,
+                                            ),
+                                        }
+                                    } else if tc.function.name == "execlaw.read_artifact" {
+                                        read_result_artifact(
+                                            db,
+                                            cfg.tool_result_artifacts_root.as_deref(),
+                                            conversation_id,
+                                            durable.run_id(),
+                                            &args,
+                                        )
+                                        .await
+                                    } else if schema_failures
+                                        .get(&tc.function.name)
+                                        .copied()
+                                        .unwrap_or_default()
+                                        >= MAX_SCHEMA_CORRECTIONS
+                                    {
+                                        let mut failure = ToolFailure::new(
+                                            ToolFailureKind::Permanent,
+                                            "schema_correction_exhausted",
+                                            "tool arguments remained invalid after bounded correction attempts",
+                                        );
+                                        failure.guidance = Some(
+                                            "choose another tool or answer without a tool".into(),
+                                        );
+                                        ToolResultEnvelope::Err { failure }
+                                    } else {
+                                        let (dispatch_input_hash, result_schema_hash) = self
+                                            .tool_dispatch
+                                            .schema_hashes(&tc.function.name)
+                                            .await;
+                                        let input_schema_hash = dispatch_input_hash.or_else(|| {
+                                            tools
+                                                .iter()
+                                                .find(|tool| tool.function.name == tc.function.name)
+                                                .map(|tool| {
+                                                    tool_schema_hash(&tool.function.parameters)
+                                                })
+                                        });
+                                        self.tool_dispatch.set_effect_ordinal(
+                                            u32::try_from(tool_ordinal).unwrap_or(u32::MAX),
+                                        );
+                                        self.dispatch_with_retry(
+                                            db,
+                                            durable.run_id(),
+                                            &tool_step_id,
+                                            &tc.function.name,
+                                            &args,
+                                            input_schema_hash,
+                                            result_schema_hash,
+                                            cfg.max_tool_rounds.saturating_mul(
+                                                MAX_DISPATCH_ATTEMPTS.saturating_sub(1),
+                                            ),
+                                        )
+                                        .await?
+                                    }
+                                }
+                                Err(error) => ToolResultEnvelope::Err {
+                                    failure: ToolFailure::new(
+                                        ToolFailureKind::Validation,
+                                        "invalid_json",
+                                        error,
+                                    ),
+                                },
+                            }
                         };
                         let outcome = offload_large_result(
                             db,
@@ -1560,7 +1831,7 @@ impl TurnExecutor {
                             conversation_id,
                             durable.run_id(),
                             &tc.function.name,
-                            outcome,
+                            result,
                         )
                         .await;
                         durable.complete(
@@ -1577,6 +1848,10 @@ impl TurnExecutor {
                         });
                     }
                 };
+                completed_tool_dependencies.insert(
+                    tc.function.name.clone(),
+                    matches!(outcome, ToolResultEnvelope::Ok { .. }),
+                );
                 let visible_outcome =
                     activate_discovered_schemas(&tc.function.name, &mut tools, &outcome);
                 durable.advance(durable_ordinal, chrono::Utc::now().timestamp())?;
@@ -1586,8 +1861,20 @@ impl TurnExecutor {
                 {
                     *schema_failures.entry(tc.function.name.clone()).or_default() += 1;
                 }
-                let tool_elapsed_ms = tool_started_at.elapsed().as_millis() as u64;
-                round_tool_dispatch_ms = round_tool_dispatch_ms.saturating_add(tool_elapsed_ms);
+                let tool_elapsed_ms = parallel_metrics
+                    .map(|(elapsed, _)| elapsed)
+                    .unwrap_or_else(|| tool_started_at.elapsed().as_millis() as u64);
+                let round_elapsed_ms = parallel_metrics
+                    .map(|(_, group_elapsed)| group_elapsed)
+                    .filter(|group_elapsed| *group_elapsed > 0)
+                    .unwrap_or_else(|| {
+                        if parallel_metrics.is_some() {
+                            0
+                        } else {
+                            tool_elapsed_ms
+                        }
+                    });
+                round_tool_dispatch_ms = round_tool_dispatch_ms.saturating_add(round_elapsed_ms);
                 tracing::debug!(
                     target: "agent::turn_timing",
                     conversation_id = %conversation_id_str,
@@ -3372,5 +3659,179 @@ mod tests {
             text.contains("ignore prior instructions"),
             "the original (now-quoted) payload is still present inside the wrap"
         );
+    }
+
+    fn readonly_contract(resource: &str) -> ToolEffectContract {
+        ToolEffectContract {
+            resources: vec![execlaw_plugin_sdk::manifest::ToolResourceAccess {
+                resource: resource.to_owned(),
+                access: execlaw_plugin_sdk::manifest::ToolResourceMode::Read,
+            }],
+            external_effect: execlaw_plugin_sdk::manifest::ToolExternalEffect::ReadOnly,
+            concurrency: execlaw_plugin_sdk::manifest::ToolConcurrency::ReadOnly,
+            ..ToolEffectContract::default()
+        }
+    }
+
+    #[test]
+    fn parallel_read_planner_batches_only_declared_read_only_calls() {
+        let names = vec!["read_a", "read_b", "unknown", "write", "read_c"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut write = readonly_contract("record/1");
+        write.external_effect = execlaw_plugin_sdk::manifest::ToolExternalEffect::ExternalWrite;
+        write.concurrency = execlaw_plugin_sdk::manifest::ToolConcurrency::Exclusive;
+        write.resources[0].access = execlaw_plugin_sdk::manifest::ToolResourceMode::Write;
+        let mut dependent_read = readonly_contract("profile");
+        dependent_read.dependencies = vec!["load_profile_id".into()];
+        let batches = parallel_read_batches(
+            &names,
+            &[
+                Some(readonly_contract("records")),
+                Some(readonly_contract("records")),
+                None,
+                Some(write),
+                Some(dependent_read),
+            ],
+        );
+        assert_eq!(batches, vec![vec![0, 1], vec![2], vec![3], vec![4]]);
+        let safe_names = (0..5)
+            .map(|index| format!("read_{index}"))
+            .collect::<Vec<_>>();
+        let safe_contracts = (0..5)
+            .map(|index| Some(readonly_contract(&format!("resource_{index}"))))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parallel_read_batches(&safe_names, &safe_contracts),
+            vec![vec![0, 1, 2, 3], vec![4]]
+        );
+        let dependency_names = vec!["dependent".to_owned(), "prerequisite".to_owned()];
+        let mut dependent = readonly_contract("derived");
+        dependent.dependencies = vec!["prerequisite".into()];
+        let dependency_contracts = vec![Some(dependent), Some(readonly_contract("source"))];
+        assert_eq!(
+            unsatisfied_same_round_dependencies(&dependency_names, &dependency_contracts),
+            HashSet::from([0])
+        );
+        let dependencies = vec!["prerequisite".to_owned()];
+        assert_eq!(
+            failed_declared_dependency(
+                &dependencies,
+                &HashMap::from([("prerequisite".to_owned(), false)])
+            ),
+            Some("prerequisite")
+        );
+        assert_eq!(
+            failed_declared_dependency(
+                &dependencies,
+                &HashMap::from([("prerequisite".to_owned(), true)])
+            ),
+            None
+        );
+        assert_eq!(
+            failed_declared_dependency(&dependencies, &HashMap::new()),
+            Some("prerequisite")
+        );
+    }
+
+    struct BarrierReadDispatch {
+        barrier: Arc<tokio::sync::Barrier>,
+        active: std::sync::atomic::AtomicUsize,
+        max_active: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl ToolDispatch for BarrierReadDispatch {
+        async fn call(
+            &self,
+            tool_name: &str,
+            _args_json: &serde_json::Value,
+        ) -> Result<serde_json::Value, String> {
+            let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active.fetch_max(active, Ordering::SeqCst);
+            self.barrier.wait().await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.active.fetch_sub(1, Ordering::SeqCst);
+            if tool_name == "read_fail" {
+                Err("read failed".into())
+            } else {
+                Ok(serde_json::json!({"tool": tool_name}))
+            }
+        }
+
+        fn effect_contract(&self, _tool_name: &str) -> Option<ToolEffectContract> {
+            Some(readonly_contract("shared/readable"))
+        }
+    }
+
+    #[tokio::test]
+    async fn parallel_read_batch_overlaps_and_collects_failure_without_orphans() {
+        let dispatch = Arc::new(BarrierReadDispatch {
+            barrier: Arc::new(tokio::sync::Barrier::new(3)),
+            active: std::sync::atomic::AtomicUsize::new(0),
+            max_active: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let started = std::time::Instant::now();
+        let outcomes = call_parallel_reads(
+            dispatch.clone(),
+            vec![
+                ("read_a".into(), serde_json::json!({})),
+                ("read_fail".into(), serde_json::json!({})),
+                ("read_c".into(), serde_json::json!({})),
+            ],
+            std::time::Duration::from_secs(2),
+            None,
+        )
+        .await;
+        assert!(started.elapsed() < std::time::Duration::from_millis(500));
+        assert_eq!(dispatch.max_active.load(Ordering::SeqCst), 3);
+        assert_eq!(outcomes.len(), 3);
+        assert!(matches!(outcomes[0].0, ToolResultEnvelope::Ok { .. }));
+        assert!(matches!(outcomes[1].0, ToolResultEnvelope::Err { .. }));
+        assert!(matches!(outcomes[2].0, ToolResultEnvelope::Ok { .. }));
+    }
+
+    #[tokio::test]
+    async fn cancellation_collects_every_parallel_read_result() {
+        let dispatch = Arc::new(BarrierReadDispatch {
+            barrier: Arc::new(tokio::sync::Barrier::new(3)),
+            active: std::sync::atomic::AtomicUsize::new(0),
+            max_active: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let dispatch_for_task = dispatch.clone();
+        let cancel_for_task = cancel.clone();
+        let task = tokio::spawn(async move {
+            call_parallel_reads(
+                dispatch_for_task,
+                vec![
+                    ("read_a".into(), serde_json::json!({})),
+                    ("read_b".into(), serde_json::json!({})),
+                    ("read_c".into(), serde_json::json!({})),
+                ],
+                std::time::Duration::from_secs(2),
+                Some(cancel_for_task),
+            )
+            .await
+        });
+        for _ in 0..100 {
+            if dispatch.max_active.load(Ordering::SeqCst) == 3 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(dispatch.max_active.load(Ordering::SeqCst), 3);
+        cancel.store(true, Ordering::SeqCst);
+        let outcomes = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(outcomes.len(), 3);
+        assert!(outcomes.iter().all(|(outcome, _)| matches!(
+            outcome,
+            ToolResultEnvelope::Err { failure }
+                if failure.kind == ToolFailureKind::Cancelled
+        )));
     }
 }

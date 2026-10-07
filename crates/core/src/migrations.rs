@@ -416,6 +416,11 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "controlled_job_redrive",
         sql: include_str!("../migrations/0078_controlled_job_redrive.sql"),
     },
+    Migration {
+        id: 79,
+        name: "resource_version_preconditions",
+        sql: include_str!("../migrations/0079_resource_version_preconditions.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]

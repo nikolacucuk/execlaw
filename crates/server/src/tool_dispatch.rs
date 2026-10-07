@@ -1333,6 +1333,17 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
 
 #[async_trait]
 impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
+    fn effect_contract(
+        &self,
+        tool_name: &str,
+    ) -> Option<execlaw_plugin_sdk::manifest::ToolEffectContract> {
+        self.host
+            .registry()
+            .tool(tool_name)
+            .or_else(|| self.host.registry().host_tool(tool_name))
+            .map(|tool| tool.effect_contract.clone())
+    }
+
     fn outbox_idempotency_key(
         &self,
         tool_name: &str,
@@ -1827,6 +1838,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("not registered"));
+    }
+
+    #[test]
+    fn declared_read_only_effect_contract_reaches_the_turn_scheduler() {
+        use execlaw_plugin_sdk::manifest::{ToolConcurrency, ToolExternalEffect, ToolResourceMode};
+
+        let host = test_host();
+        let manifest = execlaw_plugin_sdk::manifest::PluginManifest::parse(
+            r#"
+[plugin]
+id = "parallel-read-fixture"
+name = "Parallel read fixture"
+version = "0.1.0"
+
+[[tools]]
+name = "slow.read_a"
+latency = "high"
+effect_contract = { resources = [{ resource = "records", access = "read" }], external_effect = "read_only", concurrency = "read_only", cancellation = "best_effort", sensitivity = "personal" }
+"#,
+        )
+        .unwrap();
+        host.registry().enable(&manifest).unwrap();
+        let dispatch = ChainedToolDispatch::new(host, vec!["*".into()], NoBuiltinTools);
+        let contract = dispatch.effect_contract("slow.read_a").unwrap();
+        assert_eq!(contract.external_effect, ToolExternalEffect::ReadOnly);
+        assert_eq!(contract.concurrency, ToolConcurrency::ReadOnly);
+        assert_eq!(contract.resources[0].access, ToolResourceMode::Read);
+        assert!(dispatch.effect_contract("unadvertised").is_none());
     }
 
     #[tokio::test]

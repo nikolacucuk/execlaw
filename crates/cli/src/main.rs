@@ -3900,8 +3900,12 @@ async fn cmd_serve(
     {
         Ok(Ok(0)) => {}
         Ok(Ok(recovered)) => tracing::info!(recovered, "resumed authorized automation redrives"),
-        Ok(Err(error)) => tracing::error!(error = %error, "authorized automation redrive recovery failed"),
-        Err(error) => tracing::error!(error = %error, "authorized automation redrive recovery worker failed"),
+        Ok(Err(error)) => {
+            tracing::error!(error = %error, "authorized automation redrive recovery failed")
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "authorized automation redrive recovery worker failed")
+        }
     }
     let (automation_bus, automation_bus_tasks) =
         execlaw_server::automation_bus::AutomationBus::spawn(

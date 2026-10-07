@@ -313,6 +313,71 @@ required_features = ["jsonrpc.line.v1"]
     );
 }
 
+#[tokio::test]
+async fn generated_author_plugin_passes_offline_checks_and_public_lifecycle_routes() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("generated-plugin");
+    execlaw_plugin_host::conformance::generate_project(&project, "generated-plugin", "script")
+        .unwrap();
+    let report = execlaw_plugin_host::conformance::check_project(&project).unwrap();
+    assert_eq!(report.plugin_id, "generated-plugin");
+    assert_eq!(report.tool_count, 1);
+
+    let manifest = std::fs::read(project.join("plugin.toml")).unwrap();
+    let source = std::fs::read(project.join("main.rhai")).unwrap();
+    let input_schema = std::fs::read(project.join("schemas/echo.json")).unwrap();
+    let result_schema = std::fs::read(project.join("schemas/echo-result.json")).unwrap();
+    let fixture = std::fs::read(project.join("tests/conformance.json")).unwrap();
+    let zip = build_zip(&[
+        ("plugin.toml", &manifest),
+        ("main.rhai", &source),
+        ("schemas/echo.json", &input_schema),
+        ("schemas/echo-result.json", &result_schema),
+        ("tests/conformance.json", &fixture),
+    ]);
+    let (app, state) = build_app(dir.path().join("stage"));
+    let (status, body) = post_zip(app.clone(), zip).await;
+    assert_eq!(status, StatusCode::OK, "install body: {body}");
+    assert!(
+        state
+            .plugin_host
+            .registry()
+            .tool("generated-plugin.echo")
+            .is_some()
+    );
+
+    for (method, suffix) in [
+        (Method::POST, "disable"),
+        (Method::POST, "enable"),
+        (Method::DELETE, ""),
+    ] {
+        let uri = if suffix.is_empty() {
+            "/api/admin/plugins/generated-plugin".to_owned()
+        } else {
+            format!("/api/admin/plugins/generated-plugin/{suffix}")
+        };
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "lifecycle route {uri}");
+    }
+    assert!(
+        state
+            .plugin_host
+            .get_row("generated-plugin")
+            .unwrap()
+            .is_none()
+    );
+}
+
 /// Zip-slip: an archive with a `../evil.txt` entry must be rejected
 /// before any filesystem write lands outside the stage dir.
 #[tokio::test]

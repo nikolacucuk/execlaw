@@ -28,7 +28,28 @@
         "properties": {
           "label": { "type": "string", "minLength": 1 },
           "effect_kind": { "type": "string" },
-          "payload": {}
+          "payload": {},
+          "resource_keys": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+            "maxItems": 64,
+            "description": "Provider-observed resource keys whose versions are captured by prepare and checked again at execution."
+          },
+          "compensation": {
+            "type": "object",
+            "properties": {
+              "label": { "type": "string", "minLength": 1 },
+              "effect_kind": { "type": "string", "minLength": 1 },
+              "payload": {},
+              "resource_keys": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "maxItems": 64
+              }
+            },
+            "required": ["label", "effect_kind"],
+            "additionalProperties": false
+          }
         },
         "required": ["label"]
       }

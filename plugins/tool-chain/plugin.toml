@@ -1,7 +1,7 @@
 [plugin]
 id = "tool-chain"
 name = "Tool Chain Orchestrator"
-version = "0.1.0"
+version = "0.2.0"
 description = "Programmatic tool-chaining scaffold for planning and gated execution of multi-step tool flows."
 author = "execlaw"
 license = "Apache-2.0"
@@ -12,11 +12,20 @@ source = "main.rhai"
 
 [[tools]]
 name = "chain.plan"
-description = "Build a deterministic step plan for a multi-tool task. Planning only; no external effects."
+description = "Prepare a deterministic step plan with resource-version preconditions and optional compensations. Preparation creates no external effects."
 latency = "low"
 trust_floor = "KnownLimited"
 host_implemented = true
 schema = "schemas/chain.plan.json"
+
+[[tools]]
+name = "chain.preview"
+description = "Preview a prepared plan's provider-observed resource versions. A stale or unconditionally mutable resource blocks execution."
+latency = "low"
+trust_floor = "Controller"
+host_implemented = true
+required_capabilities = ["tools.sensitive"]
+schema = "schemas/chain.preview.json"
 
 [[tools]]
 name = "chain.execute"
