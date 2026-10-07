@@ -1078,7 +1078,7 @@ mod tests {
                 receipt.assets[0].asset_id, receipt.assets[0].version
             )
         );
-        assert_eq!(source.content_sha256.len(), 64);
+        assert_eq!(source.content_sha256.as_ref().unwrap().len(), 64);
 
         let original_run = {
             let store = AgentStore::new(&db);

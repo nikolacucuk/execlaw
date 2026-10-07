@@ -62,6 +62,7 @@ pub mod message_archive;
 pub mod migrations;
 pub mod oauth;
 pub mod outbox;
+pub mod paired_hosts;
 pub mod personality;
 pub mod policy_simulation;
 pub mod preferences;

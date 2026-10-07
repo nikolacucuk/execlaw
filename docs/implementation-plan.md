@@ -1,6 +1,6 @@
 # Implementation plan: all 154 enhancements
 
-Accepted scope: **H001-H154**, updated 2026-10-06 (initial H001-H130 scope: 2026-09-27). The operator intends to implement
+Accepted scope: **H001-H154**, updated 2026-10-07 (initial H001-H130 scope: 2026-09-27). The operator intends to implement
 all 154 items. This is the delivery ledger, not a request to implement every
 item in a single change. No item may be silently dropped, marked complete
 for lack of time, or described as shipped solely because it appears here.
@@ -36,9 +36,9 @@ results. No item is release-qualified by this documentation change.
 
 | Status | Items | Meaning |
 |---|---:|---|
-| Planned | 71 | Accepted items without delivery evidence attached yet |
-| Implemented; revalidate | 49 | Implementation is recorded; current acceptance and supported-platform evidence remains to be executed |
-| Partial | 33 | Implemented slices with open acceptance gates; see the individual rows below |
+| Planned | 56 | Accepted items without delivery evidence attached yet |
+| Implemented; revalidate | 53 | Implementation is recorded; current acceptance and supported-platform evidence remains to be executed |
+| Partial | 44 | Implemented slices with open acceptance gates; see the individual rows below |
 | Reopened | 0 | No reopened enhancement items |
 | Verification blocked | 1 | H020 requires production SQLCipher qualification and reconciliation of F04/F16 |
 | Qualified | 0 | All applicable acceptance, security, and supported-platform evidence passes |
@@ -102,10 +102,9 @@ as an independent status system. H005, H009, H011, and H018 have completed
 their requested implementation and focused acceptance checks. H020 remains
 unchecked and verification-blocked.
 
-Lab items H084/H085 remain accepted work. Implement the specified trial and
-evaluate its acceptance gate before production activation. A failed trial
-requires redesign or an explicit recorded operator decision to change scope;
-it is not an automatic exemption from the 154-item plan.
+H084 and H085 now have opt-in trial implementations. Their performance,
+cross-platform, transport-adapter, and measured-benefit gates remain open; the
+trials are not enabled in release builds and are not production adoption.
 
 ## Workstreams and delivery order
 
@@ -226,16 +225,16 @@ parallel list with its own status.
 | H078 | [Qualify useful hardware tiers beyond the primary GPU path](llm-harness-roadmap.md#enhancement-078) | S3 | Partial | Unassigned | Benchmark records now include per-task latency, live CPU/RAM/GPU probes, Linux battery/thermal/throttle observations, and explicit unavailable telemetry; offline fixtures remain marked as scoring-only. Reproducible model-quality/latency reports for each advertised CPU/Apple/Intel/AMD/NVIDIA tier, plus visible approved-model fallback that preserves required capabilities, remain |
 | H079 | [Ship a plugin author conformance kit](llm-harness-roadmap.md#enhancement-079) | S6 | Implemented; revalidate | Unassigned | `execlaw-plugin-conformance` generates script/subprocess sample projects, runs them through mock inputs, validates input/result schemas and declared capabilities, checks lifecycle fixtures, and rejects authority-expanding or trust-relaxing upgrades with actionable messages. Server integration coverage installs the generated author sample through the public lifecycle API. Manifest JSON Schema is generated from plugin-sdk structs. Independent third-party author and release qualification remain |
 | H080 | [Negotiate plugin API compatibility explicitly](llm-harness-roadmap.md#enhancement-080) | S6 | Implemented; revalidate | Unassigned | Manifests can declare a semver host API range and required protocol features; unsupported ranges, unknown security features, and unknown compatibility fields fail during install parsing. Legacy bundles without the table remain supported. Deprecated `host_log` remains an alias for `log_info`; enable-time diagnostics name the replacement without changing its authority or effect. Supported-release fixture qualification remains |
-| H081 | [Pin executable tool versions for in-flight runs](llm-harness-roadmap.md#enhancement-081) | S6 | Planned | Unassigned | Pending |
+| H081 | [Pin executable tool versions for in-flight runs](llm-harness-roadmap.md#enhancement-081) | S6 | Implemented; revalidate | Unassigned | Durable run snapshots now store plugin artifact-tree digests, versions, schemas, and MCP declared-server configuration identities/schema hashes. Dispatch rechecks the current identity before calls; run-scoped mutation leases prevent run pin creation racing with plugin upgrade/disable/uninstall and block those operations until all pinned runs drain. Tests cover snapshot immutability, active-run retention, changed-code denial, and mutation blocking. Real operator-managed deployment verification and release/platform qualification remain |
 | H082 | [Support publisher revocation and offline compromise response](llm-harness-roadmap.md#enhancement-082) | S2 | Partial | Unassigned | Added Controller-approved publisher/digest revocation records with source, freshness, issue/expiry times, recovery package references, audit events, impact inventory, and checks on verified reinstall and digest-pinned OCI authorization. Local staged plugin trees now receive a content digest, and startup quarantines signed plugin artifacts whose publisher/digest has since been revoked. Tests cover non-Controller denial, offline metadata retention, impact inventory, clear/recover, reinstall denial, and OCI cache denial. Live running-sidecar stop/drain, operator-facing import/recovery workflow, and cached legacy/local package attribution remain |
 | H083 | [Make plugin hook ordering, failure, and reentrancy predictable](llm-harness-roadmap.md#enhancement-083) | S6 | Partial | Unassigned | Event subscribers now sort by plugin ID and handler rather than enable timing; a reverse-enable-order regression test records the contract. Event hook execution is not currently wired into a dispatcher, so failure isolation/abort semantics, invocation budgets, reentrancy controls, and versioned conformance traces remain |
-| H084 | [Trial a restricted WebAssembly plugin tier](llm-harness-roadmap.md#enhancement-084) | S6 | Planned | Unassigned | Pending |
-| H085 | [Trial delegation between explicitly paired operator-owned hosts](llm-harness-roadmap.md#enhancement-085) | S4 | Planned | Unassigned | Pending |
-| H086 | [Make instruction precedence inspectable and resistant to injection](llm-harness-roadmap.md#enhancement-086) | S3 | Partial | Unassigned | Prompt now states the operator/system > task > repository/skill > retrieved/tool-data hierarchy; retrieved governed assets are labeled untrusted, and turn receipts include hash-only instruction source/version metadata. Focused precedence/receipt test added. Host-side import/attachment instruction scanning and a Controller inspection surface for all instruction types remain |
-| H087 | [Detect dependency cycles and capacity deadlocks](llm-harness-roadmap.md#enhancement-087) | S4 | Partial | Unassigned | Child dependencies are bounded to 128 tasks/64 edges each, duplicate edges are rejected, and reservation checks reject cycles with an actionable path in the same transaction. Cycle regression test added. Shared wait graph coverage for inference permits, resource locks, approvals, and releasing a parent's model slot while joining a child remain |
-| H088 | [Cache qualified read results with authorization and freshness checks](llm-harness-roadmap.md#enhancement-088) | S3 | Partial | Unassigned | Added persistent cache keys scoped by conversation, authority, tool/version, canonical args, and source revision; cache reads require a per-hit reauthorization callback, expiry/revision match, and an explicit read-only flag. Scope and source invalidation APIs preserve provenance. Core tests cover reauthorization and effect exclusion. Tool-dispatch integration, permission/deletion invalidation wiring, stale-result surfacing, and measured latency evidence remain |
-| H089 | [Resolve entities without silently merging identities](llm-harness-roadmap.md#enhancement-089) | S5 | Partial | Unassigned | Added temporal evidence-backed aliases and pending merge proposals for person/project/place/resource entities. Candidate lookup preserves same-name ambiguity; accepted merges are reversible and do not copy trust. Tests cover ambiguity, merge, reversal, invalid intervals, and cycle prevention. Authorized review endpoints, source-event projection, and split history in retrieval remain |
-| H090 | [Separate explicit preferences from inferred personalization](llm-harness-roadmap.md#enhancement-090) | S5 | Partial | Unassigned | Added scoped preference storage with explicit/inferred origin, evidence, expiry, proposal/approval/retraction transitions, and operator-only explicit writes. Controller prompt loadout reads approved global/agent-scope preferences and records hash-only source receipts. Tests cover third-party denial, one-task isolation, inferred approval, expiry, correction, and removal. Operator correction UI and end-to-end role/loadout tests remain |
+| H084 | [Trial a restricted WebAssembly plugin tier](llm-harness-roadmap.md#enhancement-084) | S6 | Partial | Unassigned | Added an opt-in Wasmtime 36.0.17 core-module tier with no imports, no host functions or ambient capabilities, and manifest validation requiring capability-free pure transform tools with no host effect surfaces. The typed JSON ABI uses a fresh store per call, 16 MiB memory, 1,024 table elements, 10 million fuel, 256 KiB stack, and bounded input/output. Module compilation is serialized off the async reactor and transform calls use a four-worker cap. Install/enable/hydrate/disable and conformance paths share plugin lifecycle; schema validation wraps results. Seven tests pass for imports, memory/table limits, fuel, input/output size, typed output, per-call isolation, and lifecycle. Deployment-size/overhead comparison against Rhai and subprocess plus supported-platform qualification remain |
+| H085 | [Trial delegation between explicitly paired operator-owned hosts](llm-harness-roadmap.md#enhancement-085) | S4 | Partial | Unassigned | Added durable peer pairing with Ed25519 identity, HTTPS local/VPN endpoint and local-inference endpoint checks, signed inbound/outbound task envelopes, authority/data-label intersection, typed signed artifacts, monotone task transitions, revocation, and database-reopen recovery. Tests reject unpaired/public peers and forged authority/signatures, verify narrowing and typed results, and retain tasks across DB reopen. The live network adapter, transport reconnection drill, external artifact transfer, and measured task/hardware benefit remain |
+| H086 | [Make instruction precedence inspectable and resistant to injection](llm-harness-roadmap.md#enhancement-086) | S3 | Implemented; revalidate | Unassigned | Prompt states the operator/system > task > repository/skill > retrieved/tool-data hierarchy; governed assets are explicitly labeled untrusted. Persisted hash-only source/version receipts are exposed through run trace inspection. Tests cover conflicting host/task instructions, receipt secrecy, and the operator inspection response; executable authority remains gated by host policy. Supported-model injection qualification remains |
+| H087 | [Detect dependency cycles and capacity deadlocks](llm-harness-roadmap.md#enhancement-087) | S4 | Partial | Unassigned | Child dependencies are bounded to 128 tasks/64 edges each, duplicate edges are rejected, and reservation checks reject cycles with an actionable path in the same transaction. Regression tests cover cycle-path reporting, transactional rejection without partial reservation, and freeing the only remaining per-model slot for a child after parent inference returns. A shared wait graph for resource locks and approval waits remains |
+| H088 | [Cache qualified read results with authorization and freshness checks](llm-harness-roadmap.md#enhancement-088) | S3 | Partial | Unassigned | Persistent cache keys scope results by conversation, principal/grant fingerprint, tool/version, canonical args, and fresh provider resource revisions. Dispatcher caches only explicit plugin read-only contracts, rechecks live access for each hit, skips writes/built-ins/MCP, and reports expired or revision-changed entries as stale before doing a live read. Tests cover actual dispatch hits, authority changes, conversation isolation, revisions, reauthorization, expiry, stale status, and effects. Criterion measured cache-hit lookup at 17.1-20.7 us and stale inspection at 38.4-43.7 us in the local isolated build; deletion invalidation probes and an end-to-end live-provider comparison remain |
+| H089 | [Resolve entities without silently merging identities](llm-harness-roadmap.md#enhancement-089) | S5 | Implemented; revalidate | Unassigned | Added evidence-backed temporal aliases and merge proposals for person/project/place/resource entities. Same-name candidates remain ambiguous until a Controller decision; accept/reject/reverse records actor and reason append-only, reversal restores distinct candidates, and semantic redirects carry no trust. Controller APIs expose candidate ambiguity and proposal review. Core tests cover time bounds, ambiguity, merge, cycle rejection, reversal, and decision history; broader retrieval integration remains |
+| H090 | [Separate explicit preferences from inferred personalization](llm-harness-roadmap.md#enhancement-090) | S5 | Implemented; revalidate | Unassigned | Added scoped explicit/inferred preference records with evidence, expiry, proposal/approval/reject/retract transitions, and Controller-only management APIs. One-task scopes cannot be persisted as preferences. Controller prompt loadouts include only approved global/agent-scope values and store hash-only receipts; other trust classes receive no preference block. Core tests cover governance, expiry, correction/removal, and inference states; server tests cover role gating and Controller-only prompt loadout |
 | H091 | [Ingest documents with page, cell, and region evidence](llm-harness-roadmap.md#enhancement-091) | S5 | Planned | Unassigned | Pending |
 | H092 | [Maintain a revision-aware local code and documentation index](llm-harness-roadmap.md#enhancement-092) | S4 | Planned | Unassigned | Pending |
 | H093 | [Apply patches with explicit file preconditions and transactions](llm-harness-roadmap.md#enhancement-093) | S4 | Partial | Unassigned | Multi-file checkout patches now validate all hashes and bounds before writes, reject duplicate paths, preserve permissions, and roll back already-applied files on a later I/O failure while protecting concurrent edits. Same-request replay accepts already-applied files so a reclaimed durable job can finish. Server regression tests were added but remain unverified because unrelated missing core modules currently stop server compilation; process-kill recovery and permission/encoding matrices remain |
@@ -374,12 +373,21 @@ operator-state changes by itself.
 
 ## Change record
 
+- 2026-10-07: implemented the H081 run pin path and H084/H085 lab trials.
+  H081 persists local plugin and MCP server/schema identities in each durable
+  run, rechecks them before dispatch, and holds a mutation lease while pinned
+  runs are active. H084 adds the opt-in no-import Wasmtime JSON transform tier;
+  H085 adds signed, durable paired-host task contracts and authority narrowing.
+  Focused core, plugin-host, plugin-sdk, and WASM adversarial tests pass; the
+  server check and MCP schema-drift regression also pass. Live paired-host
+  transport and measured-benefit gates remain open.
+
 - 2026-10-07: began H082 revocation and H083 deterministic hook-order slices.
   Added migration 0080 and focused adversarial tests. H082 remains Partial
   because live sidecar drain and the operator import/recovery flow are open;
   H083 remains Partial because the event hook dispatcher and its execution
-  contract are not implemented. The focused Rust test command was blocked by
-  Windows Application Control error 4551 before crate tests executed.
+  contract are not implemented. Focused core provenance and plugin-host order
+  tests subsequently passed; live sidecar drain and event dispatch remain open.
 
 - 2026-10-06: continued the main numbering with H131-H154 for the 24
   Paperclip-related enhancements; merged their rows into the item ledger and

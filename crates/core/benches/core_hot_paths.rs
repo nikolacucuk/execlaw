@@ -27,6 +27,7 @@ use execlaw_core::ids::ResearchJobId;
 use execlaw_core::ids::{ConversationId, EventSeq, IdempotencyKey, TurnSeq};
 use execlaw_core::migrations::MigrationRunner;
 use execlaw_core::outbox::{OutboxRow, OutboxStatus, OutboxStore};
+use execlaw_core::qualified_read_cache::{QualifiedReadCache, ReadCacheKey};
 use execlaw_core::refresh_tokens::RefreshTokenStore;
 use execlaw_core::research::{
     PhaseGates, PlanStep, ResearchConfigStore, ResearchConfigUpdate, ResearchJobStore,
@@ -1865,6 +1866,60 @@ fn bench_sqlite_wal_commit_durability(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_qualified_read_cache(c: &mut Criterion) {
+    let db = fresh_db();
+    let cache = QualifiedReadCache::new(&db);
+    let args = serde_json::json!({"status":"open","limit":50});
+    let key = ReadCacheKey {
+        conversation_id: "cache-bench-conversation",
+        authority_scope: "principal:controller:grant-fingerprint",
+        tool_name: "records.list",
+        tool_version: "4.2.0",
+        canonical_arguments: &args,
+        source_revision: "source-revision-100",
+    };
+    cache
+        .put(
+            &key,
+            true,
+            &serde_json::json!({"records":[]} ),
+            &serde_json::json!({"provider":"local-fixture","revision":"source-revision-100"}),
+            10_000,
+            1,
+        )
+        .unwrap();
+    let mut group = c.benchmark_group("qualified_read_cache");
+    group.bench_function(
+        BenchmarkId::new("authorized_fresh_hit", "same_revision"),
+        |bench| {
+            bench.iter(|| {
+                black_box(
+                    cache
+                        .get_authorized(black_box(&key), true, black_box(2), |_, _, _| true)
+                        .unwrap(),
+                )
+            });
+        },
+    );
+    let changed = ReadCacheKey {
+        source_revision: "source-revision-101",
+        ..key.clone()
+    };
+    group.bench_function(
+        BenchmarkId::new("stale_revision_inspection", "changed_revision"),
+        |bench| {
+            bench.iter(|| {
+                black_box(
+                    cache
+                        .lookup_authorized(black_box(&changed), true, black_box(2), |_, _, _| true)
+                        .unwrap(),
+                )
+            });
+        },
+    );
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_automation_bus,
@@ -1895,5 +1950,6 @@ criterion_group!(
     bench_research_retention_candidates,
     bench_transport_binding_store,
     bench_sqlite_wal_commit_durability,
+    bench_qualified_read_cache,
 );
 criterion_main!(benches);

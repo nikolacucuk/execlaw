@@ -188,6 +188,77 @@ impl McpHost {
         }
     }
 
+    /// Snapshot each connected MCP tool's schema and operator-declared server identity.
+    pub async fn implementation_pins(
+        &self,
+    ) -> Result<Vec<execlaw_core::runs::RunToolImplementationPin>, String> {
+        let rows = McpServerStore::new(&self.inner.db)
+            .list_all()
+            .map_err(|error| format!("list MCP server identities: {error}"))?;
+        let rows = rows
+            .into_iter()
+            .filter(|row| row.enabled)
+            .map(|row| (row.id.clone(), row))
+            .collect::<HashMap<_, _>>();
+        let handles = self
+            .inner
+            .servers
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        let mut pins = Vec::new();
+        for (server_id, handle) in handles {
+            let Some(row) = rows.get(&server_id) else {
+                continue;
+            };
+            let current_identity = mcp_config_fingerprint(&self.inner.db, row)?;
+            if current_identity != handle.config_fingerprint {
+                return Err(format!(
+                    "MCP server '{server_id}' configuration changed before its tools were pinned"
+                ));
+            }
+            let schemas = handle.tool_schemas.lock().await;
+            for (remote_name, schema) in schemas.iter() {
+                pins.push(execlaw_core::runs::RunToolImplementationPin {
+                    runtime_kind: "mcp".into(),
+                    plugin_id: server_id.clone(),
+                    plugin_version: "remote-unpinned".into(),
+                    tool_name: format!("mcp:{server_id}:{remote_name}"),
+                    artifact_sha256: current_identity.clone(),
+                    input_schema_sha256: Some(schema.hash.clone()),
+                    result_schema_sha256: None,
+                    server_identity: Some(current_identity.clone()),
+                });
+            }
+        }
+        pins.sort_by(|left, right| left.tool_name.cmp(&right.tool_name));
+        Ok(pins)
+    }
+
+    /// Reject an MCP call if server configuration or advertised schema changed after planning.
+    pub async fn verify_run_tool_pin(&self, run_id: &str, tool_name: &str) -> Result<(), String> {
+        let expected = execlaw_core::runs::RunStore::new(&self.inner.db)
+            .implementation_pins(run_id)
+            .map_err(|error| format!("load run MCP pins: {error}"))?
+            .into_iter()
+            .find(|pin| pin.runtime_kind == "mcp" && pin.tool_name == tool_name)
+            .ok_or_else(|| {
+                format!("run '{run_id}' has no MCP implementation pin for '{tool_name}'")
+            })?;
+        let current = self
+            .implementation_pins()
+            .await?
+            .into_iter()
+            .find(|pin| pin.tool_name == tool_name)
+            .ok_or_else(|| format!("MCP tool '{tool_name}' is no longer advertised"))?;
+        if current != expected {
+            return Err(format!(
+                "MCP tool '{tool_name}' server identity or schema changed after run '{run_id}' was planned"
+            ));
+        }
+        Ok(())
+    }
+
     /// Re-read `config_mcp_servers` and start / stop actors so the
     /// running set matches the persisted set. Idempotent.
     pub async fn reconcile(&self) {
@@ -807,6 +878,136 @@ mod tests {
         assert_ne!(before, mcp_config_fingerprint(&db, &row).unwrap());
         row.auth_secret_ref = Some("credential-b".into());
         assert_ne!(before, mcp_config_fingerprint(&db, &row).unwrap());
+    }
+
+    #[tokio::test]
+    async fn mcp_run_pins_include_declared_server_and_tool_schema_and_reject_config_drift() {
+        use execlaw_core::db::DbConfig;
+        use execlaw_core::ids::{ConversationId, EventSeq};
+        use execlaw_core::mcp_servers::McpServerInsert;
+        use execlaw_core::migrations::MigrationRunner;
+        use execlaw_core::runs::{NewRun, RunInputManifest, RunStore};
+
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let row = McpServerInsert {
+            id: "peer-mcp".into(),
+            display_name: "Paired local MCP".into(),
+            transport: McpTransport::StreamableHttp,
+            command: None,
+            args: Vec::new(),
+            env: HashMap::new(),
+            cwd: None,
+            url: Some("https://127.0.0.1:7443/mcp".into()),
+            auth_secret_ref: None,
+            enabled: true,
+            default_allowed_classes: vec!["Controller".into()],
+        };
+        execlaw_core::mcp_servers::McpServerStore::new(&db)
+            .insert(&row, 100)
+            .unwrap();
+        let server_row = execlaw_core::mcp_servers::McpServerStore::new(&db)
+            .list_all()
+            .unwrap()
+            .remove(0);
+        let identity = mcp_config_fingerprint(&db, &server_row).unwrap();
+        let schema = serde_json::json!({"type":"object","properties":{"query":{"type":"string"}}});
+        let validator = compile_tool_schema(&schema, "peer-mcp.search").unwrap();
+        let host = McpHost::new(db.clone());
+        host.inner.servers.insert(
+            "peer-mcp".into(),
+            Arc::new(ServerHandle {
+                client: Mutex::new(None),
+                tool_schemas: Mutex::new(HashMap::from([(
+                    "search".into(),
+                    RegisteredMcpSchema {
+                        validator: Arc::new(validator),
+                        hash: tool_schema_hash(&schema),
+                    },
+                )])),
+                shutdown: Arc::new(Notify::new()),
+                config_fingerprint: identity.clone(),
+            }),
+        );
+        let pins = host.implementation_pins().await.unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].runtime_kind, "mcp");
+        assert_eq!(pins[0].server_identity.as_deref(), Some(identity.as_str()));
+        let expected_schema_hash = tool_schema_hash(&schema);
+        assert_eq!(
+            pins[0].input_schema_sha256.as_deref(),
+            Some(expected_schema_hash.as_str())
+        );
+
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_events(conversation_id,seq,kind,payload,committed_at)
+                 VALUES('mcp-pin-conversation',1,'user_msg',x'00',100)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let run_store = RunStore::new(&db);
+        let run_id = run_store
+            .create_run(&NewRun {
+                conversation_id: ConversationId::from("mcp-pin-conversation"),
+                parent_run_id: None,
+                input_event_seq: EventSeq(1),
+                started_at: 100,
+                deadline_at: None,
+            })
+            .unwrap();
+        let empty_catalog = serde_json::json!([]);
+        run_store
+            .record_input_manifest(
+                &run_id,
+                &RunInputManifest {
+                    input_version: 1,
+                    prompt_hash: "prompt".into(),
+                    model_settings_hash: "model".into(),
+                    tool_catalog_hash: execlaw_core::tool::tool_schema_hash(&empty_catalog),
+                    tool_catalog_snapshot_json: Some(
+                        serde_json::json!({
+                            "tools":[],
+                            "discoverable_tools":[],
+                            "implementation_pins":pins,
+                        })
+                        .to_string(),
+                    ),
+                    recorded_at: 100,
+                },
+            )
+            .unwrap();
+        host.verify_run_tool_pin(&run_id, "mcp:peer-mcp:search")
+            .await
+            .unwrap();
+        let changed_schema = serde_json::json!({"type":"string"});
+        let handle = host.inner.servers.get("peer-mcp").unwrap().value().clone();
+        {
+            let mut schemas = handle.tool_schemas.lock().await;
+            schemas.get_mut("search").unwrap().hash = tool_schema_hash(&changed_schema);
+            schemas.get_mut("search").unwrap().validator =
+                Arc::new(compile_tool_schema(&changed_schema, "peer-mcp.search").unwrap());
+        }
+        assert!(
+            host.verify_run_tool_pin(&run_id, "mcp:peer-mcp:search")
+                .await
+                .unwrap_err()
+                .contains("schema changed")
+        );
+
+        let mut changed = row;
+        changed.display_name = "Changed declaration".into();
+        execlaw_core::mcp_servers::McpServerStore::new(&db)
+            .update("peer-mcp", &changed, 101)
+            .unwrap();
+        assert!(
+            host.implementation_pins()
+                .await
+                .unwrap_err()
+                .contains("configuration changed")
+        );
     }
 
     #[test]

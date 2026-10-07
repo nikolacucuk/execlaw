@@ -740,6 +740,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn waiting_parent_releases_its_generation_slot_for_a_child() {
+        let admission = InferenceAdmission::new();
+        let unrelated = admission
+            .acquire("model-only-slot", InferenceWorkload::Chat)
+            .await
+            .unwrap();
+        let parent_generation = admission
+            .acquire("model-only-slot", InferenceWorkload::Chat)
+            .await
+            .unwrap();
+        let child_admission = admission.clone();
+        let child = tokio::spawn(async move {
+            child_admission
+                .acquire("model-only-slot", InferenceWorkload::Child)
+                .await
+        });
+        while admission.queued.load(Ordering::Acquire) == 0 {
+            tokio::task::yield_now().await;
+        }
+        drop(parent_generation);
+        let child_generation = tokio::time::timeout(Duration::from_secs(1), child)
+            .await
+            .expect("child should wake when the completed parent request drops its permit")
+            .unwrap()
+            .unwrap();
+        drop(child_generation);
+        drop(unrelated);
+    }
+
+    #[tokio::test]
     async fn cancelling_queued_child_releases_queue_and_parent_reservations() {
         let admission = InferenceAdmission::new();
         let child_one = admission

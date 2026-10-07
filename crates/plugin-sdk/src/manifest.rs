@@ -854,7 +854,7 @@ pub struct SkillDecl {
 /// path and vice versa.
 #[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RuntimeDecl {
-    /// `"subprocess"` or `"script"`. WASM lands later.
+    /// `"subprocess"`, `"script"`, or the feature-gated `"wasm"` trial tier.
     pub tier: String,
     /// Path to the executable, relative to the plugin's staged root.
     /// Examples: `"node"` (resolved via PATH), `"./dist/plugin"`.
@@ -885,6 +885,7 @@ pub struct RuntimeDecl {
 pub enum RuntimeTier {
     Subprocess,
     Script,
+    Wasm,
 }
 
 impl RuntimeTier {
@@ -892,6 +893,7 @@ impl RuntimeTier {
         match s {
             "subprocess" => Some(Self::Subprocess),
             "script" => Some(Self::Script),
+            "wasm" => Some(Self::Wasm),
             _ => None,
         }
     }
@@ -900,6 +902,7 @@ impl RuntimeTier {
         match self {
             Self::Subprocess => "subprocess",
             Self::Script => "script",
+            Self::Wasm => "wasm",
         }
     }
 }
@@ -933,12 +936,18 @@ pub enum ManifestError {
     PanelOauthCapabilityWithoutAccounts { panel: String },
     #[error("panel '{panel}' requests plugin admin RPC without declaring any admin routes")]
     PanelAdminCapabilityWithoutRoutes { panel: String },
-    #[error("unknown runtime.tier '{0}' (must be 'subprocess' or 'script')")]
+    #[error("unknown runtime.tier '{0}' (must be 'subprocess', 'script', or 'wasm')")]
     UnknownRuntimeTier(String),
     #[error("runtime.tier = 'subprocess' requires 'executable'")]
     SubprocessMissingExecutable,
     #[error("runtime.tier = 'script' requires 'source' (path to .rhai file)")]
     ScriptMissingSource,
+    #[error("runtime.tier = 'wasm' requires 'source' (path to .wasm file)")]
+    WasmMissingSource,
+    #[error("runtime.tier = 'wasm' does not allow 'executable'")]
+    WasmExecutableNotAllowed,
+    #[error("wasm trial plugins may only declare capability-free pure transform tools")]
+    WasmNotPureTransforms,
     #[error(
         "tool '{tool}' has trust_floor = '{value}' which is not a known TrustLevel \
          (expected one of: Controller, Delegated, KnownTrusted, KnownLimited, \
@@ -1149,6 +1158,45 @@ impl PluginManifest {
                         .unwrap_or(false);
                     if !has_src {
                         return Err(ManifestError::ScriptMissingSource);
+                    }
+                }
+                RuntimeTier::Wasm => {
+                    if rt
+                        .source
+                        .as_ref()
+                        .is_none_or(|source| source.trim().is_empty())
+                    {
+                        return Err(ManifestError::WasmMissingSource);
+                    }
+                    if rt.executable.is_some() {
+                        return Err(ManifestError::WasmExecutableNotAllowed);
+                    }
+                    let only_pure_tools = !self.tools.is_empty()
+                        && self.tools.iter().all(|tool| {
+                            tool.required_capabilities.is_empty()
+                                && !tool.host_internal
+                                && tool.effect_contract.as_ref().is_some_and(|contract| {
+                                    contract.external_effect == ToolExternalEffect::None
+                                        && contract.resources.is_empty()
+                                })
+                        });
+                    let no_host_surfaces = self.transport.is_none()
+                        && self.identity_provider.is_none()
+                        && self.inference_backend.is_none()
+                        && self.hardware_probe.is_none()
+                        && self.services.is_empty()
+                        && self.oauth_accounts.is_empty()
+                        && self.ui_panels.is_empty()
+                        && self.chat_components.is_empty()
+                        && self.event_subscriptions.is_empty()
+                        && self.alert_sources.is_empty()
+                        && self.health_checks.is_empty()
+                        && self.admin_routes.is_empty()
+                        && self.webhook_routes.is_empty()
+                        && rt.args.is_empty()
+                        && rt.env.is_empty();
+                    if !only_pure_tools || !no_host_surfaces {
+                        return Err(ManifestError::WasmNotPureTransforms);
                     }
                 }
             }
@@ -1470,7 +1518,7 @@ rpc_capabilities = ["own_oauth_accounts"]
     }
 
     #[test]
-    fn unknown_tier_rejected() {
+    fn wasm_tier_requires_a_source_file() {
         let bad = r#"
             [plugin]
             id = "p"
@@ -1479,10 +1527,51 @@ rpc_capabilities = ["own_oauth_accounts"]
 
             [runtime]
             tier = "wasm"
-            source = "main.wasm"
         "#;
         let err = PluginManifest::parse(bad).unwrap_err();
-        assert!(matches!(err, ManifestError::UnknownRuntimeTier(_)));
+        assert!(matches!(err, ManifestError::WasmMissingSource));
+        let ok = r#"
+            [plugin]
+            id = "wasm-pure"
+            name = "Pure transform"
+            version = "0.1.0"
+
+            [[tools]]
+            name = "wasm.transform"
+            latency = "low"
+            required_capabilities = []
+            effect_contract = { external_effect = "none" }
+
+            [runtime]
+            tier = "wasm"
+            source = "transform.wasm"
+        "#;
+        let manifest = PluginManifest::parse(&ok).unwrap();
+        assert_eq!(
+            manifest.runtime.unwrap().parsed_tier(),
+            Some(RuntimeTier::Wasm)
+        );
+        let invalid = ok.replace("tier = \"wasm\"", "tier = \"unknown\"");
+        assert!(matches!(
+            PluginManifest::parse(&invalid),
+            Err(ManifestError::UnknownRuntimeTier(_))
+        ));
+        let effectful = ok.replace(
+            "external_effect = \"none\"",
+            "external_effect = \"external_write\"",
+        );
+        assert!(matches!(
+            PluginManifest::parse(&effectful),
+            Err(ManifestError::WasmNotPureTransforms)
+        ));
+        let capability_expanding = ok.replace(
+            "required_capabilities = []",
+            "required_capabilities = [\"filesystem.read\"]",
+        );
+        assert!(matches!(
+            PluginManifest::parse(&capability_expanding),
+            Err(ManifestError::WasmNotPureTransforms)
+        ));
     }
 
     #[test]

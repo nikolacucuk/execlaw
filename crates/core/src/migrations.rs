@@ -431,6 +431,21 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "knowledge_governance_primitives",
         sql: include_str!("../migrations/0081_knowledge_governance_primitives.sql"),
     },
+    Migration {
+        id: 82,
+        name: "run_tool_implementation_pins",
+        sql: include_str!("../migrations/0082_run_tool_implementation_pins.sql"),
+    },
+    Migration {
+        id: 83,
+        name: "entity_merge_decisions",
+        sql: include_str!("../migrations/0083_entity_merge_decisions.sql"),
+    },
+    Migration {
+        id: 84,
+        name: "paired_host_delegation",
+        sql: include_str!("../migrations/0084_paired_host_delegation.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -818,7 +833,7 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(runner.apply_all().unwrap(), (76..=81).collect::<Vec<_>>());
+        assert_eq!(runner.apply_all().unwrap(), (76..=84).collect::<Vec<_>>());
     }
 
     // ----------------------------------------------------------------

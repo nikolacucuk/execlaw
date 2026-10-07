@@ -48,6 +48,16 @@ struct PolicyDecisionContext {
     input_event_seq: i64,
 }
 
+struct QualifiedReadCacheContext {
+    conversation_id: String,
+    authority_scope: String,
+    tool_name: String,
+    tool_version: String,
+    source_revision: String,
+    provenance: serde_json::Value,
+    expires_at: i64,
+}
+
 fn policy_reason_code(error: &str) -> &'static str {
     if error.contains("active safety profile") {
         "safety_profile_denied"
@@ -162,6 +172,78 @@ pub struct ChainedToolDispatch<B: BuiltinTools> {
 }
 
 impl<B: BuiltinTools> ChainedToolDispatch<B> {
+    fn qualified_read_cache_context(
+        &self,
+        tool_name: &str,
+        args: &serde_json::Value,
+    ) -> Option<QualifiedReadCacheContext> {
+        use execlaw_plugin_sdk::manifest::{ToolExternalEffect, ToolResourceMode};
+
+        let conversation_id = self.conversation_id.as_ref()?.as_str().to_owned();
+        let (principal_id, authority_fingerprint) = self.live_authority_label_fields();
+        let principal_id = principal_id?;
+        let authority_fingerprint = authority_fingerprint?;
+        let registered = self.host.registry().tool(tool_name)?;
+        let contract = &registered.effect_contract;
+        if contract.external_effect != ToolExternalEffect::ReadOnly
+            || contract.resources.is_empty()
+            || contract
+                .resources
+                .iter()
+                .any(|resource| resource.access != ToolResourceMode::Read)
+        {
+            return None;
+        }
+
+        let plugin = self.host.get_row(&registered.plugin_id).ok()??;
+        if !plugin.enabled || plugin.health_status != "healthy" {
+            return None;
+        }
+
+        let now = self.clock.now_unix();
+        let versions = execlaw_core::resource_versions::ResourceVersionStore::new(self.host.db());
+        let mut resource_revisions = Vec::with_capacity(contract.resources.len());
+        for resource in &contract.resources {
+            let current = versions.get(&resource.resource).ok()??;
+            if current.observed_at > now || now - current.observed_at > 30 {
+                return None;
+            }
+            resource_revisions.push((resource.resource.clone(), current.version_token));
+        }
+        resource_revisions.sort();
+        let revision_material = serde_json::json!({
+            "plugin_id": registered.plugin_id,
+            "plugin_version": plugin.version,
+            "tool_name": registered.tool_name,
+            "schema_hash": registered.schema_hash,
+            "resources": resource_revisions,
+        });
+        let source_revision = hex::encode(sha2::Sha256::digest(
+            serde_json::to_vec(&revision_material).ok()?,
+        ));
+        let args_hash = hex::encode(sha2::Sha256::digest(serde_json::to_vec(args).ok()?));
+        let authority_scope = format!(
+            "principal:{principal_id}:{}:{authority_fingerprint}",
+            self.caller_trust.as_str()
+        );
+        Some(QualifiedReadCacheContext {
+            conversation_id,
+            authority_scope,
+            tool_name: tool_name.to_owned(),
+            tool_version: plugin.version.clone(),
+            source_revision: source_revision.clone(),
+            provenance: serde_json::json!({
+                "plugin_id": registered.plugin_id,
+                "tool": registered.tool_name,
+                "tool_version": plugin.version,
+                "source_revision": source_revision,
+                "argument_sha256": args_hash,
+                "resources": revision_material["resources"],
+            }),
+            expires_at: now.saturating_add(30),
+        })
+    }
+
     /// Legacy ctor — kept so existing call sites compile. `caller_trust`
     /// defaults to `Controller` and the access gate is disabled, which
     /// matches the pre-Phase-8a "no tool gate" semantic.
@@ -1486,7 +1568,12 @@ impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
         // the prefix.
         if tool_name.starts_with(MCP_TOOL_PREFIX) {
             return match &self.mcp_host {
-                Some(host) => host.call_tool(tool_name, args_json.clone()).await,
+                Some(host) => {
+                    if let Some(run_id) = self.parent_run_id.as_deref() {
+                        host.verify_run_tool_pin(run_id, tool_name).await?;
+                    }
+                    host.call_tool(tool_name, args_json.clone()).await
+                }
                 None => Err(format!("no MCP host configured to dispatch '{tool_name}'")),
             };
         }
@@ -1522,6 +1609,11 @@ impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
         // `Arc<dyn ToolImpl>` path). Runs before the legacy
         // `BuiltinTools::call` so refactored built-ins hit the
         // capability-scoped path and uncrefactored ones still work.
+        if self.host.registry().tool(tool_name).is_some()
+            && let Some(run_id) = self.parent_run_id.as_deref()
+        {
+            self.host.verify_run_tool_pin(run_id, tool_name)?;
+        }
         if let Some(r) = self.try_registry_builtin(tool_name, args_json).await {
             return r;
         }
@@ -1537,14 +1629,83 @@ impl<B: BuiltinTools + 'static> ToolDispatch for ChainedToolDispatch<B> {
         // generalised). Without this, a Signal contact mapped to
         // `KnownLimited` could invoke `signal.send_message` and use
         // the controller's outbound transport to spam other people.
-        self.host
+        let cache_context = self.qualified_read_cache_context(tool_name, args_json);
+        if let Some(cache_context) = cache_context.as_ref() {
+            if let Err(error) = self.check_access(tool_name) {
+                self.record_policy_decision(
+                    tool_name,
+                    execlaw_core::policy_simulation::PolicyDecisionOutcome::Denied,
+                    policy_reason_code(&error),
+                )?;
+                return Err(error);
+            }
+            let key = execlaw_core::qualified_read_cache::ReadCacheKey {
+                conversation_id: &cache_context.conversation_id,
+                authority_scope: &cache_context.authority_scope,
+                tool_name: &cache_context.tool_name,
+                tool_version: &cache_context.tool_version,
+                canonical_arguments: args_json,
+                source_revision: &cache_context.source_revision,
+            };
+            match execlaw_core::qualified_read_cache::QualifiedReadCache::new(self.host.db())
+                .lookup_authorized(
+                    &key,
+                    true,
+                    self.clock.now_unix(),
+                    |conversation, scope, name| {
+                        conversation == cache_context.conversation_id
+                            && scope == cache_context.authority_scope
+                            && name == cache_context.tool_name
+                    },
+                )
+                .map_err(|error| error.to_string())?
+            {
+                execlaw_core::qualified_read_cache::AuthorizedCacheLookup::Fresh(hit) => {
+                    return Ok(hit.result);
+                }
+                execlaw_core::qualified_read_cache::AuthorizedCacheLookup::Stale {
+                    reason, ..
+                } => {
+                    tracing::debug!(
+                        tool_name,
+                        ?reason,
+                        "qualified read cache entry was stale; performing live read"
+                    );
+                }
+                execlaw_core::qualified_read_cache::AuthorizedCacheLookup::Miss => {}
+            }
+        }
+
+        let result = self
+            .host
             .call_tool(
                 tool_name,
                 args_json.clone(),
                 &caps,
                 Some(self.caller_trust.as_str()),
             )
-            .await
+            .await?;
+        if let Some(cache_context) = cache_context {
+            let key = execlaw_core::qualified_read_cache::ReadCacheKey {
+                conversation_id: &cache_context.conversation_id,
+                authority_scope: &cache_context.authority_scope,
+                tool_name: &cache_context.tool_name,
+                tool_version: &cache_context.tool_version,
+                canonical_arguments: args_json,
+                source_revision: &cache_context.source_revision,
+            };
+            execlaw_core::qualified_read_cache::QualifiedReadCache::new(self.host.db())
+                .put(
+                    &key,
+                    true,
+                    &result,
+                    &cache_context.provenance,
+                    cache_context.expires_at,
+                    self.clock.now_unix(),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(result)
     }
 }
 
@@ -1880,6 +2041,178 @@ effect_contract = { resources = [{ resource = "records", access = "read" }], ext
         assert_eq!(contract.concurrency, ToolConcurrency::ReadOnly);
         assert_eq!(contract.resources[0].access, ToolResourceMode::Read);
         assert!(dispatch.effect_contract("unadvertised").is_none());
+    }
+
+    #[test]
+    fn qualified_read_dispatch_cache_requires_live_versioned_read_contract() {
+        use execlaw_core::ids::PrincipalId;
+        use execlaw_core::resource_versions::ResourceVersionStore;
+        use execlaw_plugin_sdk::manifest::PluginManifest;
+
+        struct FixedClock(i64);
+        impl Clock for FixedClock {
+            fn now_unix(&self) -> i64 {
+                self.0
+            }
+        }
+
+        let host = test_host();
+        let now = chrono::Utc::now().timestamp();
+        let manifest = PluginManifest::parse(r#"
+[plugin]
+id = "qualified-read-cache-fixture"
+name = "Qualified read cache fixture"
+version = "1.2.3"
+
+[[tools]]
+name = "records.list"
+effect_contract = { resources = [{ resource = "records", access = "read" }], external_effect = "read_only" }
+
+[[tools]]
+name = "records.update"
+effect_contract = { resources = [{ resource = "records", access = "write" }], external_effect = "external_write" }
+"#).unwrap();
+        host.registry().enable(&manifest).unwrap();
+        host.db().with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_plugins(plugin_id,version,manifest_toml,stage_path,enabled,installed_at,updated_at) VALUES(?1,?2,?3,'/fixture',1,?4,?4)",
+                rusqlite::params![manifest.plugin.id, manifest.plugin.version, "fixture", now],
+            )?;
+            Ok(())
+        }).unwrap();
+        ResourceVersionStore::new(host.db())
+            .observe("records", "etag-1", false, now)
+            .unwrap();
+        let mut dispatch = ChainedToolDispatch::new(host, vec!["*".into()], NoBuiltinTools)
+            .with_conversation(ConversationId::from("conversation-a"))
+            .with_clock(Arc::new(FixedClock(now)));
+        dispatch.live_principal = Some((PrincipalId::from("principal-a"), None));
+        dispatch.live_authority_fingerprint = Some("grant-a".into());
+        let args = serde_json::json!({"filter":"open"});
+        let first = dispatch
+            .qualified_read_cache_context("records.list", &args)
+            .unwrap();
+        assert_eq!(first.tool_version, "1.2.3");
+        assert!(
+            dispatch
+                .qualified_read_cache_context("records.update", &args)
+                .is_none()
+        );
+        ResourceVersionStore::new(dispatch.host.db())
+            .observe("records", "etag-2", false, now)
+            .unwrap();
+        let second = dispatch
+            .qualified_read_cache_context("records.list", &args)
+            .unwrap();
+        assert_ne!(first.source_revision, second.source_revision);
+        dispatch.conversation_id = Some(ConversationId::from("conversation-b"));
+        let other_conversation = dispatch
+            .qualified_read_cache_context("records.list", &args)
+            .unwrap();
+        assert_ne!(first.conversation_id, other_conversation.conversation_id);
+    }
+
+    #[tokio::test]
+    async fn qualified_read_cache_hit_skips_plugin_call_but_live_authority_still_wins() {
+        use execlaw_core::{
+            principal::{Principal, PrincipalStore, TrustLevel as StoredTrustLevel},
+            resource_versions::ResourceVersionStore,
+        };
+        use execlaw_plugin_sdk::manifest::PluginManifest;
+
+        struct FixedClock(i64);
+        impl Clock for FixedClock {
+            fn now_unix(&self) -> i64 {
+                self.0
+            }
+        }
+
+        let host = test_host();
+        let db = host.db().clone();
+        let now = chrono::Utc::now().timestamp();
+        let manifest = PluginManifest::parse(r#"
+[plugin]
+id = "qualified-read-cache-hit-fixture"
+name = "Qualified read cache hit fixture"
+version = "1.0.0"
+
+[[tools]]
+name = "records.list"
+effect_contract = { resources = [{ resource = "records", access = "read" }], external_effect = "read_only" }
+"#).unwrap();
+        host.registry().enable(&manifest).unwrap();
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_plugins(plugin_id,version,manifest_toml,stage_path,enabled,installed_at,updated_at) VALUES(?1,?2,?3,'/fixture',1,?4,?4)",
+                rusqlite::params![manifest.plugin.id, manifest.plugin.version, "fixture", now],
+            )?;
+            Ok(())
+        }).unwrap();
+        let principal_id = PrincipalId::from("cache-principal".to_owned());
+        PrincipalStore::new(&db)
+            .upsert(&Principal {
+                id: principal_id.clone(),
+                identifiers: vec![],
+                trust_level: StoredTrustLevel::Controller,
+                resolved_by: vec![],
+                metadata: serde_json::json!({}),
+                first_seen: now,
+                last_seen: Some(now),
+                controller_notes: None,
+            })
+            .unwrap();
+        ResourceVersionStore::new(&db)
+            .observe("records", "etag-1", false, now)
+            .unwrap();
+        let dispatch = ChainedToolDispatch::with_access_gate(
+            host,
+            vec!["*".into()],
+            TrustLevel::Controller,
+            NoBuiltinTools,
+            db.clone(),
+        )
+        .with_conversation(ConversationId::from("cache-hit-conversation"))
+        .with_live_principal("cache-principal")
+        .with_clock(Arc::new(FixedClock(now)));
+        let args = serde_json::json!({"filter":"open"});
+        let context = dispatch
+            .qualified_read_cache_context("records.list", &args)
+            .unwrap();
+        let key = execlaw_core::qualified_read_cache::ReadCacheKey {
+            conversation_id: &context.conversation_id,
+            authority_scope: &context.authority_scope,
+            tool_name: &context.tool_name,
+            tool_version: &context.tool_version,
+            canonical_arguments: &args,
+            source_revision: &context.source_revision,
+        };
+        execlaw_core::qualified_read_cache::QualifiedReadCache::new(&db)
+            .put(
+                &key,
+                true,
+                &serde_json::json!({"items":["cached"]}),
+                &context.provenance,
+                now + 30,
+                now,
+            )
+            .unwrap();
+        assert_eq!(
+            dispatch.call("records.list", &args).await.unwrap()["items"][0],
+            "cached"
+        );
+
+        PrincipalStore::new(&db)
+            .set_trust(
+                &principal_id,
+                StoredTrustLevel::KnownLimited {
+                    resolvers: vec![],
+                    allowed_topics: vec![],
+                    allowed_tools: None,
+                },
+            )
+            .unwrap();
+        let denied = dispatch.call("records.list", &args).await.unwrap_err();
+        assert!(denied.contains("authority changed") || denied.contains("trust no longer matches"));
     }
 
     #[tokio::test]

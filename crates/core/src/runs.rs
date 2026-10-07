@@ -259,6 +259,57 @@ pub struct RunInputManifest {
     pub recorded_at: i64,
 }
 
+/// Exact local plugin implementation and schema admitted to one durable run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunToolImplementationPin {
+    pub runtime_kind: String,
+    pub plugin_id: String,
+    pub plugin_version: String,
+    pub tool_name: String,
+    pub artifact_sha256: String,
+    #[serde(default)]
+    pub input_schema_sha256: Option<String>,
+    #[serde(default)]
+    pub result_schema_sha256: Option<String>,
+    #[serde(default)]
+    pub server_identity: Option<String>,
+}
+
+fn validate_implementation_pins(pins: &[RunToolImplementationPin]) -> Result<(), RunStoreError> {
+    let mut tools = std::collections::HashSet::new();
+    for pin in pins {
+        let valid_digest = |digest: &str| {
+            digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        };
+        if !matches!(pin.runtime_kind.as_str(), "plugin" | "mcp")
+            || pin.plugin_id.trim().is_empty()
+            || pin.plugin_id.len() > 128
+            || pin.plugin_version.trim().is_empty()
+            || pin.plugin_version.len() > 128
+            || pin.tool_name.trim().is_empty()
+            || pin.tool_name.len() > 128
+            || !valid_digest(&pin.artifact_sha256)
+            || pin
+                .input_schema_sha256
+                .as_deref()
+                .is_some_and(|hash| !valid_digest(hash))
+            || pin
+                .result_schema_sha256
+                .as_deref()
+                .is_some_and(|hash| !valid_digest(hash))
+            || (pin.runtime_kind == "mcp"
+                && pin.server_identity.as_deref().is_none_or(str::is_empty))
+            || (pin.runtime_kind == "plugin" && pin.server_identity.is_some())
+            || !tools.insert(pin.tool_name.as_str())
+        {
+            return Err(RunStoreError::Conflict(
+                "implementation pins contain invalid or duplicate tool identities".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// User-authored acceptance check attached to a durable run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct AcceptanceCriterion {
@@ -1200,6 +1251,7 @@ impl<'db> RunStore<'db> {
         run_id: &str,
         manifest: &RunInputManifest,
     ) -> Result<(), RunStoreError> {
+        let mut implementation_pins = Vec::new();
         if let Some(snapshot_json) = manifest.tool_catalog_snapshot_json.as_deref() {
             if snapshot_json.len() > 1024 * 1024 {
                 return Err(RunStoreError::Conflict(
@@ -1210,6 +1262,20 @@ impl<'db> RunStore<'db> {
                 serde_json::from_str(snapshot_json).map_err(|error| {
                     RunStoreError::Conflict(format!("invalid tool catalog snapshot: {error}"))
                 })?;
+            implementation_pins = snapshot
+                .get("implementation_pins")
+                .map(|value| {
+                    serde_json::from_value::<Vec<RunToolImplementationPin>>(value.clone()).map_err(
+                        |error| {
+                            RunStoreError::Conflict(format!(
+                                "invalid implementation pins in tool snapshot: {error}"
+                            ))
+                        },
+                    )
+                })
+                .transpose()?
+                .unwrap_or_default();
+            validate_implementation_pins(&implementation_pins)?;
             let tools = snapshot
                 .get("tools")
                 .and_then(serde_json::Value::as_array)
@@ -1294,9 +1360,107 @@ impl<'db> RunStore<'db> {
                 }
                 _ => {}
             }
+            for pin in &implementation_pins {
+                let mutation_locked: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_plugin_mutation_leases WHERE plugin_id=?1)",
+                    [&pin.plugin_id],
+                    |row| row.get::<_, i64>(0).map(|value| value != 0),
+                )?;
+                if mutation_locked {
+                    return Err(DbError::Invariant(format!(
+                        "plugin '{}' is changing while run '{run_id}' pins its tool surface",
+                        pin.plugin_id
+                    )));
+                }
+                tx.execute(
+                    "INSERT OR IGNORE INTO state_run_tool_implementation_pins
+                     (run_id,runtime_kind,plugin_id,plugin_version,tool_name,artifact_sha256,
+                      input_schema_sha256,result_schema_sha256,server_identity,created_at)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+                    params![
+                        run_id,
+                        pin.runtime_kind,
+                        pin.plugin_id,
+                        pin.plugin_version,
+                        pin.tool_name,
+                        pin.artifact_sha256,
+                        pin.input_schema_sha256,
+                        pin.result_schema_sha256,
+                        pin.server_identity,
+                        manifest.recorded_at,
+                    ],
+                )?;
+                let stored: (String, String, String, String, Option<String>, Option<String>, Option<String>) = tx.query_row(
+                    "SELECT runtime_kind,plugin_id,plugin_version,artifact_sha256,input_schema_sha256,result_schema_sha256,server_identity
+                     FROM state_run_tool_implementation_pins WHERE run_id=?1 AND tool_name=?2",
+                    params![run_id, pin.tool_name],
+                    |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?)),
+                )?;
+                if stored != (
+                    pin.runtime_kind.clone(),
+                    pin.plugin_id.clone(),
+                    pin.plugin_version.clone(),
+                    pin.artifact_sha256.clone(),
+                    pin.input_schema_sha256.clone(),
+                    pin.result_schema_sha256.clone(),
+                    pin.server_identity.clone(),
+                ) {
+                    return Err(DbError::Invariant(format!(
+                        "run '{run_id}' tool '{}' implementation pin changed",
+                        pin.tool_name
+                    )));
+                }
+            }
             Ok(())
         })?;
         Ok(())
+    }
+
+    /// Load immutable implementation pins recorded for a run.
+    pub fn implementation_pins(
+        &self,
+        run_id: &str,
+    ) -> Result<Vec<RunToolImplementationPin>, RunStoreError> {
+        self.db
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT runtime_kind,plugin_id,plugin_version,tool_name,artifact_sha256,
+                            input_schema_sha256,result_schema_sha256,server_identity
+                     FROM state_run_tool_implementation_pins WHERE run_id=?1 ORDER BY tool_name",
+                )?;
+                let rows = statement.query_map([run_id], |row| {
+                    Ok(RunToolImplementationPin {
+                        runtime_kind: row.get(0)?,
+                        plugin_id: row.get(1)?,
+                        plugin_version: row.get(2)?,
+                        tool_name: row.get(3)?,
+                        artifact_sha256: row.get(4)?,
+                        input_schema_sha256: row.get(5)?,
+                        result_schema_sha256: row.get(6)?,
+                        server_identity: row.get(7)?,
+                    })
+                })?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(DbError::from)
+            })
+            .map_err(RunStoreError::from)
+    }
+
+    /// Number of pending, running, or approval-waiting runs pinned to this plugin.
+    pub fn active_runs_pinning_plugin(&self, plugin_id: &str) -> Result<u64, RunStoreError> {
+        self.db
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(DISTINCT p.run_id)
+                     FROM state_run_tool_implementation_pins p
+                     JOIN state_runs r ON r.run_id=p.run_id
+                     WHERE p.runtime_kind='plugin' AND p.plugin_id=?1 AND r.status IN ('pending','running','waiting')",
+                    [plugin_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map(|count| count.max(0) as u64)
+                .map_err(DbError::from)
+            })
+            .map_err(RunStoreError::from)
     }
 
     /// Load the immutable input fingerprint associated with a run.
@@ -3038,6 +3202,58 @@ mod tests {
         assert_eq!(cycle.first(), cycle.last());
     }
 
+    #[test]
+    fn child_task_reservation_rejects_a_cycle_inside_its_transaction() {
+        let db = fresh_db();
+        let store = RunStore::new(&db);
+        let parent = create_run(&store, None);
+        let first = create_run(&store, Some(parent.clone()));
+        let second = create_run(&store, Some(parent.clone()));
+        let first_dependencies = vec![second.clone()];
+        let second_dependencies = vec![first.clone()];
+        store
+            .reserve_child_task(
+                &parent,
+                &first,
+                &serde_json::json!({"task":"first"}),
+                &"a".repeat(64),
+                &serde_json::json!({}),
+                100,
+                1_000,
+                &first_dependencies,
+                1,
+            )
+            .unwrap();
+        let error = store
+            .reserve_child_task(
+                &parent,
+                &second,
+                &serde_json::json!({"task":"second"}),
+                &"b".repeat(64),
+                &serde_json::json!({}),
+                100,
+                1_000,
+                &second_dependencies,
+                2,
+            )
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("child dependency cycle rejected")
+        );
+        let persisted: i64 = db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM state_run_child_tasks WHERE child_run_id=?1",
+                    [&second],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(persisted, 0);
+    }
+
     fn fresh_db() -> Database {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
@@ -3368,7 +3584,17 @@ mod tests {
         });
         let snapshot = serde_json::json!({
             "tools":[tool.clone()],
-            "discoverable_tools":[]
+            "discoverable_tools":[],
+            "implementation_pins":[{
+                "runtime_kind":"plugin",
+                "plugin_id":"fixture",
+                "plugin_version":"1.2.3",
+                "tool_name":"fixture.echo",
+                "artifact_sha256":"a".repeat(64),
+                "input_schema_sha256":null,
+                "result_schema_sha256":null,
+                "server_identity":null
+            }]
         });
         let catalog_hash = crate::tool::tool_schema_hash(&serde_json::Value::Array(vec![tool]));
         let manifest = RunInputManifest {
@@ -3380,15 +3606,25 @@ mod tests {
             recorded_at: 101,
         };
         store.record_input_manifest(&run_id, &manifest).unwrap();
+        let pins = store.implementation_pins(&run_id).unwrap();
+        assert_eq!(pins.len(), 1);
+        assert_eq!(pins[0].plugin_version, "1.2.3");
+        assert_eq!(store.active_runs_pinning_plugin("fixture").unwrap(), 1);
         assert_eq!(store.input_manifest(&run_id).unwrap(), Some(manifest));
 
         let mut mismatched = store.input_manifest(&run_id).unwrap().unwrap();
-        mismatched.tool_catalog_snapshot_json =
-            Some(serde_json::json!({"tools":[],"discoverable_tools":[]}).to_string());
+        let mut changed_snapshot: serde_json::Value =
+            serde_json::from_str(mismatched.tool_catalog_snapshot_json.as_deref().unwrap())
+                .unwrap();
+        changed_snapshot["implementation_pins"][0]["artifact_sha256"] =
+            serde_json::Value::String("b".repeat(64));
+        mismatched.tool_catalog_snapshot_json = Some(changed_snapshot.to_string());
         assert!(matches!(
             store.record_input_manifest(&run_id, &mismatched),
-            Err(RunStoreError::Conflict(_))
+            Err(RunStoreError::Db(DbError::Invariant(_)))
         ));
+        store.complete_run(&run_id, 0, 102).unwrap();
+        assert_eq!(store.active_runs_pinning_plugin("fixture").unwrap(), 0);
     }
 
     #[test]

@@ -129,6 +129,56 @@ impl<'db> PreferenceStore<'db> {
     pub fn loadout(&self, owner: &str, scope: &str, now: i64) -> Result<Vec<Preference>, DbError> {
         self.db.with_conn(|c|{let mut s=c.prepare("SELECT preference_id,owner_principal_id,scope,preference_key,value_json,origin,status,evidence_ref,expires_at FROM operator_preferences WHERE owner_principal_id=?1 AND scope IN ('global',?2) AND status='approved' AND (expires_at IS NULL OR expires_at>?3) ORDER BY CASE scope WHEN 'global' THEN 0 ELSE 1 END,preference_key")?;let rows=s.query_map(params![owner,scope,now],|r|{let value:String=r.get(4)?;Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,value,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,String>(7)?,r.get::<_,Option<i64>>(8)?))})?;let mut out=Vec::new();for row in rows{let r=row?;out.push(Preference{preference_id:r.0,owner_principal_id:r.1,scope:r.2,preference_key:r.3,value:serde_json::from_str(&r.4).map_err(|e|rusqlite::Error::FromSqlConversionFailure(4,rusqlite::types::Type::Text,Box::new(e)))?,origin:r.5,status:r.6,evidence_ref:r.7,expires_at:r.8});}Ok(out)})
     }
+
+    /// List current and proposed preferences for the operator correction surface.
+    pub fn list(&self, owner: &str, scope: Option<&str>) -> Result<Vec<Preference>, DbError> {
+        let ids = self.db.with_conn(|connection| {
+            let mut statement = if scope.is_some() {
+                connection.prepare("SELECT preference_id FROM operator_preferences WHERE owner_principal_id=?1 AND scope IN ('global',?2) ORDER BY scope,preference_key")?
+            } else {
+                connection.prepare("SELECT preference_id FROM operator_preferences WHERE owner_principal_id=?1 ORDER BY scope,preference_key")?
+            };
+            if let Some(scope) = scope {
+                let rows = statement.query_map(params![owner, scope], |row| row.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            } else {
+                let rows = statement.query_map([owner], |row| row.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+            }
+        })?;
+        ids.into_iter()
+            .filter_map(|id| match self.get(&id) {
+                Ok(Some(preference)) => Some(Ok(preference)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
+    /// Reject an inferred preference without removing its evidence record.
+    pub fn reject_inference(
+        &self,
+        authority: PreferenceAuthority,
+        id: &str,
+        now: i64,
+    ) -> Result<(), DbError> {
+        if authority != PreferenceAuthority::Operator {
+            return Err(DbError::Invariant(
+                "only an operator can reject inferred preferences".into(),
+            ));
+        }
+        self.db.with_conn(|connection| {
+            let changed = connection.execute(
+                "UPDATE operator_preferences SET status='rejected',updated_at=?2 WHERE preference_id=?1 AND origin='inferred' AND status='proposed'",
+                params![id, now],
+            )?;
+            if changed != 1 {
+                return Err(DbError::Invariant("preference inference is not pending".into()));
+            }
+            Ok(())
+        })
+    }
+
     pub fn get(&self, id: &str) -> Result<Option<Preference>, DbError> {
         self.db.with_conn(|c|{let row=c.query_row("SELECT preference_id,owner_principal_id,scope,preference_key,value_json,origin,status,evidence_ref,expires_at FROM operator_preferences WHERE preference_id=?1",[id],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,r.get::<_,String>(6)?,r.get::<_,String>(7)?,r.get::<_,Option<i64>>(8)?))).optional()?;row.map(|r|Ok(Preference{preference_id:r.0,owner_principal_id:r.1,scope:r.2,preference_key:r.3,value:serde_json::from_str(&r.4).map_err(|e|DbError::Invariant(e.to_string()))?,origin:r.5,status:r.6,evidence_ref:r.7,expires_at:r.8})).transpose()})
     }
@@ -152,11 +202,28 @@ mod tests {
             .propose_inferred("operator", "global", "style", &v, "event:10", None, 1)
             .unwrap();
         assert!(s.loadout("operator", "global", 2).unwrap().is_empty());
+        assert_eq!(s.list("operator", None).unwrap()[0].status, "proposed");
         s.approve_inference(PreferenceAuthority::Conversation, &inferred, 2)
             .unwrap_err();
         s.approve_inference(PreferenceAuthority::Operator, &inferred, 2)
             .unwrap();
         assert_eq!(s.loadout("operator", "global", 3).unwrap().len(), 1);
+        let rejected = s
+            .propose_inferred(
+                "operator",
+                "agent:research",
+                "tone",
+                &v,
+                "event:11",
+                None,
+                3,
+            )
+            .unwrap();
+        s.reject_inference(PreferenceAuthority::Conversation, &rejected, 4)
+            .unwrap_err();
+        s.reject_inference(PreferenceAuthority::Operator, &rejected, 4)
+            .unwrap();
+        assert_eq!(s.get(&rejected).unwrap().unwrap().status, "rejected");
         let task = s.set_explicit(
             PreferenceAuthority::Operator,
             "operator",

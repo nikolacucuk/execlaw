@@ -101,6 +101,20 @@ impl RevocationFreshness {
     }
 }
 
+/// Operator-approved publisher or digest revocation imported as one audited decision.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRevocationRequest {
+    pub scope: String,
+    pub subject: String,
+    pub source: String,
+    pub freshness: RevocationFreshness,
+    pub issued_at: i64,
+    pub expires_at: Option<i64>,
+    pub recovery_package: String,
+    pub actor_trust: String,
+    pub actor: String,
+}
+
 /// Cryptographic verification boundary. Production can inject a cosign-backed
 /// implementation; tests use deterministic offline fakes.
 pub trait AttestationVerifier: Send + Sync {
@@ -265,25 +279,18 @@ impl ArtifactProvenanceStore {
     /// but retain their source, issuance, and expiry so their freshness is visible.
     pub fn revoke(
         &self,
-        scope: &str,
-        subject: &str,
-        source: &str,
-        freshness: RevocationFreshness,
-        issued_at: i64,
-        expires_at: Option<i64>,
-        recovery_package: &str,
-        actor_trust: &str,
-        actor: &str,
+        request: &ArtifactRevocationRequest,
     ) -> Result<(), ArtifactVerificationError> {
-        if actor_trust != "Controller" {
+        if request.actor_trust != "Controller" {
             return Err(ArtifactVerificationError::ControllerRequired);
         }
-        let normalized_subject = match scope {
-            "publisher" => subject.trim().to_owned(),
-            "digest" => subject
+        let normalized_subject = match request.scope.as_str() {
+            "publisher" => request.subject.trim().to_owned(),
+            "digest" => request
+                .subject
                 .trim()
                 .strip_prefix("sha256:")
-                .unwrap_or(subject.trim())
+                .unwrap_or(request.subject.trim())
                 .to_ascii_lowercase(),
             _ => {
                 return Err(ArtifactVerificationError::InvalidMetadata(
@@ -293,14 +300,16 @@ impl ArtifactProvenanceStore {
         };
         if normalized_subject.is_empty()
             || normalized_subject.len() > 512
-            || source.trim().is_empty()
-            || source.len() > 1024
-            || actor.trim().is_empty()
-            || actor.len() > 128
-            || recovery_package.len() > 4096
-            || issued_at <= 0
-            || expires_at.is_some_and(|expiry| expiry <= issued_at)
-            || (scope == "digest"
+            || request.source.trim().is_empty()
+            || request.source.len() > 1024
+            || request.actor.trim().is_empty()
+            || request.actor.len() > 128
+            || request.recovery_package.len() > 4096
+            || request.issued_at <= 0
+            || request
+                .expires_at
+                .is_some_and(|expiry| expiry <= request.issued_at)
+            || (request.scope == "digest"
                 && (normalized_subject.len() != 64
                     || !normalized_subject
                         .bytes()
@@ -311,18 +320,22 @@ impl ArtifactProvenanceStore {
             ));
         }
         let revoked_at = chrono::Utc::now().timestamp();
-        let revocation_id = format!("{scope}:{}", sha256_bytes(normalized_subject.as_bytes()));
-        let detail = serde_json::json!({"scope":scope,"subject":normalized_subject,"source":source,"freshness":freshness.as_str(),"issued_at":issued_at,"expires_at":expires_at,"recovery_package":recovery_package});
+        let revocation_id = format!(
+            "{}:{}",
+            request.scope,
+            sha256_bytes(normalized_subject.as_bytes())
+        );
+        let detail = serde_json::json!({"scope":request.scope,"subject":normalized_subject,"source":request.source,"freshness":request.freshness.as_str(),"issued_at":request.issued_at,"expires_at":request.expires_at,"recovery_package":request.recovery_package});
         self.db.transaction(|tx| {
             tx.execute(
                 "INSERT INTO state_artifact_revocations(revocation_id,scope,subject,source,freshness,issued_at,expires_at,revoked_at,revoked_by,recovery_package,active) \
                  VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,1) \
                  ON CONFLICT(scope,subject) DO UPDATE SET revocation_id=excluded.revocation_id,source=excluded.source,freshness=excluded.freshness,issued_at=excluded.issued_at,expires_at=excluded.expires_at,revoked_at=excluded.revoked_at,revoked_by=excluded.revoked_by,recovery_package=excluded.recovery_package,active=1",
-                params![revocation_id, scope, normalized_subject, source, freshness.as_str(), issued_at, expires_at, revoked_at, actor, recovery_package],
+                params![revocation_id, request.scope, normalized_subject, request.source, request.freshness.as_str(), request.issued_at, request.expires_at, revoked_at, request.actor, request.recovery_package],
             )?;
             tx.execute(
                 "INSERT INTO state_artifact_verification_events(artifact_id,event_type,status,actor,detail_json,created_at) VALUES(NULL,'revocation_imported','active',?1,?2,?3)",
-                params![actor, detail.to_string(), revoked_at],
+                params![request.actor, detail.to_string(), revoked_at],
             )?;
             Ok(())
         })?;
@@ -1053,31 +1066,31 @@ mod tests {
             1
         );
         assert!(matches!(
-            store.revoke(
-                "publisher",
-                &artifact.publisher_identity,
-                "operator incident package",
-                RevocationFreshness::OfflineSnapshot,
-                100,
-                Some(i64::MAX),
-                "recovery.tar",
-                "KnownTrusted",
-                "operator"
-            ),
+            store.revoke(&ArtifactRevocationRequest {
+                scope: "publisher".into(),
+                subject: artifact.publisher_identity.clone(),
+                source: "operator incident package".into(),
+                freshness: RevocationFreshness::OfflineSnapshot,
+                issued_at: 100,
+                expires_at: Some(i64::MAX),
+                recovery_package: "recovery.tar".into(),
+                actor_trust: "KnownTrusted".into(),
+                actor: "operator".into(),
+            }),
             Err(ArtifactVerificationError::ControllerRequired)
         ));
         store
-            .revoke(
-                "publisher",
-                &artifact.publisher_identity,
-                "operator incident package",
-                RevocationFreshness::OfflineSnapshot,
-                chrono::Utc::now().timestamp(),
-                None,
-                "recovery.tar",
-                "Controller",
-                "operator",
-            )
+            .revoke(&ArtifactRevocationRequest {
+                scope: "publisher".into(),
+                subject: artifact.publisher_identity.clone(),
+                source: "operator incident package".into(),
+                freshness: RevocationFreshness::OfflineSnapshot,
+                issued_at: chrono::Utc::now().timestamp(),
+                expires_at: None,
+                recovery_package: "recovery.tar".into(),
+                actor_trust: "Controller".into(),
+                actor: "operator".into(),
+            })
             .unwrap();
         assert!(matches!(
             store.verify_bytes(b"artifact", &artifact, Some(&Accept)),
@@ -1111,17 +1124,17 @@ mod tests {
         let store = store();
         let digest = sha256_bytes(b"artifact");
         store
-            .revoke(
-                "digest",
-                &format!("sha256:{digest}"),
-                "offline advisory",
-                RevocationFreshness::OfflineSnapshot,
-                chrono::Utc::now().timestamp(),
-                None,
-                "",
-                "Controller",
-                "operator",
-            )
+            .revoke(&ArtifactRevocationRequest {
+                scope: "digest".into(),
+                subject: format!("sha256:{digest}"),
+                source: "offline advisory".into(),
+                freshness: RevocationFreshness::OfflineSnapshot,
+                issued_at: chrono::Utc::now().timestamp(),
+                expires_at: None,
+                recovery_package: String::new(),
+                actor_trust: "Controller".into(),
+                actor: "operator".into(),
+            })
             .unwrap();
         let reference = format!("example/plugin@sha256:{digest}");
         assert!(matches!(

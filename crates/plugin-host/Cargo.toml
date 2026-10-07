@@ -8,6 +8,10 @@ repository.workspace = true
 authors.workspace = true
 description = "Plugin host: discovery, lifecycle, isolation tiers."
 
+[features]
+default = []
+wasm-trial = ["dep:wasmtime"]
+
 [dependencies]
 execlaw-core = { path = "../core" }
 execlaw-plugin-sdk = { path = "../plugin-sdk" }
@@ -26,10 +30,12 @@ thiserror.workspace = true
 async-trait.workspace = true
 rusqlite.workspace = true
 chrono.workspace = true
+wasmtime = { version = "=36.0.17", default-features = false, features = ["cranelift", "runtime"], optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
 criterion.workspace = true
+wat = "1"
 
 [[bin]]
 name = "execlaw-plugin-conformance"

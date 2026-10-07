@@ -14,6 +14,8 @@ pub mod conformance;
 pub mod hook_registry;
 pub mod host;
 pub mod subprocess;
+#[cfg(feature = "wasm-trial")]
+pub mod wasm;
 
 pub use builtin_registrar::{RegisterBuiltinsError, register_builtins, register_core_builtins};
 pub use hook_registry::{
@@ -23,6 +25,8 @@ pub use hook_registry::{
 };
 pub use host::{BuiltinTools, PluginHost, PluginHostError, PluginRow};
 pub use subprocess::{RpcError, RpcRequest, RpcResponse, SubprocessPlugin, SubprocessSpec};
+#[cfg(feature = "wasm-trial")]
+pub use wasm::WasmPlugin;
 
 use execlaw_plugin_sdk::PluginManifest;
 use std::collections::BTreeMap;

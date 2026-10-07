@@ -159,7 +159,8 @@ pub struct TurnAssetLoadoutReceipt {
 pub struct InstructionSourceReceipt {
     pub source_kind: String,
     pub source_id: String,
-    pub content_sha256: String,
+    #[serde(default)]
+    pub content_sha256: Option<String>,
 }
 
 /// One asset that passed every loadout policy check and was actually injected.

@@ -23,6 +23,23 @@ pub struct ReadCacheKey<'a> {
     pub source_revision: &'a str,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheStaleReason {
+    Expired,
+    SourceRevisionChanged,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum AuthorizedCacheLookup {
+    Miss,
+    Fresh(CachedRead),
+    Stale {
+        cached: CachedRead,
+        reason: CacheStaleReason,
+    },
+}
+
 pub struct QualifiedReadCache<'db> {
     db: &'db Database,
 }
@@ -97,6 +114,69 @@ impl<'db> QualifiedReadCache<'db> {
             source_revision: revision,
             expires_at,
         }))
+    }
+
+    /// Inspect the latest entry with the same conversation, authority, tool and arguments.
+    /// Stale rows are returned as metadata but are never returned by [`Self::get_authorized`].
+    pub fn lookup_authorized(
+        &self,
+        key: &ReadCacheKey<'_>,
+        is_read_only: bool,
+        now: i64,
+        reauthorize: impl FnOnce(&str, &str, &str) -> bool,
+    ) -> Result<AuthorizedCacheLookup, DbError> {
+        if !is_read_only {
+            return Ok(AuthorizedCacheLookup::Miss);
+        }
+        let (_, args_hash) = Self::key(key)?;
+        let record = self.db.with_conn(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT result_json,provenance_json,source_revision,expires_at FROM qualified_read_cache WHERE conversation_id=?1 AND authority_scope=?2 AND tool_name=?3 AND tool_version=?4 AND canonical_args_hash=?5 ORDER BY CASE WHEN source_revision=?6 THEN 0 ELSE 1 END,created_at DESC,cache_key DESC LIMIT 1",
+                    params![
+                        key.conversation_id,
+                        key.authority_scope,
+                        key.tool_name,
+                        key.tool_version,
+                        args_hash,
+                        key.source_revision
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .optional()?)
+        })?;
+        let Some((result, provenance, source_revision, expires_at)) = record else {
+            return Ok(AuthorizedCacheLookup::Miss);
+        };
+        if !reauthorize(key.conversation_id, key.authority_scope, key.tool_name) {
+            return Ok(AuthorizedCacheLookup::Miss);
+        }
+        let cached = CachedRead {
+            result: serde_json::from_str(&result)
+                .map_err(|e| DbError::Invariant(format!("invalid cached result: {e}")))?,
+            provenance: serde_json::from_str(&provenance)
+                .map_err(|e| DbError::Invariant(format!("invalid cached provenance: {e}")))?,
+            source_revision,
+            expires_at,
+        };
+        let stale_reason = if cached.expires_at <= now {
+            Some(CacheStaleReason::Expired)
+        } else if cached.source_revision != key.source_revision {
+            Some(CacheStaleReason::SourceRevisionChanged)
+        } else {
+            None
+        };
+        Ok(match stale_reason {
+            Some(reason) => AuthorizedCacheLookup::Stale { cached, reason },
+            None => AuthorizedCacheLookup::Fresh(cached),
+        })
     }
 
     /// Store a read result with its source provenance. Effectful operations cannot be cached.
@@ -204,6 +284,16 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+        let other_conversation = ReadCacheKey {
+            conversation_id: "c2",
+            ..key.clone()
+        };
+        assert!(
+            cache
+                .get_authorized(&other_conversation, true, 2, |_, _, _| true)
+                .unwrap()
+                .is_none()
+        );
         let changed = ReadCacheKey {
             source_revision: "rev-2",
             ..key.clone()
@@ -214,7 +304,41 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
-        assert_eq!(cache.invalidate_scope("c1", "calendar:read").unwrap(), 1);
+        assert!(matches!(
+            cache
+                .lookup_authorized(&changed, true, 2, |_, _, _| true)
+                .unwrap(),
+            AuthorizedCacheLookup::Stale {
+                reason: CacheStaleReason::SourceRevisionChanged,
+                ..
+            }
+        ));
+        assert!(matches!(
+            cache
+                .lookup_authorized(&key, true, 100, |_, _, _| true)
+                .unwrap(),
+            AuthorizedCacheLookup::Stale {
+                reason: CacheStaleReason::Expired,
+                ..
+            }
+        ));
+        cache
+            .put(
+                &changed,
+                true,
+                &serde_json::json!([2]),
+                &serde_json::json!({"source":"calendar","revision":"rev-2"}),
+                100,
+                2,
+            )
+            .unwrap();
+        assert!(matches!(
+            cache
+                .lookup_authorized(&changed, true, 3, |_, _, _| true)
+                .unwrap(),
+            AuthorizedCacheLookup::Fresh(_)
+        ));
+        assert_eq!(cache.invalidate_scope("c1", "calendar:read").unwrap(), 2);
         assert!(
             cache
                 .get_authorized(&key, true, 2, |_, _, _| true)

@@ -201,6 +201,32 @@ pub async fn run_runtime_cases(root: &Path) -> anyhow::Result<()> {
             }
             plugin.shutdown().await;
         }
+        Some(execlaw_plugin_sdk::manifest::RuntimeTier::Wasm) => {
+            #[cfg(feature = "wasm-trial")]
+            {
+                let source = runtime
+                    .source
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("wasm runtime is missing source"))?;
+                let source = safe_project_path(root, source)?;
+                let plugin = crate::WasmPlugin::load(&source)
+                    .map_err(|error| anyhow::anyhow!("load Wasm conformance plugin: {error}"))?;
+                for case in fixture.cases {
+                    let result = plugin.transform(&case.arguments).map_err(|error| {
+                        anyhow::anyhow!("Wasm conformance call failed: {error}")
+                    })?;
+                    if result != case.result {
+                        anyhow::bail!(
+                            "Wasm runtime case '{}' returned {result}, expected {}",
+                            case.tool_name,
+                            case.result
+                        );
+                    }
+                }
+            }
+            #[cfg(not(feature = "wasm-trial"))]
+            anyhow::bail!("Wasm runtime trial requires the wasm-trial feature");
+        }
         None => anyhow::bail!("unsupported plugin runtime tier '{}'", runtime.tier),
     }
     Ok(())

@@ -47,10 +47,11 @@ without hardcoded plugin identities, and route effects through the outbox.
 
 A plugin is a ZIP bundle the operator uploads to a running execlaw control plane. It declares (via TOML manifest) a set of capabilities the host should mount: agent-callable tools, sidecar containers, admin/webhook HTTP routes, identity providers, OAuth client metadata, skills, alert sources, transport bindings, UI panels. The host registers and unwires those surfaces during lifecycle operations; atomic filesystem/registry/runtime upgrades and rollback remain H027 work (F02). **No host code change is required to add, upgrade, or remove a plugin's manifest-declared capabilities** — that's the architectural contract. Host changes are still required when changing shared behavior such as transport routing, event projection, or policy semantics.
 
-A plugin's runtime behaviour is one of two tiers (`crates/plugin-sdk/src/manifest.rs:535-591`):
+A plugin's runtime behaviour has two production tiers and one opt-in lab trial (`crates/plugin-sdk/src/manifest.rs`):
 
 - **Script** — a Rhai source file (`main.rhai`) that runs in a per-plugin embedded interpreter inside the control-plane process. Most in-tree plugins (Signal, WhatsApp, Slack, Google Calendar, Google Places, …) use this tier.
 - **Subprocess** — a native binary the host spawns and talks to over JSON-RPC stdio. Used when a plugin needs a language runtime the script tier can't provide (audio decoding, ONNX inference, native crypto). The reference example is `plugins/hello/`.
+- **WASM trial** — a pure JSON transform executed by the Wasmtime engine when execlaw is built with `execlaw-plugin-host/wasm-trial`. The default build rejects this tier. A manifest may declare only tools with no required capabilities and `effect_contract.external_effect = "none"`; it cannot declare sidecars, transports, OAuth, admin/webhook routes, or other host surfaces. The module receives no imports, files, network, vault values, or host functions. It must export `memory`, `alloc(i32) -> i32`, and `transform(i32, i32) -> i64`; the result packs output pointer in the high 32 bits and output length in the low 32 bits. Each call receives a fresh store, 16 MiB linear-memory ceiling, 1,024 table elements, 10 million fuel, 256 KiB stack, and 1 MiB input/output limits. Module compilation is serialized on a blocking worker and Wasm calls are limited to four concurrent workers. Wasmtime is pinned to 36.0.17 for the trial; enabling this optional feature requires Rust 1.86 or later. This tier is not enabled by release builds and is not approved for production use.
 
 Both tiers expose the same capabilities to the agent. Tier choice is an implementation detail.
 
@@ -126,6 +127,7 @@ Every plugin ships with `plugin.toml`. The full schema lives in `crates/plugin-s
 tier   = "script"        # or "subprocess"
 source = "main.rhai"     # script tier only — relative to plugin root
 # executable = "./bin"   # subprocess tier only
+# source = "transform.wasm"  # wasm trial tier only; requires the opt-in feature
 # args = []
 # env = { TOKEN = "secret://my_secret" }
 ```

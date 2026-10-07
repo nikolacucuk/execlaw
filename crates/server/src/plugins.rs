@@ -716,6 +716,12 @@ fn plugin_error_response(e: PluginHostError) -> axum::response::Response {
         PluginHostError::UnsupportedTier(_) => (StatusCode::BAD_REQUEST, "unsupported_tier"),
         PluginHostError::MissingRuntime => (StatusCode::BAD_REQUEST, "missing_runtime"),
         PluginHostError::Provenance(_) => (StatusCode::FORBIDDEN, "provenance_verification_failed"),
+        PluginHostError::PinnedByActiveRuns { .. } => {
+            (StatusCode::CONFLICT, "plugin_pinned_by_active_runs")
+        }
+        PluginHostError::PluginMutationInProgress(_) => {
+            (StatusCode::CONFLICT, "plugin_mutation_in_progress")
+        }
         PluginHostError::StagePathOutsideRoot(_) => (StatusCode::BAD_REQUEST, "stage_path_invalid"),
         PluginHostError::UpgradeRolledBack(_) => (StatusCode::CONFLICT, "upgrade_rolled_back"),
         PluginHostError::UpgradeRollbackFailed { .. } => {

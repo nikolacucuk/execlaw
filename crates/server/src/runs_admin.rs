@@ -1193,7 +1193,11 @@ mod tests {
                 admission_reasons: vec!["trust_floor_readable".into()],
             }],
             retrieved_assets: Vec::new(),
-            instruction_sources: Vec::new(),
+            instruction_sources: vec![execlaw_core::memory_assets::InstructionSourceReceipt {
+                source_kind: "operator_policy".into(),
+                source_id: "static-base@1".into(),
+                content_sha256: Some("a".repeat(64)),
+            }],
         };
         execlaw_core::memory_assets::MemoryAssetStore::new(&state.db)
             .record_turn_loadout(conversation_id.as_str(), 1, &receipt)
@@ -1218,6 +1222,17 @@ mod tests {
         .unwrap();
         assert_eq!(value["asset_loadout"]["assets"][0]["asset_id"], "asset-1");
         assert_eq!(value["asset_loadout"]["assets"][0]["injected_chars"], 128);
+        assert_eq!(
+            value["asset_loadout"]["instruction_sources"][0]["source_id"],
+            "static-base@1"
+        );
+        assert_eq!(
+            value["asset_loadout"]["instruction_sources"][0]["content_sha256"]
+                .as_str()
+                .unwrap()
+                .len(),
+            64
+        );
         assert!(
             value["asset_loadout"]["assets"][0]
                 .get("content_ref")

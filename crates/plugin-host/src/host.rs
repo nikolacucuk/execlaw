@@ -105,6 +105,10 @@ pub enum PluginHostError {
     StagePathOutsideRoot(String),
     #[error("artifact provenance: {0}")]
     Provenance(String),
+    #[error("plugin '{plugin_id}' is pinned by {active_runs} active run(s)")]
+    PinnedByActiveRuns { plugin_id: String, active_runs: u64 },
+    #[error("plugin '{0}' is already being upgraded, enabled, disabled, or uninstalled")]
+    PluginMutationInProgress(String),
     #[error("plugin upgrade failed; previous version was restored: {0}")]
     UpgradeRolledBack(String),
     #[error(
@@ -118,6 +122,25 @@ pub enum PluginHostError {
     Db(#[from] DbError),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+struct PluginMutationLease {
+    db: Database,
+    plugin_id: String,
+}
+
+impl Drop for PluginMutationLease {
+    fn drop(&mut self) {
+        if let Err(error) = self.db.with_conn(|connection| {
+            connection.execute(
+                "DELETE FROM state_plugin_mutation_leases WHERE plugin_id=?1",
+                [&self.plugin_id],
+            )?;
+            Ok(())
+        }) {
+            warn!(plugin_id = %self.plugin_id, %error, "failed to release plugin mutation lease");
+        }
+    }
 }
 
 /// Persisted row shape for `state_plugins`.
@@ -166,6 +189,8 @@ struct PluginHostInner {
     /// Per-plugin Rhai scripts. Empty for subprocess-tier plugins;
     /// populated at enable / hydrate time for `tier = "script"`.
     script_plugins: RwLock<BTreeMap<String, execlaw_script::ScriptPlugin>>,
+    #[cfg(feature = "wasm-trial")]
+    wasm_plugins: RwLock<BTreeMap<String, Arc<crate::wasm::WasmPlugin>>>,
     /// Shared engine factory — cheap to clone, builds a fresh
     /// per-plugin Rhai engine on demand.
     script_engine: execlaw_script::ScriptEngine,
@@ -219,6 +244,8 @@ impl PluginHost {
                 registry,
                 subprocesses: RwLock::new(BTreeMap::new()),
                 script_plugins: RwLock::new(BTreeMap::new()),
+                #[cfg(feature = "wasm-trial")]
+                wasm_plugins: RwLock::new(BTreeMap::new()),
                 script_engine,
                 stage_root,
                 skill_store: std::sync::OnceLock::new(),
@@ -677,10 +704,10 @@ impl PluginHost {
                         .insert(plugin_id.clone(), Arc::new(plugin));
                 }
                 execlaw_plugin_sdk::manifest::RuntimeTier::Script => {
-                    let source_rel = runtime_source_or_err(runtime).inspect_err(|_| {
-                        self.inner.registry.disable(&plugin_id);
-                    })?;
-                    let source_path = stage_path.join(source_rel);
+                    let source_path =
+                        runtime_source_path(stage_path, runtime).inspect_err(|_| {
+                            self.inner.registry.disable(&plugin_id);
+                        })?;
                     let script = match execlaw_script::ScriptPlugin::from_file(
                         &plugin_id,
                         &source_path,
@@ -706,6 +733,35 @@ impl PluginHost {
                     // the sidecar supervisor reports the plugin's
                     // sidecars healthy. Plugins without sidecars
                     // get on_enable fired immediately by that pass.
+                }
+                execlaw_plugin_sdk::manifest::RuntimeTier::Wasm => {
+                    #[cfg(feature = "wasm-trial")]
+                    {
+                        let source_path =
+                            runtime_source_path(stage_path, runtime).inspect_err(|_| {
+                                self.inner.registry.disable(&plugin_id);
+                            })?;
+                        let plugin = match crate::wasm::WasmPlugin::load_limited(source_path).await
+                        {
+                            Ok(plugin) => plugin,
+                            Err(error) => {
+                                self.inner.registry.disable(&plugin_id);
+                                return Err(PluginHostError::Spawn(format!("Wasm load: {error}")));
+                            }
+                        };
+                        self.inner
+                            .wasm_plugins
+                            .write()
+                            .await
+                            .insert(plugin_id.clone(), Arc::new(plugin));
+                    }
+                    #[cfg(not(feature = "wasm-trial"))]
+                    {
+                        self.inner.registry.disable(&plugin_id);
+                        return Err(PluginHostError::UnsupportedTier(
+                            "wasm (enable wasm-trial to run this lab tier)".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -832,6 +888,7 @@ impl PluginHost {
         let existing = self
             .get_row(&plugin_id)?
             .ok_or_else(|| PluginHostError::NotInstalled(plugin_id.clone()))?;
+        let _mutation_lease = self.acquire_plugin_mutation(&plugin_id)?;
         self.inner
             .registry
             .validate_upgrade_schemas_with_stage(&manifest, stage_path)
@@ -921,6 +978,8 @@ impl PluginHost {
                 );
             }
         }
+        #[cfg(feature = "wasm-trial")]
+        self.inner.wasm_plugins.write().await.remove(plugin_id);
     }
 
     async fn upgrade_inner(&self, stage_path: &Path) -> Result<PluginRow, PluginHostError> {
@@ -980,6 +1039,7 @@ impl PluginHost {
     /// shipped skills (Phase B), remove DB row + staged directory.
     /// Idempotent — missing plugin returns `NotInstalled`.
     pub async fn uninstall(&self, plugin_id: &str) -> Result<(), PluginHostError> {
+        let _mutation_lease = self.acquire_plugin_mutation(plugin_id)?;
         let row = self
             .get_row(plugin_id)?
             .ok_or_else(|| PluginHostError::NotInstalled(plugin_id.to_owned()))?;
@@ -1003,6 +1063,8 @@ impl PluginHost {
                 );
             }
         }
+        #[cfg(feature = "wasm-trial")]
+        self.inner.wasm_plugins.write().await.remove(plugin_id);
 
         // Phase B (2026-05-03) — archive skills owned by this
         // plugin BEFORE deleting the install row so the
@@ -1051,6 +1113,7 @@ impl PluginHost {
     /// — the host's `shutdown()` of WS subscriptions + the engine
     /// drop remain the *backstop* teardown that always runs.
     pub async fn disable(&self, plugin_id: &str) -> Result<(), PluginHostError> {
+        let _mutation_lease = self.acquire_plugin_mutation(plugin_id)?;
         let Some(mut row) = self.get_row(plugin_id)? else {
             return Err(PluginHostError::NotInstalled(plugin_id.to_owned()));
         };
@@ -1164,7 +1227,7 @@ impl PluginHost {
                         .insert(plugin_id.to_owned(), Arc::new(plugin));
                 }
                 execlaw_plugin_sdk::manifest::RuntimeTier::Script => {
-                    let source_path = stage.join(runtime_source_or_err(runtime)?);
+                    let source_path = runtime_source_path(&stage, runtime)?;
                     let script = execlaw_script::ScriptPlugin::from_file(
                         plugin_id,
                         &source_path,
@@ -1176,6 +1239,35 @@ impl PluginHost {
                         .write()
                         .await
                         .insert(plugin_id.to_owned(), script);
+                }
+                execlaw_plugin_sdk::manifest::RuntimeTier::Wasm => {
+                    #[cfg(feature = "wasm-trial")]
+                    {
+                        let source_path =
+                            runtime_source_path(&stage, runtime).inspect_err(|_| {
+                                self.inner.registry.disable(plugin_id);
+                            })?;
+                        let plugin = match crate::wasm::WasmPlugin::load_limited(source_path).await
+                        {
+                            Ok(plugin) => plugin,
+                            Err(error) => {
+                                self.inner.registry.disable(plugin_id);
+                                return Err(PluginHostError::Spawn(format!("Wasm load: {error}")));
+                            }
+                        };
+                        self.inner
+                            .wasm_plugins
+                            .write()
+                            .await
+                            .insert(plugin_id.to_owned(), Arc::new(plugin));
+                    }
+                    #[cfg(not(feature = "wasm-trial"))]
+                    {
+                        self.inner.registry.disable(plugin_id);
+                        return Err(PluginHostError::UnsupportedTier(
+                            "wasm (enable wasm-trial to run this lab tier)".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -1225,6 +1317,12 @@ impl PluginHost {
     /// the DB by re-registering hooks and (for subprocess-tier)
     /// respawning the child.
     pub async fn hydrate(&self) -> Result<(), PluginHostError> {
+        // A process crash can leave a mutation lease behind. Hydration is a
+        // single-control-plane startup phase, before new turns are admitted.
+        self.inner.db.with_conn(|connection| {
+            connection.execute("DELETE FROM state_plugin_mutation_leases", [])?;
+            Ok(())
+        })?;
         let rows = self.list_rows()?;
         for row in rows.into_iter().filter(|r| r.enabled) {
             let provenance = ArtifactProvenanceStore::new(self.inner.db.clone());
@@ -1361,8 +1459,8 @@ impl PluginHost {
                             }
                         }
                         Some(execlaw_plugin_sdk::manifest::RuntimeTier::Script) => {
-                            let src = match runtime_source_or_err(runtime) {
-                                Ok(s) => s,
+                            let path = match runtime_source_path(&stage, runtime) {
+                                Ok(path) => path,
                                 Err(e) => {
                                     warn!(
                                         plugin_id = %row.plugin_id,
@@ -1376,7 +1474,6 @@ impl PluginHost {
                                     continue;
                                 }
                             };
-                            let path = stage.join(src);
                             match execlaw_script::ScriptPlugin::from_file(
                                 &row.plugin_id,
                                 &path,
@@ -1440,6 +1537,44 @@ impl PluginHost {
                                         &format!("script load failed: {e}"),
                                     );
                                 }
+                            }
+                        }
+                        Some(execlaw_plugin_sdk::manifest::RuntimeTier::Wasm) => {
+                            #[cfg(feature = "wasm-trial")]
+                            {
+                                let path = match runtime_source_path(&stage, runtime) {
+                                    Ok(path) => path,
+                                    Err(error) => {
+                                        self.quarantine_plugin(
+                                            &row.plugin_id,
+                                            &format!("Wasm source path invalid: {error}"),
+                                        );
+                                        continue;
+                                    }
+                                };
+                                match crate::wasm::WasmPlugin::load_limited(path).await {
+                                    Ok(plugin) => {
+                                        self.inner
+                                            .wasm_plugins
+                                            .write()
+                                            .await
+                                            .insert(row.plugin_id.clone(), Arc::new(plugin));
+                                        debug!(plugin_id = %row.plugin_id, "hydrated restricted Wasm plugin");
+                                    }
+                                    Err(error) => {
+                                        self.quarantine_plugin(
+                                            &row.plugin_id,
+                                            &format!("Wasm load failed: {error}"),
+                                        );
+                                    }
+                                }
+                            }
+                            #[cfg(not(feature = "wasm-trial"))]
+                            {
+                                self.quarantine_plugin(
+                                    &row.plugin_id,
+                                    "Wasm runtime unavailable; restart with the wasm-trial feature",
+                                );
                             }
                         }
                         None => {
@@ -1640,23 +1775,41 @@ impl PluginHost {
             "tool": tool_name,
             "args": args.clone(),
         });
-        self.inject_oauth_tokens(&registered.plugin_id, &mut rpc_params);
         let plugin = {
             let subs = self.inner.subprocesses.read().await;
             subs.get(&registered.plugin_id).cloned()
         };
-        let result = if let Some(plugin) = plugin {
-            plugin.call("tool.call", rpc_params).await?
-        } else if let Some(script) = {
+        let script = {
             let scripts = self.inner.script_plugins.read().await;
             scripts.get(&registered.plugin_id).cloned()
-        } {
+        };
+        #[cfg(feature = "wasm-trial")]
+        let wasm = {
+            let plugins = self.inner.wasm_plugins.read().await;
+            plugins.get(&registered.plugin_id).cloned()
+        };
+        if plugin.is_some() || script.is_some() {
+            self.inject_oauth_tokens(&registered.plugin_id, &mut rpc_params);
+        }
+        let result = if let Some(plugin) = plugin {
+            plugin.call("tool.call", rpc_params).await?
+        } else if let Some(script) = script {
             let oauth = oauth_map_from_params(&rpc_params);
             script
                 .tool_call(tool_name, args, oauth)
                 .await
                 .map_err(|e| e.to_string())?
         } else {
+            #[cfg(feature = "wasm-trial")]
+            if let Some(wasm) = wasm {
+                wasm.transform_limited(args.clone()).await?
+            } else {
+                return Err(format!(
+                    "plugin '{}' is registered but no runtime is loaded",
+                    registered.plugin_id
+                ));
+            }
+            #[cfg(not(feature = "wasm-trial"))]
             return Err(format!(
                 "plugin '{}' is registered but no runtime is loaded",
                 registered.plugin_id
@@ -1670,6 +1823,101 @@ impl PluginHost {
             ));
         }
         Ok(result)
+    }
+
+    /// Build the immutable local implementation identity pinned by durable runs.
+    pub fn implementation_pin(
+        &self,
+        tool_name: &str,
+    ) -> Result<execlaw_core::runs::RunToolImplementationPin, String> {
+        let registered = self
+            .inner
+            .registry
+            .tool(tool_name)
+            .ok_or_else(|| format!("tool '{tool_name}' is no longer registered"))?;
+        let row = self
+            .get_row(&registered.plugin_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                format!(
+                    "plugin '{}' has no persisted install row",
+                    registered.plugin_id
+                )
+            })?;
+        let artifact_sha256 =
+            staged_tree_digest(Path::new(&row.stage_path)).map_err(|error| error.to_string())?;
+        Ok(execlaw_core::runs::RunToolImplementationPin {
+            runtime_kind: "plugin".into(),
+            plugin_id: registered.plugin_id.clone(),
+            plugin_version: row.version,
+            tool_name: registered.tool_name.clone(),
+            artifact_sha256,
+            input_schema_sha256: registered.schema_hash.clone(),
+            result_schema_sha256: registered.result_schema_hash.clone(),
+            server_identity: None,
+        })
+    }
+
+    /// Deny execution if the current runtime no longer matches the run's durable pin.
+    pub fn verify_run_tool_pin(&self, run_id: &str, tool_name: &str) -> Result<(), String> {
+        let expected = execlaw_core::runs::RunStore::new(&self.inner.db)
+            .implementation_pins(run_id)
+            .map_err(|error| format!("load run implementation pins: {error}"))?
+            .into_iter()
+            .find(|pin| pin.tool_name == tool_name)
+            .ok_or_else(|| format!("run '{run_id}' has no implementation pin for '{tool_name}'"))?;
+        let current = self.implementation_pin(tool_name)?;
+        if current != expected {
+            return Err(format!(
+                "tool '{tool_name}' implementation changed after run '{}' was planned",
+                run_id
+            ));
+        }
+        Ok(())
+    }
+
+    fn acquire_plugin_mutation(
+        &self,
+        plugin_id: &str,
+    ) -> Result<PluginMutationLease, PluginHostError> {
+        let active_runs = self.inner.db.transaction(|tx| {
+            let active_runs: i64 = tx.query_row(
+                "SELECT COUNT(DISTINCT p.run_id)
+                 FROM state_run_tool_implementation_pins p
+                 JOIN state_runs r ON r.run_id=p.run_id
+                 WHERE p.runtime_kind='plugin' AND p.plugin_id=?1
+                   AND r.status IN ('pending','running','waiting')",
+                [plugin_id],
+                |row| row.get(0),
+            )?;
+            if active_runs > 0 {
+                return Ok(active_runs as u64);
+            }
+            match tx.execute(
+                "INSERT INTO state_plugin_mutation_leases(plugin_id,acquired_at) VALUES(?1,?2)",
+                params![plugin_id, chrono::Utc::now().timestamp()],
+            ) {
+                Ok(_) => Ok(0),
+                Err(rusqlite::Error::SqliteFailure(error, _))
+                    if error.code == rusqlite::ErrorCode::ConstraintViolation =>
+                {
+                    Err(DbError::Invariant(format!(
+                        "plugin '{plugin_id}' mutation already leased"
+                    )))
+                }
+                Err(error) => Err(DbError::from(error)),
+            }
+        })?;
+        if active_runs > 0 {
+            return Err(PluginHostError::PinnedByActiveRuns {
+                plugin_id: plugin_id.to_owned(),
+                active_runs,
+            });
+        }
+        Ok(PluginMutationLease {
+            db: self.inner.db.clone(),
+            plugin_id: plugin_id.to_owned(),
+        })
     }
 
     /// Look up every `[[oauth_accounts]]` declared by `plugin_id`'s
@@ -1970,6 +2218,36 @@ fn runtime_source_or_err(
         .ok_or(PluginHostError::MissingRuntime)
 }
 
+fn runtime_source_path(
+    stage: &Path,
+    runtime: &execlaw_plugin_sdk::manifest::RuntimeDecl,
+) -> Result<PathBuf, PluginHostError> {
+    let source = runtime_source_or_err(runtime)?;
+    let relative = Path::new(source);
+    if relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(PluginHostError::Manifest(
+            "runtime source must remain inside the plugin stage".into(),
+        ));
+    }
+    let stage_root = stage.canonicalize()?;
+    let source_path = stage_root.join(relative).canonicalize()?;
+    if !source_path.starts_with(&stage_root) || !source_path.is_file() {
+        return Err(PluginHostError::Manifest(
+            "runtime source must be a file inside the plugin stage".into(),
+        ));
+    }
+    Ok(source_path)
+}
+
 /// Pull the `_oauth` map out of the JSON params the host injected
 /// for subprocess plugins. Script plugins receive it as a typed
 /// `serde_json::Map`. Empty map when no OAuth accounts apply.
@@ -2181,11 +2459,106 @@ mod tests {
     use execlaw_core::db::DbConfig;
     use execlaw_core::migrations::MigrationRunner;
     use execlaw_core::oauth::{OauthClient, OauthClientStore, OauthTokenStore, OauthTokens};
+    use execlaw_core::runs::{NewRun, RunInputManifest, RunStore};
 
     fn fresh_db() -> Database {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
         MigrationRunner::new(&db).apply_all().unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn durable_run_pins_plugin_code_and_blocks_mutation_until_drain() {
+        let db = fresh_db();
+        let registry = HookRegistry::new();
+        let stage_root = tempfile::tempdir().unwrap();
+        let stage = stage_root.path().join("p-1.0.0");
+        std::fs::create_dir_all(&stage).unwrap();
+        let manifest = r#"[plugin]
+id = "p"
+name = "Pinned"
+version = "1.0.0"
+
+[[tools]]
+name = "p.echo"
+latency = "low"
+required_capabilities = []
+
+[runtime]
+tier = "script"
+source = "main.rhai"
+"#;
+        std::fs::write(stage.join("plugin.toml"), manifest).unwrap();
+        std::fs::write(
+            stage.join("main.rhai"),
+            "fn tool_call(name, args, oauth) { args }",
+        )
+        .unwrap();
+        install_manifest(&db, &registry, "p", manifest);
+        db.with_conn(|connection| {
+            connection.execute(
+                "UPDATE state_plugins SET stage_path=?1 WHERE plugin_id='p'",
+                [stage.to_string_lossy().as_ref()],
+            )?;
+            connection.execute(
+                "INSERT INTO state_events(conversation_id,seq,kind,payload,committed_at)
+                 VALUES('pin-conversation',1,'user_msg',x'00',100)",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let host = PluginHost::new(db.clone(), registry, stage_root.path().to_path_buf());
+        let pin = host.implementation_pin("p.echo").unwrap();
+        let run_store = RunStore::new(&db);
+        let run_id = run_store
+            .create_run(&NewRun {
+                conversation_id: execlaw_core::ids::ConversationId::from("pin-conversation"),
+                parent_run_id: None,
+                input_event_seq: execlaw_core::ids::EventSeq(1),
+                started_at: 100,
+                deadline_at: None,
+            })
+            .unwrap();
+        let declarations = serde_json::json!([]);
+        let catalog_hash = execlaw_core::tool::tool_schema_hash(&declarations);
+        let snapshot = serde_json::json!({
+            "tools":[],
+            "discoverable_tools":[],
+            "implementation_pins":[pin],
+        });
+        run_store
+            .record_input_manifest(
+                &run_id,
+                &RunInputManifest {
+                    input_version: 1,
+                    prompt_hash: "p".into(),
+                    model_settings_hash: "m".into(),
+                    tool_catalog_hash: catalog_hash,
+                    tool_catalog_snapshot_json: Some(snapshot.to_string()),
+                    recorded_at: 100,
+                },
+            )
+            .unwrap();
+        host.verify_run_tool_pin(&run_id, "p.echo").unwrap();
+
+        std::fs::write(
+            stage.join("main.rhai"),
+            "fn tool_call(name, args, oauth) { #{changed:true} }",
+        )
+        .unwrap();
+        assert!(
+            host.verify_run_tool_pin(&run_id, "p.echo")
+                .unwrap_err()
+                .contains("changed")
+        );
+        assert!(matches!(
+            host.disable("p").await,
+            Err(PluginHostError::PinnedByActiveRuns { active_runs: 1, .. })
+        ));
+
+        run_store.complete_run(&run_id, 0, 101).unwrap();
+        host.disable("p").await.unwrap();
     }
 
     /// Insert an enabled plugin row + register hooks with the
@@ -3684,6 +4057,102 @@ entry = "ui/panel.js"
         let error = host.install(outside_stage.path()).await.unwrap_err();
         assert!(matches!(error, PluginHostError::StagePathOutsideRoot(_)));
         assert!(host.get_row("outside-stage").unwrap().is_none());
+    }
+
+    #[cfg(feature = "wasm-trial")]
+    #[tokio::test]
+    async fn wasm_plugin_uses_the_same_install_enable_disable_and_schema_contract() {
+        let db = fresh_db();
+        let registry = HookRegistry::new();
+        let stage_root = tempfile::tempdir().unwrap();
+        let stage = stage_root.path().join("wasm-transform-1.0.0");
+        std::fs::create_dir_all(stage.join("schemas")).unwrap();
+        std::fs::write(
+            stage.join("plugin.toml"),
+            r#"[plugin]
+id = "wasm-transform"
+name = "Wasm transform"
+version = "1.0.0"
+
+[[tools]]
+name = "wasm.transform"
+latency = "low"
+required_capabilities = []
+schema = "schemas/input.json"
+result_schema = "schemas/result.json"
+effect_contract = { external_effect = "none" }
+
+[runtime]
+tier = "wasm"
+source = "transform.wasm"
+"#,
+        )
+        .unwrap();
+        std::fs::write(stage.join("schemas/input.json"), r#"{"type":"object"}"#).unwrap();
+        std::fs::write(stage.join("schemas/result.json"), r#"{"type":"object"}"#).unwrap();
+        std::fs::write(
+            stage.join("transform.wasm"),
+            wat::parse_str(
+                r#"(module
+                    (memory (export "memory") 1 1)
+                    (data (i32.const 0) "{}")
+                    (func (export "alloc") (param i32) (result i32) (i32.const 1024))
+                    (func (export "transform") (param i32 i32) (result i64) (i64.const 2)))"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let host = PluginHost::new(db, registry, stage_root.path().to_path_buf());
+        host.install(&stage).await.unwrap();
+        assert_eq!(
+            host.call_tool(
+                "wasm.transform",
+                serde_json::json!({"value":1}),
+                &[],
+                Some("Controller")
+            )
+            .await
+            .unwrap(),
+            serde_json::json!({})
+        );
+        host.disable("wasm-transform").await.unwrap();
+        host.enable("wasm-transform").await.unwrap();
+        assert_eq!(
+            host.call_tool(
+                "wasm.transform",
+                serde_json::json!({}),
+                &[],
+                Some("Controller")
+            )
+            .await
+            .unwrap(),
+            serde_json::json!({})
+        );
+    }
+
+    #[cfg(not(feature = "wasm-trial"))]
+    #[tokio::test]
+    async fn wasm_install_is_disabled_in_the_default_build() {
+        let db = fresh_db();
+        let registry = HookRegistry::new();
+        let stage_root = tempfile::tempdir().unwrap();
+        let stage = stage_root.path().join("wasm-disabled-1.0.0");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(
+            stage.join("plugin.toml"),
+            "[plugin]\nid=\"wasm-disabled\"\nname=\"Wasm\"\nversion=\"1.0.0\"\n\n[[tools]]\nname=\"wasm.disabled\"\nlatency=\"low\"\nrequired_capabilities=[]\neffect_contract={external_effect=\"none\"}\n\n[runtime]\ntier=\"wasm\"\nsource=\"transform.wasm\"\n",
+        ).unwrap();
+        std::fs::write(
+            stage.join("transform.wasm"),
+            b"not compiled by the default build",
+        )
+        .unwrap();
+        let host = PluginHost::new(db, registry, stage_root.path().to_path_buf());
+        assert!(matches!(
+            host.install(&stage).await,
+            Err(PluginHostError::UnsupportedTier(tier)) if tier.contains("wasm-trial")
+        ));
+        assert!(host.get_row("wasm-disabled").unwrap().is_none());
     }
 
     #[test]

@@ -2890,6 +2890,8 @@ pub(crate) struct RunnerToolView {
     pub builtin_names: Vec<String>,
     /// Names of agent-callable plugin tools that survived filtering.
     pub plugin_tool_names: Vec<String>,
+    /// Content digests and schema identities for plugin tools admitted to this turn.
+    pub implementation_pins: Vec<execlaw_core::runs::RunToolImplementationPin>,
 }
 
 fn safety_profile_allows_tool(
@@ -3227,6 +3229,7 @@ fn build_runner_tool_catalog_with_workspace(
     let mut discoverable: Vec<ToolDeclaration> = Vec::new();
     let mut builtin_names: Vec<String> = Vec::new();
     let mut plugin_tool_names: Vec<String> = Vec::new();
+    let mut implementation_pins = Vec::new();
     let mut catalog_bytes = 0;
     let mut budget_excluded_count = 0;
     // Pre-build the `&[&str]` view of `caller_caps` once; the cap
@@ -3282,6 +3285,14 @@ fn build_runner_tool_catalog_with_workspace(
                 continue;
             }
         }
+        let pin = match plugin_host.implementation_pin(&t.tool_name) {
+            Ok(pin) => pin,
+            Err(error) => {
+                tracing::warn!(plugin_id = %t.plugin_id, tool = %t.tool_name, %error, "plugin tool excluded because its implementation identity could not be pinned");
+                continue;
+            }
+        };
+        implementation_pins.push(pin);
         let description = t.description.clone().unwrap_or_else(|| {
             format!(
                 "Plugin tool '{}' from '{}' (latency: {}). \
@@ -3353,6 +3364,7 @@ fn build_runner_tool_catalog_with_workspace(
         discoverable,
         builtin_names,
         plugin_tool_names,
+        implementation_pins,
     }
 }
 
@@ -4823,6 +4835,14 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     }
     let mut pinned_tool_catalog = tool_view.discoverable.clone();
     pinned_tool_catalog.extend(tool_view.declarations.iter().cloned());
+    let mut implementation_pins = tool_view.implementation_pins.clone();
+    implementation_pins.extend(
+        state
+            .mcp_host
+            .implementation_pins()
+            .await
+            .map_err(|error| format!("snapshot MCP tool identities: {error}"))?,
+    );
     durable
         .record_input_manifest(
             &serde_json::json!({
@@ -4848,6 +4868,7 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
             &serde_json::json!({
                 "tools": &tool_view.declarations,
                 "discoverable_tools": &tool_view.discoverable,
+                "implementation_pins": &implementation_pins,
             }),
             chrono::Utc::now().timestamp(),
         )
