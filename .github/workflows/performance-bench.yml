@@ -113,7 +113,7 @@ jobs:
 
       - name: Store comparison report and raw estimates
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: execlaw-performance-${{ github.sha }}
           path: perf/results/
