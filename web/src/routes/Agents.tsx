@@ -65,7 +65,18 @@ export function Agents() {
         setRuns(await listAgentRuns(agentId, token));
     };
     const refreshScheduleFires = async (agentId: string) => setScheduleFires(await listAgentScheduleFires(agentId, token));
-    const refreshDrafts = async () => setDrafts(await listAgentReplyDrafts(token));
+    const refreshDrafts = async () => {
+        const items = await listAgentReplyDrafts(token);
+        setDrafts(items);
+        const ownership = await Promise.all(items.map(async (draft) => {
+            try {
+                return [draft.id, await getAgentOwnership(draft.conversation_id, draft.channel, draft.recipient, token)] as const;
+            } catch {
+                return [draft.id, null] as const;
+            }
+        }));
+        setOwners(Object.fromEntries(ownership));
+    };
 
     const refreshChildTasks = async () => {
         try {
@@ -228,7 +239,8 @@ export function Agents() {
         setDraftError(null);
         try {
             await handBackAgentConversation(draft.conversation_id, draft.channel, draft.recipient, owner.generation, token);
-            setOwners((current) => ({ ...current, [draft.id]: null }));
+            const restored = await getAgentOwnership(draft.conversation_id, draft.channel, draft.recipient, token);
+            setOwners((current) => ({ ...current, [draft.id]: restored }));
         } catch (error) {
             setDraftError(error instanceof Error ? error.message : "Hand-back failed.");
         }
@@ -271,7 +283,7 @@ export function Agents() {
                             <div className="col-md-6"><Form.Control placeholder="Role prompt" value={form.role_prompt} onChange={(e) => setForm({ ...form, role_prompt: e.target.value })} /></div>
                             <div className="col-md-2"><Form.Control type="number" min={5} value={form.interval_secs} onChange={(e) => setForm({ ...form, interval_secs: Number(e.target.value) })} /></div>
                             <div className="col-md-1"><Button onClick={() => void save()} aria-label="Create agent"><i className="bi bi-plus-lg" /></Button></div>
-                            <div className="col-12"><Form.Label htmlFor="agent-trigger-json" className="small">Trigger and schedule JSON</Form.Label><Form.Control id="agent-trigger-json" as="textarea" rows={3} value={form.triggerJson} onChange={(event) => setForm({ ...form, triggerJson: event.target.value })} /><Form.Text>Example: {`{"event_only":true,"channel":"whatsapp","group_ids":["group@g.us"],"keywords":["camper"]}`}. For a timed agent, add {`"schedule":{"cron":"0 8 * * *","timezone":"America/Vancouver","overlap":"skip","catchup_secs":3600}`}.</Form.Text></div>
+                            <div className="col-12"><Form.Label htmlFor="agent-trigger-json" className="small">Trigger and schedule JSON</Form.Label><Form.Control id="agent-trigger-json" as="textarea" rows={3} value={form.triggerJson} onChange={(event) => setForm({ ...form, triggerJson: event.target.value })} /><Form.Text>Example: {`{"event_only":true,"channel":"whatsapp","group_ids":["group@g.us"],"keywords":["camper"]}`}. For burst handling, add {`"debounce_secs":30,"max_batch_size":25,"urgent_keywords":["urgent"]`}. For a timed agent, add {`"schedule":{"cron":"0 8 * * *","timezone":"America/Vancouver","overlap":"skip","catchup_secs":3600}`}.</Form.Text></div>
                             <div className="col-md-6"><Form.Label htmlFor="agent-completion-criteria" className="small">Acceptance criteria (one required criterion per line: id=description)</Form.Label><Form.Control id="agent-completion-criteria" as="textarea" rows={2} value={form.criteria} onChange={(e) => setForm({ ...form, criteria: e.target.value })} /></div>
                             <div className="col-md-6"><Form.Label htmlFor="agent-output-verifiers" className="small">Structured output checks (criterion-id|/json/path|expected JSON)</Form.Label><Form.Control id="agent-output-verifiers" as="textarea" rows={2} value={form.verifiers} onChange={(e) => setForm({ ...form, verifiers: e.target.value })} /></div>
                             <div className="col-md-6"><Form.Label htmlFor="agent-completion-artifacts" className="small">Required artifacts (one per line: id=description)</Form.Label><Form.Control id="agent-completion-artifacts" as="textarea" rows={2} value={form.artifacts} onChange={(e) => setForm({ ...form, artifacts: e.target.value })} /></div>
@@ -335,8 +347,14 @@ export function Agents() {
                         {drafts.length === 0 && <p className="small text-muted">No pending drafts.</p>}
                         {drafts.map((draft) => {
                             const owner = owners[draft.id];
+                            const audience = draft.audience ?? {};
+                            const groupId = typeof audience.group_id === "string" ? audience.group_id : null;
+                            const members = Array.isArray(audience.members)
+                                ? audience.members.filter((member): member is string => typeof member === "string")
+                                : [];
                             return <article key={draft.id} className="border rounded p-3 mb-2">
                                 <div className="d-flex justify-content-between"><strong>{draft.agent_id}.agent.md</strong><span className={draft.stale_at ? "text-warning" : "text-muted"}>{draft.stale_at ? "Stale · regenerate before sending" : `Draft v${draft.revision}`}</span></div>
+                                <p className="small mb-1" aria-label={`Audience for ${draft.id}`}>Destination: {draft.channel} · <code>{draft.recipient}</code>{groupId && <> · Group ID: <code>{groupId}</code> · observed member identities: {members.length ? members.map((member) => <code key={member} className="me-1">{member}</code>) : "unavailable"} · audience epoch {String(audience.membership_epoch ?? "unknown")}</>}</p>
                                 <p className="small mb-1">Inbound: {draft.inbound_text}</p>
                                 <Form.Control as="textarea" rows={3} aria-label={`Edit draft ${draft.id}`} value={draftEdits[draft.id] ?? draft.draft_text} onChange={(event) => setDraftEdits((current) => ({ ...current, [draft.id]: event.target.value }))} />
                                 <div className="d-flex flex-wrap gap-2 mt-2"><Button size="sm" variant="outline-primary" disabled={!!draft.stale_at} onClick={() => void editDraft(draft)}>Save revision</Button><Button size="sm" variant="outline-secondary" onClick={() => void rejectDraft(draft)}>Reject</Button><a className="btn btn-sm btn-outline-success" href={`/chat/${encodeURIComponent(draft.conversation_id)}`}>Review in thread</a><Button size="sm" variant="outline-secondary" onClick={() => void inspectOwner(draft)}>Check owner</Button>{owner?.owner_kind === "controller" ? <Button size="sm" variant="outline-secondary" onClick={() => void handBackDraft(draft, owner)}>Hand back</Button> : <Button size="sm" variant="outline-warning" onClick={() => void takeOverDraft(draft)}>Take over</Button>}</div>

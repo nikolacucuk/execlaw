@@ -5,7 +5,7 @@ use chrono::{TimeZone, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Versioned trigger specification stored in `config_agents.trigger_json`.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AgentTriggerSpec {
     pub event_only: bool,
@@ -16,7 +16,33 @@ pub struct AgentTriggerSpec {
     pub keywords: Vec<String>,
     pub priority: i32,
     pub observer: bool,
+    /// Hold matching source events for this many seconds before admission.
+    pub debounce_secs: u32,
+    /// Maximum same-recipient events a single event-only run may consume.
+    #[serde(default = "default_max_batch_size")]
+    pub max_batch_size: u32,
+    /// Case-insensitive text markers that bypass the debounce window.
+    pub urgent_keywords: Vec<String>,
     pub schedule: Option<AgentScheduleSpec>,
+}
+
+impl Default for AgentTriggerSpec {
+    fn default() -> Self {
+        Self {
+            event_only: false,
+            channel: None,
+            group_only: false,
+            group_ids: Vec::new(),
+            group_titles: Vec::new(),
+            keywords: Vec::new(),
+            priority: 0,
+            observer: false,
+            debounce_secs: 0,
+            max_batch_size: default_max_batch_size(),
+            urgent_keywords: Vec::new(),
+            schedule: None,
+        }
+    }
 }
 
 /// The event fields an agent may use for deterministic trigger admission.
@@ -65,6 +91,10 @@ pub struct AgentScheduleSpec {
 
 fn default_catchup_secs() -> u32 {
     3600
+}
+
+fn default_max_batch_size() -> u32 {
+    1
 }
 
 impl AgentScheduleSpec {
@@ -160,6 +190,19 @@ impl AgentTriggerSpec {
         {
             return Err("agent trigger filters must not contain empty values".into());
         }
+        if self.debounce_secs > 3600 {
+            return Err("agent trigger debounce_secs exceeds one hour".into());
+        }
+        if !(1..=100).contains(&self.max_batch_size) {
+            return Err("agent trigger max_batch_size must be between 1 and 100".into());
+        }
+        if self
+            .urgent_keywords
+            .iter()
+            .any(|keyword| keyword.trim().is_empty())
+        {
+            return Err("urgent event keywords must not be empty".into());
+        }
         if let Some(schedule) = &self.schedule {
             schedule.validate()?;
         }
@@ -222,6 +265,20 @@ impl AgentTriggerSpec {
             .iter()
             .any(|keyword| haystack.contains(&keyword.to_lowercase()))
             .then_some("keyword"))
+    }
+
+    /// Calculate the durable mailbox due time, allowing configured urgent
+    /// events to bypass debounce.
+    pub fn available_at(&self, event: &AgentEvent, received_at: i64) -> i64 {
+        if self
+            .urgent_keywords
+            .iter()
+            .any(|keyword| event.text.to_lowercase().contains(&keyword.to_lowercase()))
+        {
+            received_at
+        } else {
+            received_at.saturating_add(self.debounce_secs as i64)
+        }
     }
 }
 
@@ -391,6 +448,32 @@ mod tests {
             ..event
         };
         assert!(!preview_events(&trigger, &[other]).unwrap()[0].matched);
+    }
+
+    #[test]
+    fn configured_urgent_event_bypasses_bounded_debounce() {
+        let trigger = AgentTriggerSpec {
+            debounce_secs: 30,
+            max_batch_size: 10,
+            urgent_keywords: vec!["urgent".into()],
+            ..Default::default()
+        };
+        let ordinary = AgentEvent {
+            source: "test".into(),
+            id: "ordinary".into(),
+            channel: "test".into(),
+            recipient: "peer".into(),
+            group_id: None,
+            group_name: None,
+            text: "normal update".into(),
+            occurred_at: 1,
+        };
+        assert_eq!(trigger.available_at(&ordinary, 100), 130);
+        let urgent = AgentEvent {
+            text: "urgent: stop now".into(),
+            ..ordinary
+        };
+        assert_eq!(trigger.available_at(&urgent, 100), 100);
     }
 
     #[test]

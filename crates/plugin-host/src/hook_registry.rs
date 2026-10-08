@@ -358,6 +358,7 @@ pub struct RegisteredTransport {
     pub transport_id: String,
     pub supports_attachments: bool,
     pub supports_groups: bool,
+    pub message_operations: Vec<execlaw_plugin_sdk::manifest::MessageOperationDecl>,
 }
 
 /// An identity provider (matches transport identifiers → principals).
@@ -863,6 +864,7 @@ impl HookRegistry {
                     transport_id: t.transport_id.clone(),
                     supports_attachments: t.supports_attachments,
                     supports_groups: t.supports_groups,
+                    message_operations: t.message_operations.clone(),
                 },
             );
         }
@@ -1229,6 +1231,21 @@ impl HookRegistry {
             .values()
             .cloned()
             .collect()
+    }
+
+    /// Return whether a registered transport explicitly declares a normalized
+    /// inbound operation. Undeclared operations take the visible fallback path.
+    pub fn supports_message_operation(
+        &self,
+        transport_id: &str,
+        operation: execlaw_plugin_sdk::manifest::MessageOperationDecl,
+    ) -> bool {
+        self.inner
+            .read()
+            .unwrap()
+            .transports_by_id
+            .get(transport_id)
+            .is_some_and(|transport| transport.message_operations.contains(&operation))
     }
 
     /// Look up the sidecar registered with `name`, if any. Returns
@@ -1847,6 +1864,32 @@ supports_groups = false
         );
         // p1's transport is still registered correctly.
         assert_eq!(reg.transport("signal").unwrap().plugin_id, "p1");
+    }
+
+    #[test]
+    fn transport_operation_support_requires_manifest_declaration() {
+        let manifest = PluginManifest::parse(
+            r#"[plugin]
+id = "message-transport"
+name = "Message Transport"
+version = "1.0.0"
+
+[transport]
+transport_id = "message-test"
+message_operations = ["create", "edit", "reply_lineage"]
+"#,
+        )
+        .unwrap();
+        let registry = HookRegistry::new();
+        registry.enable(&manifest).unwrap();
+        assert!(registry.supports_message_operation(
+            "message-test",
+            execlaw_plugin_sdk::manifest::MessageOperationDecl::Edit
+        ));
+        assert!(!registry.supports_message_operation(
+            "message-test",
+            execlaw_plugin_sdk::manifest::MessageOperationDecl::Delete
+        ));
     }
 
     /// UI-panel mount paths are also singleton — two plugins cannot

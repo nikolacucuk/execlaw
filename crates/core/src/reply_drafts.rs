@@ -201,6 +201,74 @@ impl<'db> ReplyDraftStore<'db> {
             Ok(())
         })
     }
+
+    /// Verify that the draft still targets its captured transport and observed audience.
+    /// Group membership comes from opaque principal IDs, never display names.
+    pub fn validate_audience(&self, id: &str) -> Result<(), DbError> {
+        let draft = self
+            .get(id)?
+            .ok_or_else(|| DbError::Invariant("reply draft not found".into()))?;
+        let audience = &draft.audience;
+        if audience.get("channel").and_then(serde_json::Value::as_str)
+            != Some(draft.channel.as_str())
+            || audience
+                .get("recipient")
+                .and_then(serde_json::Value::as_str)
+                != Some(draft.recipient.as_str())
+        {
+            return Err(DbError::Invariant(
+                "reply draft transport destination changed".into(),
+            ));
+        }
+        let native_group = audience.get("group_id").and_then(serde_json::Value::as_str);
+        if native_group.is_none() {
+            let bound: bool = self.db.with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM state_transport_bindings binding \
+                     JOIN state_conversations conversation \
+                       ON conversation.conversation_id = ?1 \
+                     WHERE binding.channel = ?2 AND binding.foreign_id = ?3 \
+                       AND binding.principal_group_id = conversation.principal_group_id \
+                       AND binding.is_group = 0)",
+                    params![draft.conversation_id, draft.channel, draft.recipient],
+                    |row| row.get(0),
+                )?)
+            })?;
+            return if bound {
+                Ok(())
+            } else {
+                Err(DbError::Invariant(
+                    "reply draft recipient identity is no longer bound to this conversation".into(),
+                ))
+            };
+        }
+        let current = crate::principal_groups::PrincipalGroupStore::new(self.db)
+            .audience_state(&draft.conversation_id)?;
+        let Some((group_id, current_native_group, epoch, member_hash, _members)) = current else {
+            return Err(DbError::Invariant(
+                "reply draft group audience is unavailable".into(),
+            ));
+        };
+        if current_native_group.as_deref() != native_group
+            || audience
+                .get("principal_group_id")
+                .and_then(serde_json::Value::as_str)
+                != Some(group_id.as_str())
+            || audience
+                .get("membership_epoch")
+                .and_then(serde_json::Value::as_i64)
+                != Some(epoch)
+            || audience
+                .get("members_sha256")
+                .and_then(serde_json::Value::as_str)
+                != Some(member_hash.as_str())
+        {
+            return Err(DbError::Invariant(
+                "reply draft audience changed since it was proposed".into(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 fn map_draft(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReplyDraft> {
@@ -278,5 +346,78 @@ mod tests {
             "approved"
         );
         assert!(store.approve("draft-2", 1, "controller", 14).is_err());
+    }
+
+    #[test]
+    fn observed_group_membership_change_invalidates_reviewed_draft_audience() {
+        use crate::{
+            ids::PrincipalId,
+            principal_groups::{GroupKey, PrincipalGroupStore},
+            transport_bindings::TransportBindingStore,
+        };
+
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        db.with_conn(|connection| {
+            connection.execute(
+                "INSERT INTO state_conversations(conversation_id,kind,phase,trust_class,modality) \
+                 VALUES ('group-chat','GroupWithControllerPresent','idle','KnownTrusted','Text')",
+                [],
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        let groups = PrincipalGroupStore::new(&db);
+        let group = groups
+            .resolve(
+                &GroupKey {
+                    channel: "whatsapp",
+                    native_group_id: Some("native-group-1"),
+                    principals: &[],
+                    includes_controller: true,
+                },
+                100,
+            )
+            .unwrap();
+        groups
+            .bind_conversation("group-chat", &group.group_id)
+            .unwrap();
+        TransportBindingStore::new(&db)
+            .insert_binding("whatsapp", "native-group-1", &group.group_id, true, 100)
+            .unwrap();
+        let (group_id, _, epoch, members_sha256, members) =
+            groups.audience_state("group-chat").unwrap().unwrap();
+        let audience = serde_json::json!({
+            "channel":"whatsapp", "recipient":"native-group-1",
+            "group_id":"native-group-1", "principal_group_id":group_id,
+            "membership_epoch":epoch, "members_sha256":members_sha256,
+            "members":members
+        });
+        let store = ReplyDraftStore::new(&db);
+        store
+            .create(&NewReplyDraft {
+                id: "audience-draft",
+                agent_id: "agent",
+                run_id: "run",
+                conversation_id: "group-chat",
+                channel: "whatsapp",
+                recipient: "native-group-1",
+                source_event_id: Some("source-1"),
+                source_event_seq: Some(1),
+                audience: &audience,
+                inbound_text: "Question",
+                draft_text: "Private answer",
+                now: 100,
+            })
+            .unwrap();
+        assert!(store.validate_audience("audience-draft").is_ok());
+        groups
+            .add_member(
+                &group.group_id,
+                &PrincipalId::from("lower-trust-member"),
+                101,
+            )
+            .unwrap();
+        assert!(store.validate_audience("audience-draft").is_err());
     }
 }

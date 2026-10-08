@@ -169,9 +169,14 @@ transport_id        = "whatsapp"
 supports_attachments = true
 supports_groups      = true
 icon                 = "whatsapp"   # Bootstrap-icons name
+message_operations   = ["create", "edit", "delete", "reaction_add", "reaction_remove", "reply_lineage"]
 ```
 
 Marks the plugin as ownership-claimant for inbound messages on `transport_id`. The host's auto-bridge picks transports based on these declarations.
+`message_operations` is an explicit list; omitted operations use the visible
+unsupported-event fallback. Adapters pass normalized operation fields through
+the shared `host_route_inbound` contract. Reactions are informational and do
+not grant approval.
 
 ### `[identity_provider]` (at most one)
 
@@ -202,7 +207,7 @@ Handler signature: `fn admin_status(args)` where `args = #{ method, path, query,
 
 ### `[[webhook_routes]]` (public route, mounted at `/api/webhooks/{plugin_id}{path}`)
 
-Webhook routes do not use execlaw session JWTs. Declare the route's `auth` mode so the host verifies a query token or HMAC-SHA256 header before publishing or dispatching the request. Routes that omit `auth` retain the legacy handler-validation fallback and must verify the caller themselves. See `crates/server/src/plugin_webhook_routes.rs` and the WhatsApp manifest for the supported pattern.
+Webhook routes do not use execlaw session JWTs. Declare the route's `auth` mode so the host verifies a query token or HMAC-SHA256 header before publishing or dispatching the request. HMAC routes can also declare `timestamp_header`, `replay_window_secs`, `event_id_header`, `previous_vault_key`, and `max_body_bytes`. A timestamp is signed with the exact body bytes; when an event-ID header is configured it is included in the signature and durable replay receipt. The current canonical form is `timestamp:event_id:body` (or `timestamp:body` without an event ID). Old and current vault keys can overlap during rollover. Routes without `auth` retain the legacy handler-validation fallback. Accepted and acknowledged rejected deliveries emit sanitized outcomes; request bodies are never included in webhook parse-error logs. See `crates/server/src/plugin_webhook_routes.rs` for the route contract.
 
 ### `[[oauth_accounts]]`, `[[ui_panels]]`, `[[event_subscriptions]]`, `[[alert_sources]]`, `[[health_checks]]`, `[[skills]]`, `[[chat_components]]`
 

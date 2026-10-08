@@ -183,7 +183,37 @@ fn on_frame(handle, raw) {
     let payload = env.payload;
     if payload == () { return; }
     let event = payload.event;
-    if event == () || event.type != "message" { return; }
+    if event == () { return; }
+    if event.type == "reaction_added" || event.type == "reaction_removed" {
+        let inbound = decode_reaction_event(team_id, event, payload);
+        if inbound != () {
+            try { host_route_inbound(inbound); }
+            catch (e) { log_warn("slack: host_route_inbound rejected reaction: " + e); }
+        }
+        return;
+    }
+    if event.type != "message" { return; }
+    if event.subtype == "message_deleted" {
+        let inbound = decode_deleted_event(team_id, event, payload);
+        if inbound != () {
+            try { host_route_inbound(inbound); }
+            catch (e) { log_warn("slack: host_route_inbound rejected deletion: " + e); }
+        }
+        return;
+    }
+    if event.subtype == "message_changed" {
+        let changed = event.message;
+        if changed == () { return; }
+        changed.channel = event.channel;
+        changed.channel_type = event.channel_type;
+        changed.subtype = "message_changed";
+        let inbound = decode_event(team_id, changed, payload);
+        if inbound != () {
+            try { host_route_inbound(inbound); }
+            catch (e) { log_warn("slack: host_route_inbound rejected edit: " + e); }
+        }
+        return;
+    }
     if event.subtype != () && event.subtype != "" { return; }
     if event.bot_id != () && event.bot_id != "" { return; }
     if event.user == () || event.user == "" { return; }
@@ -219,7 +249,9 @@ fn decode_event(team_id, event, payload) {
         // messages need <@SELF> in the text.
         let is_dm = (event.channel_type == "im")
             || (event.channel != () && event.channel.starts_with("D"));
-        if !is_dm {
+        if is_dm { cache_dm_peer(event.channel, event.user); }
+        let operation = if event.subtype == "message_changed" { "edit" } else { "create" };
+        if !is_dm && operation == "create" {
             let bot_user_id = bot_user_id_for_team(team_id);
             if bot_user_id != () && bot_user_id != "" {
                 let mention = "<@" + bot_user_id + ">";
@@ -275,6 +307,11 @@ fn decode_event(team_id, event, payload) {
 
         return #{
             "channel": "slack",
+            "source_event_id": if payload.event_id != () { payload.event_id } else { event.ts },
+            "message_operation": operation,
+            "target_message_id": event.ts,
+            "source_revision": if operation == "edit" && event.edited != () { parse_slack_ts_ms(event.edited.ts) } else { parse_slack_ts_ms(event.ts) },
+            "reply_to_message_id": event.thread_ts,
             "native_id": event.user,
             "display_name": if is_dm { conv_label } else { () },
             "group_id": group_id,
@@ -287,6 +324,58 @@ fn decode_event(team_id, event, payload) {
     } catch (e) {
         log_warn("slack: undecodable event: " + e);
         return ();
+    }
+}
+
+fn decode_deleted_event(team_id, event, payload) {
+    let channel = event.channel;
+    let target_id = event.deleted_ts;
+    if channel == () || target_id == () { return (); }
+    let previous = if event.previous_message != () { event.previous_message } else { () };
+    let is_dm = channel.starts_with("D");
+    let author = if is_dm { lookup_dm_peer(channel) } else if previous != () && previous.user != () { previous.user } else { () };
+    let author = if author == () || author == "" { "slack-system" } else { author };
+    let group_id = if is_dm { () } else { "slack:" + channel };
+    #{
+        "channel": "slack",
+        "source_event_id": if payload.event_id != () { payload.event_id } else { event.ts },
+        "message_operation": "delete",
+        "target_message_id": target_id,
+        "source_revision": parse_slack_ts_ms(event.ts),
+        "native_id": author,
+        "group_id": group_id,
+        "group_name": if is_dm { () } else { resolve_channel_label(team_id, channel, false, author) },
+        "text": "",
+        "timestamp_ms": parse_slack_ts_ms(event.ts),
+        "agent_handling_enabled": false,
+        "reuse_conversation": true,
+    }
+}
+
+fn decode_reaction_event(team_id, event, payload) {
+    let item = event.item;
+    if item == () || item.type != "message" || item.channel == () || item.ts == () { return (); }
+    let actor = event.user;
+    if actor == () || actor == "" || event.reaction == () { return (); }
+    let channel = item.channel;
+    let is_dm = channel.starts_with("D");
+    let cached_peer = if is_dm { lookup_dm_peer(channel) } else { () };
+    let conversation_peer = if cached_peer != () && cached_peer != "" { cached_peer } else { actor };
+    let group_id = if is_dm { () } else { "slack:" + channel };
+    #{
+        "channel": "slack",
+        "source_event_id": if payload.event_id != () { payload.event_id } else { event.event_ts },
+        "message_operation": if event.type == "reaction_removed" { "reaction_remove" } else { "reaction_add" },
+        "target_message_id": item.ts,
+        "source_revision": parse_slack_ts_ms(event.event_ts),
+        "reaction": event.reaction,
+        "native_id": conversation_peer,
+        "group_id": group_id,
+        "group_name": if is_dm { () } else { resolve_channel_label(team_id, channel, false, actor) },
+        "text": "",
+        "timestamp_ms": parse_slack_ts_ms(event.event_ts),
+        "agent_handling_enabled": false,
+        "reuse_conversation": true,
     }
 }
 
@@ -605,7 +694,11 @@ fn parse_slack_ts_ms(ts) {
 
 fn parse_int(s) {
     if s == () || s == "" { return (); }
-    try { return s.to_int(); } catch (e) { return (); }
+    let digits = s;
+    while digits.len() > 1 && digits.starts_with("0") {
+        digits = digits.sub_string(1);
+    }
+    try { return parse_json(digits); } catch (e) { return (); }
 }
 
 // =====================================================================
@@ -679,6 +772,35 @@ fn load_channel_labels() {
     } catch (e) {
         return #{};
     }
+}
+
+// Slack delete/reaction events carry a DM channel ID but not always the
+// peer user ID. Keep the authenticated message's channel-to-peer mapping so
+// later mutations land in the same host conversation as the original.
+fn load_dm_peers() {
+    let raw = vault_get("dm_channel_peers");
+    if raw == () || raw == "" { return #{}; }
+    try { return parse_json(raw); } catch (e) { return #{}; }
+}
+
+fn cache_dm_peer(channel_id, user_id) {
+    if channel_id == () || user_id == () || channel_id == "" || user_id == "" { return; }
+    try {
+        let peers = load_dm_peers();
+        peers[channel_id] = user_id;
+        vault_put("dm_channel_peers", to_json_string(peers));
+    } catch (e) {
+        log_warn("slack: DM channel peer cache unavailable: " + e);
+    }
+}
+
+fn lookup_dm_peer(channel_id) {
+    if channel_id == () || channel_id == "" { return (); }
+    try {
+        let peers = load_dm_peers();
+        if peers[channel_id] != () { return peers[channel_id]; }
+    } catch (e) { log_warn("slack: DM channel peer lookup failed: " + e); }
+    ()
 }
 
 fn save_channel_label(channel_id, label) {

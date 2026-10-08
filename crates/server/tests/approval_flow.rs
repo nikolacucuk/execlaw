@@ -146,6 +146,11 @@ async fn send_inbound(state: &AppState, sender: &str, text: &str) -> RouteOutcom
         InboundMessage {
             channel: "test".into(),
             source_event_id: None,
+            message_operation: None,
+            target_message_id: None,
+            source_revision: None,
+            reply_to_message_id: None,
+            reaction: None,
             native_id: sender.into(),
             display_name: None,
             group_id: None,

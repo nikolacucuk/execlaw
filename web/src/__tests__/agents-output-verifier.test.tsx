@@ -48,7 +48,7 @@ it("previews a selected agent without effects and exposes a stale draft", async 
     mocks.listAgents.mockResolvedValue([{ id: "camper", name: "camper", trigger: { channel: "whatsapp", keywords: ["camper"] },
         enabled: true, paused: false, reply_mode: "draft", definition_version: 2, schedule_next_at: null, last_run_status: null }]);
     mocks.listAgentReplyDrafts.mockResolvedValue([{ id: "draft-1", agent_id: "camper", conversation_id: "chat-1", channel: "whatsapp",
-        recipient: "group@g.us", revision: 1, inbound_text: "Camper?", draft_text: "Please send dates.", status: "pending", stale_at: 10,
+        recipient: "group@g.us", audience: { group_id: "group@g.us", membership_epoch: 3, members: ["principal-a", "principal-b"] }, revision: 1, inbound_text: "Camper?", draft_text: "Please send dates.", status: "pending", stale_at: 10,
         model_seq: 4, created_at: 9 }]);
     render(<Agents />);
     fireEvent.click(await screen.findByRole("button", { name: /camper.*Running/ }));
@@ -58,6 +58,8 @@ it("previews a selected agent without effects and exposes a stale draft", async 
     expect(screen.getByText(/effects 0/)).toBeInTheDocument();
     expect(screen.getByText(/Stale · regenerate before sending/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save revision" })).toBeDisabled();
+    expect(screen.getByLabelText("Audience for draft-1")).toHaveTextContent("principal-a");
+    expect(screen.getByLabelText("Audience for draft-1")).toHaveTextContent("audience epoch 3");
 });
 
 it("submits a structured output verifier with the matching agent criterion", async () => {

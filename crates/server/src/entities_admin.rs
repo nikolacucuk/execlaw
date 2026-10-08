@@ -59,7 +59,7 @@ pub struct MergeListQuery {
     pub status: Option<String>,
 }
 
-#[utoipa::path(get,path="/api/admin/entity-merges",params(("status"=Option<String>,Query)),responses((status=200,description="Entity merge proposals and review decisions")),security(("bearer_auth"=[])))]
+#[utoipa::path(get,path="/api/admin/entity-merges",params(("status"=Option<String>,Query)),responses((status=200,description="Entity merge proposals and review decisions")),security(("bearer_jwt"=[])))]
 pub async fn list_merges(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -78,7 +78,7 @@ pub async fn list_merges(
     }
 }
 
-#[utoipa::path(post,path="/api/admin/entities",request_body=CreateEntityRequest,responses((status=201,description="Entity created")),security(("bearer_auth"=[])))]
+#[utoipa::path(post,path="/api/admin/entities",request_body=CreateEntityRequest,responses((status=201,description="Entity created")),security(("bearer_jwt"=[])))]
 pub async fn create(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -105,7 +105,7 @@ pub async fn create(
     }
 }
 
-#[utoipa::path(get,path="/api/admin/entities/candidates",params(("label"=String,Query),("at"=Option<i64>,Query)),responses((status=200,description="Matching entities with ambiguity preserved")),security(("bearer_auth"=[])))]
+#[utoipa::path(get,path="/api/admin/entities/candidates",params(("label"=String,Query),("at"=Option<i64>,Query)),responses((status=200,description="Matching entities with ambiguity preserved")),security(("bearer_jwt"=[])))]
 pub async fn candidates(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -130,7 +130,7 @@ pub async fn candidates(
     Json(serde_json::json!({"ambiguous":matches.len()>1,"candidates":matches})).into_response()
 }
 
-#[utoipa::path(post,path="/api/admin/entities/{id}/aliases",params(("id"=String,Path)),request_body=AddAliasRequest,responses((status=201,description="Evidence-backed alias added")),security(("bearer_auth"=[])))]
+#[utoipa::path(post,path="/api/admin/entities/{id}/aliases",params(("id"=String,Path)),request_body=AddAliasRequest,responses((status=201,description="Evidence-backed alias added")),security(("bearer_jwt"=[])))]
 pub async fn add_alias(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -161,7 +161,7 @@ pub async fn add_alias(
     }
 }
 
-#[utoipa::path(post,path="/api/admin/entity-merges",request_body=ProposeMergeRequest,responses((status=201,description="Merge proposal created")),security(("bearer_auth"=[])))]
+#[utoipa::path(post,path="/api/admin/entity-merges",request_body=ProposeMergeRequest,responses((status=201,description="Merge proposal created")),security(("bearer_jwt"=[])))]
 pub async fn propose_merge(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -190,7 +190,7 @@ pub async fn propose_merge(
     }
 }
 
-#[utoipa::path(post,path="/api/admin/entity-merges/{id}/accept",params(("id"=String,Path)),request_body=DecisionRequest,responses((status=204,description="Merge accepted")),security(("bearer_auth"=[])))]
+#[utoipa::path(post,path="/api/admin/entity-merges/{id}/accept",params(("id"=String,Path)),request_body=DecisionRequest,responses((status=204,description="Merge accepted")),security(("bearer_jwt"=[])))]
 pub async fn accept_merge(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -215,7 +215,7 @@ pub async fn accept_merge(
     }
 }
 
-#[utoipa::path(post,path="/api/admin/entity-merges/{id}/reject",params(("id"=String,Path)),request_body=DecisionRequest,responses((status=204,description="Merge rejected")),security(("bearer_auth"=[])))]
+#[utoipa::path(post,path="/api/admin/entity-merges/{id}/reject",params(("id"=String,Path)),request_body=DecisionRequest,responses((status=204,description="Merge rejected")),security(("bearer_jwt"=[])))]
 pub async fn reject_merge(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -240,7 +240,7 @@ pub async fn reject_merge(
     }
 }
 
-#[utoipa::path(post,path="/api/admin/entity-merges/{id}/reverse",params(("id"=String,Path)),request_body=DecisionRequest,responses((status=204,description="Merge reversed")),security(("bearer_auth"=[])))]
+#[utoipa::path(post,path="/api/admin/entity-merges/{id}/reverse",params(("id"=String,Path)),request_body=DecisionRequest,responses((status=204,description="Merge reversed")),security(("bearer_jwt"=[])))]
 pub async fn reverse_merge(
     State(state): State<AppState>,
     user: AuthedUser,

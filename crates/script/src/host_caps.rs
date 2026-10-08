@@ -57,6 +57,16 @@ pub struct InboundMessage {
     pub channel: String,
     /// Stable upstream message ID for deduplication and review lineage.
     pub source_event_id: Option<String>,
+    /// Normalized transport mutation kind (`create`, `edit`, `delete`, or reaction operation).
+    pub message_operation: Option<String>,
+    /// Stable upstream target message ID for edits, deletes, reactions, and replies.
+    pub target_message_id: Option<String>,
+    /// Monotonic provider revision/sequence for this target message.
+    pub source_revision: Option<i64>,
+    /// Stable upstream reply target ID.
+    pub reply_to_message_id: Option<String>,
+    /// Provider reaction token, never an approval signal by itself.
+    pub reaction: Option<String>,
     /// Foreign id of the sender — E.164 phone for Signal, jid for
     /// WhatsApp, RFC-5322 address for email. The host's principal
     /// admit pipeline uses this as the routing key.
@@ -145,6 +155,9 @@ pub enum RouteOutcome {
     /// Group inbound where the LLM classifier decided the message
     /// wasn't directed at the agent. Persisted but no turn ran.
     GroupNotAddressed,
+    /// A normalized transport operation was persisted as an explicit
+    /// fallback because the manifest does not declare support for it.
+    UnsupportedOperation,
 }
 
 /// Long-lived background-task handle for a Rhai-driven WebSocket

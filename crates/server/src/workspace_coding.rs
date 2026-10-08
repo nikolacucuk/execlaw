@@ -15,6 +15,7 @@ use execlaw_core::{
         WorkspaceStore,
     },
 };
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::Write;
@@ -23,6 +24,7 @@ use std::path::{Path as FsPath, PathBuf};
 const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_SNAPSHOT_BYTES: u64 = 100 * 1024 * 1024;
 const MAX_SEARCH_MATCHES: usize = 500;
+const CODE_SOURCE_EXTENSIONS: &[&str] = &["rs", "ts", "tsx", "js", "jsx", "rhai", "md", "mdx"];
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterWorkspaceRequest {
@@ -52,6 +54,11 @@ pub struct WorkspacePathQuery {
 
 #[derive(Debug, Deserialize)]
 pub struct WorkspaceSearchRequest {
+    pub query: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WorkspaceCodeQuery {
     pub query: String,
 }
 
@@ -122,6 +129,14 @@ pub struct WorkspaceApplyState {
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/admin/workspaces", get(list_roots).post(register_root))
+        .route(
+            "/api/admin/workspaces/{workspace_id}/code-index",
+            get(code_index_status).post(index_workspace),
+        )
+        .route(
+            "/api/admin/workspaces/{workspace_id}/code-index/symbols",
+            get(search_code_symbols),
+        )
         .route("/api/admin/workspaces/{workspace_id}/files", get(read_file))
         .route(
             "/api/admin/workspaces/{workspace_id}/search",
@@ -315,6 +330,15 @@ fn map_store(error: execlaw_core::workspaces::WorkspaceStoreError) -> ApiError {
     }
 }
 
+fn map_db(error: execlaw_core::DbError) -> ApiError {
+    tracing::error!(error = %error, "workspace database operation failed");
+    ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "workspace_database_error",
+        message: "workspace database operation failed".into(),
+    }
+}
+
 #[utoipa::path(post,path="/api/admin/workspaces",request_body=serde_json::Value,responses((status=200,description="Registered canonical workspace root",body=serde_json::Value)),tag="workspaces")]
 pub async fn register_root(
     State(state): State<AppState>,
@@ -430,6 +454,188 @@ pub async fn search_files(
         }
     }
     Ok(Json(matches))
+}
+
+/// Incrementally index source and documentation symbols for one registered root.
+/// A text search remains the fallback whenever this receipt is stale or incomplete.
+pub async fn index_workspace(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    controller(&user)?;
+    let root = root_path(&state, &workspace_id)?;
+    let files = scan_workspace(&root)?;
+    let mut indexed = Vec::new();
+    let mut unsupported = 0usize;
+    for (path, bytes) in &files {
+        let extension = FsPath::new(path)
+            .extension()
+            .and_then(|v| v.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if !CODE_SOURCE_EXTENSIONS.contains(&extension.as_str()) {
+            unsupported += 1;
+            continue;
+        }
+        let Ok(text) = std::str::from_utf8(bytes) else {
+            unsupported += 1;
+            continue;
+        };
+        indexed.push((
+            path.as_str(),
+            hex::encode(Sha256::digest(bytes)),
+            code_symbols(text),
+        ));
+    }
+    let excluded = count_excluded_paths(&root)?;
+    let mut revision_input = Vec::new();
+    for (path, bytes) in &files {
+        revision_input.extend_from_slice(path.as_bytes());
+        revision_input.push(0);
+        revision_input.extend_from_slice(hex::encode(Sha256::digest(bytes)).as_bytes());
+        revision_input.push(b'\n');
+    }
+    let revision = hex::encode(Sha256::digest(&revision_input));
+    let now = chrono::Utc::now().timestamp();
+    state.db.transaction(|tx| {
+        tx.execute("INSERT INTO state_workspace_code_indexes(workspace_id,revision,files_indexed,files_excluded,files_unsupported,updated_at) VALUES (?1,?2,?3,?4,?5,?6) ON CONFLICT(workspace_id) DO UPDATE SET revision=excluded.revision,files_indexed=excluded.files_indexed,files_excluded=excluded.files_excluded,files_unsupported=excluded.files_unsupported,updated_at=excluded.updated_at", rusqlite::params![workspace_id, revision, indexed.len() as i64, excluded as i64, unsupported as i64, now])?;
+        let paths = indexed.iter().map(|(path, _, _)| *path).collect::<std::collections::HashSet<_>>();
+        let mut old_paths = tx.prepare("SELECT path FROM state_workspace_code_files WHERE workspace_id=?1")?;
+        let old = old_paths.query_map([&workspace_id], |row| row.get::<_, String>(0))?.collect::<Result<Vec<_>, _>>()?;
+        drop(old_paths);
+        for path in old {
+            if !paths.contains(path.as_str()) {
+                tx.execute("DELETE FROM state_workspace_code_files WHERE workspace_id=?1 AND path=?2", rusqlite::params![workspace_id, path])?;
+                tx.execute("DELETE FROM state_workspace_code_symbols WHERE workspace_id=?1 AND path=?2", rusqlite::params![workspace_id, path])?;
+            }
+        }
+        for (path, hash, symbols) in &indexed {
+            let previous: Option<String> = tx.query_row("SELECT source_hash FROM state_workspace_code_files WHERE workspace_id=?1 AND path=?2", rusqlite::params![workspace_id, path], |row| row.get(0)).optional()?;
+            if previous.as_deref() == Some(hash.as_str()) { continue; }
+            tx.execute("DELETE FROM state_workspace_code_symbols WHERE workspace_id=?1 AND path=?2", rusqlite::params![workspace_id, path])?;
+            tx.execute("INSERT INTO state_workspace_code_files(workspace_id,path,source_hash) VALUES (?1,?2,?3) ON CONFLICT(workspace_id,path) DO UPDATE SET source_hash=excluded.source_hash", rusqlite::params![workspace_id, path, hash])?;
+            for (symbol, kind, line, end_line) in symbols {
+                tx.execute("INSERT INTO state_workspace_code_symbols(workspace_id,path,symbol,kind,start_line,end_line,source_hash) VALUES (?1,?2,?3,?4,?5,?6,?7)", rusqlite::params![workspace_id,path,symbol,kind,line,end_line,hash])?;
+            }
+        }
+        Ok(())
+    }).map_err(map_db)?;
+    Ok(Json(
+        serde_json::json!({"workspace_id":workspace_id,"revision":revision,"fresh":true,"coverage":{"indexed":indexed.len(),"excluded":excluded,"unsupported":unsupported}}),
+    ))
+}
+
+/// Return index freshness before callers rely on symbol or impact results.
+pub async fn code_index_status(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(workspace_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    controller(&user)?;
+    let root = root_path(&state, &workspace_id)?;
+    let files = scan_workspace(&root)?;
+    let mut current_input = Vec::new();
+    for (path, bytes) in &files {
+        current_input.extend_from_slice(path.as_bytes());
+        current_input.push(0);
+        current_input.extend_from_slice(hex::encode(Sha256::digest(bytes)).as_bytes());
+        current_input.push(b'\n');
+    }
+    let current_revision = hex::encode(Sha256::digest(&current_input));
+    let receipt = state.db.with_conn(|c| Ok(c.query_row("SELECT revision,files_indexed,files_excluded,files_unsupported,updated_at FROM state_workspace_code_indexes WHERE workspace_id=?1", [&workspace_id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?,r.get::<_,i64>(4)?))).optional()?)).map_err(map_db)?;
+    let Some((revision, indexed, excluded, unsupported, updated_at)) = receipt else {
+        return Ok(Json(
+            serde_json::json!({"workspace_id":workspace_id,"indexed":false,"fresh":false,"reason":"not_indexed"}),
+        ));
+    };
+    Ok(Json(
+        serde_json::json!({"workspace_id":workspace_id,"indexed":true,"fresh":revision == current_revision,"revision":revision,"current_revision":current_revision,"coverage":{"indexed":indexed,"excluded":excluded,"unsupported":unsupported},"updated_at":updated_at}),
+    ))
+}
+
+fn code_symbols(text: &str) -> Vec<(String, String, i64, i64)> {
+    let declaration = regex::Regex::new(r"(?m)^\s*(?:(?:pub(?:\([^)]*\))?|export|async)\s+)*(fn|struct|enum|trait|type|const|static|mod|class|interface|function)\s+([A-Za-z_$][A-Za-z0-9_$]*)").expect("static declaration regex is valid");
+    declaration
+        .captures_iter(text)
+        .filter_map(|capture| {
+            let whole = capture.get(0)?;
+            let line = text[..whole.start()]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count() as i64
+                + 1;
+            Some((
+                capture.get(2)?.as_str().to_owned(),
+                capture.get(1)?.as_str().to_owned(),
+                line,
+                line,
+            ))
+        })
+        .collect()
+}
+
+fn count_excluded_paths(root: &FsPath) -> Result<usize, ApiError> {
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut count = 0usize;
+    while let Some((directory, depth)) = stack.pop() {
+        if depth >= 64 {
+            continue;
+        }
+        for entry in std::fs::read_dir(directory)
+            .map_err(|error| io_error("workspace_index_coverage", error))?
+        {
+            let entry = entry.map_err(|error| io_error("workspace_index_coverage", error))?;
+            let name = entry.file_name().to_string_lossy().to_string();
+            if is_secret_component(&name) {
+                count = count.saturating_add(1);
+                continue;
+            }
+            let metadata = std::fs::symlink_metadata(entry.path())
+                .map_err(|error| io_error("workspace_index_coverage", error))?;
+            if metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && !is_reparse_point(&metadata)
+            {
+                stack.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    Ok(count)
+}
+
+/// Search indexed declarations only while the index matches the current workspace revision.
+pub async fn search_code_symbols(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(workspace_id): Path<String>,
+    Query(query): Query<WorkspaceCodeQuery>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    controller(&user)?;
+    if query.query.trim().is_empty() || query.query.len() > 256 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "workspace_code_query_invalid",
+            message: "symbol query must contain 1 to 256 bytes".into(),
+        });
+    }
+    let status = code_index_status(State(state.clone()), user, Path(workspace_id.clone()))
+        .await?
+        .0;
+    if status["fresh"] != true {
+        return Err(ApiError {
+            status: StatusCode::CONFLICT,
+            code: "workspace_code_index_stale",
+            message: "refresh the workspace code index before relying on symbol results".into(),
+        });
+    }
+    let needle = format!("%{}%", query.query.replace('%', "").replace('_', ""));
+    let results = state.db.with_conn(|c| {
+        let mut statement = c.prepare("SELECT path,symbol,kind,start_line,end_line,source_hash FROM state_workspace_code_symbols WHERE workspace_id=?1 AND symbol LIKE ?2 ORDER BY symbol,path,start_line LIMIT 200")?;
+        let rows = statement.query_map(rusqlite::params![workspace_id, needle], |r| Ok(serde_json::json!({"path":r.get::<_,String>(0)?,"symbol":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"start_line":r.get::<_,i64>(3)?,"end_line":r.get::<_,i64>(4)?,"source_hash":r.get::<_,String>(5)?})))?;
+        Ok(rows.collect::<Result<Vec<_>,_>>()?)
+    }).map_err(map_db)?;
+    Ok(Json(serde_json::json!({"fresh":true,"results":results})))
 }
 
 /// Apply bounded, hash-checked file replacements inside a run's isolated checkout.
@@ -1615,6 +1821,7 @@ fn safe_target(
     relative: &str,
     create_parents: bool,
 ) -> Result<(PathBuf, PathBuf), String> {
+    let canonical_root = std::fs::canonicalize(root).map_err(|error| error.to_string())?;
     let rel = PathBuf::from(relative);
     if rel.is_absolute()
         || rel
@@ -1654,7 +1861,7 @@ fn safe_target(
         }
     }
     let canonical_parent = std::fs::canonicalize(&parent).map_err(|error| error.to_string())?;
-    if !canonical_parent.starts_with(root) {
+    if !canonical_parent.starts_with(&canonical_root) {
         return Err("workspace parent escaped registered root".into());
     }
     let destination = parent.join(filename);
@@ -1800,6 +2007,8 @@ fn root_path(state: &AppState, workspace_id: &str) -> Result<PathBuf, ApiError> 
 }
 
 pub(crate) fn safe_relative_file(root: &FsPath, relative: &str) -> Result<PathBuf, ApiError> {
+    let canonical_root =
+        std::fs::canonicalize(root).map_err(|error| io_error("workspace_path_root", error))?;
     let path = PathBuf::from(relative);
     if path.is_absolute()
         || path
@@ -1813,7 +2022,7 @@ pub(crate) fn safe_relative_file(root: &FsPath, relative: &str) -> Result<PathBu
             message: "absolute, traversal, and secret paths are not readable".into(),
         });
     }
-    let mut current = root.to_path_buf();
+    let mut current = canonical_root.clone();
     for component in path.components() {
         current.push(component.as_os_str());
         let metadata = std::fs::symlink_metadata(&current)
@@ -1828,7 +2037,7 @@ pub(crate) fn safe_relative_file(root: &FsPath, relative: &str) -> Result<PathBu
     }
     let canonical = std::fs::canonicalize(&current)
         .map_err(|error| io_error("workspace_path_canonicalize", error))?;
-    if !canonical.starts_with(root) || !canonical.is_file() {
+    if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
         return Err(ApiError {
             status: StatusCode::FORBIDDEN,
             code: "workspace_path_denied",
@@ -1913,6 +2122,323 @@ pub(crate) fn scan_workspace(root: &FsPath) -> Result<Vec<(String, Vec<u8>)>, Ap
     }
     files.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(files)
+}
+
+pub(crate) fn workspace_content_revision(root: &FsPath) -> Result<String, ApiError> {
+    let mut digest = Sha256::new();
+    for (path, contents) in scan_workspace(root)? {
+        digest.update(path.as_bytes());
+        digest.update([0]);
+        digest.update(Sha256::digest(contents));
+        digest.update([b'\n']);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+pub(crate) fn is_test_source_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase().replace('\\', "/");
+    let filename = lower.rsplit('/').next().unwrap_or(&lower);
+    lower
+        .split('/')
+        .any(|part| part == "tests" || part == "__tests__")
+        || filename.starts_with("test_")
+        || filename.ends_with("_test.rs")
+        || filename.ends_with(".test.ts")
+        || filename.ends_with(".test.tsx")
+        || filename.ends_with(".spec.ts")
+        || filename.ends_with(".spec.tsx")
+        || filename.ends_with("_test.py")
+}
+
+pub(crate) fn observed_test_skips(output: &str) -> u32 {
+    let pattern = regex::Regex::new(r"(?i)(\d+)\s+(?:ignored|skipped)").expect("static skip regex");
+    pattern
+        .captures_iter(output)
+        .filter_map(|capture| capture.get(1)?.as_str().parse::<u32>().ok())
+        .fold(0_u32, u32::saturating_add)
+}
+
+pub(crate) fn workspace_execution_evidence(
+    command: &[String],
+    exit_code: Option<i64>,
+    timed_out: bool,
+    output_truncated: bool,
+    output: &str,
+    checked_revision: &str,
+    current_revision: &str,
+    environment_identity: &str,
+    baseline_tests: &std::collections::BTreeMap<String, String>,
+    current_files: &std::collections::BTreeMap<String, String>,
+) -> serde_json::Value {
+    let verification_kind = classify_verification_command(command);
+    let changed_tests = baseline_tests
+        .iter()
+        .filter(|(path, hash)| {
+            current_files
+                .get(*path)
+                .is_some_and(|current| current != *hash)
+        })
+        .map(|(path, _)| path.clone())
+        .collect::<Vec<_>>();
+    let added_tests = current_files
+        .keys()
+        .filter(|path| is_test_source_path(path) && !baseline_tests.contains_key(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let deleted_tests = baseline_tests
+        .keys()
+        .filter(|path| !current_files.contains_key(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    let observed_skips = observed_test_skips(output);
+    let unexpected_skips = observed_skips > 0;
+    let stale = checked_revision != current_revision;
+    let passed = exit_code == Some(0)
+        && !timed_out
+        && !output_truncated
+        && deleted_tests.is_empty()
+        && !unexpected_skips
+        && !stale
+        && verification_kind.is_some();
+    serde_json::json!({
+        "command":command,
+        "verification_kind":verification_kind,
+        "exit_status":exit_code,
+        "timed_out":timed_out,
+        "checked_revision":checked_revision,
+        "current_revision":current_revision,
+        "environment_identity":environment_identity,
+        "output_sha256":hex::encode(Sha256::digest(output.as_bytes())),
+        "output_bytes":output.len(),
+        "output_truncated":output_truncated,
+        "changed_tests":changed_tests,
+        "added_tests":added_tests,
+        "deleted_tests":deleted_tests,
+        "skip_count":{"observed":observed_skips,"expected":0,"unexpected":unexpected_skips},
+        "passed":passed,
+        "stale":stale
+    })
+}
+
+fn classify_verification_command(command: &[String]) -> Option<&'static str> {
+    let program = command.first()?.replace('\\', "/");
+    let program = program.rsplit('/').next()?.to_ascii_lowercase();
+    let args = command
+        .iter()
+        .skip(1)
+        .map(|value| value.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    match program.as_str() {
+        "cargo" => {
+            let action = args.first()?.as_str();
+            if !args.iter().any(|argument| argument == "--locked") {
+                return None;
+            }
+            match action {
+                "test" => Some("test"),
+                "build" | "check" | "clippy" => Some("build"),
+                _ => None,
+            }
+        }
+        "npm" | "pnpm" | "yarn" => {
+            let action = match args.first()?.as_str() {
+                "test" | "build" | "lint" => args[0].as_str(),
+                "run" => match args.get(1)?.as_str() {
+                    "test" | "build" | "lint" => args[1].as_str(),
+                    _ => return None,
+                },
+                _ => return None,
+            };
+            Some(if action == "test" { "test" } else { "build" })
+        }
+        "pytest" | "py.test" => Some("test"),
+        "go" => match args.first()?.as_str() {
+            "test" => Some("test"),
+            "build" => Some("build"),
+            _ => None,
+        },
+        "make" | "gmake" => match args.first()?.as_str() {
+            "test" | "check" => Some("test"),
+            "build" | "all" => Some("build"),
+            _ => None,
+        },
+        "python" | "python3" => {
+            if args.windows(2).any(|window| window == ["-m", "pytest"]) {
+                Some("test")
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn verify_application_migrations(
+    checkout: &FsPath,
+    fixture_path: &str,
+    migration_paths: &[String],
+) -> Result<serde_json::Value, ApiError> {
+    if migration_paths.is_empty() || migration_paths.len() > 64 {
+        return Err(ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "workspace_migration_list_invalid",
+            message: "provide 1 to 64 migration paths".into(),
+        });
+    }
+    let fixture = safe_relative_file(checkout, fixture_path)?;
+    let fixture_sql = read_bounded_sql(&fixture)?;
+    let fixture_sha256 = hash_file(&fixture)?;
+    let mut total_sql_bytes = fixture_sql.len();
+    let connection = rusqlite::Connection::open_in_memory().map_err(|error| ApiError {
+        status: StatusCode::INTERNAL_SERVER_ERROR,
+        code: "workspace_migration_database_failed",
+        message: error.to_string(),
+    })?;
+    connection
+        .execute_batch(&fixture_sql)
+        .map_err(|error| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "workspace_migration_fixture_failed",
+            message: format!("fixture failed on a new disposable SQLite database: {error}"),
+        })?;
+    let before = sqlite_schema_snapshot(&connection)?;
+    let destructive = regex::Regex::new(
+        r"(?i)\b(?:DROP\s+(?:TABLE|COLUMN|INDEX)|DELETE\s+FROM|TRUNCATE\s+TABLE)\b",
+    )
+    .expect("static destructive SQL detector");
+    let mut applied = Vec::new();
+    let mut destructive_statements = Vec::new();
+    for path in migration_paths {
+        let file = safe_relative_file(checkout, path)?;
+        let sql = read_bounded_sql(&file)?;
+        total_sql_bytes = total_sql_bytes.saturating_add(sql.len());
+        if total_sql_bytes > 8 * 1024 * 1024 {
+            return Err(ApiError {
+                status: StatusCode::PAYLOAD_TOO_LARGE,
+                code: "workspace_migration_input_too_large",
+                message: "fixture and migrations exceed the 8 MiB total limit".into(),
+            });
+        }
+        for matched in destructive.find_iter(&sql) {
+            let start = sql[..matched.start()]
+                .rfind(';')
+                .map_or(0, |index| index + 1);
+            let end = sql[matched.start()..]
+                .find(';')
+                .map_or(sql.len(), |offset| matched.start() + offset);
+            destructive_statements.push(serde_json::json!({
+                "path":path,
+                "statement":sql[start..end].trim().chars().take(512).collect::<String>()
+            }));
+        }
+        if let Err(error) = connection.execute_batch(&sql) {
+            return Ok(serde_json::json!({
+                "passed":false,
+                "fixture_path":fixture_path,
+                "fixture_sha256":fixture_sha256,
+                "applied":applied,
+                "failed_migration":path,
+                "error":error.to_string(),
+                "destructive_statements":destructive_statements,
+                "rollback_limitations":["Only the disposable SQLite database is discarded; no down-migration or data restoration behavior is inferred from this run."]
+            }));
+        }
+        applied.push(serde_json::json!({"path":path,"sha256":hash_file(&file)?}));
+    }
+    let after = sqlite_schema_snapshot(&connection)?;
+    let before_names = before
+        .iter()
+        .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    let after_names = after
+        .iter()
+        .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
+        .collect::<std::collections::BTreeSet<_>>();
+    let added = after_names
+        .difference(&before_names)
+        .copied()
+        .collect::<Vec<_>>();
+    let removed = before_names
+        .difference(&after_names)
+        .copied()
+        .collect::<Vec<_>>();
+    let before_sql = before
+        .iter()
+        .filter_map(|object| {
+            Some((
+                object.get("name")?.as_str()?,
+                object.get("sql")?.as_str().unwrap_or_default(),
+            ))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let after_sql = after
+        .iter()
+        .filter_map(|object| {
+            Some((
+                object.get("name")?.as_str()?,
+                object.get("sql")?.as_str().unwrap_or_default(),
+            ))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let changed = before_names
+        .intersection(&after_names)
+        .filter(|name| before_sql.get(**name) != after_sql.get(**name))
+        .copied()
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "passed":true,
+        "database":"disposable-in-memory-sqlite",
+        "fixture_path":fixture_path,
+        "fixture_sha256":fixture_sha256,
+        "applied":applied,
+        "schema_before":before,
+        "schema_after":after,
+        "added_schema_objects":added,
+        "removed_schema_objects":removed,
+        "changed_schema_objects":changed,
+        "destructive_statements":destructive_statements,
+        "rollback_limitations":["The database is disposable. This verifies forward application only; it does not claim a rollback path or data restoration semantics."]
+    }))
+}
+
+fn read_bounded_sql(path: &FsPath) -> Result<String, ApiError> {
+    let metadata =
+        std::fs::metadata(path).map_err(|error| io_error("workspace_sql_metadata", error))?;
+    if metadata.len() > 2 * 1024 * 1024 {
+        return Err(ApiError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "workspace_sql_too_large",
+            message: "SQL fixture or migration exceeds 2 MiB".into(),
+        });
+    }
+    String::from_utf8(std::fs::read(path).map_err(|error| io_error("workspace_sql_read", error))?)
+        .map_err(|_| ApiError {
+            status: StatusCode::BAD_REQUEST,
+            code: "workspace_sql_not_utf8",
+            message: "SQL file must be UTF-8".into(),
+        })
+}
+
+fn sqlite_schema_snapshot(
+    connection: &rusqlite::Connection,
+) -> Result<Vec<serde_json::Value>, ApiError> {
+    let mut statement = connection.prepare(
+        "SELECT type,name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name",
+    ).map_err(|error| ApiError { status: StatusCode::INTERNAL_SERVER_ERROR, code: "workspace_schema_query_failed", message: error.to_string() })?;
+    let rows = statement.query_map([], |row| Ok(serde_json::json!({
+        "type":row.get::<_,String>(0)?,"name":row.get::<_,String>(1)?,"sql":row.get::<_,Option<String>>(2)?
+    }))).map_err(|error| ApiError { status: StatusCode::INTERNAL_SERVER_ERROR, code: "workspace_schema_query_failed", message: error.to_string() })?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "workspace_schema_query_failed",
+            message: error.to_string(),
+        })
+}
+
+fn hash_file(path: &FsPath) -> Result<String, ApiError> {
+    let bytes = std::fs::read(path).map_err(|error| io_error("workspace_sql_hash", error))?;
+    Ok(hex::encode(Sha256::digest(bytes)))
 }
 
 /// Copy only bounded, regular, non-secret workspace files into a disposable tool container mount.
@@ -2142,6 +2668,228 @@ fn map_workspace_error(error: execlaw_core::workspaces::WorkspaceStoreError) -> 
 mod tests {
     use super::*;
     use execlaw_core::workspaces::WorkspaceApplyFile;
+
+    #[test]
+    fn verification_helpers_identify_test_changes_and_unexpected_skips() {
+        assert!(is_test_source_path("crates/server/tests/send_test.rs"));
+        assert!(is_test_source_path("web/src/__tests__/chat.spec.tsx"));
+        assert!(!is_test_source_path("crates/server/src/chats.rs"));
+        assert_eq!(observed_test_skips("2 ignored; 1 skipped"), 3);
+        assert_eq!(observed_test_skips("all 14 tests passed"), 0);
+    }
+
+    #[test]
+    fn executor_evidence_rejects_claims_without_exit_status_and_marks_stale_or_deleted_tests() {
+        let command = vec!["cargo".into(), "test".into(), "--locked".into()];
+        let baseline =
+            std::collections::BTreeMap::from([("tests/required.rs".into(), "before".into())]);
+        let current = std::collections::BTreeMap::new();
+        let forged_text = workspace_execution_evidence(
+            &command,
+            Some(1),
+            false,
+            false,
+            "all tests passed",
+            "rev-a",
+            "rev-a",
+            "toolchain@sha256:image",
+            &baseline,
+            &current,
+        );
+        assert_eq!(forged_text["passed"], false);
+        assert_eq!(forged_text["deleted_tests"][0], "tests/required.rs");
+        let assertion_output = workspace_execution_evidence(
+            &["echo".into(), "tests passed".into()],
+            Some(0),
+            false,
+            false,
+            "tests passed",
+            "rev-a",
+            "rev-a",
+            "toolchain@sha256:image",
+            &std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        );
+        assert_eq!(
+            assertion_output["verification_kind"],
+            serde_json::Value::Null
+        );
+        assert_eq!(assertion_output["passed"], false);
+
+        let same =
+            std::collections::BTreeMap::from([("tests/required.rs".into(), "before".into())]);
+        let stale = workspace_execution_evidence(
+            &command,
+            Some(0),
+            false,
+            false,
+            "ok",
+            "rev-a",
+            "rev-b",
+            "toolchain@sha256:image",
+            &baseline,
+            &same,
+        );
+        assert_eq!(stale["stale"], true);
+        assert_eq!(stale["passed"], false);
+
+        let skipped = workspace_execution_evidence(
+            &command,
+            Some(0),
+            false,
+            false,
+            "1 skipped",
+            "rev-a",
+            "rev-a",
+            "toolchain@sha256:image",
+            &baseline,
+            &same,
+        );
+        assert_eq!(skipped["skip_count"]["unexpected"], true);
+        assert_eq!(skipped["passed"], false);
+    }
+
+    #[test]
+    fn application_migrations_run_only_on_disposable_fixture_database_and_report_destruction() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(
+            workspace.path().join("fixture.sql"),
+            "CREATE TABLE accounts(id INTEGER PRIMARY KEY, legacy TEXT); CREATE TABLE obsolete(id INTEGER); INSERT INTO accounts VALUES (1, 'kept');",
+        ).unwrap();
+        std::fs::write(
+            workspace.path().join("001.sql"),
+            "ALTER TABLE accounts ADD COLUMN active INTEGER NOT NULL DEFAULT 1; DROP TABLE obsolete;",
+        ).unwrap();
+        std::fs::write(
+            workspace.path().join("002.sql"),
+            "CREATE TABLE audit_events(id INTEGER PRIMARY KEY, account_id INTEGER);",
+        )
+        .unwrap();
+        let result = verify_application_migrations(
+            workspace.path(),
+            "fixture.sql",
+            &["001.sql".into(), "002.sql".into()],
+        )
+        .unwrap();
+        assert_eq!(result["passed"], true);
+        assert_eq!(result["database"], "disposable-in-memory-sqlite");
+        assert_eq!(result["added_schema_objects"][0], "audit_events");
+        assert!(
+            !result["destructive_statements"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            result["rollback_limitations"][0]
+                .as_str()
+                .unwrap()
+                .contains("forward application only")
+        );
+        assert!(
+            verify_application_migrations(
+                workspace.path(),
+                "../production.db",
+                &["001.sql".into()]
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn source_symbol_extraction_covers_rust_types_and_script_functions() {
+        let symbols =
+            code_symbols("pub fn run() {}\nstruct State {}\nexport function start() {}\n");
+        assert_eq!(
+            symbols
+                .iter()
+                .map(|item| item.0.as_str())
+                .collect::<Vec<_>>(),
+            ["run", "State", "start"]
+        );
+        assert_eq!(symbols[1].1, "struct");
+    }
+
+    #[tokio::test]
+    async fn code_index_tracks_revision_renames_deletions_and_exclusions() {
+        let state = crate::routes::test_app_state();
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(temp.path().join("src")).unwrap();
+        std::fs::write(temp.path().join("src/lib.rs"), "pub fn old_name() {}\n").unwrap();
+        std::fs::write(temp.path().join(".env"), "SECRET=must_not_index\n").unwrap();
+        let canonical = std::fs::canonicalize(temp.path()).unwrap();
+        let root = WorkspaceStore::new(&state.db)
+            .register_root(&canonical.to_string_lossy(), "controller", 1)
+            .unwrap();
+        let indexed = index_workspace(
+            State(state.clone()),
+            workspace_controller(),
+            Path(root.workspace_id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(indexed["fresh"], true);
+        let symbol_count: i64 = state
+            .db
+            .with_conn(|c| {
+                Ok(c.query_row(
+                    "SELECT COUNT(*) FROM state_workspace_code_symbols WHERE workspace_id=?1",
+                    [&root.workspace_id],
+                    |r| r.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(symbol_count, 1);
+        let secret_files: i64 = state
+            .db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT COUNT(*) FROM state_workspace_code_files WHERE workspace_id=?1 AND path='.env'",
+                    [&root.workspace_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(secret_files, 0);
+        std::fs::remove_file(temp.path().join("src/lib.rs")).unwrap();
+        std::fs::write(
+            temp.path().join("src/new.ts"),
+            "export function renamed() {}\n",
+        )
+        .unwrap();
+        let status = code_index_status(
+            State(state.clone()),
+            workspace_controller(),
+            Path(root.workspace_id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(status["fresh"], false);
+        let indexed = index_workspace(
+            State(state.clone()),
+            workspace_controller(),
+            Path(root.workspace_id.clone()),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(indexed["coverage"]["indexed"], 1);
+        assert!(indexed["coverage"]["excluded"].as_u64().unwrap() >= 1);
+        let names: Vec<String> = state
+            .db
+            .with_conn(|c| {
+                let mut statement = c.prepare(
+                    "SELECT symbol FROM state_workspace_code_symbols WHERE workspace_id=?1 ORDER BY symbol",
+                )?;
+                let rows = statement.query_map([&root.workspace_id], |row| row.get(0))?;
+                Ok(rows.collect::<Result<Vec<String>, _>>()?)
+            })
+            .unwrap();
+        assert_eq!(names, ["renamed"]);
+        assert!(!names.iter().any(|name| name.contains("SECRET")));
+    }
 
     fn workspace_controller() -> AuthedUser {
         AuthedUser {

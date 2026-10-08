@@ -77,6 +77,23 @@ tier = "script"
 source = "main.rhai"
 "#;
 
+const MANIFEST_HMAC_ROLLOVER: &str = r#"
+[plugin]
+id = "wh-test"
+name = "Webhook Auth Test"
+version = "0.1.0"
+
+[[webhook_routes]]
+method = "POST"
+path = "/event"
+handler = "on_event"
+auth = { kind = "hmac_sha256_header", header = "X-Signature", vault_key = "webhook_secret", previous_vault_key = "webhook_secret_previous", timestamp_header = "X-Webhook-Time", replay_window_secs = 300, event_id_header = "X-Event-ID", max_body_bytes = 128 }
+
+[runtime]
+tier = "script"
+source = "main.rhai"
+"#;
+
 /// Legacy plugin — no `auth` field. Asserts the dispatcher preserves
 /// today's behavior (handler validates) for backward compatibility.
 const MANIFEST_LEGACY: &str = r#"
@@ -195,9 +212,13 @@ fn build_app(stage_root: std::path::PathBuf) -> (axum::Router, AppState) {
 }
 
 async fn install_plugin(app: axum::Router, manifest: &str) {
+    install_plugin_with_script(app, manifest, SCRIPT).await;
+}
+
+async fn install_plugin_with_script(app: axum::Router, manifest: &str, script: &str) {
     let zip = build_zip(&[
         ("plugin.toml", manifest.as_bytes()),
-        ("main.rhai", SCRIPT.as_bytes()),
+        ("main.rhai", script.as_bytes()),
     ]);
     let resp = app
         .oneshot(
@@ -224,6 +245,12 @@ fn seed_secret(state: &AppState, value: &str) {
     let store = VaultRowStore::new(&state.db);
     store
         .put(Some(PLUGIN_ID), "webhook_secret", value.as_bytes(), 0)
+        .unwrap();
+}
+
+fn seed_named_secret(state: &AppState, key: &str, value: &str) {
+    VaultRowStore::new(&state.db)
+        .put(Some(PLUGIN_ID), key, value.as_bytes(), 0)
         .unwrap();
 }
 
@@ -425,6 +452,127 @@ async fn hmac_header_missing_rejects() {
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(count_webhook_events(&state), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hmac_rollover_accepts_previous_key_then_deduplicates_delivery() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, state) = build_app(tmp.path().to_path_buf());
+    install_plugin(app.clone(), MANIFEST_HMAC_ROLLOVER).await;
+    seed_secret(&state, "new-current-key");
+    seed_named_secret(&state, "webhook_secret_previous", "old-rotating-key");
+
+    let body = br#"{"event":"rollover"}"#;
+    let now = chrono::Utc::now().timestamp().to_string();
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(b"old-rotating-key").unwrap();
+    mac.update(format!("{now}:provider-event-7:").as_bytes());
+    mac.update(body);
+    let signature = hex::encode(mac.finalize().into_bytes());
+    let headers = [
+        ("X-Signature", signature.as_str()),
+        ("X-Webhook-Time", now.as_str()),
+        ("X-Event-ID", "provider-event-7"),
+    ];
+    let (first, _) = post_webhook(app.clone(), "/api/webhooks/wh-test/event", &headers, body).await;
+    assert_eq!(first, StatusCode::OK);
+    let (duplicate, response) =
+        post_webhook(app.clone(), "/api/webhooks/wh-test/event", &headers, body).await;
+    assert_eq!(duplicate, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&response).contains("duplicate"));
+    let mut distinct_mac = <Hmac<Sha256> as Mac>::new_from_slice(b"old-rotating-key").unwrap();
+    distinct_mac.update(format!("{now}:provider-event-8:").as_bytes());
+    distinct_mac.update(body);
+    let distinct_signature = hex::encode(distinct_mac.finalize().into_bytes());
+    let distinct_headers = [
+        ("X-Signature", distinct_signature.as_str()),
+        ("X-Webhook-Time", now.as_str()),
+        ("X-Event-ID", "provider-event-8"),
+    ];
+    let (distinct, response) = post_webhook(
+        app.clone(),
+        "/api/webhooks/wh-test/event",
+        &distinct_headers,
+        body,
+    )
+    .await;
+    assert_eq!(distinct, StatusCode::OK);
+    assert!(!String::from_utf8_lossy(&response).contains("duplicate"));
+    let mut current_mac = <Hmac<Sha256> as Mac>::new_from_slice(b"new-current-key").unwrap();
+    current_mac.update(format!("{now}:provider-event-9:").as_bytes());
+    current_mac.update(body);
+    let current_signature = hex::encode(current_mac.finalize().into_bytes());
+    let current_headers = [
+        ("X-Signature", current_signature.as_str()),
+        ("X-Webhook-Time", now.as_str()),
+        ("X-Event-ID", "provider-event-9"),
+    ];
+    let (current, _) =
+        post_webhook(app, "/api/webhooks/wh-test/event", &current_headers, body).await;
+    assert_eq!(
+        current,
+        StatusCode::OK,
+        "the current key must remain valid during overlap"
+    );
+    assert_eq!(count_webhook_events(&state), 3);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn acknowledged_handler_rejection_has_a_sanitized_durable_outcome() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, state) = build_app(tmp.path().to_path_buf());
+    let script = r#"fn on_event(args) { #{"ok":false,"reason":"policy rejected"} }"#;
+    install_plugin_with_script(app.clone(), MANIFEST_HMAC, script).await;
+    seed_secret(&state, WEBHOOK_SECRET);
+    let body = br#"{"event":"rejected"}"#;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(WEBHOOK_SECRET.as_bytes()).unwrap();
+    mac.update(body);
+    let signature = hex::encode(mac.finalize().into_bytes());
+    let (status, response) = post_webhook(
+        app,
+        "/api/webhooks/wh-test/event",
+        &[("X-Signature", &signature)],
+        body,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the handler intentionally acknowledges rejected work"
+    );
+    assert!(String::from_utf8_lossy(&response).contains("policy rejected"));
+    assert_eq!(
+        execlaw_core::webhook_receipts::WebhookReceiptStore::new(&state.db)
+            .outcome_count("rejected")
+            .unwrap(),
+        1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hmac_replay_window_and_route_body_limit_reject_before_dispatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app, state) = build_app(tmp.path().to_path_buf());
+    install_plugin(app.clone(), MANIFEST_HMAC_ROLLOVER).await;
+    seed_secret(&state, "new-current-key");
+    seed_named_secret(&state, "webhook_secret_previous", "old-rotating-key");
+    let body = br#"{"event":"stale"}"#;
+    let stale = (chrono::Utc::now().timestamp() - 1000).to_string();
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(b"new-current-key").unwrap();
+    mac.update(format!("{stale}:stale-1:").as_bytes());
+    mac.update(body);
+    let signature = hex::encode(mac.finalize().into_bytes());
+    let headers = [
+        ("X-Signature", signature.as_str()),
+        ("X-Webhook-Time", stale.as_str()),
+        ("X-Event-ID", "stale-1"),
+    ];
+    let (status, _) =
+        post_webhook(app.clone(), "/api/webhooks/wh-test/event", &headers, body).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(count_webhook_events(&state), 0);
+    let oversized = vec![b'x'; 129];
+    let (status, _) = post_webhook(app, "/api/webhooks/wh-test/event", &headers, &oversized).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
 }
 
 /// Backward compatibility: a plugin manifest with NO `auth` field

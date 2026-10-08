@@ -18,6 +18,22 @@ const OUTPUT_LIMIT_BYTES: usize = 24 * 1024;
 const LSP_FRAME_LIMIT_BYTES: usize = 1024 * 1024;
 const DIAGNOSTIC_LIMIT: usize = 48;
 
+fn workspace_job_environment() -> Vec<String> {
+    vec![
+        "HOME=/tmp".into(),
+        "TMPDIR=/tmp".into(),
+        "CARGO_HOME=/tmp/cargo-home".into(),
+        "CARGO_NET_OFFLINE=true".into(),
+        "CARGO_TARGET_DIR=/tmp/target".into(),
+        "NPM_CONFIG_CACHE=/tmp/npm-cache".into(),
+        "NPM_CONFIG_OFFLINE=true".into(),
+        "NPM_CONFIG_IGNORE_SCRIPTS=true".into(),
+        "PIP_NO_INDEX=1".into(),
+        "UV_OFFLINE=1".into(),
+        "NO_PROXY=*".into(),
+    ]
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceRunRequest {
     pub image_reference: String,
@@ -192,13 +208,7 @@ impl BollardWorkspaceJobExecutor {
             cmd: Some(cmd),
             working_dir: Some(working_dir.into()),
             user: Some(container_user(&checkout_path)?),
-            env: Some(vec![
-                "HOME=/tmp".into(),
-                "TMPDIR=/tmp".into(),
-                "CARGO_NET_OFFLINE=true".into(),
-                "CARGO_TARGET_DIR=/tmp/target".into(),
-                "NO_PROXY=*".into(),
-            ]),
+            env: Some(workspace_job_environment()),
             attach_stdin: Some(open_stdin),
             attach_stdout: Some(true),
             attach_stderr: Some(true),
@@ -1379,6 +1389,23 @@ mod tests {
             config.tmpfs.as_ref().unwrap()["/tmp"]
                 .contains(&format!("size={}", limits.tmpfs_bytes))
         );
+    }
+
+    #[test]
+    fn dependency_install_environment_is_offline_ephemeral_and_has_no_host_credentials() {
+        let environment = workspace_job_environment();
+        assert!(environment.contains(&"CARGO_NET_OFFLINE=true".to_owned()));
+        assert!(environment.contains(&"NPM_CONFIG_OFFLINE=true".to_owned()));
+        assert!(environment.contains(&"NPM_CONFIG_IGNORE_SCRIPTS=true".to_owned()));
+        assert!(environment.contains(&"PIP_NO_INDEX=1".to_owned()));
+        assert!(environment.contains(&"UV_OFFLINE=1".to_owned()));
+        assert!(environment.iter().all(|value| {
+            let key = value.split('=').next().unwrap_or_default();
+            !key.to_ascii_lowercase().contains("token")
+                && !key.to_ascii_lowercase().contains("secret")
+                && !key.to_ascii_lowercase().contains("password")
+                && !key.to_ascii_lowercase().contains("key")
+        }));
     }
 
     #[test]

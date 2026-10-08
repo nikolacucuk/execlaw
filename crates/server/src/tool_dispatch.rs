@@ -632,6 +632,34 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
                 self.dispatch_workspace_execution_job(run_id, &checkout, tool_name, args)
                     .await
             }
+            "workspace.migrations.verify" => {
+                let fixture = args
+                    .get("fixture_path")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        "workspace.migrations.verify requires fixture_path".to_owned()
+                    })?;
+                let migration_paths = args
+                    .get("migration_paths")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| {
+                        "workspace.migrations.verify requires migration_paths".to_owned()
+                    })?
+                    .iter()
+                    .map(|value| {
+                        value
+                            .as_str()
+                            .map(str::to_owned)
+                            .ok_or_else(|| "migration_paths entries must be strings".to_owned())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                crate::workspace_coding::verify_application_migrations(
+                    &checkout,
+                    fixture,
+                    &migration_paths,
+                )
+                .map_err(|error| error.message)
+            }
             _ => Err(format!(
                 "no host implementation registered for '{tool_name}'"
             )),
@@ -789,7 +817,25 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
             .map_err(|error| error.to_string())?
         {
             WorkspaceExecutionJobClaim::Succeeded(result) => {
-                return serde_json::from_str(&result).map_err(|error| error.to_string());
+                let mut result: serde_json::Value =
+                    serde_json::from_str(&result).map_err(|error| error.to_string())?;
+                if operation == "terminal" {
+                    if let Some(evidence) = result.get_mut("evidence") {
+                        let current = crate::workspace_coding::workspace_content_revision(checkout)
+                            .map_err(|error| error.message)?;
+                        evidence["current_revision"] = serde_json::Value::String(current.clone());
+                        evidence["stale"] = serde_json::Value::Bool(
+                            evidence
+                                .get("checked_revision")
+                                .and_then(serde_json::Value::as_str)
+                                != Some(current.as_str()),
+                        );
+                        if evidence["stale"] == serde_json::Value::Bool(true) {
+                            evidence["passed"] = serde_json::Value::Bool(false);
+                        }
+                    }
+                }
+                return Ok(result);
             }
             WorkspaceExecutionJobClaim::Failed(code) => {
                 return Err(format!("workspace process job failed previously: {code}"));
@@ -836,13 +882,53 @@ impl<B: BuiltinTools> ChainedToolDispatch<B> {
             },
         };
         let job_result = if let Some(mut request) = run_request {
+            let command = request.argv.clone();
+            let checked_revision =
+                crate::workspace_coding::workspace_content_revision(snapshot.path())
+                    .map_err(|error| error.message)?;
+            let current_files = crate::workspace_coding::scan_workspace(snapshot.path())
+                .map_err(|error| error.message)?
+                .into_iter()
+                .map(|(path, bytes)| (path.clone(), hex::encode(sha2::Sha256::digest(bytes))))
+                .collect::<std::collections::BTreeMap<_, _>>();
             request.checkout_path = snapshot.path().to_owned();
             executor.run(request).await.map(|result| {
+                let baseline_tests = store
+                    .binding_for_run(run_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|binding| store.get_checkpoint(&binding.checkpoint_id).ok().flatten())
+                    .map(|checkpoint| {
+                        checkpoint
+                            .manifest
+                            .into_iter()
+                            .filter(|entry| {
+                                crate::workspace_coding::is_test_source_path(&entry.path)
+                            })
+                            .map(|entry| (entry.path, entry.sha256))
+                            .collect::<std::collections::BTreeMap<_, _>>()
+                    })
+                    .unwrap_or_default();
+                let current_revision =
+                    crate::workspace_coding::workspace_content_revision(checkout)
+                        .unwrap_or_else(|_| "unavailable".into());
+                let evidence = crate::workspace_coding::workspace_execution_evidence(
+                    &command,
+                    result.exit_code,
+                    result.timed_out,
+                    result.output_truncated,
+                    &result.output,
+                    &checked_revision,
+                    &current_revision,
+                    &image_reference,
+                    &baseline_tests,
+                    &current_files,
+                );
                 serde_json::json!({
                     "run_id":run_id,"job_id":job_id,"operation":operation,
                     "exit_code":result.exit_code,"timed_out":result.timed_out,
                     "output_truncated":result.output_truncated,"output":result.output,
-                    "elapsed_ms":result.elapsed_ms
+                    "elapsed_ms":result.elapsed_ms,"evidence":evidence
                 })
             })
         } else if let Some(mut request) = diagnostics_request {

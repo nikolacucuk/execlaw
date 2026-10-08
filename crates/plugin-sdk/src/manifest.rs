@@ -62,11 +62,11 @@ pub struct PluginManifest {
     pub admin_routes: Vec<AdminRouteDecl>,
 
     /// Public webhook routes the plugin exposes for receiving
-    /// callbacks from third-party services. Mounted UNAUTHENTICATED
-    /// at `/api/webhooks/{plugin_id}{path}` — see `WebhookRouteDecl`
-    /// for the security contract (handlers MUST validate a shared
-    /// secret in the URL or body). First user: WhatsApp / wuzapi
-    /// posting message events here.
+    /// callbacks from third-party services. Mounted at
+    /// `/api/webhooks/{plugin_id}{path}`; declared auth is verified by
+    /// the host before body dispatch or automation effects. Omitted auth
+    /// retains the legacy handler-validation path. See `WebhookRouteDecl`
+    /// for exact-body and replay options.
     #[serde(default)]
     pub webhook_routes: Vec<WebhookRouteDecl>,
 
@@ -411,6 +411,10 @@ pub struct TransportDecl {
     pub supports_attachments: bool,
     #[serde(default)]
     pub supports_groups: bool,
+    /// Normalized message operations the adapter maps to the shared host
+    /// contract. Missing declarations mean create-only compatibility.
+    #[serde(default)]
+    pub message_operations: Vec<MessageOperationDecl>,
     /// Bootstrap-icons name (without the `bi-` prefix) the SPA renders
     /// next to thread titles for conversations bridged on this
     /// transport. Lets the operator visually distinguish "Web chat",
@@ -421,6 +425,17 @@ pub struct TransportDecl {
     /// `"envelope"` for email).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub icon: Option<String>,
+}
+
+#[derive(schemars::JsonSchema, Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageOperationDecl {
+    Create,
+    Edit,
+    Delete,
+    ReactionAdd,
+    ReactionRemove,
+    ReplyLineage,
 }
 
 #[derive(schemars::JsonSchema, Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -732,11 +747,32 @@ pub enum WebhookAuthDecl {
     /// Compute `HMAC-SHA256(vault[vault_key], body)` and compare
     /// against the request header `header`. Accepts both raw hex
     /// and `sha256=<hex>` (GitHub's `X-Hub-Signature-256` style).
+    /// When `timestamp_header` is set, the signed bytes are
+    /// `timestamp:body`, or `timestamp:event_id:body` when an event ID
+    /// header is configured; with an event ID alone it is `event_id:body`.
+    /// Providers with another canonicalization
+    /// format should use a route-specific verifier.
     HmacSha256Header {
         /// HTTP header carrying the signature, e.g. `X-Hub-Signature-256`.
         header: String,
         /// Name of the per-plugin vault row holding the shared secret.
         vault_key: String,
+        /// Optional previous key used during an operator-controlled rollover.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        previous_vault_key: Option<String>,
+        /// Optional Unix-seconds header. When set, requests outside the
+        /// declared replay window are rejected before dispatch.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timestamp_header: Option<String>,
+        /// Maximum accepted age/future skew for `timestamp_header`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay_window_secs: Option<u32>,
+        /// Optional provider delivery ID header used for durable deduplication.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        event_id_header: Option<String>,
+        /// Maximum raw request size in bytes. Defaults to the host limit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_body_bytes: Option<usize>,
     },
     /// Explicit opt-out: declare that this route is not host-authenticated
     /// and the handler is solely responsible for validating the caller.
@@ -1982,7 +2018,7 @@ rpc_capabilities = ["own_oauth_accounts"]
         let m = PluginManifest::parse(GOOGLE_APPS_MANIFEST)
             .expect("plugins/google-apps/plugin.toml must parse cleanly");
         assert_eq!(m.plugin.id, "google-apps");
-        assert_eq!(m.plugin.version, "0.3.1");
+        assert_eq!(m.plugin.version, "0.3.2");
 
         // Identity provider survives the consolidation — same shape
         // as google-contacts had.
@@ -2206,6 +2242,7 @@ rpc_capabilities = ["own_oauth_accounts"]
             "workspace.apply_patch",
             "workspace.run",
             "workspace.diagnostics",
+            "workspace.migrations.verify",
         ] {
             let tool = tools.get(name).unwrap_or_else(|| panic!("missing {name}"));
             assert!(

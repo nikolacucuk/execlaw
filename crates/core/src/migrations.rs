@@ -446,6 +446,21 @@ pub const MIGRATIONS: &[Migration] = &[
         name: "paired_host_delegation",
         sql: include_str!("../migrations/0084_paired_host_delegation.sql"),
     },
+    Migration {
+        id: 85,
+        name: "workspace_code_index",
+        sql: include_str!("../migrations/0085_workspace_code_index.sql"),
+    },
+    Migration {
+        id: 86,
+        name: "h101_h105_transport_continuity",
+        sql: include_str!("../migrations/0086_h101_h105_transport_continuity.sql"),
+    },
+    Migration {
+        id: 87,
+        name: "reply_audience_epochs",
+        sql: include_str!("../migrations/0087_reply_audience_epochs.sql"),
+    },
 ];
 
 #[derive(Debug, Error)]
@@ -833,7 +848,12 @@ mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(runner.apply_all().unwrap(), (76..=84).collect::<Vec<_>>());
+        let expected = MIGRATIONS
+            .iter()
+            .filter(|migration| migration.id > 75)
+            .map(|migration| migration.id)
+            .collect::<Vec<_>>();
+        assert_eq!(runner.apply_all().unwrap(), expected);
     }
 
     // ----------------------------------------------------------------

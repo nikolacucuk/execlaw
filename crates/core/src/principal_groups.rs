@@ -33,7 +33,7 @@
 
 use crate::db::{Database, DbError};
 use crate::ids::PrincipalId;
-use rusqlite::params;
+use rusqlite::{OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -247,25 +247,44 @@ impl<'db> PrincipalGroupStore<'db> {
 
         self.db.with_conn(|c| {
             let tx = c.unchecked_transaction()?;
-            tx.execute(
-                "DELETE FROM state_principal_group_members WHERE group_id = ?1",
-                params![group_id],
-            )?;
-            for pid in &seen {
-                tx.execute(
-                    "INSERT INTO state_principal_group_members \
-                     (group_id, principal_id) VALUES (?1, ?2)",
-                    params![group_id, pid],
+            let existing = {
+                let mut statement = tx.prepare_cached(
+                    "SELECT principal_id FROM state_principal_group_members \
+                     WHERE group_id = ?1 ORDER BY principal_id ASC",
                 )?;
+                statement
+                    .query_map(params![group_id], |row| row.get::<_, String>(0))?
+                    .collect::<Result<Vec<_>, _>>()?
+            };
+            let membership_changed =
+                existing.iter().map(String::as_str).collect::<Vec<_>>() != seen;
+            if membership_changed {
+                tx.execute(
+                    "DELETE FROM state_principal_group_members WHERE group_id = ?1",
+                    params![group_id],
+                )?;
+                for pid in &seen {
+                    tx.execute(
+                        "INSERT INTO state_principal_group_members \
+                         (group_id, principal_id) VALUES (?1, ?2)",
+                        params![group_id, pid],
+                    )?;
+                }
             }
             // includes_controller is sticky-true (see doc).
             let new_flag: i64 = if includes_controller { 1 } else { 0 };
             tx.execute(
                 "UPDATE state_principal_groups \
                  SET includes_controller = MAX(includes_controller, ?1), \
-                     last_active_at = ?2 \
-                 WHERE group_id = ?3",
-                params![new_flag, now, group_id],
+                     last_active_at = ?2, \
+                     membership_epoch = membership_epoch + ?3 \
+                     WHERE group_id = ?4",
+                params![
+                    new_flag,
+                    now,
+                    if membership_changed { 1_i64 } else { 0_i64 },
+                    group_id
+                ],
             )?;
             tx.commit()?;
             Ok(())
@@ -331,11 +350,13 @@ impl<'db> PrincipalGroupStore<'db> {
                  (group_id, principal_id) VALUES (?1, ?2)",
                 params![group_id, principal_id.as_str()],
             )?;
+            let inserted = tx.changes() > 0;
             tx.execute(
                 "UPDATE state_principal_groups \
-                 SET last_active_at = ?1 \
-                 WHERE group_id = ?2",
-                params![now, group_id],
+                 SET last_active_at = ?1, \
+                     membership_epoch = membership_epoch + ?2 \
+                 WHERE group_id = ?3",
+                params![now, if inserted { 1_i64 } else { 0_i64 }, group_id],
             )?;
             tx.commit()?;
             Ok(())
@@ -388,6 +409,49 @@ impl<'db> PrincipalGroupStore<'db> {
                 })?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(rows)
+        })
+    }
+
+    /// Return the stable internal group identity, observed membership epoch,
+    /// and a hash of opaque principal IDs for one conversation.
+    pub fn audience_state(
+        &self,
+        conversation_id: &str,
+    ) -> Result<Option<(String, Option<String>, i64, String, Vec<String>)>, DbError> {
+        self.db.with_conn(|connection| {
+            let row: Option<(String, Option<String>, i64)> = connection
+                .query_row(
+                    "SELECT groups.group_id, groups.native_group_id, groups.membership_epoch \
+                     FROM state_conversations conversations \
+                     JOIN state_principal_groups groups \
+                       ON groups.group_id = conversations.principal_group_id \
+                     WHERE conversations.conversation_id = ?1",
+                    params![conversation_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((group_id, native_group_id, epoch)) = row else {
+                return Ok(None);
+            };
+            let mut statement = connection.prepare_cached(
+                "SELECT principal_id FROM state_principal_group_members \
+                 WHERE group_id = ?1 ORDER BY principal_id ASC",
+            )?;
+            let members = statement
+                .query_map(params![group_id], |row| row.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            let mut digest = Sha256::new();
+            for member in &members {
+                digest.update(member.as_bytes());
+                digest.update([0]);
+            }
+            Ok(Some((
+                group_id,
+                native_group_id,
+                epoch,
+                hex::encode(digest.finalize()),
+                members,
+            )))
         })
     }
 
@@ -813,16 +877,45 @@ mod tests {
             after1.last_active_at, 1100,
             "add_member must bump last_active_at"
         );
+        let epoch1: i64 = db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT membership_epoch FROM state_principal_groups WHERE group_id=?1",
+                    [&g.group_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
 
         // Second call with the same id is a no-op — no duplicate.
         store.add_member(&g.group_id, &alice, 1200).unwrap();
         let m2 = store.members(&g.group_id).unwrap();
         assert_eq!(m2.len(), 1, "duplicate add must be a no-op");
+        let duplicate_epoch: i64 = db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT membership_epoch FROM state_principal_groups WHERE group_id=?1",
+                    [&g.group_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(duplicate_epoch, epoch1);
 
         // Different principal grows the count.
         store.add_member(&g.group_id, &bob, 1300).unwrap();
         let m3 = store.members(&g.group_id).unwrap();
         assert_eq!(m3.len(), 2);
+        let new_member_epoch: i64 = db
+            .with_conn(|connection| {
+                Ok(connection.query_row(
+                    "SELECT membership_epoch FROM state_principal_groups WHERE group_id=?1",
+                    [&g.group_id],
+                    |row| row.get(0),
+                )?)
+            })
+            .unwrap();
+        assert_eq!(new_member_epoch, epoch1 + 1);
     }
 
     #[test]

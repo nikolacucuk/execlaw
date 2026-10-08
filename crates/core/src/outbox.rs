@@ -122,15 +122,9 @@ impl<'db> OutboxStore<'db> {
                   attempts, next_attempt_at, last_error, enqueued_seq) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
-                    row.idempotency_key.as_str(),
-                    row.conversation_id.as_str(),
-                    row.effect_kind,
-                    row.payload,
-                    row.status.as_str(),
-                    row.attempts,
-                    row.next_attempt_at,
-                    row.last_error,
-                    row.enqueued_seq.0,
+                    row.idempotency_key.as_str(), row.conversation_id.as_str(), row.effect_kind,
+                    row.payload, row.status.as_str(), row.attempts, row.next_attempt_at,
+                    row.last_error, row.enqueued_seq.0,
                 ],
             )?;
             let id = tx.last_insert_rowid();
@@ -213,8 +207,8 @@ impl<'db> OutboxStore<'db> {
             tx.execute(
                 "INSERT INTO state_outbox \
                  (idempotency_key, conversation_id, effect_kind, payload, status, \
-                  attempts, next_attempt_at, last_error, enqueued_seq) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                  attempts, next_attempt_at, last_error, enqueued_seq, ownership_scope_key, ownership_generation) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                 params![
                     row.idempotency_key.as_str(),
                     row.conversation_id.as_str(),
@@ -225,6 +219,8 @@ impl<'db> OutboxStore<'db> {
                     row.next_attempt_at,
                     row.last_error,
                     row.enqueued_seq.0,
+                    owner.map(|(scope, _, _)| scope),
+                    owner.map(|(_, _, generation)| generation),
                 ],
             )?;
             let id = tx.last_insert_rowid();
@@ -833,17 +829,135 @@ mod tests {
             enqueued_seq: EventSeq(1),
         };
         let key = crate::agent_ownership::scope_key(cid.as_str(), "whatsapp", "group@g.us");
-        OutboxStore::new(&db)
+        let (outbox_id, inserted) = OutboxStore::new(&db)
             .enqueue_idempotent_for_agent(&row, &key, "camper", current.generation)
             .unwrap();
+        assert!(inserted);
         ownership
             .takeover(cid.as_str(), "whatsapp", "group@g.us", 11)
             .unwrap();
+        assert_eq!(outbox_status(&db, outbox_id), "failed");
+        let transitions = OutboxStore::new(&db).delivery_timeline(outbox_id).unwrap();
+        assert_eq!(
+            transitions.last().unwrap().transition,
+            "cancelled_by_takeover"
+        );
         assert!(
             OutboxStore::new(&db)
                 .enqueue_idempotent_for_agent(&row, &key, "camper", current.generation)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn takeover_marks_in_flight_automatic_send_unknown_for_reconciliation() {
+        let db = fresh_db();
+        let ownership = crate::agent_ownership::AgentOwnershipStore::new(&db);
+        let cid = ConversationId::from("owner-race-chat");
+        let owner = ownership
+            .assign_agent(cid.as_str(), "signal", "peer", "watcher", 1)
+            .unwrap();
+        let row = OutboxRow {
+            id: None,
+            idempotency_key: IdempotencyKey::mint(&cid, crate::ids::TurnSeq(2), 0),
+            conversation_id: cid.clone(),
+            effect_kind: "transport.send".into(),
+            payload: b"reply".to_vec(),
+            status: OutboxStatus::Pending,
+            attempts: 0,
+            next_attempt_at: None,
+            last_error: None,
+            enqueued_seq: EventSeq(2),
+        };
+        let scope = crate::agent_ownership::scope_key(cid.as_str(), "signal", "peer");
+        let (id, _) = OutboxStore::new(&db)
+            .enqueue_idempotent_for_agent(&row, &scope, "watcher", owner.generation)
+            .unwrap();
+        assert!(
+            OutboxStore::new(&db)
+                .claim_with_lease(id, "relay", 5, 60)
+                .unwrap()
+        );
+        ownership
+            .takeover(cid.as_str(), "signal", "peer", 6)
+            .unwrap();
+        assert_eq!(outbox_status(&db, id), "unknown");
+        assert!(
+            OutboxStore::new(&db)
+                .ready_pending(100, 10)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            OutboxStore::new(&db)
+                .delivery_timeline(id)
+                .unwrap()
+                .last()
+                .unwrap()
+                .transition,
+            "takeover_outcome_unknown"
+        );
+    }
+
+    #[test]
+    fn takeover_and_automatic_enqueue_race_never_leaves_a_pending_agent_send() {
+        use std::sync::{Arc, Barrier};
+        let db = fresh_db();
+        let cid = ConversationId::from("owner-concurrent-chat");
+        let current = crate::agent_ownership::AgentOwnershipStore::new(&db)
+            .assign_agent(cid.as_str(), "whatsapp", "peer", "watcher", 1)
+            .unwrap();
+        let scope = crate::agent_ownership::scope_key(cid.as_str(), "whatsapp", "peer");
+        let row = OutboxRow {
+            id: None,
+            idempotency_key: IdempotencyKey::mint(&cid, crate::ids::TurnSeq(3), 0),
+            conversation_id: cid.clone(),
+            effect_kind: "transport.send".into(),
+            payload: b"reply".to_vec(),
+            status: OutboxStatus::Pending,
+            attempts: 0,
+            next_attempt_at: None,
+            last_error: None,
+            enqueued_seq: EventSeq(3),
+        };
+        let barrier = Arc::new(Barrier::new(2));
+        let enqueue_db = db.clone();
+        let enqueue_barrier = barrier.clone();
+        let enqueue_scope = scope.clone();
+        let enqueue_row = row.clone();
+        let generation = current.generation;
+        let enqueue = std::thread::spawn(move || {
+            enqueue_barrier.wait();
+            OutboxStore::new(&enqueue_db).enqueue_idempotent_for_agent(
+                &enqueue_row,
+                &enqueue_scope,
+                "watcher",
+                generation,
+            )
+        });
+        let takeover_db = db.clone();
+        let takeover_barrier = barrier.clone();
+        let takeover_cid = cid.clone();
+        let takeover = std::thread::spawn(move || {
+            takeover_barrier.wait();
+            crate::agent_ownership::AgentOwnershipStore::new(&takeover_db).takeover(
+                takeover_cid.as_str(),
+                "whatsapp",
+                "peer",
+                2,
+            )
+        });
+        let enqueue_result = enqueue.join().unwrap();
+        takeover.join().unwrap().unwrap();
+        assert!(
+            OutboxStore::new(&db)
+                .ready_pending(100, 10)
+                .unwrap()
+                .is_empty()
+        );
+        if let Ok((id, true)) = enqueue_result {
+            assert_eq!(outbox_status(&db, id), "failed");
+        }
     }
 
     #[test]

@@ -533,6 +533,14 @@ pub(crate) async fn deliver_agent_reply_automatically(
     recipient: &str,
     text: &str,
 ) -> Result<(), String> {
+    let draft_store = execlaw_core::reply_drafts::ReplyDraftStore::new(&state.db);
+    let draft = draft_store
+        .for_model_seq(conversation_id.as_str(), model_seq)
+        .map_err(|error| format!("load automatic reply audience: {error}"))?
+        .ok_or_else(|| "automatic reply draft is missing".to_owned())?;
+    draft_store
+        .validate_audience(&draft.id)
+        .map_err(|error| format!("automatic reply audience changed: {error}"))?;
     let owner = execlaw_core::agent_ownership::AgentOwnershipStore::new(&state.db)
         .get(conversation_id.as_str(), channel, recipient)
         .map_err(|error| format!("check automatic reply owner: {error}"))?;
@@ -1247,6 +1255,10 @@ pub async fn send_message(
         .inference
         .resolve(&state.db, BackendPurpose::Standard)
         .map(|resolved| resolved.with_workload("chat"));
+    let use_tool_path = use_tool_path
+        && inference_for_turn
+            .as_ref()
+            .is_some_and(|resolved| qualified_model_supports_tools(&state.db, &resolved.model_id));
     if resume_payload.is_some() && inference_for_turn.is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -2144,6 +2156,13 @@ async fn run_real_turn(
         caller_timezone,
         group_context.as_ref(),
     );
+    if !planner_executor
+        && (!state.plugin_host.registry().all_tools().is_empty()
+            || !state.plugin_host.registry().all_builtins().is_empty())
+        && !qualified_model_supports_tools(&state.db, &resolved_model_id)
+    {
+        turn_context.push_str("\nTools are unavailable for this turn. Answer from available context and say when an action requires tools.");
+    }
     if !planner_executor {
         append_transport_history_context(
             state,
@@ -2969,6 +2988,17 @@ fn qualified_model_profile(
         .ok()??;
     let context_check = profile.observed.get("context")?;
     (context_check.get("passed")?.as_bool()? && profile.context_tokens >= 4096).then_some(profile)
+}
+
+fn qualified_model_supports_tools(db: &execlaw_core::Database, model_id: &str) -> bool {
+    qualified_model_profile(db, BackendPurpose::Standard, model_id).is_some_and(|profile| {
+        profile
+            .observed
+            .get("tools")
+            .and_then(|check| check.get("passed"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    })
 }
 
 fn load_compaction_pending_state(
@@ -4345,6 +4375,11 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     // catalog was filtered, so the model's system prompt routed it
     // to tool names the catalog had stripped — confusing for the
     // model, wasteful of prompt tokens, and a policy hygiene gap.
+    let resolved = state
+        .inference
+        .resolve(&state.db, BackendPurpose::Standard)
+        .map(|resolved| resolved.with_workload("chat"))
+        .ok_or_else(|| "no inference backend configured".to_owned())?;
     let mut tool_view = build_runner_tool_catalog_for_durable_run(
         &state.db,
         &state.plugin_host,
@@ -4354,6 +4389,12 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     );
     if let Some(profile) = &safety_profile_snapshot {
         tool_view = filter_tool_view_for_safety_profile(&state.plugin_host, profile, tool_view);
+    }
+    let tools_unqualified = (!tool_view.discoverable.is_empty()
+        || !tool_view.declarations.is_empty())
+        && !qualified_model_supports_tools(&state.db, &resolved.model_id);
+    if tools_unqualified {
+        tool_view = RunnerToolView::default();
     }
     if planner_executor {
         tracing::debug!(
@@ -4376,6 +4417,9 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
         caller_timezone,
         group_context.as_ref(),
     );
+    if tools_unqualified {
+        turn_context.push_str("\nTools are unavailable for this turn. Answer from available context and say when an action requires tools.");
+    }
     if !planner_executor {
         append_transport_history_context(
             state,
@@ -4632,27 +4676,9 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
     // path sent `model=Qwen3.5` to a vLLM container loaded with
     // `model=Qwen3.6`, because the URL came from the DB and the
     // model id came from a stale `state.config.model_id` constant).
-    let resolved = state
-        .inference
-        .resolve(&state.db, BackendPurpose::Standard)
-        .map(|resolved| resolved.with_workload("chat"))
-        .ok_or_else(|| "no inference backend configured".to_owned())?;
     let inference_client_for_subagents =
         Arc::new(resolved.client.as_ref().clone().with_workload("child"));
     let resolved_model_id = resolved.model_id.clone();
-    if !tool_view.discoverable.is_empty()
-        && !qualified_model_profile(&state.db, BackendPurpose::Standard, &resolved_model_id)
-            .is_some_and(|profile| {
-                profile
-                    .observed
-                    .get("tools")
-                    .and_then(|check| check.get("passed"))
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-            })
-    {
-        return Err("tool calling is unavailable until this exact model/backend/template profile passes tool qualification".into());
-    }
     let endpoint_resolution = resolved
         .client
         .endpoint_resolution()
@@ -6253,15 +6279,7 @@ async fn run_tool_capable_turn(
         tool_view = filter_tool_view_for_safety_profile(&state.plugin_host, profile, tool_view);
     }
     if !tool_view.discoverable.is_empty()
-        && !qualified_model_profile(&state.db, BackendPurpose::Standard, &resolved_model_id)
-            .is_some_and(|profile| {
-                profile
-                    .observed
-                    .get("tools")
-                    .and_then(|check| check.get("passed"))
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-            })
+        && !qualified_model_supports_tools(&state.db, &resolved_model_id)
     {
         return Err("tool calling is unavailable until this exact model/backend/template profile passes tool qualification".into());
     }
@@ -6847,6 +6865,10 @@ async fn dispatch_routine_turn_inner(
         .inference
         .resolve(&state.db, BackendPurpose::Standard)
         .map(|resolved| resolved.with_workload("automation"));
+    let has_plugin_tools = has_plugin_tools
+        && inference_for_turn
+            .as_ref()
+            .is_some_and(|resolved| qualified_model_supports_tools(&state.db, &resolved.model_id));
     // 2026-05-16 — sister fix to `dispatch_external_turn`'s
     // runner-routing branch (chats.rs ~line 3015). Pre-fix, this
     // path always fell into `run_tool_capable_turn` / `run_real_turn`,
@@ -7323,6 +7345,10 @@ pub async fn dispatch_external_turn(
                 "chat"
             })
         });
+    let has_plugin_tools = has_plugin_tools
+        && inference_for_turn
+            .as_ref()
+            .is_some_and(|resolved| qualified_model_supports_tools(&state.db, &resolved.model_id));
     // External-transport turns (Signal etc.) don't carry a per-call
     // timezone yet — the bridge wire shape doesn't include
     // `Intl.DateTimeFormat`. Fall back to UTC; the agent's prose
@@ -7925,6 +7951,10 @@ pub async fn dispatch_clarification_turn(
         .inference
         .resolve(&state.db, BackendPurpose::Standard)
         .map(|resolved| resolved.with_workload("automation"));
+    let has_plugin_tools = has_plugin_tools
+        && inference_for_turn
+            .as_ref()
+            .is_some_and(|resolved| qualified_model_supports_tools(&state.db, &resolved.model_id));
     // 2026-05-16 — sister fix to `dispatch_external_turn` +
     // `dispatch_routine_turn`. Route this synthetic
     // orchestrator-fired turn through the conversation's bound
@@ -8815,6 +8845,17 @@ async fn send_transport_text(
     use execlaw_core::principal_groups::PrincipalGroupStore;
     use execlaw_core::transport_bindings::TransportBindingStore;
 
+    if let Some(seq) = source_seq {
+        let drafts = execlaw_core::reply_drafts::ReplyDraftStore::new(&state.db);
+        if let Some(draft) = drafts
+            .for_model_seq(cid.as_str(), seq)
+            .map_err(|error| format!("load reviewed reply audience: {error}"))?
+        {
+            drafts
+                .validate_audience(&draft.id)
+                .map_err(|error| format!("reviewed reply audience changed: {error}"))?;
+        }
+    }
     let pg_id = PrincipalGroupStore::new(&state.db)
         .principal_group_id_for(cid.as_str())
         .map_err(|e| format!("conversation binding lookup: {e}"))?
@@ -10185,6 +10226,37 @@ mod tests {
     use super::*;
     use crate::runner_supervisor::TurnEvent;
 
+    fn install_catalog_test_plugin(state: &AppState, manifest_toml: &str) {
+        let manifest = execlaw_plugin_sdk::PluginManifest::parse(manifest_toml).unwrap();
+        let stage = state.plugin_host.stage_root().join(format!(
+            "{}-{}-{}",
+            manifest.plugin.id,
+            manifest.plugin.version,
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::write(stage.join("plugin.toml"), manifest_toml).unwrap();
+        let now = chrono::Utc::now().timestamp();
+        state
+            .db
+            .with_conn(|conn| {
+                conn.execute(
+                    "INSERT INTO state_plugins(plugin_id, version, manifest_toml, stage_path, enabled, installed_at, updated_at) \
+                     VALUES (?1, ?2, ?3, ?4, 1, ?5, ?5)",
+                    rusqlite::params![
+                        manifest.plugin.id,
+                        manifest.plugin.version,
+                        manifest_toml,
+                        stage.to_string_lossy().to_string(),
+                        now
+                    ],
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        state.plugin_host.registry().enable(&manifest).unwrap();
+    }
+
     #[test]
     fn compaction_summary_label_is_host_owned_and_destination_restricted() {
         let state = crate::routes::test_app_state();
@@ -10997,6 +11069,7 @@ mod tests {
     #[test]
     fn committed_runner_reply_replays_and_finishes_the_durable_run_once() {
         let state = test_app_state();
+        let now = chrono::Utc::now().timestamp();
         let conversation = ConversationId::from("runner-commit-recovery");
         ensure_conversation_for(&state.db, &conversation);
         let user = PendingEvent::encode(
@@ -11035,7 +11108,7 @@ mod tests {
             conversation.clone(),
             EventSeq(1),
             None,
-            chrono::Utc::now().timestamp(),
+            now,
         )
         .unwrap();
         let checkpoint: execlaw_runner_protocol::ModelRoundCheckpoint =
@@ -11056,12 +11129,12 @@ mod tests {
                     &serde_json::json!({"round":0}),
                     None,
                     None,
-                    1,
+                    now,
                 )
                 .unwrap(),
             execlaw_runner_local::durable::StepDecision::Execute(_)
         ));
-        durable.complete("model:0", &checkpoint, 2).unwrap();
+        durable.complete("model:0", &checkpoint, now).unwrap();
 
         assert_eq!(
             replay_committed_runner_response(
@@ -13660,7 +13733,8 @@ mod tests {
         })
         .unwrap();
         let prompt = super::assemble_system_prompt(&state.db, None, "STATIC ONLY", "", "");
-        assert_eq!(prompt, "STATIC ONLY");
+        assert!(prompt.starts_with("INSTRUCTION PRECEDENCE:"));
+        assert!(prompt.ends_with("STATIC ONLY"));
     }
 
     #[test]
@@ -14203,7 +14277,8 @@ mod tests {
     fn build_runner_tool_catalog_strips_all_tools_when_planner_executor() {
         let state = test_app_state();
         // Seed one plugin tool so an unfiltered catalog would be non-empty.
-        let manifest = execlaw_plugin_sdk::PluginManifest::parse(
+        install_catalog_test_plugin(
+            &state,
             r#"
 [plugin]
 id = "p"
@@ -14215,9 +14290,7 @@ name = "p.tool_a"
 latency = "low"
 required_capabilities = []
 "#,
-        )
-        .unwrap();
-        state.plugin_host.registry().enable(&manifest).unwrap();
+        );
 
         // Sanity: catalog is non-empty WITHOUT the split.
         let with_split_off = super::build_runner_tool_catalog(
@@ -14268,7 +14341,8 @@ required_capabilities = []
         use execlaw_core::tool_access::{ToolAccessSeed, ToolAccessStore, ToolSource};
 
         let state = test_app_state();
-        let manifest = execlaw_plugin_sdk::PluginManifest::parse(
+        install_catalog_test_plugin(
+            &state,
             r#"
 [plugin]
 id = "p"
@@ -14285,9 +14359,7 @@ name = "open_tool"
 latency = "low"
 required_capabilities = []
 "#,
-        )
-        .unwrap();
-        state.plugin_host.registry().enable(&manifest).unwrap();
+        );
 
         // Seed an access row that restricts `controller_only_tool` to
         // `["Controller"]`. `open_tool` has no row → allow-by-default.
@@ -14467,7 +14539,8 @@ required_capabilities = []
     #[test]
     fn build_runner_tool_catalog_filters_plugin_tools_by_required_capabilities() {
         let state = test_app_state();
-        let manifest = execlaw_plugin_sdk::PluginManifest::parse(
+        install_catalog_test_plugin(
+            &state,
             r#"
 [plugin]
 id = "p"
@@ -14484,9 +14557,7 @@ name = "needs_nothing"
 latency = "low"
 required_capabilities = []
 "#,
-        )
-        .unwrap();
-        state.plugin_host.registry().enable(&manifest).unwrap();
+        );
 
         // KnownLimited caller (no memory caps) — `needs_memory` is filtered.
         let limited = super::build_runner_tool_catalog(
@@ -15267,6 +15338,68 @@ required_capabilities = []
         // tools are in the registry.
         assert_eq!(status, StatusCode::OK);
         assert!(!body["assistant_text"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unqualified_tool_profile_still_allows_text_chat() {
+        use execlaw_core::backends::{BackendMode, BackendPurpose, BackendStore, BackendUpsert};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let state = test_app_state();
+        install_catalog_test_plugin(
+            &state,
+            r#"[plugin]
+id = "text-chat-tool"
+name = "text-chat-tool"
+version = "1.0.0"
+
+[[tools]]
+name = "text-chat-tool.lookup"
+latency = "low"
+required_capabilities = []
+"#,
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0_u8; 8192];
+            let count = socket.read(&mut request).await.unwrap();
+            assert!(count > 0);
+            let stream = concat!(
+                "data: {\"id\":\"text-only\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"local model replied\"}}]}\n\n",
+                "data: {\"id\":\"text-only\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n"
+            );
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                stream.len(),
+                stream,
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+        BackendStore::new(&state.db)
+            .upsert(
+                &BackendUpsert {
+                    purpose: BackendPurpose::Standard,
+                    inference_backend: "service-vllm".into(),
+                    model_spec_json: serde_json::json!({"model":"test-model"}),
+                    gpu_id: None,
+                    endpoint: Some(endpoint),
+                    notes: None,
+                    reasoning_enabled: false,
+                    mode: BackendMode::External,
+                },
+                1,
+            )
+            .unwrap();
+        assert!(!qualified_model_supports_tools(&state.db, "test-model"));
+
+        let app = crate::routes::build_router(state);
+        let (status, body) = send(app, "say hello").await;
+        assert_eq!(status, StatusCode::OK, "body was {body}");
+        assert_eq!(body["assistant_text"], "local model replied");
+        server.await.unwrap();
     }
 
     // ---- PATCH /api/chats/:id (thread metadata) ----------------------

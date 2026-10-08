@@ -1166,6 +1166,41 @@ impl<'db> RunStore<'db> {
         }).map_err(RunStoreError::from)
     }
 
+    // Step leases use whole UTC seconds. Preserve a newer millisecond observation
+    // within that same second while still rejecting a rollback to an earlier second.
+    fn observe_execution_budget_at_second(
+        &self,
+        run_id: &str,
+        now: i64,
+    ) -> Result<(), RunStoreError> {
+        self.db.transaction(|tx| {
+            let last_observed: Option<i64> = tx
+                .query_row(
+                    "SELECT updated_at_ms FROM state_run_execution_budgets WHERE run_id=?1",
+                    [run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(last_observed) = last_observed {
+                if now < last_observed.div_euclid(1_000) {
+                    return Err(DbError::Invariant(
+                        RunClockError::Rollback {
+                            last_observed_ms: last_observed,
+                            now_ms: now.saturating_mul(1_000),
+                        }
+                        .to_string(),
+                    ));
+                }
+                tx.execute(
+                    "UPDATE state_run_execution_budgets SET updated_at_ms=MAX(updated_at_ms, ?2) WHERE run_id=?1",
+                    params![run_id, now.saturating_mul(1_000)],
+                )?;
+            }
+            Ok(())
+        })
+        .map_err(RunStoreError::from)
+    }
+
     /// Consume one run-wide retry reservation if the deadline and quota allow it.
     pub fn consume_execution_retry(
         &self,
@@ -2283,8 +2318,7 @@ impl<'db> RunStore<'db> {
         now: i64,
         lease_expires_at: i64,
     ) -> Result<RunStepRecord, RunStoreError> {
-        let now_ms = now.saturating_mul(1_000);
-        let _ = self.execution_budget_at(run_id, now_ms)?;
+        self.observe_execution_budget_at_second(run_id, now)?;
         if lease_expires_at <= now {
             return Err(RunStoreError::InvalidLease {
                 now,
@@ -3412,6 +3446,31 @@ mod tests {
                 .deadline_at_ms,
             15_000
         );
+    }
+
+    #[test]
+    fn second_precision_step_claim_preserves_same_second_budget_observation() {
+        let db = fresh_db();
+        let store = RunStore::new(&db);
+        let run_id = create_run(&store, None);
+        store
+            .add_step(&run_id, &step("model", 0, RunStepKind::ModelRequest))
+            .unwrap();
+        store
+            .ensure_execution_budget(&run_id, 10_000, 2, 1, 10_000)
+            .unwrap();
+        store.execution_budget_at(&run_id, 10_037).unwrap();
+        store
+            .claim_step(&run_id, "model", "worker", 10, 20)
+            .unwrap();
+        assert!(matches!(
+            store.execution_budget_at(&run_id, 10_036),
+            Err(RunStoreError::Db(DbError::Invariant(message))) if message.contains("moved backward")
+        ));
+        assert!(matches!(
+            store.claim_step(&run_id, "model", "worker", 9, 20),
+            Err(RunStoreError::Db(DbError::Invariant(message))) if message.contains("moved backward")
+        ));
     }
 
     #[test]

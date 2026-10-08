@@ -166,6 +166,18 @@ pub fn router() -> Router<AppState> {
         .route("/api/admin/agents/ownership", get(get_ownership))
         .route("/api/admin/agents/ownership/takeover", post(takeover))
         .route("/api/admin/agents/ownership/handback", post(handback))
+        .route(
+            "/api/admin/transport-identities/link",
+            post(link_transport_identity),
+        )
+        .route(
+            "/api/admin/transport-identities/{id}/unlink",
+            post(unlink_transport_identity),
+        )
+        .route(
+            "/api/admin/transport-identities/{id}/transfer",
+            post(transfer_transport_context),
+        )
         .route("/api/admin/agents/import-markdown", post(import_markdown))
         .route(
             "/api/admin/agents/{id}",
@@ -192,6 +204,153 @@ pub fn router() -> Router<AppState> {
             "/api/admin/agents/{id}/runs/{run_id}/completion/delivery",
             post(confirm_agent_delivery),
         )
+}
+
+#[derive(Debug, Deserialize)]
+struct TransportIdentityLinkRequest {
+    left_channel: String,
+    left_subject: String,
+    right_channel: String,
+    right_subject: String,
+    verification_id: String,
+}
+
+async fn link_transport_identity(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Json(request): Json<TransportIdentityLinkRequest>,
+) -> Result<Json<execlaw_core::transport_identity::TransportIdentityLink>, ApiError> {
+    controller(&user)?;
+    execlaw_core::transport_identity::TransportIdentityStore::new(&state.db)
+        .link_verified(
+            &user.user_id,
+            &request.left_channel,
+            &request.left_subject,
+            &request.right_channel,
+            &request.right_subject,
+            &request.verification_id,
+            chrono::Utc::now().timestamp(),
+        )
+        .map(Json)
+        .map_err(|error| ApiError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "transport_identity_link_invalid",
+            message: error.to_string(),
+        })
+}
+
+async fn unlink_transport_identity(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(id): Path<String>,
+) -> Result<Json<bool>, ApiError> {
+    controller(&user)?;
+    execlaw_core::transport_identity::TransportIdentityStore::new(&state.db)
+        .unlink(&id, &user.user_id, chrono::Utc::now().timestamp())
+        .map(Json)
+        .map_err(|error| ApiError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "transport_identity_unlink_failed",
+            message: error.to_string(),
+        })
+}
+
+#[derive(Debug, Deserialize)]
+struct ContinuityTransferRequest {
+    origin_channel: String,
+    origin_subject: String,
+    origin_conversation: String,
+    destination_channel: String,
+    destination_subject: String,
+    destination_conversation: String,
+    selected_message_ids: Vec<String>,
+    audience_kind: String,
+}
+
+async fn transfer_transport_context(
+    State(state): State<AppState>,
+    user: AuthedUser,
+    Path(id): Path<String>,
+    Json(request): Json<ContinuityTransferRequest>,
+) -> Result<Json<String>, ApiError> {
+    controller(&user)?;
+    let transfer = execlaw_core::transport_identity::ContinuityTransfer {
+        origin_channel: request.origin_channel,
+        origin_subject: request.origin_subject,
+        origin_conversation: request.origin_conversation,
+        destination_channel: request.destination_channel,
+        destination_subject: request.destination_subject,
+        destination_conversation: request.destination_conversation,
+        selected_message_ids: request.selected_message_ids,
+        audience_kind: request.audience_kind,
+    };
+    let identities = execlaw_core::transport_identity::TransportIdentityStore::new(&state.db);
+    identities
+        .authorize_transfer(&id, &transfer)
+        .map_err(|error| ApiError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "transport_context_transfer_invalid",
+            message: error.to_string(),
+        })?;
+    let archive = execlaw_core::message_archive::MessageArchiveStore::new(&state.db);
+    let origin = archive
+        .get_conversation_by_remote_id(&transfer.origin_channel, &transfer.origin_subject)
+        .map_err(|error| ApiError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "transport_context_origin_unavailable",
+            message: error.to_string(),
+        })?
+        .filter(|conversation| {
+            conversation.conversation_kind == "direct"
+                && conversation.conversation_id.as_deref()
+                    == Some(transfer.origin_conversation.as_str())
+        })
+        .ok_or_else(|| ApiError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "transport_context_origin_unavailable",
+            message: "selected history must belong to the linked direct conversation".into(),
+        })?;
+    let mut selected_context = Vec::with_capacity(transfer.selected_message_ids.len());
+    for message_id in &transfer.selected_message_ids {
+        let message = archive
+            .message_for_transport(
+                &origin.conversation_id.clone().unwrap_or_default(),
+                &transfer.origin_channel,
+                &transfer.origin_subject,
+                message_id,
+            )
+            .map_err(|error| ApiError {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                code: "transport_context_message_unavailable",
+                message: error.to_string(),
+            })?
+            .filter(|message| !message.body.is_empty())
+            .ok_or_else(|| ApiError {
+                status: axum::http::StatusCode::BAD_REQUEST,
+                code: "transport_context_message_unavailable",
+                message: "selected history contains an unavailable or deleted message".into(),
+            })?;
+        selected_context.push(serde_json::json!({
+            "message_id":message.archive_message_id,
+            "sender_id":message.sender_id,
+            "body":message.body,
+            "occurred_at":message.occurred_at,
+            "reply_to_message_id":message.reply_to_message_id,
+        }));
+    }
+    identities
+        .record_transfer(
+            &id,
+            &transfer,
+            &selected_context,
+            chrono::Utc::now().timestamp(),
+        )
+        .map(Json)
+        .map_err(|error| ApiError {
+            status: axum::http::StatusCode::BAD_REQUEST,
+            code: "transport_context_transfer_invalid",
+            message: error.to_string(),
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -498,14 +657,44 @@ async fn handback(
     Json(request): Json<HandbackRequest>,
 ) -> Result<Json<bool>, ApiError> {
     controller(&user)?;
-    AgentOwnershipStore::new(&state.db)
-        .handback(
+    let (previous_agent, actions) = AgentOwnershipStore::new(&state.db)
+        .handback_with_context(
             &request.conversation_id,
             &request.channel,
             &request.recipient,
             request.generation,
         )
         .map_err(|error| map(AgentError::Db(error)))?;
+    if let Some(agent_id) = previous_agent {
+        let source_kind = "handoff";
+        let source_event_id = format!(
+            "handback:{}:{}",
+            request.conversation_id, request.generation
+        );
+        let content = serde_json::json!({
+            "kind":"controller_handoff_context",
+            "conversation_id":request.conversation_id,
+            "channel":request.channel,
+            "recipient":request.recipient,
+            "intervening_actions":actions,
+            "instruction":"Read the operator-owned actions and incoming messages before continuing. Do not repeat work already completed."
+        }).to_string();
+        AgentStore::new(&state.db)
+            .enqueue_triggered_event(
+                &agent_id,
+                &execlaw_core::agents::AgentSourceEvent {
+                    source_kind,
+                    source_event_id: &source_event_id,
+                    occurred_at: chrono::Utc::now().timestamp(),
+                    conversation_id: &request.conversation_id,
+                    recipient: &request.recipient,
+                    content: &content,
+                },
+                chrono::Utc::now().timestamp(),
+            )
+            .map_err(map)?;
+        crate::agent_supervisor::AgentSupervisor::kick_global();
+    }
     Ok(Json(true))
 }
 async fn list(State(s): State<AppState>, _: AuthedUser) -> Result<Json<Vec<AgentView>>, ApiError> {

@@ -117,6 +117,97 @@ jobs:
       - name: Replay offline regression fixture catalog
         run: cargo run -p execlaw-eval-harness --locked -- replay-fixtures --directory evals/fixtures --report target/eval-fixture-report.json
 
+  network-denied:
+    name: local-only / network-denied workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo registry and artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-unknown-linux-gnu
+
+      - name: Run workspace tests with no external network namespace
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y strace
+          python3 -m unittest discover -s scripts/qualification -p 'test_check_network_trace.py'
+          mkdir -p target
+          sudo unshare --net bash -euc 'ip link set lo up; strace -f -qq -e trace=network -o target/network-denied.trace cargo test --workspace --locked --no-fail-fast'
+          python3 scripts/qualification/check_network_trace.py target/network-denied.trace
+
+  security-mutations:
+    name: security / critical enforcement mutations
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install cargo-mutants
+        run: cargo install --locked cargo-mutants
+
+      - name: Require critical enforcement mutants to be caught
+        env:
+          CARGO_MUTANTS_MINIMUM_TEST_TIMEOUT: 300
+          CARGO_TARGET_DIR: target/security-mutations
+        run: >-
+          cargo mutants --no-shuffle --timeout 600
+          --package execlaw-core --package execlaw-policy --package execlaw-server
+          --file crates/policy/src/trust.rs
+          --file crates/server/src/approvals.rs
+          --file crates/core/src/events.rs
+          --file crates/server/src/attachment_api.rs
+          --file crates/server/src/tool_dispatch.rs
+          --file crates/core/src/multimodal_evidence.rs
+          --file crates/core/src/transition_model.rs
+          --output target/security-mutation-results
+
+      - name: Preserve mutation outcomes for review
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: execlaw-security-mutation-results
+          path: target/security-mutation-results
+          if-no-files-found: ignore
+
+  fuzz-smoke:
+    name: fuzz / bounded parser and protocol smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install nightly Rust and cargo-fuzz
+        run: |
+          rustup toolchain install nightly --profile minimal
+          cargo install --locked cargo-fuzz
+
+      - name: Run bounded fuzz targets
+        shell: bash
+        run: |
+          cargo +nightly fuzz run runner_conversation -- -max_total_time=30 -timeout=5 -max_len=65536
+          cargo +nightly fuzz run server_conversation -- -max_total_time=30 -timeout=5 -max_len=65536
+          cargo +nightly fuzz run registration_handshake -- -max_total_time=30 -timeout=5 -max_len=65536
+          cargo +nightly fuzz run plugin_manifest -- -max_total_time=30 -timeout=5 -max_len=262144
+          cargo +nightly fuzz run plugin_zip -- -max_total_time=30 -timeout=5 -max_len=1048576
+          cargo +nightly fuzz run json_documents -- -max_total_time=30 -timeout=5 -max_len=1048576
+
+      - name: Preserve fuzz corpora and crash reproductions
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: execlaw-fuzz-corpus
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
   spa:
     name: spa
     runs-on: ubuntu-latest

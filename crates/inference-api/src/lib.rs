@@ -547,8 +547,10 @@ impl Default for InferenceRetryPolicy {
 }
 
 impl InferenceRetryPolicy {
-    /// Choose a bounded deadline for the selected local protocol. A cold
-    /// native Ollama model can take longer to load than a warm vLLM request.
+    /// Choose a bounded deadline for the selected local protocol. OpenAI
+    /// compatible Ollama endpoints can take more than 30 seconds to prefill a
+    /// normal chat prompt before sending the first stream byte. A cold native
+    /// Ollama model may take longer still.
     ///
     /// ```
     /// use execlaw_inference_api::{InferenceEngine, InferenceRetryPolicy};
@@ -556,11 +558,13 @@ impl InferenceRetryPolicy {
     ///     > InferenceRetryPolicy::for_engine(InferenceEngine::OpenAICompat).deadline);
     /// ```
     pub fn for_engine(engine: InferenceEngine) -> Self {
-        let mut policy = Self::default();
-        if engine == InferenceEngine::Ollama {
-            policy.deadline = std::time::Duration::from_secs(120);
+        Self {
+            deadline: match engine {
+                InferenceEngine::OpenAICompat => std::time::Duration::from_secs(120),
+                InferenceEngine::Ollama => std::time::Duration::from_secs(180),
+            },
+            ..Self::default()
         }
-        policy
     }
 }
 
@@ -1761,6 +1765,22 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::net::IpAddr;
+
+    #[test]
+    fn chat_retry_deadlines_allow_local_model_prefill() {
+        assert_eq!(
+            InferenceRetryPolicy::for_engine(InferenceEngine::OpenAICompat).deadline,
+            std::time::Duration::from_secs(120),
+        );
+        assert_eq!(
+            InferenceRetryPolicy::for_engine(InferenceEngine::Ollama).deadline,
+            std::time::Duration::from_secs(180),
+        );
+        assert_eq!(
+            InferenceRetryPolicy::default().deadline,
+            std::time::Duration::from_secs(30),
+        );
+    }
 
     #[tokio::test]
     async fn openai_embeddings_call_is_local_and_decodes_bounded_vectors() {

@@ -21,7 +21,7 @@ host_implemented = true
 
 [[tools]]
 name = "workspace.run"
-description = "Run one bounded argv job inside the network-disabled sandbox using a sanitized read-only run checkout. The registered source workspace is not writable through the process."
+description = "Run one bounded argv job inside the network-disabled sandbox using a sanitized read-only run checkout. The host returns revision, command, environment, bounded-output digest, changed or deleted test paths, skip accounting, and stale-aware pass status from executor evidence."
 schema = "schemas/run.json"
 latency = "high"
 required_capabilities = ["workspace.read", "workspace.process"]
@@ -33,6 +33,15 @@ name = "workspace.diagnostics"
 description = "Request bounded diagnostics from the Controller-configured language server for one file in a sanitized read-only run checkout."
 schema = "schemas/diagnostics.json"
 latency = "high"
+required_capabilities = ["workspace.read", "workspace.process"]
+trust_floor = "Controller"
+host_implemented = true
+
+[[tools]]
+name = "workspace.migrations.verify"
+description = "Apply application SQL migrations to a disposable in-memory SQLite database seeded only from an isolated-workspace fixture; report schema changes, destructive statements, and forward-only rollback limits. The database target is fixed by the host."
+schema = "schemas/migrations_verify.json"
+latency = "medium"
 required_capabilities = ["workspace.read", "workspace.process"]
 trust_floor = "Controller"
 host_implemented = true

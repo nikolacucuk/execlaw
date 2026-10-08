@@ -2697,6 +2697,11 @@ fn inbound_from_rhai_map(plugin_id: &str, msg: &Map) -> Result<InboundMessage, B
     Ok(InboundMessage {
         channel,
         source_event_id: opt_str("source_event_id"),
+        message_operation: opt_str("message_operation"),
+        target_message_id: opt_str("target_message_id"),
+        source_revision: opt_i64("source_revision"),
+        reply_to_message_id: opt_str("reply_to_message_id"),
+        reaction: opt_str("reaction"),
         native_id,
         display_name: opt_str("display_name"),
         group_id: opt_str("group_id"),

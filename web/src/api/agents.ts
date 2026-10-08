@@ -91,6 +91,7 @@ export interface AgentReplyDraft {
     conversation_id: string;
     channel: string;
     recipient: string;
+    audience: Record<string, unknown>;
     revision: number;
     inbound_text: string;
     draft_text: string;
@@ -128,8 +129,21 @@ export interface AgentOwnership {
     conversation_id: string;
     owner_kind: "controller" | "agent";
     agent_id: string | null;
+    previous_agent_id?: string | null;
     generation: number;
     updated_at: number;
+}
+
+export interface TransportIdentityLink {
+    link_id: string;
+    controller_id: string;
+    left_channel: string;
+    left_subject: string;
+    right_channel: string;
+    right_subject: string;
+    verification_id: string;
+    linked_at: number;
+    revoked_at: number | null;
 }
 
 export interface AgentRequest {
@@ -210,6 +224,19 @@ export function takeOverAgentConversation(conversation_id: string, channel: stri
 
 export function handBackAgentConversation(conversation_id: string, channel: string, recipient: string, generation: number, token: () => string | null) {
     return apiFetch<boolean>("/api/admin/agents/ownership/handback", { method: "POST", body: { conversation_id, channel, recipient, generation } }, token);
+}
+export function linkTransportIdentity(body: Omit<TransportIdentityLink, "link_id" | "controller_id" | "linked_at" | "revoked_at">, token: () => string | null) {
+    return apiFetch<TransportIdentityLink>("/api/admin/transport-identities/link", { method: "POST", body }, token);
+}
+export function unlinkTransportIdentity(id: string, token: () => string | null) {
+    return apiFetch<boolean>(`/api/admin/transport-identities/${encodeURIComponent(id)}/unlink`, { method: "POST" }, token);
+}
+export function transferTransportContext(id: string, body: {
+    origin_channel: string; origin_subject: string; origin_conversation: string;
+    destination_channel: string; destination_subject: string; destination_conversation: string;
+    selected_message_ids: string[]; audience_kind: "direct" | "group";
+}, token: () => string | null) {
+    return apiFetch<string>(`/api/admin/transport-identities/${encodeURIComponent(id)}/transfer`, { method: "POST", body }, token);
 }
 export function recordAgentCriterion(agentId: string, runId: string, criterionId: string, body: { status: "passed" | "failed" | "blocked"; evidence_refs: string[]; detail: string | null }, token: () => string | null) {
     return apiFetch<AgentCompletionReport>(`/api/admin/agents/${encodeURIComponent(agentId)}/runs/${encodeURIComponent(runId)}/completion/criteria/${encodeURIComponent(criterionId)}`, { method: "PUT", body }, token);

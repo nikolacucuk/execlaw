@@ -14,6 +14,10 @@ buffers UTF-8/tool JSON across arbitrary network chunk boundaries. A terminal
 visible partial output is never replayed. Ollama NDJSON uses its own required
 terminal frame.
 
+Chat request opening has a 120-second deadline for OpenAI-compatible local
+endpoints and a 180-second deadline for native Ollama. This covers slow model
+prefill before the first stream byte while retaining a bounded failure time.
+
 ## Implementation plan
 
 All 154 enhancements are committed implementation scope under the

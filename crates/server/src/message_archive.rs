@@ -3,7 +3,10 @@
 
 use crate::state::AppState;
 use execlaw_core::ids::ConversationId;
-use execlaw_core::message_archive::{ArchiveConversation, ArchiveMessage, MessageArchiveStore};
+use execlaw_core::message_archive::{
+    ArchiveConversation, ArchiveMessage, ArchiveOperation, ArchiveOperationKind,
+    MessageArchiveStore,
+};
 use execlaw_core::principal::Principal;
 use execlaw_script::InboundMessage;
 use sha2::{Digest, Sha256};
@@ -42,7 +45,6 @@ pub fn archive_inbound(
         / 1000;
     let name = message.display_name.as_deref();
     let store = MessageArchiveStore::new(&state.db);
-    let topic_keywords = execlaw_core::message_archive::extract_topic_keywords(&message.text, 5);
     store
         .upsert_conversation(
             &archive_id,
@@ -57,25 +59,50 @@ pub fn archive_inbound(
     store
         .upsert_participant(&archive_id, sender.id.as_str(), name, occurred_at)
         .map_err(|e| format!("archive participant: {e}"))?;
-    let inserted = store
-        .append_message(&ArchiveMessage {
-            archive_message_id: &message_id,
+    let operation_kind = match message.message_operation.as_deref().unwrap_or("create") {
+        "create" => ArchiveOperationKind::Create,
+        "edit" => ArchiveOperationKind::Edit,
+        "delete" => ArchiveOperationKind::Delete,
+        "reaction_add" => ArchiveOperationKind::ReactionAdd,
+        "reaction_remove" => ArchiveOperationKind::ReactionRemove,
+        unknown => {
+            return Err(format!(
+                "unsupported transport message operation: {unknown}"
+            ));
+        }
+    };
+    let target_message_id = message.target_message_id.as_deref().unwrap_or(&message_id);
+    let target_archive_id = stable_id(&[&message.channel, remote_id, target_message_id]);
+    let operation_event_id = message.source_event_id.as_deref().unwrap_or(&message_id);
+    let source_version = message
+        .source_revision
+        .unwrap_or_else(|| message.timestamp_ms.unwrap_or_default());
+    let operation = store
+        .apply_operation(&ArchiveOperation {
+            event_id: operation_event_id,
             archive_id: &archive_id,
-            source_event_seq: None,
-            source_event_kind: "transport_inbound",
-            direction: "inbound",
+            archive_message_id: &target_archive_id,
+            source_message_id: target_message_id,
+            kind: operation_kind,
+            source_version,
+            occurred_at,
+            body: if matches!(
+                operation_kind,
+                ArchiveOperationKind::Create | ArchiveOperationKind::Edit
+            ) {
+                Some(&message.text)
+            } else {
+                None
+            },
             sender_id: Some(sender.id.as_str()),
             sender_name: name,
-            body: &message.text,
-            topic_keywords: &topic_keywords,
-            occurred_at,
-            source_message_id: Some(&message_id),
-            created_at: chrono::Utc::now().timestamp(),
-            delivery_status: "delivered",
-            reply_to_message_id: None,
+            reply_to_message_id: message.reply_to_message_id.as_deref(),
+            reaction: message.reaction.as_deref(),
+            actor_id: Some(sender.id.as_str()),
+            recorded_at: chrono::Utc::now().timestamp(),
         })
-        .map_err(|e| format!("archive message: {e}"))?;
-    if inserted {
+        .map_err(|e| format!("archive normalized message operation: {e}"))?;
+    if operation.current_state_changed {
         project(&store, &archive_id, &archive_root())?;
     }
     project_conversation_history(state, cid)?;
@@ -217,7 +244,11 @@ fn project(store: &MessageArchiveStore<'_>, archive_id: &str, root: &Path) -> Re
         };
         page.push_str(&format!(
             "\n## {when} - {speaker}{status}\n\n{}\n",
-            message.body
+            if message.is_deleted {
+                "[Message deleted]"
+            } else {
+                message.body.as_str()
+            }
         ));
     }
     fs::write(folder.join(&year).join(format!("{year}-{month}.md")), page)

@@ -353,7 +353,7 @@ impl AgentStore {
                 )?;
                 if changed != 1 { return Err(DbError::Invariant(format!("agent mailbox item was already consumed: {message_id}"))); }
             }
-            tx.execute("UPDATE config_agents SET last_run_at=?1,last_run_status=?2,last_error=?3,next_run_at=?4,updated_at=?1 WHERE id=?5",
+            tx.execute("UPDATE config_agents SET last_run_at=?1,last_run_status=?2,last_error=?3,next_run_at=COALESCE(?4,(SELECT MIN(available_at) FROM state_agent_messages WHERE agent_id=?5 AND delivered_at IS NULL AND superseded_by IS NULL)),updated_at=?1 WHERE id=?5",
                 params![completion.now,completion.status,completion.error,completion.next_run_at,completion.agent_id])?;
             Ok(())
         })?;
@@ -855,7 +855,32 @@ impl AgentStore {
         limit: u32,
         now: i64,
     ) -> Result<Vec<AgentMessageRow>, AgentError> {
-        self.db.with_conn(|c| { let mut s=c.prepare("SELECT id,agent_id,parent_agent_id,direction,content,created_at,delivered_at,result_run_id,source_kind,source_event_id,source_occurred_at,conversation_id,recipient,definition_version,available_at FROM state_agent_messages WHERE agent_id=?1 AND delivered_at IS NULL AND available_at<=?3 ORDER BY created_at,id LIMIT ?2")?; let rows=s.query_map(params![agent_id,limit,now],map_message)?; rows.collect::<Result<Vec<_>,_>>().map_err(Into::into) }).map_err(Into::into)
+        self.db.with_conn(|c| { let mut s=c.prepare("SELECT id,agent_id,parent_agent_id,direction,content,created_at,delivered_at,result_run_id,source_kind,source_event_id,source_occurred_at,conversation_id,recipient,definition_version,available_at FROM state_agent_messages WHERE agent_id=?1 AND delivered_at IS NULL AND superseded_by IS NULL AND available_at<=?3 ORDER BY created_at,id LIMIT ?2")?; let rows=s.query_map(params![agent_id,limit,now],map_message)?; rows.collect::<Result<Vec<_>,_>>().map_err(Into::into) }).map_err(Into::into)
+    }
+
+    /// Read one due recipient batch, preventing event coalescing from mixing
+    /// conversations or destinations in one agent run.
+    pub fn pending_messages_for_scope(
+        &self,
+        agent_id: &str,
+        conversation_id: &str,
+        recipient: &str,
+        definition_version: Option<u32>,
+        limit: u32,
+    ) -> Result<Vec<AgentMessageRow>, AgentError> {
+        self.db.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT id,agent_id,parent_agent_id,direction,content,created_at,delivered_at,result_run_id,
+                        source_kind,source_event_id,source_occurred_at,conversation_id,recipient,definition_version,available_at
+                 FROM state_agent_messages WHERE agent_id=?1 AND delivered_at IS NULL AND superseded_by IS NULL AND available_at<=?4
+                   AND conversation_id=?2 AND recipient=?3 AND definition_version IS ?5 ORDER BY created_at,id LIMIT ?6",
+            )?;
+            let rows = statement.query_map(
+                params![agent_id, conversation_id, recipient, chrono::Utc::now().timestamp(), definition_version, limit.min(100)],
+                map_message,
+            )?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        }).map_err(Into::into)
     }
 
     pub fn enqueue(
@@ -898,6 +923,18 @@ impl AgentStore {
         event: &AgentSourceEvent<'_>,
         now: i64,
     ) -> Result<(String, bool), AgentError> {
+        self.enqueue_triggered_event_at(agent_id, event, now, now)
+    }
+
+    /// Queue one source event for a durable debounce deadline. The event is
+    /// stored immediately for attribution; only its work eligibility is delayed.
+    pub fn enqueue_triggered_event_at(
+        &self,
+        agent_id: &str,
+        event: &AgentSourceEvent<'_>,
+        available_at: i64,
+        now: i64,
+    ) -> Result<(String, bool), AgentError> {
         if event.source_kind.trim().is_empty()
             || event.source_event_id.trim().is_empty()
             || event.conversation_id.trim().is_empty()
@@ -912,16 +949,62 @@ impl AgentStore {
         let result = self.db.transaction(|tx| {
             let version: i64 = tx.query_row("SELECT definition_version FROM config_agents WHERE id=?1", [agent_id], |row| row.get(0))?;
             let inserted = tx.execute(
-                "INSERT INTO state_agent_messages (id,agent_id,direction,content,created_at,source_kind,source_event_id,source_occurred_at,conversation_id,recipient,definition_version,available_at) VALUES (?1,?2,'inbound',?3,?4,?5,?6,?7,?8,?9,?10,?4) ON CONFLICT DO NOTHING",
-                params![id,agent_id,event.content,now,event.source_kind,event.source_event_id,event.occurred_at,event.conversation_id,event.recipient,version],
+                "INSERT INTO state_agent_messages (id,agent_id,direction,content,created_at,source_kind,source_event_id,source_occurred_at,conversation_id,recipient,definition_version,available_at) VALUES (?1,?2,'inbound',?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT DO NOTHING",
+                params![id,agent_id,event.content,now,event.source_kind,event.source_event_id,event.occurred_at,event.conversation_id,event.recipient,version,available_at.max(now)],
             )? == 1;
             let mailbox_id = if inserted { id.clone() } else {
                 tx.query_row("SELECT id FROM state_agent_messages WHERE agent_id=?1 AND source_kind=?2 AND source_event_id=?3", params![agent_id,event.source_kind,event.source_event_id], |row| row.get(0))?
             };
             if inserted {
-                tx.execute("UPDATE config_agents SET next_run_at=?1,updated_at=?1 WHERE id=?2", params![now,agent_id])?;
+                tx.execute("UPDATE config_agents SET next_run_at=CASE WHEN next_run_at IS NULL OR next_run_at>?1 THEN ?1 ELSE next_run_at END,updated_at=?2 WHERE id=?3", params![available_at.max(now),now,agent_id])?;
             }
             Ok((mailbox_id, inserted))
+        })?;
+        Ok(result)
+    }
+
+    /// Atomically mark a stale source proposal superseded and enqueue its
+    /// correction. The old mailbox row remains available for audit.
+    pub fn enqueue_triggered_correction(
+        &self,
+        agent_id: &str,
+        event: &AgentSourceEvent<'_>,
+        supersedes_event_id: &str,
+        available_at: i64,
+        now: i64,
+    ) -> Result<(String, bool), AgentError> {
+        if event.source_kind.trim().is_empty()
+            || event.source_event_id.trim().is_empty()
+            || event.conversation_id.trim().is_empty()
+            || event.recipient.trim().is_empty()
+            || event.content.trim().is_empty()
+            || supersedes_event_id.trim().is_empty()
+        {
+            return Err(AgentError::Invalid(
+                "correction identity and content are required".into(),
+            ));
+        }
+        let new_id = Uuid::new_v4().to_string();
+        let result = self.db.transaction(|tx| {
+            let version: i64 = tx.query_row("SELECT definition_version FROM config_agents WHERE id=?1", [agent_id], |row| row.get(0))?;
+            let inserted = tx.execute(
+                "INSERT INTO state_agent_messages(id,agent_id,direction,content,created_at,source_kind,source_event_id,source_occurred_at,conversation_id,recipient,definition_version,available_at)
+                 VALUES (?1,?2,'inbound',?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT DO NOTHING",
+                params![new_id, agent_id, event.content, now, event.source_kind, event.source_event_id, event.occurred_at, event.conversation_id, event.recipient, version, available_at.max(now)],
+            )? == 1;
+            if inserted {
+                tx.execute(
+                    "UPDATE state_agent_messages SET superseded_by=?1
+                     WHERE agent_id=?2 AND source_kind=?3 AND source_event_id=?4
+                       AND delivered_at IS NULL AND superseded_by IS NULL",
+                    params![new_id, agent_id, event.source_kind, supersedes_event_id],
+                )?;
+                tx.execute("UPDATE config_agents SET next_run_at=CASE WHEN next_run_at IS NULL OR next_run_at>?1 THEN ?1 ELSE next_run_at END,updated_at=?2 WHERE id=?3", params![available_at.max(now), now, agent_id])?;
+            }
+            let id = if inserted { new_id.clone() } else {
+                tx.query_row("SELECT id FROM state_agent_messages WHERE agent_id=?1 AND source_kind=?2 AND source_event_id=?3", params![agent_id,event.source_kind,event.source_event_id], |row| row.get(0))?
+            };
+            Ok((id, inserted))
         })?;
         Ok(result)
     }
@@ -954,7 +1037,7 @@ impl AgentStore {
             let current: Option<i64> = tx.query_row("SELECT schedule_next_at FROM config_agents WHERE id=?1 AND enabled=1 AND paused=0", [&agent.id], |row| row.get(0)).optional()?.flatten();
             if current != Some(due) { return Ok(None); }
             let running: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM state_agent_runs WHERE agent_id=?1 AND status='running')", [&agent.id], |row| row.get(0))?;
-            let pending: i64 = tx.query_row("SELECT COUNT(*) FROM state_agent_messages WHERE agent_id=?1 AND source_kind='schedule' AND delivered_at IS NULL", [&agent.id], |row| row.get(0))?;
+            let pending: i64 = tx.query_row("SELECT COUNT(*) FROM state_agent_messages WHERE agent_id=?1 AND source_kind='schedule' AND delivered_at IS NULL AND superseded_by IS NULL", [&agent.id], |row| row.get(0))?;
             let overlap = match schedule.overlap {
                 AgentOverlapPolicy::Skip => running || pending > 0,
                 AgentOverlapPolicy::BufferOne => pending > 0,
@@ -1684,6 +1767,112 @@ mod tests {
         assert_eq!(
             store.completion_report(&failing).unwrap().unwrap().status,
             crate::runs::RunCompletionStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn thousand_event_burst_is_attributed_batched_and_corrections_supersede() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = DbConfig {
+            path: directory.path().join("burst.db"),
+            key: None,
+        };
+        let db = Database::open(&config).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let store = AgentStore::new(&db);
+        let agent = store.upsert(&AgentUpsert {
+            id: Some("burst".into()), name: "burst".into(), role_prompt: "summarize".into(),
+            model: None, backend_purpose: "standard".into(), tools: Vec::new(), trust_policy: serde_json::json!({}),
+            interval_secs: 60, token_budget: 1000, max_runtime_secs: 60, concurrency_limit: 1,
+            enabled: true, trigger: serde_json::json!({"event_only":true,"debounce_secs":60,"max_batch_size":25}),
+            reply_mode: "draft".into(),
+        }, 1).unwrap();
+        for index in 0..1000 {
+            let id = format!("event-{index}");
+            let content =
+                serde_json::json!({"source_event_id":id,"text":format!("message {index}")})
+                    .to_string();
+            store
+                .enqueue_triggered_event_at(
+                    &agent.id,
+                    &AgentSourceEvent {
+                        source_kind: "transport:test",
+                        source_event_id: &id,
+                        occurred_at: index,
+                        conversation_id: "conversation",
+                        recipient: "peer",
+                        content: &content,
+                    },
+                    1100,
+                    1000,
+                )
+                .unwrap();
+        }
+        assert!(
+            store
+                .pending_messages_at(&agent.id, 100, 1099)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .pending_messages_for_scope(&agent.id, "conversation", "peer", Some(1), 25)
+                .unwrap()
+                .len(),
+            25
+        );
+        let count: i64 = db.with_conn(|connection| Ok(connection.query_row(
+            "SELECT COUNT(*) FROM state_agent_messages WHERE agent_id='burst' AND source_kind='transport:test'", [], |row| row.get(0)
+        )?)).unwrap();
+        assert_eq!(count, 1000, "every original event remains attributable");
+        drop(store);
+        drop(db);
+        let db = Database::open(&config).unwrap();
+        let store = AgentStore::new(&db);
+        assert_eq!(
+            store
+                .pending_messages_at(&agent.id, 100, 1099)
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            store
+                .pending_messages_at(&agent.id, 1001, 1100)
+                .unwrap()
+                .len(),
+            1000
+        );
+        let corrected = r#"{"source_event_id":"correction-999","text":"corrected message 999"}"#;
+        store
+            .enqueue_triggered_correction(
+                &agent.id,
+                &AgentSourceEvent {
+                    source_kind: "transport:test",
+                    source_event_id: "correction-999",
+                    occurred_at: 1101,
+                    conversation_id: "conversation",
+                    recipient: "peer",
+                    content: corrected,
+                },
+                "event-999",
+                1101,
+                1001,
+            )
+            .unwrap();
+        assert!(
+            store
+                .pending_messages_at(&agent.id, 100, 1100)
+                .unwrap()
+                .iter()
+                .all(|row| row.source_event_id.as_deref() != Some("event-999"))
+        );
+        assert!(
+            store
+                .pending_messages_at(&agent.id, 1001, 1200)
+                .unwrap()
+                .iter()
+                .any(|row| row.source_event_id.as_deref() == Some("correction-999"))
         );
     }
 }

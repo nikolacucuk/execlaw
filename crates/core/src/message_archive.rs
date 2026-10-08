@@ -49,6 +49,7 @@ pub struct StoredArchiveMessage {
     pub direction: String,
     pub delivery_status: String,
     pub reply_to_message_id: Option<String>,
+    pub is_deleted: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,6 +59,64 @@ pub struct ArchiveSearchHit {
     pub body: String,
     pub sender_name: Option<String>,
     pub topic_keywords: String,
+}
+
+/// A provider-independent message mutation from a transport adapter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveOperationKind {
+    Create,
+    Edit,
+    Delete,
+    ReactionAdd,
+    ReactionRemove,
+}
+
+impl ArchiveOperationKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "create",
+            Self::Edit => "edit",
+            Self::Delete => "delete",
+            Self::ReactionAdd => "reaction_add",
+            Self::ReactionRemove => "reaction_remove",
+        }
+    }
+}
+
+/// Append-only source operation. `source_version` is the transport's
+/// monotonic revision/sequence for the target message, not receive time.
+#[derive(Debug, Clone)]
+pub struct ArchiveOperation<'a> {
+    pub event_id: &'a str,
+    pub archive_id: &'a str,
+    pub archive_message_id: &'a str,
+    pub source_message_id: &'a str,
+    pub kind: ArchiveOperationKind,
+    pub source_version: i64,
+    pub occurred_at: i64,
+    pub body: Option<&'a str>,
+    pub sender_id: Option<&'a str>,
+    pub sender_name: Option<&'a str>,
+    pub reply_to_message_id: Option<&'a str>,
+    pub reaction: Option<&'a str>,
+    pub actor_id: Option<&'a str>,
+    pub recorded_at: i64,
+}
+
+/// Whether a transport operation was recorded and whether it changed the
+/// current display projection. Audit history is retained in both cases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ArchiveOperationResult {
+    pub recorded: bool,
+    pub current_state_changed: bool,
+}
+
+/// Current normalized reaction attached to an archived message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveReaction {
+    pub source_message_id: String,
+    pub actor_id: String,
+    pub reaction: String,
 }
 
 /// Extract a small deterministic topic vocabulary for FTS lookup.
@@ -165,6 +224,169 @@ impl<'db> MessageArchiveStore<'db> {
         })
     }
 
+    /// Record a normalized edit/delete/reaction/create and update the current
+    /// display projection only when the transport revision is newer. A
+    /// delete arriving before its create leaves a tombstone that an older
+    /// create cannot resurrect.
+    pub fn apply_operation(
+        &self,
+        operation: &ArchiveOperation<'_>,
+    ) -> Result<ArchiveOperationResult, DbError> {
+        if operation.event_id.trim().is_empty()
+            || operation.source_message_id.trim().is_empty()
+            || operation.archive_id.trim().is_empty()
+        {
+            return Err(DbError::Invariant(
+                "archive operation identity fields are required".to_owned(),
+            ));
+        }
+        if matches!(
+            operation.kind,
+            ArchiveOperationKind::Create | ArchiveOperationKind::Edit
+        ) && operation.body.is_none()
+        {
+            return Err(DbError::Invariant(
+                "create and edit operations require a body".to_owned(),
+            ));
+        }
+        if matches!(
+            operation.kind,
+            ArchiveOperationKind::ReactionAdd | ArchiveOperationKind::ReactionRemove
+        ) && operation.reaction.is_none()
+        {
+            return Err(DbError::Invariant(
+                "reaction operations require a reaction value".to_owned(),
+            ));
+        }
+        if matches!(
+            operation.kind,
+            ArchiveOperationKind::ReactionAdd | ArchiveOperationKind::ReactionRemove
+        ) && operation.actor_id.is_none()
+        {
+            return Err(DbError::Invariant(
+                "reaction operations require an actor identity".to_owned(),
+            ));
+        }
+        self.db.transaction(|tx| {
+            let recorded = tx.execute(
+                "INSERT OR IGNORE INTO message_archive_revisions(
+                    event_id,archive_id,source_message_id,operation,source_version,
+                    occurred_at,body,reply_to_message_id,reaction,actor_id,recorded_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                params![
+                    operation.event_id,
+                    operation.archive_id,
+                    operation.source_message_id,
+                    operation.kind.as_str(),
+                    operation.source_version,
+                    operation.occurred_at,
+                    operation.body,
+                    operation.reply_to_message_id,
+                    operation.reaction,
+                    operation.actor_id,
+                    operation.recorded_at,
+                ],
+            )? == 1;
+            if !recorded {
+                return Ok(ArchiveOperationResult { recorded: false, current_state_changed: false });
+            }
+            if matches!(operation.kind, ArchiveOperationKind::ReactionAdd | ArchiveOperationKind::ReactionRemove) {
+                tx.execute(
+                    "INSERT INTO message_archive_reactions(archive_id,source_message_id,actor_id,reaction,source_version,source_event_id,active,updated_at)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+                     ON CONFLICT(archive_id,source_message_id,actor_id,reaction) DO UPDATE SET
+                        source_version=excluded.source_version,source_event_id=excluded.source_event_id,
+                        active=excluded.active,updated_at=excluded.updated_at
+                     WHERE excluded.source_version > message_archive_reactions.source_version
+                        OR (excluded.source_version = message_archive_reactions.source_version
+                            AND excluded.source_event_id > message_archive_reactions.source_event_id)",
+                    params![operation.archive_id,operation.source_message_id,operation.actor_id,operation.reaction,operation.source_version,
+                        operation.event_id,operation.kind == ArchiveOperationKind::ReactionAdd,operation.recorded_at],
+                )?;
+                return Ok(ArchiveOperationResult { recorded: true, current_state_changed: false });
+            }
+
+            let current_revision: Option<(i64, String)> = tx.query_row(
+                "SELECT source_version,source_revision_event_id FROM message_archive_messages
+                 WHERE archive_id=?1 AND source_message_id=?2",
+                params![operation.archive_id, operation.source_message_id],
+                |row| Ok((row.get(0)?,row.get(1)?)),
+            ).optional()?;
+            let newer_revision = current_revision.as_ref().is_none_or(|(version,event_id)| {
+                operation.source_version > *version
+                    || (operation.source_version == *version && operation.event_id > event_id.as_str())
+            });
+            if !newer_revision {
+                return Ok(ArchiveOperationResult { recorded: true, current_state_changed: false });
+            }
+            let deleted = operation.kind == ArchiveOperationKind::Delete;
+            let body = if deleted { "" } else { operation.body.unwrap_or("") };
+            let keywords = extract_topic_keywords(body, 5);
+            let direction = "inbound";
+            let source_kind = operation.kind.as_str();
+            tx.execute(
+                "INSERT INTO message_archive_messages(
+                    archive_message_id,archive_id,source_event_kind,direction,sender_id,sender_name,
+                    body,topic_keywords,occurred_at,source_message_id,created_at,delivery_status,
+                    reply_to_message_id,deleted_at,source_version,source_revision_event_id
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,'delivered',?12,?13,?14,?15)
+                 ON CONFLICT(archive_id,source_message_id) DO UPDATE SET
+                    source_event_kind=excluded.source_event_kind,
+                    sender_id=COALESCE(excluded.sender_id,message_archive_messages.sender_id),
+                    sender_name=COALESCE(excluded.sender_name,message_archive_messages.sender_name),
+                    body=excluded.body, topic_keywords=excluded.topic_keywords,
+                    occurred_at=excluded.occurred_at,
+                    reply_to_message_id=COALESCE(excluded.reply_to_message_id,message_archive_messages.reply_to_message_id),
+                    deleted_at=excluded.deleted_at, source_version=excluded.source_version,
+                    source_revision_event_id=excluded.source_revision_event_id
+                 WHERE excluded.source_version > message_archive_messages.source_version
+                    OR (excluded.source_version = message_archive_messages.source_version
+                        AND excluded.source_revision_event_id > message_archive_messages.source_revision_event_id)",
+                params![
+                    operation.archive_message_id,
+                    operation.archive_id,
+                    source_kind,
+                    direction,
+                    operation.sender_id,
+                    operation.sender_name,
+                    body,
+                    keywords,
+                    operation.occurred_at,
+                    operation.source_message_id,
+                    operation.recorded_at,
+                    operation.reply_to_message_id,
+                    if deleted { Some(operation.recorded_at) } else { None::<i64> },
+                    operation.source_version,
+                    operation.event_id,
+                ],
+            )?;
+            Ok(ArchiveOperationResult { recorded: true, current_state_changed: true })
+        })
+    }
+
+    /// Return active reactions only. Reactions remain informational and this
+    /// API provides no approval or policy interpretation.
+    pub fn active_reactions(
+        &self,
+        archive_id: &str,
+        source_message_id: &str,
+    ) -> Result<Vec<ArchiveReaction>, DbError> {
+        self.db.with_conn(|connection| {
+            let mut statement = connection.prepare(
+                "SELECT source_message_id,actor_id,reaction FROM message_archive_reactions
+                 WHERE archive_id=?1 AND source_message_id=?2 AND active=1 ORDER BY actor_id,reaction",
+            )?;
+            let rows = statement.query_map(params![archive_id, source_message_id], |row| {
+                Ok(ArchiveReaction {
+                    source_message_id: row.get(0)?,
+                    actor_id: row.get(1)?,
+                    reaction: row.get(2)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+    }
+
     pub fn update_delivery_status(
         &self,
         archive_message_id: &str,
@@ -225,8 +447,8 @@ impl<'db> MessageArchiveStore<'db> {
         .timestamp();
         self.db.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT archive_message_id, sender_id, sender_name, body, occurred_at,
-                        direction, delivery_status, reply_to_message_id
+                "SELECT archive_message_id, sender_id, sender_name, CASE WHEN deleted_at IS NULL THEN body ELSE '' END, occurred_at,
+                        direction, delivery_status, reply_to_message_id, deleted_at IS NOT NULL
                  FROM message_archive_messages
                  WHERE archive_id = ?1 AND occurred_at >= ?2 AND occurred_at < ?3
                  ORDER BY occurred_at, created_at, archive_message_id",
@@ -242,6 +464,7 @@ impl<'db> MessageArchiveStore<'db> {
                         direction: row.get(5)?,
                         delivery_status: row.get(6)?,
                         reply_to_message_id: row.get(7)?,
+                        is_deleted: row.get(8)?,
                     })
                 })?
                 .collect::<Result<Vec<_>, _>>()?)
@@ -306,9 +529,11 @@ impl<'db> MessageArchiveStore<'db> {
     pub fn search(&self, query: &str, limit: u32) -> Result<Vec<ArchiveSearchHit>, DbError> {
         self.db.with_conn(|c| {
             let mut stmt = c.prepare(
-                "SELECT archive_message_id, archive_id, body, sender_name, topic_keywords
+                "SELECT message_archive_search.archive_message_id, message_archive_search.archive_id,
+                        message_archive_search.body, message_archive_search.sender_name, message_archive_search.topic_keywords
                  FROM message_archive_search
-                 WHERE message_archive_search MATCH ?1
+                 JOIN message_archive_messages m ON m.archive_message_id=message_archive_search.archive_message_id
+                 WHERE message_archive_search MATCH ?1 AND m.deleted_at IS NULL
                  ORDER BY rank LIMIT ?2",
             )?;
             Ok(stmt
@@ -361,9 +586,9 @@ impl<'db> MessageArchiveStore<'db> {
         message_id: &str,
     ) -> Result<Option<StoredArchiveMessage>, DbError> {
         self.db.with_conn(|connection| Ok(connection.query_row(
-            "SELECT m.archive_message_id,m.sender_id,m.sender_name,m.body,m.occurred_at,m.direction,m.delivery_status,m.reply_to_message_id FROM message_archive_messages m JOIN message_archive_conversations c ON c.archive_id=m.archive_id WHERE c.conversation_id=?1 AND c.channel=?2 AND c.remote_id=?3 AND m.archive_message_id=?4",
+            "SELECT m.archive_message_id,m.sender_id,m.sender_name,m.body,m.occurred_at,m.direction,m.delivery_status,m.reply_to_message_id,m.deleted_at IS NOT NULL FROM message_archive_messages m JOIN message_archive_conversations c ON c.archive_id=m.archive_id WHERE c.conversation_id=?1 AND c.channel=?2 AND c.remote_id=?3 AND m.archive_message_id=?4 AND m.deleted_at IS NULL",
             params![conversation_id,channel,remote_id,message_id],
-            |row| Ok(StoredArchiveMessage { archive_message_id: row.get(0)?, sender_id: row.get(1)?, sender_name: row.get(2)?, body: row.get(3)?, occurred_at: row.get(4)?, direction: row.get(5)?, delivery_status: row.get(6)?, reply_to_message_id: row.get(7)? }),
+            |row| Ok(StoredArchiveMessage { archive_message_id: row.get(0)?, sender_id: row.get(1)?, sender_name: row.get(2)?, body: row.get(3)?, occurred_at: row.get(4)?, direction: row.get(5)?, delivery_status: row.get(6)?, reply_to_message_id: row.get(7)?, is_deleted: row.get(8)? }),
         ).optional()?))
     }
 
@@ -391,6 +616,7 @@ impl<'db> MessageArchiveStore<'db> {
                  JOIN message_archive_conversations c ON c.archive_id = m.archive_id
                  JOIN message_archive_search s ON s.archive_message_id = m.archive_message_id
                  WHERE c.conversation_id = ?1
+                   AND m.deleted_at IS NULL
                    AND (?4 IS NULL OR (c.channel = ?4 AND c.remote_id = ?5))
                    AND message_archive_search MATCH ?2
                  ORDER BY m.occurred_at DESC, m.created_at DESC
@@ -415,6 +641,7 @@ impl<'db> MessageArchiveStore<'db> {
                             direction: row.get(5)?,
                             delivery_status: row.get(6)?,
                             reply_to_message_id: row.get(7)?,
+                            is_deleted: false,
                         })
                     },
                 )?
@@ -533,5 +760,173 @@ mod tests {
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].body, "camper dates for A");
+    }
+
+    #[test]
+    fn delete_before_create_and_out_of_order_edits_converge_without_reviving_text() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let store = MessageArchiveStore::new(&db);
+        store
+            .upsert_conversation("a", "signal", "peer", "direct", None, Some("c"), 1)
+            .unwrap();
+        let apply = |event_id: &str, kind, version, body: Option<&str>| {
+            store
+                .apply_operation(&ArchiveOperation {
+                    event_id,
+                    archive_id: "a",
+                    archive_message_id: "m1",
+                    source_message_id: "remote-1",
+                    kind,
+                    source_version: version,
+                    occurred_at: version,
+                    body,
+                    sender_id: Some("peer"),
+                    sender_name: None,
+                    reply_to_message_id: None,
+                    reaction: None,
+                    actor_id: Some("peer"),
+                    recorded_at: version,
+                })
+                .unwrap()
+        };
+        apply("deleted-first", ArchiveOperationKind::Delete, 3, None);
+        apply(
+            "created-late",
+            ArchiveOperationKind::Create,
+            1,
+            Some("revoked secret"),
+        );
+        apply(
+            "edited-new",
+            ArchiveOperationKind::Edit,
+            4,
+            Some("current text"),
+        );
+        apply(
+            "edited-old",
+            ArchiveOperationKind::Edit,
+            2,
+            Some("stale text"),
+        );
+        assert!(
+            !apply(
+                "edited-old",
+                ArchiveOperationKind::Edit,
+                2,
+                Some("stale text")
+            )
+            .recorded
+        );
+
+        let current = store
+            .message_for_transport("c", "signal", "peer", "m1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.body, "current text");
+        let search = store.search("revoked", 10).unwrap();
+        assert!(
+            search.is_empty(),
+            "revoked text must not remain current search evidence"
+        );
+        apply("deleted-current", ArchiveOperationKind::Delete, 5, None);
+        assert!(
+            store
+                .message_for_transport("c", "signal", "peer", "m1")
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.search("current", 10).unwrap().is_empty());
+        apply("z-edit", ArchiveOperationKind::Edit, 6, Some("tie winner"));
+        apply("a-edit", ArchiveOperationKind::Edit, 6, Some("tie loser"));
+        assert_eq!(
+            store
+                .message_for_transport("c", "signal", "peer", "m1")
+                .unwrap()
+                .unwrap()
+                .body,
+            "tie winner",
+            "same-version conflicts converge by stable event ID"
+        );
+        let audit: i64 = db.with_conn(|connection| Ok(connection.query_row(
+            "SELECT COUNT(*) FROM message_archive_revisions WHERE source_message_id='remote-1'", [], |row| row.get(0)
+        )?)).unwrap();
+        assert_eq!(
+            audit, 7,
+            "duplicate delivery is ignored but every unique operation stays auditable"
+        );
+    }
+
+    #[test]
+    fn reactions_are_audited_without_becoming_message_approval_or_edit() {
+        let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();
+        MigrationRunner::new(&db).apply_all().unwrap();
+        let store = MessageArchiveStore::new(&db);
+        store
+            .upsert_conversation("a", "signal", "peer", "direct", None, Some("c"), 1)
+            .unwrap();
+        store
+            .apply_operation(&ArchiveOperation {
+                event_id: "create",
+                archive_id: "a",
+                archive_message_id: "m1",
+                source_message_id: "remote-1",
+                kind: ArchiveOperationKind::Create,
+                source_version: 1,
+                occurred_at: 1,
+                body: Some("hello"),
+                sender_id: Some("peer"),
+                sender_name: None,
+                reply_to_message_id: Some("parent"),
+                reaction: None,
+                actor_id: Some("peer"),
+                recorded_at: 1,
+            })
+            .unwrap();
+        let result = store
+            .apply_operation(&ArchiveOperation {
+                event_id: "reaction",
+                archive_id: "a",
+                archive_message_id: "m1",
+                source_message_id: "remote-1",
+                kind: ArchiveOperationKind::ReactionAdd,
+                source_version: 2,
+                occurred_at: 2,
+                body: None,
+                sender_id: None,
+                sender_name: None,
+                reply_to_message_id: None,
+                reaction: Some("approve"),
+                actor_id: Some("peer"),
+                recorded_at: 2,
+            })
+            .unwrap();
+        assert!(!result.current_state_changed);
+        assert_eq!(store.active_reactions("a", "remote-1").unwrap().len(), 1);
+        store
+            .apply_operation(&ArchiveOperation {
+                event_id: "reaction-removed",
+                archive_id: "a",
+                archive_message_id: "m1",
+                source_message_id: "remote-1",
+                kind: ArchiveOperationKind::ReactionRemove,
+                source_version: 3,
+                occurred_at: 3,
+                body: None,
+                sender_id: None,
+                sender_name: None,
+                reply_to_message_id: None,
+                reaction: Some("approve"),
+                actor_id: Some("peer"),
+                recorded_at: 3,
+            })
+            .unwrap();
+        assert!(store.active_reactions("a", "remote-1").unwrap().is_empty());
+        let current = store
+            .message_for_transport("c", "signal", "peer", "m1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.body, "hello");
+        assert_eq!(current.reply_to_message_id.as_deref(), Some("parent"));
     }
 }

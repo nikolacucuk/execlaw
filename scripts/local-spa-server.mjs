@@ -4,6 +4,10 @@ import net from "node:net";
 import path from "node:path";
 
 const root = path.resolve("web/dist");
+const backendPort = Number(process.argv[2] ?? 3031);
+if (!Number.isInteger(backendPort) || backendPort < 1 || backendPort > 65535) {
+    throw new Error("backend port must be an integer from 1 to 65535");
+}
 const contentTypes = {
     ".css": "text/css",
     ".html": "text/html",
@@ -31,7 +35,7 @@ const server = http.createServer(async (request, response) => {
                 ? undefined
                 : await readRequestBody(request);
             const backendResponse = await fetch(
-                `http://127.0.0.1:3031${request.url}`,
+                `http://127.0.0.1:${backendPort}${request.url}`,
                 {
                     body,
                     headers: request.headers,
@@ -62,7 +66,7 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.on("upgrade", (request, socket, head) => {
-    const upstream = net.connect(3031, "127.0.0.1", () => {
+    const upstream = net.connect(backendPort, "127.0.0.1", () => {
         const headers = [
             `${request.method} ${request.url} HTTP/${request.httpVersion}`,
             ...Object.entries(request.headers).map(([name, value]) => {

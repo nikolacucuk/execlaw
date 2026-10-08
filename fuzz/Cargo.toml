@@ -1,0 +1,61 @@
+[package]
+name = "execlaw-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+members = ["."]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+execlaw-runner-protocol = { path = "../crates/runner-protocol" }
+execlaw-plugin-sdk = { path = "../crates/plugin-sdk" }
+serde_json = "1"
+toml = "0.9"
+jsonschema = { version = "0.33", default-features = false }
+
+[[bin]]
+name = "runner_conversation"
+path = "fuzz_targets/runner_conversation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "server_conversation"
+path = "fuzz_targets/server_conversation.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "registration_handshake"
+path = "fuzz_targets/registration_handshake.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plugin_manifest"
+path = "fuzz_targets/plugin_manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "plugin_zip"
+path = "fuzz_targets/plugin_zip.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "json_documents"
+path = "fuzz_targets/json_documents.rs"
+test = false
+doc = false
+bench = false

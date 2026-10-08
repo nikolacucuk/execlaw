@@ -162,16 +162,38 @@ async fn run_agent(
     let _permit = semaphore.acquire().await.map_err(|e| e.to_string())?;
     // A transport mailbox item has its own conversation and recipient. Mixing
     // several items in one inference would attach one reply to the first item.
-    let messages = store
-        .pending_messages(
-            &agent.id,
-            if trigger_is_event_only(&agent.trigger) {
-                1
-            } else {
-                32
-            },
-        )
-        .map_err(|e| e.to_string())?;
+    let messages = if trigger_is_event_only(&agent.trigger) {
+        let first = store
+            .pending_messages(&agent.id, 1)
+            .map_err(|e| e.to_string())?;
+        if let Some(message) = first.first() {
+            let batch_size =
+                execlaw_core::agent_contract::AgentTriggerSpec::from_value(&agent.trigger)
+                    .map(|trigger| trigger.max_batch_size)
+                    .unwrap_or(1);
+            match (
+                message.conversation_id.as_deref(),
+                message.recipient.as_deref(),
+            ) {
+                (Some(conversation_id), Some(recipient)) => store
+                    .pending_messages_for_scope(
+                        &agent.id,
+                        conversation_id,
+                        recipient,
+                        message.definition_version,
+                        batch_size,
+                    )
+                    .map_err(|error| error.to_string())?,
+                _ => first,
+            }
+        } else {
+            first
+        }
+    } else {
+        store
+            .pending_messages(&agent.id, 32)
+            .map_err(|e| e.to_string())?
+    };
     if let Some(version) = messages
         .first()
         .and_then(|message| message.definition_version)
@@ -475,8 +497,23 @@ async fn run_agent(
                         let (review_text, draft_id, suggested) = match &outcome {
                             AgentOutcome::DraftReady { review, suggested_reply, .. } => {
                                 let message = messages.first().ok_or_else(|| "draft has no mailbox item".to_owned())?;
-                                let audience = serde_json::json!({"channel":channel,"recipient":recipient,
-                                    "group_id":inbound.get("group_id"),"group_name":inbound.get("group_name")});
+                                let native_group = inbound.get("group_id").and_then(serde_json::Value::as_str);
+                                let group_snapshot = if native_group.is_some() {
+                                    execlaw_core::principal_groups::PrincipalGroupStore::new(&db)
+                                        .audience_state(conversation_id)
+                                        .map_err(|error| format!("snapshot reply audience: {error}"))?
+                                } else { None };
+                                let audience = if let Some((group_id, _, epoch, members_sha256, members)) = group_snapshot {
+                                    serde_json::json!({"channel":channel,"recipient":recipient,
+                                        "group_id":native_group,"group_name":inbound.get("group_name"),
+                                        "principal_group_id":group_id,"membership_epoch":epoch,
+                                        "members_sha256":members_sha256,"members":members,
+                                        "identity_basis":"observed_principal_ids"})
+                                } else {
+                                    serde_json::json!({"channel":channel,"recipient":recipient,
+                                        "group_id":native_group,"group_name":inbound.get("group_name"),
+                                        "identity_basis":"exact_transport_binding"})
+                                };
                                 ReplyDraftStore::new(&db).create(&NewReplyDraft {
                                     id: &message.id, agent_id: &agent.id, run_id: &run_id,
                                     conversation_id, channel, recipient,

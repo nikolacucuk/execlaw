@@ -128,25 +128,22 @@ fn seed_chain_pending(
     let now = chrono::Utc::now().timestamp();
     let plan_id = format!("plan-{}", uuid::Uuid::new_v4());
     let run_id = format!("run-{}", uuid::Uuid::new_v4());
-    let plan_json = serde_json::to_vec(&json!({
-        "objective": objective,
-        "constraints": [],
-        "steps": [
-            {
-                "step_index": 0,
-                "label": "effect",
-                "effect_kind": effect_kind,
-                "payload": {"text": "hello"}
-            }
-        ]
-    }))
-    .unwrap();
-    let effect_hash = execlaw_core::tool::tool_schema_hash(&json!([{
+    let effect_step = json!({
         "step_index": 0,
         "label": "effect",
         "effect_kind": effect_kind,
-        "payload": {"text": "hello"}
-    }]));
+        "payload": {"text": "hello"},
+        "resource_preconditions": [],
+        "compensation": null,
+        "idempotency_key_override": null
+    });
+    let plan_json = serde_json::to_vec(&json!({
+        "objective": objective,
+        "constraints": [],
+        "steps": [effect_step.clone()]
+    }))
+    .unwrap();
+    let effect_hash = execlaw_core::tool::tool_schema_hash(&json!([effect_step]));
 
     db.with_conn(|c| {
         c.execute(

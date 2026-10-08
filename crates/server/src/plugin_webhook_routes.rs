@@ -106,6 +106,7 @@ fn unauthorized(plugin_id: &str, reason: &'static str) -> ApiError {
     tracing::warn!(
         target: "plugin_webhook_routes",
         plugin_id = %plugin_id,
+        outcome = "rejected",
         reason,
         "webhook auth rejected"
     );
@@ -156,6 +157,7 @@ fn verify_webhook_auth(
     query: &BTreeMap<String, String>,
     headers: &HeaderMap,
     body: &[u8],
+    now_seconds: i64,
 ) -> Result<(), ApiError> {
     let Some(auth) = auth else {
         // Legacy path — plugin manifest has no [[webhook_routes]] auth
@@ -184,9 +186,34 @@ fn verify_webhook_auth(
             }
             Ok(())
         }
-        WebhookAuthDecl::HmacSha256Header { header, vault_key } => {
+        WebhookAuthDecl::HmacSha256Header {
+            header,
+            vault_key,
+            previous_vault_key,
+            timestamp_header,
+            replay_window_secs,
+            event_id_header,
+            ..
+        } => {
             use hmac::{Hmac, Mac};
             use sha2::Sha256;
+            let signed_timestamp = if let Some(timestamp_header) = timestamp_header {
+                let timestamp = headers
+                    .get(timestamp_header.as_str())
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+                    .ok_or_else(|| unauthorized(plugin_id, "timestamp_missing_or_invalid"))?;
+                let supplied_at = timestamp
+                    .parse::<i64>()
+                    .map_err(|_| unauthorized(plugin_id, "timestamp_missing_or_invalid"))?;
+                let window = replay_window_secs.unwrap_or(300).min(86_400) as i64;
+                if now_seconds.saturating_sub(supplied_at).abs() > window {
+                    return Err(unauthorized(plugin_id, "timestamp_outside_replay_window"));
+                }
+                Some(timestamp)
+            } else {
+                None
+            };
             let supplied = headers
                 .get(header.as_str())
                 .and_then(|v| v.to_str().ok())
@@ -196,13 +223,47 @@ fn verify_webhook_auth(
             let supplied_hex = supplied.strip_prefix("sha256=").unwrap_or(supplied);
             let supplied_bytes =
                 hex::decode(supplied_hex).map_err(|_| unauthorized(plugin_id, "hmac_not_hex"))?;
-            let secret = resolve_vault_secret(state, plugin_id, vault_key)?;
-            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes())
-                .map_err(|_| unauthorized(plugin_id, "hmac_key_invalid"))?;
-            mac.update(body);
-            mac.verify_slice(&supplied_bytes)
-                .map_err(|_| unauthorized(plugin_id, "hmac_mismatch"))?;
-            Ok(())
+            let mut keys = vec![resolve_vault_secret(state, plugin_id, vault_key)?];
+            if let Some(previous_key) = previous_vault_key {
+                if let Ok(secret) = resolve_vault_secret(state, plugin_id, previous_key) {
+                    keys.push(secret);
+                }
+            }
+            let mut signed_body = Vec::with_capacity(body.len() + 256);
+            if let Some(timestamp) = signed_timestamp.as_deref() {
+                signed_body.extend_from_slice(timestamp.as_bytes());
+                signed_body.push(b':');
+                if let Some(event_header) = event_id_header {
+                    let event_id = headers
+                        .get(event_header.as_str())
+                        .and_then(|value| value.to_str().ok())
+                        .filter(|value| !value.trim().is_empty())
+                        .ok_or_else(|| unauthorized(plugin_id, "event_id_missing"))?;
+                    signed_body.extend_from_slice(event_id.as_bytes());
+                    signed_body.push(b':');
+                }
+            } else if let Some(event_header) = event_id_header {
+                let event_id = headers
+                    .get(event_header.as_str())
+                    .and_then(|value| value.to_str().ok())
+                    .filter(|value| !value.trim().is_empty())
+                    .ok_or_else(|| unauthorized(plugin_id, "event_id_missing"))?;
+                signed_body.extend_from_slice(event_id.as_bytes());
+                signed_body.push(b':');
+            }
+            signed_body.extend_from_slice(body);
+            let valid = keys.iter().any(|secret| {
+                let Ok(mut mac) = <Hmac<Sha256> as Mac>::new_from_slice(secret.as_bytes()) else {
+                    return false;
+                };
+                mac.update(&signed_body);
+                mac.verify_slice(&supplied_bytes).is_ok()
+            });
+            if valid {
+                Ok(())
+            } else {
+                Err(unauthorized(plugin_id, "hmac_mismatch"))
+            }
         }
     }
 }
@@ -241,7 +302,9 @@ fn redact_query_for_bus(
 /// Mount the catch-all under `/api/webhooks/:plugin_id/...`.
 /// Match-anything `*tail` lets a plugin declare nested paths.
 pub(crate) fn webhook_routes_router() -> Router<AppState> {
-    Router::new().route("/api/webhooks/{plugin_id}/{*tail}", any(dispatch_handler))
+    Router::new()
+        .route("/api/webhooks/{plugin_id}/{*tail}", any(dispatch_handler))
+        .layer(axum::extract::DefaultBodyLimit::max(10 * 1024 * 1024))
 }
 
 async fn dispatch_handler(
@@ -273,6 +336,26 @@ async fn dispatch_handler(
             ),
         })?;
 
+    if let Some(WebhookAuthDecl::HmacSha256Header {
+        max_body_bytes: Some(maximum),
+        ..
+    }) = decl.auth.as_ref()
+        && body.len() > *maximum
+    {
+        return Err(ApiError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "plugin_webhook_body_too_large",
+            message: "webhook request body exceeds the route limit".to_owned(),
+        });
+    }
+    if body.len() > 10 * 1024 * 1024 {
+        return Err(ApiError {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            code: "plugin_webhook_body_too_large",
+            message: "webhook request body exceeds the host limit".to_owned(),
+        });
+    }
+
     // Host-enforced auth runs immediately after route lookup, BEFORE
     // any other side effect: no script-plugin lookup, no body decode,
     // no automation-bus publish, no handler invocation. The audit's
@@ -285,20 +368,62 @@ async fn dispatch_handler(
         &query,
         &headers,
         body.as_ref(),
+        chrono::Utc::now().timestamp(),
     )?;
 
+    let route_key = format!("{upper} {path_with_slash}");
+    let delivery_id = match decl.auth.as_ref() {
+        Some(WebhookAuthDecl::HmacSha256Header {
+            event_id_header: Some(name),
+            ..
+        }) => headers
+            .get(name.as_str())
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned),
+        _ => None,
+    }
+    .unwrap_or_else(|| {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(&body))
+    });
+    let receipts = execlaw_core::webhook_receipts::WebhookReceiptStore::new(&state.db);
+    match receipts
+        .claim(
+            &plugin_id,
+            &route_key,
+            &delivery_id,
+            chrono::Utc::now().timestamp(),
+        )
+        .map_err(|error| ApiError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            code: "plugin_webhook_receipt_failed",
+            message: error.to_string(),
+        })? {
+        execlaw_core::webhook_receipts::WebhookClaim::AlreadyProcessed => {
+            tracing::info!(target: "plugin_webhook_routes", plugin_id, route_key, outcome = "duplicate_acknowledged", "authenticated webhook replay acknowledged");
+            return Ok((
+                StatusCode::OK,
+                Json(serde_json::json!({"ok": true, "duplicate": true})),
+            )
+                .into_response());
+        }
+        execlaw_core::webhook_receipts::WebhookClaim::Claimed => {}
+    }
+
     // Look up the live script plugin.
-    let plugin = state
-        .plugin_host
-        .script_plugin(&plugin_id)
-        .await
-        .ok_or_else(|| ApiError {
-            status: StatusCode::NOT_FOUND,
-            code: "plugin_not_loaded",
-            message: format!(
-                "plugin '{plugin_id}' is registered but not loaded as a script plugin"
-            ),
-        })?;
+    let plugin = match state.plugin_host.script_plugin(&plugin_id).await {
+        Some(plugin) => plugin,
+        None => {
+            let _ = receipts.release(&plugin_id, &route_key, &delivery_id);
+            return Err(ApiError {
+                status: StatusCode::NOT_FOUND,
+                code: "plugin_not_loaded",
+                message: format!(
+                    "plugin '{plugin_id}' is registered but not loaded as a script plugin"
+                ),
+            });
+        }
+    };
 
     // Decode body to a JSON value the plugin can pattern-match on.
     // Three encodings, by order of probable Content-Type:
@@ -347,7 +472,6 @@ async fn dispatch_handler(
                 tracing::warn!(
                     plugin_id = %plugin_id,
                     body_len = body.len(),
-                    body_preview = %String::from_utf8_lossy(&body[..body.len().min(400)]),
                     parse_err = %e,
                     "webhook body not form-urlencoded; falling back to String"
                 );
@@ -362,7 +486,6 @@ async fn dispatch_handler(
                     plugin_id = %plugin_id,
                     content_type = %content_type,
                     body_len = body.len(),
-                    body_preview = %String::from_utf8_lossy(&body[..body.len().min(400)]),
                     parse_err = %e,
                     "webhook body not JSON; falling back to String"
                 );
@@ -390,8 +513,8 @@ async fn dispatch_handler(
     // plugin Rhai handler dispatch. The bus emission is best-effort:
     // a failure to publish must NOT block webhook handling, since the
     // upstream caller has no idea this bus even exists. Dedup key is
-    // a deterministic hash over (plugin_id, method, path, body) so
-    // upstream retries collapse into one event.
+    // a deterministic hash over the authenticated delivery identity so
+    // retries collapse without merging distinct IDs that share a body.
     //
     // We do the publish AFTER auth verification (above) so an
     // unauthenticated probe can't pollute the durable bus, but BEFORE
@@ -409,7 +532,7 @@ async fn dispatch_handler(
             h.update(b":");
             h.update(path_with_slash.as_bytes());
             h.update(b":");
-            h.update(&body);
+            h.update(delivery_id.as_bytes());
             format!("webhook:{plugin_id}:{:x}", h.finalize())
         };
         let evt = execlaw_core::automation_bus::Event {
@@ -439,14 +562,32 @@ async fn dispatch_handler(
     let result = plugin
         .invoke_async_owned(decl.handler.clone(), dyn_args)
         .await
-        .map_err(|e| ApiError {
-            // Webhook callers don't read execlaw's error semantics —
-            // they want a 200/non-200 distinction. We use 500 on
-            // handler error so wuzapi-style retry logic kicks in if
-            // the third party retries.
+        .map_err(|e| {
+            let _ = receipts.release(&plugin_id, &route_key, &delivery_id);
+            ApiError {
+                // Webhook callers don't read execlaw's error semantics —
+                // they want a 200/non-200 distinction. We use 500 on
+                // handler error so wuzapi-style retry logic kicks in if
+                // the third party retries.
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "plugin_webhook_handler_error",
+                message: format!("[{plugin_id}] handler {}: {e}", decl.handler),
+            }
+        })?;
+    let outcome = if result.get("ok").and_then(serde_json::Value::as_bool) == Some(false)
+        || result.get("accepted").and_then(serde_json::Value::as_bool) == Some(false)
+    {
+        "rejected"
+    } else {
+        "accepted"
+    };
+    tracing::info!(target: "plugin_webhook_routes", plugin_id, route_key, outcome, "webhook handler acknowledged");
+    receipts
+        .complete(&plugin_id, &route_key, &delivery_id, outcome)
+        .map_err(|error| ApiError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
-            code: "plugin_webhook_handler_error",
-            message: format!("[{plugin_id}] handler {}: {e}", decl.handler),
+            code: "plugin_webhook_receipt_failed",
+            message: error.to_string(),
         })?;
     Ok((StatusCode::OK, Json(result)).into_response())
 }

@@ -50,7 +50,7 @@ pub struct SetPreferenceRequest {
     pub expires_at: Option<i64>,
 }
 
-#[utoipa::path(get, path="/api/admin/preferences", params(("scope" = Option<String>, Query)), responses((status=200, description="Current and proposed preferences")), security(("bearer_auth"=[])))]
+#[utoipa::path(get, path="/api/admin/preferences", params(("scope" = Option<String>, Query)), responses((status=200, description="Current and proposed preferences")), security(("bearer_jwt"=[])))]
 pub async fn list(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -73,7 +73,7 @@ pub async fn list(
     }
 }
 
-#[utoipa::path(post, path="/api/admin/preferences", request_body=SetPreferenceRequest, responses((status=200, description="Preference saved")), security(("bearer_auth"=[])))]
+#[utoipa::path(post, path="/api/admin/preferences", request_body=SetPreferenceRequest, responses((status=200, description="Preference saved")), security(("bearer_jwt"=[])))]
 pub async fn set(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -127,7 +127,7 @@ fn owned_preference(state: &AppState, owner: &str, id: &str) -> Result<(), Respo
     }
 }
 
-#[utoipa::path(post, path="/api/admin/preferences/{id}/approve", params(("id" = String, Path)), responses((status=204, description="Inference approved")), security(("bearer_auth"=[])))]
+#[utoipa::path(post, path="/api/admin/preferences/{id}/approve", params(("id" = String, Path)), responses((status=204, description="Inference approved")), security(("bearer_jwt"=[])))]
 pub async fn approve(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -157,7 +157,7 @@ pub async fn approve(
     }
 }
 
-#[utoipa::path(post, path="/api/admin/preferences/{id}/reject", params(("id" = String, Path)), responses((status=204, description="Inference rejected")), security(("bearer_auth"=[])))]
+#[utoipa::path(post, path="/api/admin/preferences/{id}/reject", params(("id" = String, Path)), responses((status=204, description="Inference rejected")), security(("bearer_jwt"=[])))]
 pub async fn reject(
     State(state): State<AppState>,
     user: AuthedUser,
@@ -187,7 +187,7 @@ pub async fn reject(
     }
 }
 
-#[utoipa::path(delete, path="/api/admin/preferences/{id}", params(("id" = String, Path)), responses((status=204, description="Preference retracted")), security(("bearer_auth"=[])))]
+#[utoipa::path(delete, path="/api/admin/preferences/{id}", params(("id" = String, Path)), responses((status=204, description="Preference retracted")), security(("bearer_jwt"=[])))]
 pub async fn remove(
     State(state): State<AppState>,
     user: AuthedUser,

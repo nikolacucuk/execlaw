@@ -178,13 +178,72 @@ pub async fn route_inbound(
     pg_store
         .bind_conversation(cid.as_str(), &principal_group_id)
         .map_err(|e| HostCapError::new(format!("bind conversation: {e}")))?;
-    if let Err(error) = crate::message_archive::archive_inbound(state, &msg, &cid, &sender) {
-        tracing::error!(
-            target: "message_archive",
-            channel,
-            error,
-            "failed to archive inbound transport message"
-        );
+    if let Some(operation) = msg
+        .message_operation
+        .as_deref()
+        .filter(|operation| *operation != "create")
+    {
+        let declared = match operation {
+            "edit" => Some(execlaw_plugin_sdk::manifest::MessageOperationDecl::Edit),
+            "delete" => Some(execlaw_plugin_sdk::manifest::MessageOperationDecl::Delete),
+            "reaction_add" => Some(execlaw_plugin_sdk::manifest::MessageOperationDecl::ReactionAdd),
+            "reaction_remove" => {
+                Some(execlaw_plugin_sdk::manifest::MessageOperationDecl::ReactionRemove)
+            }
+            _ => None,
+        };
+        let supported = declared.is_some_and(|operation| {
+            state
+                .plugin_host
+                .registry()
+                .supports_message_operation(channel, operation)
+        });
+        if !supported {
+            tracing::warn!(target: "generic_inbound", channel, operation, "transport operation is not declared; preserving visible fallback");
+            let mut fallback = msg.clone();
+            fallback.message_operation = Some("create".into());
+            fallback.target_message_id = None;
+            fallback.text = format!("[Unsupported transport event: {operation}] {}", msg.text);
+            crate::message_archive::archive_inbound(state, &fallback, &cid, &sender).map_err(
+                |error| {
+                    HostCapError::new(format!("archive unsupported transport operation: {error}"))
+                },
+            )?;
+            let source_seq = crate::chats::commit_inbound_user_msg_silently(
+                state,
+                &cid,
+                sender.id.as_str(),
+                &fallback.text,
+                channel,
+                msg.group_id.as_deref().unwrap_or(&msg.native_id),
+                Vec::new(),
+            )
+            .await
+            .map_err(|error| {
+                HostCapError::new(format!("persist unsupported transport operation: {error}"))
+            })?;
+            ReplyDraftStore::new(&state.db)
+                .stale_after_inbound(
+                    cid.as_str(),
+                    channel,
+                    reply_recipient(&msg.native_id, msg.group_id.as_deref()),
+                    source_seq,
+                    now,
+                )
+                .map_err(|error| {
+                    HostCapError::new(format!("stale drafts after unsupported operation: {error}"))
+                })?;
+            return Ok(RouteOutcome::UnsupportedOperation);
+        }
+    }
+    crate::message_archive::archive_inbound(state, &msg, &cid, &sender)
+        .map_err(|error| HostCapError::new(format!("archive inbound transport event: {error}")))?;
+    if msg
+        .message_operation
+        .as_deref()
+        .is_some_and(|operation| operation != "create")
+    {
+        return Ok(RouteOutcome::GroupNotAddressed);
     }
     tracing::info!(
         target: "generic_inbound",
@@ -310,6 +369,40 @@ pub async fn route_inbound(
                 now,
             )
             .map_err(|error| HostCapError::new(format!("stale earlier drafts: {error}")))?;
+        if msg.is_self_message {
+            let recipient = reply_recipient(&msg.native_id, msg.group_id.as_deref());
+            let owner = AgentOwnershipStore::new(&state.db)
+                .get(cid.as_str(), channel, recipient)
+                .map_err(|error| {
+                    HostCapError::new(format!("read owner for Controller action: {error}"))
+                })?;
+            if owner
+                .as_ref()
+                .is_some_and(|owner| owner.owner_kind == "controller")
+            {
+                if source_seq > 0 {
+                    let event_id = msg
+                        .source_event_id
+                        .clone()
+                        .unwrap_or_else(|| format!("conversation-seq:{source_seq}"));
+                    AgentOwnershipStore::new(&state.db)
+                        .record_operator_action(
+                            cid.as_str(),
+                            channel,
+                            recipient,
+                            &event_id,
+                            source_seq,
+                            &serde_json::json!({"kind":"controller_sent_message","text":msg.text}),
+                            now,
+                        )
+                        .map_err(|error| {
+                            HostCapError::new(format!(
+                                "record Controller message during takeover: {error}"
+                            ))
+                        })?;
+                }
+            }
+        }
         return Ok(RouteOutcome::GroupNotAddressed);
     }
 
@@ -336,6 +429,18 @@ pub async fn route_inbound(
         ReplyDraftStore::new(&state.db)
             .stale_after_inbound(cid.as_str(), channel, recipient, source_seq, now)
             .map_err(|error| HostCapError::new(format!("stale earlier drafts: {error}")))?;
+        if source_seq > 0 {
+            let event_id = msg
+                .source_event_id
+                .clone()
+                .unwrap_or_else(|| format!("conversation-seq:{source_seq}"));
+            AgentOwnershipStore::new(&state.db)
+                .record_operator_action(
+                    cid.as_str(), channel, recipient, &event_id, source_seq,
+                    &serde_json::json!({"kind":"inbound_during_takeover","text":msg.text,"sender_id":sender.id.as_str()}), now,
+                )
+                .map_err(|error| HostCapError::new(format!("record takeover context: {error}")))?;
+        }
         return Ok(RouteOutcome::ControllerOwned);
     }
 
@@ -649,8 +754,21 @@ fn enqueue_triggered_agents(
             recipient,
             content: &content,
         };
+        let admission_event = AgentEvent {
+            source: source_kind.clone(),
+            id: source_event_id.clone(),
+            channel: channel.to_owned(),
+            recipient: recipient.to_owned(),
+            group_id: msg.group_id.clone(),
+            group_name: msg.group_name.clone(),
+            text: msg.text.clone(),
+            occurred_at: event.occurred_at,
+        };
+        let available_at = AgentTriggerSpec::from_value(&agent.trigger)
+            .map(|trigger| trigger.available_at(&admission_event, now))
+            .unwrap_or(now);
         let (_, inserted) = store
-            .enqueue_triggered_event(&agent.id, &event, now)
+            .enqueue_triggered_event_at(&agent.id, &event, available_at, now)
             .map_err(|e| e.to_string())?;
         queued |= inserted;
     }
@@ -911,6 +1029,11 @@ mod tests {
         let inbound = InboundMessage {
             channel: "whatsapp".into(),
             source_event_id: Some("test-message".into()),
+            message_operation: None,
+            target_message_id: None,
+            source_revision: None,
+            reply_to_message_id: None,
+            reaction: None,
             native_id: "sender".into(),
             display_name: None,
             group_id: Some("group@g.us".into()),
