@@ -159,6 +159,16 @@ for the exact identity used by routing. If the running server is older than
 the checked-out CLI, `execlaw qualify-model --context-tokens 4096` uses the
 local database and the same qualification checks without restarting it.
 Pass `--no-encrypt` only for a plaintext development database.
+Plain inference success and `/v1/models` reachability do not qualify tool
+calls. The Standard backend's `model_spec_json` must include the exact
+`quantization`, `chat_template`, and `backend_version`; an Ollama backend also
+needs `binary_hint: "ollama"` to use its native tool and thinking protocol.
+Choose a context budget the deployed Ollama instance actually accepts and
+require the context check to pass. See
+[`truenas-docker.md`](truenas-docker.md#qualify-ollama-before-using-chat-tools)
+for the deployed-model procedure and the `model_identity_incomplete` alert.
+Passing text and tool checks alone does not authorize tool turns when context
+calibration fails; inspect the full matrix before calling a model qualified.
 
 For a local memory export, run
 `execlaw memory export-assertion <ID> --to <FILE> --redaction-map <map.json> --consent`.

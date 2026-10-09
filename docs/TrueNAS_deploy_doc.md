@@ -8,6 +8,9 @@ Use this document as the capability checklist. The lower-level Docker and
 network troubleshooting reference remains
 [`truenas-docker.md`](truenas-docker.md). TrueNAS CORE is FreeBSD-based; run a
 Linux VM on CORE and apply this guide inside that VM.
+The current Ollama chat incident and its evidence gaps are tracked in
+[`ollama-inference-investigation.md`](ollama-inference-investigation.md);
+the capability readiness table below is not a live deployment test.
 
 ## 1. Deployment model
 

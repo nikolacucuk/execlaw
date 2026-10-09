@@ -2948,6 +2948,18 @@ fn filter_tool_view_for_safety_profile(
 
 const MAX_TOOL_CATALOG_BYTES: usize = 24 * 1024;
 
+fn tool_catalog_limit_for_model(db: &execlaw_core::Database, model_id: &str) -> usize {
+    // The serialized catalog shares the context window with the system prompt,
+    // history, and reply reserve. A fixed 24 KiB catalog can exhaust an 8K
+    // model before its first request reaches inference.
+    let context_tokens = qualified_context_tokens(db, model_id).unwrap_or(8_192) as usize;
+    let bytes_per_token = qualified_bytes_per_token_milli(db, model_id) as usize;
+    context_tokens
+        .saturating_mul(bytes_per_token)
+        .saturating_div(6_000)
+        .min(MAX_TOOL_CATALOG_BYTES)
+}
+
 fn qualified_output_reserve(context_tokens: Option<u32>) -> u32 {
     // A qualified 4K endpoint must retain enough room for its prompt. The
     // old fixed 4K output cap left zero prompt tokens and rejected every turn.
@@ -3196,23 +3208,7 @@ pub(crate) fn build_runner_tool_catalog(
         caller_caps,
         planner_executor,
         false,
-    )
-}
-
-pub(crate) fn build_runner_tool_catalog_for_durable_run(
-    db: &execlaw_core::Database,
-    plugin_host: &execlaw_plugin_host::PluginHost,
-    caller_trust: TrustLevel,
-    caller_caps: &[String],
-    planner_executor: bool,
-) -> RunnerToolView {
-    build_runner_tool_catalog_with_workspace(
-        db,
-        plugin_host,
-        caller_trust,
-        caller_caps,
-        planner_executor,
-        true,
+        MAX_TOOL_CATALOG_BYTES,
     )
 }
 
@@ -3223,6 +3219,7 @@ fn build_runner_tool_catalog_with_workspace(
     caller_caps: &[String],
     planner_executor: bool,
     include_workspace_tools: bool,
+    max_catalog_bytes: usize,
 ) -> RunnerToolView {
     use execlaw_core::tool_access::ToolAccessStore;
     use execlaw_inference_api::ToolDeclaration;
@@ -3292,7 +3289,7 @@ fn build_runner_tool_catalog_with_workspace(
             &mut decls,
             &mut catalog_bytes,
             declaration,
-            MAX_TOOL_CATALOG_BYTES,
+            max_catalog_bytes,
         ) {
             builtin_names.push(d.name.clone());
         } else {
@@ -3341,7 +3338,7 @@ fn build_runner_tool_catalog_with_workspace(
             &mut decls,
             &mut catalog_bytes,
             declaration,
-            MAX_TOOL_CATALOG_BYTES,
+            max_catalog_bytes,
         ) {
             plugin_tool_names.push(t.tool_name.clone());
         } else {
@@ -3353,7 +3350,7 @@ fn build_runner_tool_catalog_with_workspace(
         catalog_bytes,
         tool_count = decls.len(),
         budget_excluded_count,
-        max_catalog_bytes = MAX_TOOL_CATALOG_BYTES,
+        max_catalog_bytes,
         "tool catalog budget applied"
     );
     if !discoverable.is_empty() {
@@ -3362,12 +3359,9 @@ fn build_runner_tool_catalog_with_workspace(
             "Search authorized tools by task or name. Search returns concise matches; call again with one exact tool name to load its schema for subsequent calls.",
             serde_json::json!({"type":"object","properties":{"query":{"type":"string","minLength":1}},"required":["query"],"additionalProperties":false}),
         );
-        let _ = push_within_tool_catalog_budget(
-            &mut decls,
-            &mut catalog_bytes,
-            discovery,
-            MAX_TOOL_CATALOG_BYTES + 1024,
-        );
+        // Discovery must remain callable when the bounded catalog fills up.
+        // Its schema is small and is accounted for by the request fitter.
+        decls.push(discovery);
     }
     let result_reader = ToolDeclaration::function(
         "execlaw.read_artifact",
@@ -3383,12 +3377,7 @@ fn build_runner_tool_catalog_with_workspace(
             "additionalProperties":false
         }),
     );
-    let _ = push_within_tool_catalog_budget(
-        &mut decls,
-        &mut catalog_bytes,
-        result_reader,
-        MAX_TOOL_CATALOG_BYTES + 2048,
-    );
+    decls.push(result_reader);
     RunnerToolView {
         declarations: decls,
         discoverable,
@@ -4380,12 +4369,14 @@ pub(crate) async fn run_runner_turn(ctx: RunnerTurnCtx<'_>) -> Result<(i64, Stri
         .resolve(&state.db, BackendPurpose::Standard)
         .map(|resolved| resolved.with_workload("chat"))
         .ok_or_else(|| "no inference backend configured".to_owned())?;
-    let mut tool_view = build_runner_tool_catalog_for_durable_run(
+    let mut tool_view = build_runner_tool_catalog_with_workspace(
         &state.db,
         &state.plugin_host,
         caller_trust,
         &caller_caps,
         planner_executor,
+        true,
+        tool_catalog_limit_for_model(&state.db, &resolved.model_id),
     );
     if let Some(profile) = &safety_profile_snapshot {
         tool_view = filter_tool_view_for_safety_profile(&state.plugin_host, profile, tool_view);
@@ -6268,12 +6259,14 @@ async fn run_tool_capable_turn(
     // builder needs, so the system prompt and the model's tool
     // catalog stay in sync.
     let catalog_started_at = std::time::Instant::now();
-    let mut tool_view = build_runner_tool_catalog(
+    let mut tool_view = build_runner_tool_catalog_with_workspace(
         &state.db,
         &state.plugin_host,
         caller_trust,
         &caller_caps,
         planner_executor,
+        false,
+        tool_catalog_limit_for_model(&state.db, &resolved_model_id),
     );
     if let Some(profile) = &safety_profile_snapshot {
         tool_view = filter_tool_view_for_safety_profile(&state.plugin_host, profile, tool_view);
@@ -14329,6 +14322,69 @@ required_capabilities = []
         assert!(
             with_split_on.builtin_names.is_empty() && with_split_on.plugin_tool_names.is_empty(),
             "name lists must also be empty when the split fires (otherwise routing prose leaks tool names)"
+        );
+    }
+
+    #[test]
+    fn small_context_catalog_keeps_discovery_and_routing_in_sync() {
+        let state = test_app_state();
+        install_catalog_test_plugin(
+            &state,
+            r#"
+[plugin]
+id = "catalog-budget-test"
+name = "catalog-budget-test"
+version = "1.0.0"
+
+[[tools]]
+name = "catalog-budget-test.lookup"
+latency = "low"
+required_capabilities = []
+"#,
+        );
+        let limit = super::tool_catalog_limit_for_model(&state.db, "unqualified-model");
+        assert_eq!(limit, 4_096);
+        let view = super::build_runner_tool_catalog_with_workspace(
+            &state.db,
+            &state.plugin_host,
+            TrustLevel::Controller,
+            &["*".to_owned()],
+            false,
+            false,
+            limit,
+        );
+        let serialized_bytes: usize = view
+            .declarations
+            .iter()
+            .map(|tool| serde_json::to_vec(tool).unwrap().len())
+            .sum();
+        assert!(serialized_bytes <= limit + 2_048);
+        assert!(
+            view.declarations
+                .iter()
+                .any(|tool| tool.function.name == "execlaw.discover_tool")
+        );
+        for name in view.builtin_names.iter().chain(&view.plugin_tool_names) {
+            assert!(
+                view.declarations
+                    .iter()
+                    .any(|tool| &tool.function.name == name)
+            );
+        }
+        let saturated = super::build_runner_tool_catalog_with_workspace(
+            &state.db,
+            &state.plugin_host,
+            TrustLevel::Controller,
+            &["*".to_owned()],
+            false,
+            false,
+            1,
+        );
+        assert!(
+            saturated
+                .declarations
+                .iter()
+                .any(|tool| tool.function.name == "execlaw.discover_tool")
         );
     }
 

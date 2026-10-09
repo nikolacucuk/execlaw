@@ -1,5 +1,8 @@
 # execlaw on TrueNAS with Docker + Ollama (NVIDIA GPU)
 
+For the current local PC and TrueNAS chat failure, start with the
+[`Ollama inference investigation`](ollama-inference-investigation.md).
+
 This guide gives you a full, repeatable setup for running:
 
 - execlaw control plane in Docker

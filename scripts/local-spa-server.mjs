@@ -5,8 +5,12 @@ import path from "node:path";
 
 const root = path.resolve("web/dist");
 const backendPort = Number(process.argv[2] ?? 3031);
+const frontendPort = Number(process.argv[3] ?? 5174);
 if (!Number.isInteger(backendPort) || backendPort < 1 || backendPort > 65535) {
     throw new Error("backend port must be an integer from 1 to 65535");
+}
+if (!Number.isInteger(frontendPort) || frontendPort < 1 || frontendPort > 65535) {
+    throw new Error("frontend port must be an integer from 1 to 65535");
 }
 const contentTypes = {
     ".css": "text/css",
@@ -34,20 +38,33 @@ const server = http.createServer(async (request, response) => {
             const body = ["GET", "HEAD"].includes(request.method)
                 ? undefined
                 : await readRequestBody(request);
+            const forwardedHeaders = { ...request.headers };
+            const hopByHop = [
+                "host", "connection", "content-length", "transfer-encoding",
+                "expect", "accept-encoding", "keep-alive", "proxy-authenticate",
+                "proxy-authorization", "te", "trailer", "upgrade",
+                ...(request.headers.connection ?? "").split(",").map((name) => name.trim().toLowerCase()),
+            ];
+            for (const name of hopByHop) delete forwardedHeaders[name];
             const backendResponse = await fetch(
                 `http://127.0.0.1:${backendPort}${request.url}`,
                 {
                     body,
-                    headers: request.headers,
+                    headers: forwardedHeaders,
                     method: request.method,
                 },
             );
+            const responseHeaders = Object.fromEntries(backendResponse.headers);
+            for (const name of ["connection", "content-length", "content-encoding", "transfer-encoding"]) {
+                delete responseHeaders[name];
+            }
             response.writeHead(
                 backendResponse.status,
-                Object.fromEntries(backendResponse.headers),
+                responseHeaders,
             );
             response.end(Buffer.from(await backendResponse.arrayBuffer()));
-        } catch {
+        } catch (error) {
+            console.error("local SPA API proxy failed", request.method, error.message, error.cause?.message);
             response.writeHead(502, { "Content-Type": "text/plain" });
             response.end("Backend unavailable");
         }
@@ -84,6 +101,6 @@ server.on("upgrade", (request, socket, head) => {
     socket.on("error", () => upstream.destroy());
 });
 
-server.listen(5174, "127.0.0.1", () => {
-    console.log("execlaw SPA http://127.0.0.1:5174/");
+server.listen(frontendPort, "127.0.0.1", () => {
+    console.log(`execlaw SPA http://127.0.0.1:${frontendPort}/`);
 });

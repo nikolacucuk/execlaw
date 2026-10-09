@@ -1,5 +1,8 @@
 # Running execlaw on TrueNAS SCALE with Docker
 
+The current local PC and TrueNAS Ollama chat investigation is tracked in
+[`ollama-inference-investigation.md`](ollama-inference-investigation.md).
+
 This guide deploys execlaw's control plane on TrueNAS SCALE and retains all
 durable state in one ZFS-backed directory. It assumes Ollama is already
 running in Docker on the TrueNAS server.
@@ -219,6 +222,16 @@ Do not add them under **Private integration**; approvals are capability-scoped.
 Approvals carried forward by the capability-scope migration were placed under
 **Private integration**, so an older approval there does not authorize Ollama
 inference.
+
+The Windows local deployment recovered on October 7, 2026 after its plaintext
+database was migrated from schema 27 to 87 and `192.168.1.76/32` was approved
+under **Local inference**. Migration 0055 had carried the old unscoped approval
+into **Private integration**; that scope does not authorize the Standard
+backend. The resolver then reported `approved_cidr`, and a fresh chat reached
+Ollama. This records the local recovery, not a TrueNAS qualification result:
+the TrueNAS database needs its own DNS and CIDR approvals and a fresh chat
+check after deployment.
+
 After saving both approvals, reopen **Settings -> Backends -> Standard** and
 run its inference probe. If a turn still fails, inspect the resolver warning:
 
@@ -226,6 +239,64 @@ run its inference probe. If a turn still fails, inspect the resolver warning:
 sudo docker compose logs --since=10m execlaw 2>&1 \
   | grep -Ei 'inference_resolver|configured inference endpoint denied'
 ```
+
+### Qualify Ollama before using chat tools
+
+A successful plain chat proves that the endpoint is reachable. Tool-bearing
+turns also require a passing capability profile for the exact Standard model,
+quantization, chat template, backend version, and parser version. If Alerts
+shows `tool calling is unavailable until this exact model/backend/template
+profile passes tool qualification`, inspect **Settings -> Backends -> Standard**
+and its **Model spec (JSON)**. An older external row may contain only `model`;
+the qualification endpoint then returns `model_identity_incomplete`.
+
+From the control-plane container, obtain the current metadata from Ollama's
+native API:
+
+```bash
+sudo docker compose exec execlaw \
+  curl -fsS http://host.docker.internal:30068/api/version
+sudo docker compose exec execlaw \
+  curl -fsS http://host.docker.internal:30068/api/show \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"fredrezones55/Qwen3.6-35B-A3B-APEX:I-Mini"}'
+```
+
+Record `details.quantization_level`, a SHA-256 of the exact `template` bytes,
+and the Ollama version. For the model observed on October 9, 2026, the
+corresponding Model spec was:
+
+```json
+{
+  "model": "fredrezones55/Qwen3.6-35B-A3B-APEX:I-Mini",
+  "binary_hint": "ollama",
+  "context_tokens": 8192,
+  "quantization": "Q3_K_M",
+  "chat_template": "sha256:b507b9c2f6ca642bffcd06665ea7c91f235fd32daeefdf875a0f938db05fb315",
+  "backend_version": "ollama/0.40.2"
+}
+```
+
+Verify these values against the deployed Ollama instance before saving them.
+`binary_hint` selects Ollama's native `/api/chat` adapter, which forwards the
+turn's thinking and context options and preserves native tool calls. Keep the
+existing External mode and endpoint. In **Settings -> Inference**, set the
+qualification context to the tested `context_tokens` value and choose
+**Qualify model**. Require a passing text, streaming, tools, structured JSON,
+and context matrix; vision is a separate check. A failed qualification does
+not authorize tools. Repeat qualification whenever the model, template,
+quantization, backend version, or parser changes, then confirm with a new
+tool-bearing chat turn. The local LAN and the TrueNAS deployment each keep
+their own database and must be qualified separately.
+The current qualifier first warms a cold Ollama model outside the scored
+matrix; a cold load must not spend the text and tool checks' short deadlines.
+The image built from `f01c5c1` predates the context-probe repair. If text,
+streaming, tools, and structured JSON pass but context reports
+`context_probe_token_count_mismatch` after sending a very large request, the
+old probe may have interpreted Ollama's truncated prompt count as underfill.
+Rebuild with the repaired `inference_probe.rs` and qualify again. Do not mark a
+profile qualified by editing SQLite or increase the runtime context solely to
+make this probe pass.
 
 The Compose variable `OLLAMA_OPENAI_URL` is retained for compatibility with
 older setups, but the canonical current value uses `host.docker.internal`.

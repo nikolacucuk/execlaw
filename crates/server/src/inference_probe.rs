@@ -244,6 +244,7 @@ pub async fn qualify_local_model(
         code: "model_identity_incomplete",
         message: "Standard backend model_spec_json must include exact quantization, chat_template, and backend_version metadata before qualification".into(),
     })?;
+    warm_model_for_qualification(&resolved.client, &resolved.model_id).await;
     let mut checks = run_conformance(&resolved.client, &resolved.model_id, context_tokens).await;
     checks.vision = run_vision_matrix(&resolved.client, &resolved.model_id).await;
     // The probe adapts its length until the backend reports a prompt inside
@@ -299,6 +300,40 @@ pub async fn qualify_local_model(
         qualified_at,
         checks,
     })
+}
+
+async fn warm_model_for_qualification(client: &InferenceClient, model: &str) {
+    // A cold Ollama load can exceed the scored 20-second text/tool deadlines.
+    // Prime the same endpoint without tools, then measure every capability in
+    // the existing matrix; a warm-up response never grants qualification.
+    let request = ChatRequest {
+        model: ModelId(model.to_owned()),
+        messages: vec![ChatMessage::user("Reply READY.")],
+        tools: None,
+        stream: false,
+        temperature: Some(0.0),
+        max_tokens: Some(16),
+        chat_template_kwargs: Some(serde_json::json!({"enable_thinking": false})),
+        tool_choice: None,
+        response_format: None,
+        guided_decoding_backend: None,
+    };
+    let started = std::time::Instant::now();
+    let warmed = matches!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            client.chat_completions(&request)
+        )
+        .await,
+        Ok(Ok(_))
+    );
+    tracing::info!(
+        target: "inference_probe",
+        model,
+        warmed,
+        elapsed_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+        "model qualification warm-up finished"
+    );
 }
 
 async fn run_vision_matrix(client: &InferenceClient, model: &str) -> ConformanceCheck {
@@ -575,9 +610,10 @@ async fn run_context_probe(
     context_tokens: u32,
 ) -> ConformanceCheck {
     let started = std::time::Instant::now();
-    let mut target_chars = (context_tokens as usize)
-        .saturating_mul(6)
-        .clamp(256, 2_000_000);
+    // Start below the requested window so a backend that silently truncates
+    // oversized prompts cannot make its reduced usage look like underfill.
+    // The next attempt scales from a real, untruncated token observation.
+    let mut target_chars = ((context_tokens as usize) / 2).clamp(256, 2_000_000);
     let mut last_tokens = None;
     let mut last_request_bytes = None;
     for _attempt in 0..3 {
@@ -1035,16 +1071,49 @@ mod tests {
     use axum::response::IntoResponse;
     use execlaw_core::backends::{BackendMode, BackendUpsert};
     use execlaw_core::users::{UserRole, UserRow, UserStore};
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tower::ServiceExt;
 
     #[test]
     fn context_probe_resizes_from_observed_token_usage() {
-        let initial = 4_096 * 6;
+        let initial = 4_096 / 2;
         let grown = next_context_probe_chars(initial, 2_050, 4_096);
         assert!(grown > initial);
         assert!(grown < 2_000_000);
         assert!(next_context_probe_chars(initial, 5_000, 4_096) < initial);
+    }
+
+    #[tokio::test]
+    async fn context_probe_calibrates_before_backend_truncates_oversized_prompt() {
+        async fn fixture(Json(request): Json<serde_json::Value>) -> Json<serde_json::Value> {
+            let chars = request["messages"][1]["content"].as_str().unwrap().len();
+            let context_tokens = request["options"]["num_ctx"].as_u64().unwrap();
+            let full_tokens = (chars / 4) as u64;
+            let prompt_tokens = if full_tokens > context_tokens {
+                context_tokens / 2 + 2
+            } else {
+                full_tokens
+            };
+            Json(serde_json::json!({
+                "model": "local-test",
+                "message": {"role": "assistant", "content": "OK"},
+                "done": true,
+                "prompt_eval_count": prompt_tokens,
+                "eval_count": 1
+            }))
+        }
+        let router = Router::new().route("/api/chat", post(fixture));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(axum::serve(listener, router).into_future());
+        let client = InferenceClient::new(format!("http://{address}"))
+            .with_engine(InferenceEngine::Ollama)
+            .with_ollama_context_tokens(4_096);
+
+        let result = run_context_probe(&client, "local-test", 4_096).await;
+        assert!(result.passed, "{result:?}");
+        assert!(result.prompt_tokens.unwrap() >= 3_072);
+        server.abort();
     }
 
     async fn openai_fixture(Json(request): Json<serde_json::Value>) -> axum::response::Response {
@@ -1220,6 +1289,65 @@ mod tests {
             )
             .expect("persist test session");
         (build_router(state), format!("Bearer {token}"))
+    }
+
+    #[tokio::test]
+    async fn qualification_does_not_score_the_cold_model_warmup() {
+        async fn cold_fixture(
+            State(calls): State<std::sync::Arc<AtomicUsize>>,
+            Json(request): Json<serde_json::Value>,
+        ) -> axum::response::Response {
+            if calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                return Json(serde_json::json!({
+                    "model": "local-test",
+                    "message": {"role": "assistant", "content": ""},
+                    "done": true,
+                    "prompt_eval_count": 8,
+                    "eval_count": 0
+                }))
+                .into_response();
+            }
+            ollama_fixture(Json(request)).await
+        }
+
+        let calls = std::sync::Arc::new(AtomicUsize::new(0));
+        let fixture = Router::new()
+            .route("/api/chat", post(cold_fixture))
+            .with_state(calls.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let fixture_server = tokio::spawn(axum::serve(listener, fixture).into_future());
+        let state = test_app_state();
+        BackendStore::new(&state.db)
+            .upsert(
+                &BackendUpsert {
+                    purpose: BackendPurpose::Standard,
+                    inference_backend: "external".into(),
+                    model_spec_json: serde_json::json!({
+                        "model": "local-test",
+                        "binary_hint": "ollama",
+                        "context_tokens": 4_096,
+                        "quantization": "Q4",
+                        "chat_template": "test-template-v1",
+                        "backend_version": "ollama-fixture-v1"
+                    }),
+                    gpu_id: None,
+                    endpoint: Some(format!("http://{address}/v1")),
+                    notes: None,
+                    reasoning_enabled: false,
+                    mode: BackendMode::External,
+                },
+                chrono::Utc::now().timestamp(),
+            )
+            .unwrap();
+
+        let result = qualify_local_model(&state.db, &state.inference, 4_096)
+            .await
+            .unwrap();
+        assert!(result.qualified, "{result:?}");
+        assert!(result.checks.text.passed && result.checks.tools.passed);
+        assert!(calls.load(Ordering::SeqCst) > 1);
+        fixture_server.abort();
     }
 
     #[tokio::test]
