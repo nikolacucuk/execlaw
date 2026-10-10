@@ -278,6 +278,16 @@ describe("Composer", () => {
         resolverHolder.fn?.();
     });
 
+    it("keeps a typed message when an existing turn is busy after remount", () => {
+        const onSend = vi.fn();
+        render(<Composer onSend={onSend} busy />);
+        const input = screen.getByTestId("composer-input") as HTMLTextAreaElement;
+        fireEvent.change(input, { target: { value: "wait for the reply" } });
+        fireEvent.keyDown(input, { key: "Enter", shiftKey: false });
+        expect(onSend).not.toHaveBeenCalled();
+        expect(input.value).toBe("wait for the reply");
+    });
+
     // ---- skill picker (composer `+` menu, second item) ----------
 
     it("shows the `+` button when getSkills is wired even without multimodal", () => {

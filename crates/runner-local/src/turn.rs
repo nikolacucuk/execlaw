@@ -30,8 +30,8 @@ use execlaw_core::runs::{RunStepKind, RunStoreError};
 use execlaw_core::tool::{ToolFailure, ToolFailureKind, ToolResultEnvelope, tool_schema_hash};
 use execlaw_core::tool_execution::{CircuitPermit, ToolExecutionStore, ToolInvocationDefinition};
 use execlaw_inference_api::{
-    ChatMessage, ChatRequest, ChatResponse, InferenceClient, InferenceError, InferenceRetryPolicy,
-    ModelId, Role, ToolCall, ToolDeclaration,
+    ChatMessage, ChatRequest, ChatResponse, InferenceClient, InferenceEngine, InferenceError,
+    InferenceRetryPolicy, ModelId, Role, ToolCall, ToolDeclaration,
 };
 use execlaw_plugin_sdk::manifest::{ToolEffectContract, ToolEffectPolicy};
 use futures::FutureExt;
@@ -447,6 +447,18 @@ pub struct TurnSummary {
 // ---------------------------------------------------------------------------
 // Turn executor
 // ---------------------------------------------------------------------------
+
+fn model_step_lease_seconds(engine: InferenceEngine) -> i64 {
+    // A live Ollama call may spend the full retry deadline loading or
+    // generating before it can checkpoint the model response.
+    i64::try_from(
+        InferenceRetryPolicy::for_engine(engine)
+            .deadline
+            .as_secs()
+            .saturating_add(60),
+    )
+    .unwrap_or(i64::MAX)
+}
 
 /// Runs a single turn on behalf of a conversation. Stateless; safe to
 /// construct per-turn.
@@ -965,13 +977,7 @@ impl TurnExecutor {
             None,
             chrono::Utc::now().timestamp(),
         )?
-        .with_model_lease_seconds(
-            if self.inference.engine == execlaw_inference_api::InferenceEngine::Ollama {
-                150
-            } else {
-                60
-            },
-        );
+        .with_model_lease_seconds(model_step_lease_seconds(self.inference.engine));
         if let Some(receipt) = &self.asset_loadout {
             execlaw_core::memory_assets::MemoryAssetStore::new(db)
                 .record_turn_loadout(conversation_id.as_str(), input_event_seq.0, receipt)
@@ -2272,6 +2278,14 @@ mod tests {
     use execlaw_core::db::{Database, DbConfig};
     use execlaw_core::migrations::MigrationRunner;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn model_lease_outlasts_local_inference_retry_deadline() {
+        for engine in [InferenceEngine::OpenAICompat, InferenceEngine::Ollama] {
+            let deadline = InferenceRetryPolicy::for_engine(engine).deadline.as_secs();
+            assert!(model_step_lease_seconds(engine) as u64 > deadline);
+        }
+    }
 
     fn fresh_db() -> Database {
         let db = Database::open(&DbConfig::in_memory_unencrypted()).unwrap();

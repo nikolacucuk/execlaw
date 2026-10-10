@@ -707,7 +707,7 @@ export function Composer({
         const trimmed = text.trim();
         // Allow image-only sends — vision models handle a bare image
         // fine with the implicit "describe this" framing.
-        if ((trimmed.length === 0 && attachments.length === 0) || submitting) return;
+        if ((trimmed.length === 0 && attachments.length === 0) || submitting || busy || disabled) return;
         setSubmitting(true);
         // Snapshot the staged attachments + clear the input
         // synchronously so the operator sees the send committed even

@@ -1211,6 +1211,38 @@ pub async fn send_message(
     // later refinement; stripping tools is the load-bearing invariant.
     let use_tool_path = has_plugin_tools && !planner_executor;
 
+    // A second web send must not replace the live turn's stop flag or try to
+    // reclaim its leased model step while Ollama is still producing a reply.
+    let cancel_guard = match crate::turn_cancel::TurnCancelGuard::try_new(
+        state.turn_cancel.clone(),
+        cid.as_str().to_owned(),
+    ) {
+        Some(guard) => guard,
+        None => {
+            let body_hash = match execlaw_core::chat_requests::ChatRequestStore::body_hash(&req) {
+                Ok(hash) => hash,
+                Err(error) => return err_500(&format!("hash active chat request: {error}")),
+            };
+            let now = chrono::Utc::now().timestamp();
+            let active_run = execlaw_core::chat_requests::ChatRequestStore::new(&state.db)
+                .in_progress_run_for_body(&user.user_id, cid.as_str(), &body_hash, now - 300);
+            return match active_run {
+                Ok(Some(run_id)) => (
+                    StatusCode::ACCEPTED,
+                    Json(serde_json::json!({"status":"in_progress","request_handle":run_id})),
+                )
+                    .into_response(),
+                Ok(None) => (
+                    StatusCode::CONFLICT,
+                    Json(serde_json::json!({"error":{"code":"turn_in_progress","message":"A reply is still in progress for this chat. Wait for it before sending another message."}})),
+                )
+                    .into_response(),
+                Err(error) => err_500(&format!("inspect active chat request: {error}")),
+            };
+        }
+    };
+    let cancel_flag = cancel_guard.flag.clone();
+
     // Phase 10.1 — agent-processing awareness. Publish a phase
     // transition so subscribers (SPA tabs, transport plugins) can
     // surface a typing/processing indicator. The is_processing()
@@ -1234,16 +1266,6 @@ pub async fn send_message(
     // success path so the explicit Idle publish lands BEFORE
     // ChatMessageOutbound (typing-dots-stop-a-beat-before-reply UX).
     let idle_guard = IdlePhaseGuard::new(state.events.clone(), cid.as_str().to_owned());
-
-    // 2026-04-28 — register a per-turn cancellation flag. The streaming
-    // path polls this between SSE chunks and exits the loop early when
-    // `POST /api/chats/:id/stop` flips it. RAII guard guarantees the
-    // entry is removed on every exit path.
-    let cancel_guard = crate::turn_cancel::TurnCancelGuard::new(
-        state.turn_cancel.clone(),
-        cid.as_str().to_owned(),
-    );
-    let cancel_flag = cancel_guard.flag.clone();
 
     // Phase 12.E — pick the inference client per turn from the
     // resolver. A managed-mode Backend whose supervisor has written
@@ -12083,6 +12105,71 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("execlaw dev stub")
+        );
+    }
+
+    #[tokio::test]
+    async fn overlapping_send_keeps_live_turn_and_reports_duplicate_as_in_progress() {
+        let state = test_app_state();
+        let app = crate::routes::build_router(state.clone());
+        let token = setup_and_get_token(&app).await;
+        let cid = "slow-ollama-turn";
+        ensure_conversation_for(&state.db, &ConversationId::from(cid));
+        let user_id = execlaw_core::users::UserStore::new(&state.db)
+            .list_all()
+            .unwrap()[0]
+            .user_id
+            .clone();
+        let mut body: SendMessageRequest =
+            serde_json::from_value(serde_json::json!({"text":"slow reply"})).unwrap();
+        body.sender_principal_id = Some("controller".into());
+        let body_hash = execlaw_core::chat_requests::ChatRequestStore::body_hash(&body).unwrap();
+        let run_id = format!("turn:{cid}:1");
+        execlaw_core::chat_requests::ChatRequestStore::new(&state.db)
+            .reserve(
+                &user_id,
+                cid,
+                "first-request",
+                &body_hash,
+                &run_id,
+                chrono::Utc::now().timestamp(),
+            )
+            .unwrap();
+        let active =
+            crate::turn_cancel::TurnCancelGuard::try_new(state.turn_cancel.clone(), cid.into())
+                .unwrap();
+
+        let request = |text: &str| {
+            Request::builder()
+                .method(Method::POST)
+                .uri(format!("/api/chats/{cid}/messages"))
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("Idempotency-Key", "second-request")
+                .body(Body::from(serde_json::json!({"text":text}).to_string()))
+                .unwrap()
+        };
+        let duplicate = app.clone().oneshot(request("slow reply")).await.unwrap();
+        assert_eq!(duplicate.status(), StatusCode::ACCEPTED);
+        let duplicate_body: serde_json::Value = json_body(duplicate.into_body()).await;
+        assert_eq!(duplicate_body["request_handle"], run_id);
+        assert!(std::sync::Arc::ptr_eq(
+            &active.flag,
+            &state.turn_cancel.flag(cid).unwrap()
+        ));
+        assert!(state.turn_cancel.cancel(cid));
+        assert!(active.is_cancelled());
+
+        let different = app.oneshot(request("different work")).await.unwrap();
+        assert_eq!(different.status(), StatusCode::CONFLICT);
+        let different_body: serde_json::Value = json_body(different.into_body()).await;
+        assert_eq!(different_body["error"]["code"], "turn_in_progress");
+        assert_eq!(
+            event_log(&state)
+                .replay_since(&ConversationId::from(cid), EventSeq(0))
+                .unwrap()
+                .len(),
+            0
         );
     }
 

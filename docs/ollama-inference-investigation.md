@@ -1,11 +1,13 @@
 # Ollama inference investigation — local PC and TrueNAS
 
 **Status (October 9, 2026, America/Vancouver): Local repair verified with a
-disposable authenticated chat; TrueNAS chat remains open.** The local PC's
+disposable authenticated chat and a completed production chat run; TrueNAS chat
+remains open.** The local PC's
 October 9 failure was a prompt-budget rejection before inference. The rebuilt
 local service and SPA proxy are healthy, and a disposable execlaw conversation
-returned an Ollama reply. The operator's signed-in browser session has not
-been exercised after the repair. TrueNAS model qualification passes, but no
+returned an Ollama reply. The production database now also contains a new user
+message and model turn from a completed run after the repair; the exact visible
+reply was not captured. TrueNAS model qualification passes, but no
 successful post-qualification TrueNAS execlaw chat turn has been captured.
 HTTP health, served SPA HTML, direct Ollama calls, and qualification are
 distinct checks; none alone proves that a new execlaw chat returns a reply.
@@ -32,7 +34,7 @@ making code or deployment claims. Paths below are repository-relative.
 
 | Surface | Confirmed observation | Limit |
 |---|---|---|
-| Local PC SPA `http://127.0.0.1:5174/chat` | The rebuilt local backend serves on `:3034`; the SPA proxy points to it, and GET `/chat` and proxied `/api/health` returned 200. A disposable authenticated chat through the same binary returned `OK`. | The operator's existing browser session and production database were not used for the successful chat probe. |
+| Local PC SPA `http://127.0.0.1:5174/chat` | The latest rebuilt backend serves on `:3036`; the SPA proxy points to it, and GET `/chat` and proxied `/api/health` returned 200. A disposable authenticated overlapping-send probe against the rebuilt binary returned one assistant reply and HTTP 202 for the duplicate. | The exact reply displayed in the operator's signed-in browser after this second repair was not captured. |
 | TrueNAS control plane `http://192.168.1.76:3031` | Container rebuilt successfully after a one-line context-probe edit; image `sha256:4ab697000f772c9eeda014f6d6c27fb68ce81da1759482aa4c4a9ee952bad9bc` was started. `/api/health` returned 200. | No successful new execlaw web-chat reply has been captured after qualification. |
 | TrueNAS → Ollama | `host.docker.internal` resolved to `fdd0::1` and `172.16.0.1`; both CIDRs and the DNS name were shown under **Local inference** approvals. Container `/v1/models` returned the configured model; native `/api/chat` returned `OK` and later `READY`. | Direct curl bypasses execlaw's resolver, chat policy, session, durable-run path, and tool gate. |
 | Ollama `http://192.168.1.76:30068` | `/api/version` reported `0.40.2` on October 9. `/api/show` reported `Q3_K_M` and template SHA-256 `b507b9c2f6ca642bffcd06665ea7c91f235fd32daeefdf875a0f938db05fb315`. | Versions and model tags can change. Re-read the live endpoint before requalification. |
@@ -72,7 +74,8 @@ when it buffers the response. A focused Node test covers the POST and a
 compressed upstream response; a live unauthenticated POST through `:5174` now
 reaches the backend and returns the expected 401.
 The original `:3033` process exited but Windows retained its listener, so the
-rebuilt backend runs on `:3034` and the `:5174` SPA proxy now targets `:3034`.
+rebuilt backend first ran on `:3034`; the subsequent overlapping-send repair
+runs on `:3036`, with the `:5174` proxy targeting that port.
 The original database, keys, and old executable backup were preserved.
 
 A separate plaintext probe database with a fresh Controller account approved
@@ -82,12 +85,46 @@ passed. A new authenticated chat returned `OK`; its user and model events were
 committed at sequences 1 and 2, and its durable run completed. This proves the
 rebuilt local binary can route a qualified tool-capable chat to Ollama. It does
 not prove the operator's existing session or the TrueNAS chat path.
+After that probe, the production database recorded `user_msg` sequence 2 and
+`model_turn` sequence 3 in the previously failed conversation at 3:13 p.m.;
+the corresponding durable run completed and the earlier context-budget alert
+was resolved. This confirms a post-repair model turn on the active local
+deployment. The visible browser reply still needs confirmation from the
+operator.
 The local server crate test suite passed 1,286 tests (7 ignored), the focused
 Node proxy test passed, and `cargo fmt --all -- --check` passed. Strict Clippy
 is blocked by pre-existing warnings in `model-adapter` and `core` before it
 can certify this change; ordinary server-crate Clippy completed with warnings.
-Windows Application Control blocked `graphify query`
-and `graphify update .`.
+Windows Application Control blocked `graphify query` and `graphify update .`
+during that earlier local pass.
+
+### October 9 overlapping send during Ollama inference
+
+In conversation `f41a4419-9b33-497f-beb1-5ae8e6cef328`, the first request
+held durable step `model:0` from 6:26:02 p.m. to 6:26:33 p.m. and committed a
+reply. Seven seconds after that request started, a second request with a
+different idempotency key but the same body attempted to resume the live step.
+It returned `durable step 'model:0' is unavailable: Busy`, even though the
+first reply arrived later. The second request was marked unknown; the first
+request and durable run completed. This was overlapping execution during a
+normal slow local-model response.
+
+The composer now refuses Enter submission while its `busy` prop is true,
+including after the chat pane remounts. The web handler acquires the
+conversation's cancel registration only when no turn already owns it; an exact
+duplicate receives HTTP 202 `in_progress`, while a different message receives
+an explicit conflict without touching the active turn. The in-process model
+lease now lasts longer than its protocol-specific inference retry deadline.
+
+A new disposable authenticated probe qualified the same local Ollama model,
+observed `model:0` actively leased, then sent an identical request with a
+second idempotency key. The duplicate received HTTP 202 `in_progress`; the
+original received HTTP 200 with a 3,218-character reply after 4.7 seconds.
+The probe database has one user event, one model event, one model-step attempt,
+and a completed run. The rebuilt backend serves on `:3036`; `:5174` proxies
+to it and serves the rebuilt SPA bundle. Full affected suites passed: core
+843/843, runner-local 31/31, server 1,289 passed with 7 ignored, and SPA
+551/551. SPA lint, build, and Rust formatting passed.
 
 ### TrueNAS qualification and logs
 
@@ -120,21 +157,20 @@ the native client, but current app-turn evidence is still needed.
 
 ## Source and verification state
 
-The local checkout is at `f01c5c1` with **uncommitted** changes including
+The local checkout is at `bd3bcdc` with **uncommitted** overlapping-send
+changes in [`chat_requests.rs`](../crates/core/src/chat_requests.rs),
+[`turn.rs`](../crates/runner-local/src/turn.rs),
 [`chats.rs`](../crates/server/src/chats.rs),
-[`local-spa-server.mjs`](../scripts/local-spa-server.mjs),
-[`local-spa-server.test.mjs`](../scripts/local-spa-server.test.mjs),
-[`inference_probe.rs`](../crates/server/src/inference_probe.rs),
-[`testing.md`](testing.md), this investigation, and the TrueNAS guides, plus
-unrelated dirty data/log files that must be preserved. The full local probe
-change warms a cold model before scored checks and starts context calibration
-at half the requested token count in characters. The last observed TrueNAS
-checkout had only the manually applied one-line calibration change; it did
-**not** have
-the local warm-up helper and regression tests. Do not assume `git pull` will
-deliver uncommitted local changes, or push directly to `main`.
+[`turn_cancel.rs`](../crates/server/src/turn_cancel.rs),
+[`Composer.tsx`](../web/src/chat/Composer.tsx), its adjacent test, and this
+investigation. Dirty archive and log files are preserved. Earlier model-probe
+and proxy repairs are in the local committed history. The last observed
+TrueNAS checkout had only the manually applied context-calibration change; it
+did **not** have the local warm-up helper and regression tests. Do not assume
+`git pull` will deliver these new uncommitted changes or push directly to
+`main`.
 
-Verification of the local source change: 11 focused inference-probe tests
+Earlier verification of the qualification source change: 11 focused inference-probe tests
 passed; a rebuilt local CLI qualified a disposable database copy against
 Ollama `0.40.2` at 8,192 tokens with text, streaming, tools, structured JSON,
 and context passing. `cargo build --locked -p execlaw` passed. A full
@@ -172,10 +208,9 @@ SSH port 22 to TrueNAS was closed when transfer was attempted.
    against `sudo docker compose exec execlaw curl -fsS
    http://host.docker.internal:30068/api/version`; requalify after changing
    identity metadata. Preserve the matrix result, including failures.
-4. For the PC, use the existing signed-in browser session to send `Reply OK`
-   in a new chat at `:5174`. The disposable authenticated probe already
-   verifies the rebuilt binary, but a production-session response is still
-   needed to close that final local deployment boundary.
+4. For the PC, confirm the reply displayed in the existing signed-in browser
+   session at `:5174`. The production database now shows a completed
+   post-repair model turn, but its visible text has not been captured.
 5. Trace the failed path in source only after matching it to new evidence:
    [`inference_resolver.rs`](../crates/server/src/inference_resolver.rs)
    (`resolve`, `is_ollama_binary_hint`),

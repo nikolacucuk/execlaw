@@ -29,6 +29,7 @@
 //!     between chunks is sufficient.
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -66,6 +67,31 @@ impl TurnCancellationRegistry {
             },
         );
         flag
+    }
+
+    /// Register a turn only when no other live turn owns this conversation.
+    /// A second web request must not replace the first request's stop flag.
+    ///
+    /// ```ignore
+    /// let flag = registry.try_register("conversation-id");
+    /// assert!(flag.is_some());
+    /// ```
+    pub fn try_register(&self, conversation_id: &str) -> Option<Arc<AtomicBool>> {
+        let flag = Arc::new(AtomicBool::new(false));
+        match self.inner.entry(conversation_id.to_owned()) {
+            Entry::Occupied(_) => None,
+            Entry::Vacant(entry) => {
+                entry.insert(flag.clone());
+                self.active.insert(
+                    conversation_id.to_owned(),
+                    ActiveTurn {
+                        turn_id: Some(uuid::Uuid::new_v4().to_string()),
+                        group_id: None,
+                    },
+                );
+                Some(flag)
+            }
+        }
     }
 
     /// Bind a runner-mediated execution identity to the live conversation turn.
@@ -118,6 +144,15 @@ impl TurnCancellationRegistry {
         self.active.remove(conversation_id);
     }
 
+    fn clear_if_current(&self, conversation_id: &str, flag: &Arc<AtomicBool>) {
+        if let Entry::Occupied(entry) = self.inner.entry(conversation_id.to_owned())
+            && Arc::ptr_eq(entry.get(), flag)
+        {
+            entry.remove();
+            self.active.remove(conversation_id);
+        }
+    }
+
     /// Test helper: how many entries are live.
     #[cfg(test)]
     pub fn len(&self) -> usize {
@@ -150,6 +185,21 @@ impl TurnCancelGuard {
         }
     }
 
+    /// Acquire the conversation only if another turn has not registered it.
+    ///
+    /// ```ignore
+    /// let guard = TurnCancelGuard::try_new(registry, "conversation-id".into());
+    /// assert!(guard.is_some());
+    /// ```
+    pub fn try_new(registry: TurnCancellationRegistry, conversation_id: String) -> Option<Self> {
+        let flag = registry.try_register(&conversation_id)?;
+        Some(Self {
+            registry,
+            conversation_id,
+            flag,
+        })
+    }
+
     /// Returns true once the operator (or any other caller) has hit
     /// `POST /api/chats/:id/stop` for this conversation.
     pub fn is_cancelled(&self) -> bool {
@@ -159,7 +209,8 @@ impl TurnCancelGuard {
 
 impl Drop for TurnCancelGuard {
     fn drop(&mut self) {
-        self.registry.clear(&self.conversation_id);
+        self.registry
+            .clear_if_current(&self.conversation_id, &self.flag);
     }
 }
 
@@ -217,5 +268,28 @@ mod tests {
         // the live registry only sees f2.
         reg.cancel("conv-4");
         assert!(f2.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn second_guard_cannot_replace_or_clear_a_live_turn() {
+        let reg = TurnCancellationRegistry::new();
+        let first = TurnCancelGuard::try_new(reg.clone(), "conv-live".into()).unwrap();
+        assert!(TurnCancelGuard::try_new(reg.clone(), "conv-live".into()).is_none());
+        assert!(Arc::ptr_eq(&first.flag, &reg.flag("conv-live").unwrap()));
+        drop(first);
+        assert!(reg.flag("conv-live").is_none());
+        assert!(TurnCancelGuard::try_new(reg.clone(), "conv-live".into()).is_some());
+    }
+
+    #[test]
+    fn replaced_guard_does_not_clear_new_owners_flag() {
+        let reg = TurnCancellationRegistry::new();
+        let first = TurnCancelGuard::new(reg.clone(), "conv-replaced".into());
+        let second = TurnCancelGuard::new(reg.clone(), "conv-replaced".into());
+        drop(first);
+        assert!(Arc::ptr_eq(
+            &second.flag,
+            &reg.flag("conv-replaced").unwrap()
+        ));
     }
 }

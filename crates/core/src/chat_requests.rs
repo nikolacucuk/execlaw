@@ -180,6 +180,36 @@ impl<'db> ChatRequestStore<'db> {
         })
     }
 
+    /// Find a recent pending request with the same authenticated body.
+    /// This lets a duplicate send join the live turn without claiming its
+    /// model step or minting another user event.
+    ///
+    /// ```ignore
+    /// let run_id = ChatRequestStore::new(&db)
+    ///     .in_progress_run_for_body("controller", "conversation", &body_hash, now - 300)?;
+    /// ```
+    pub fn in_progress_run_for_body(
+        &self,
+        principal_id: &str,
+        conversation_id: &str,
+        body_hash: &str,
+        updated_since: i64,
+    ) -> Result<Option<String>, DbError> {
+        self.db.with_conn(|connection| {
+            connection
+                .query_row(
+                    "SELECT run_id FROM state_chat_request_keys
+                     WHERE principal_id = ?1 AND conversation_id = ?2 AND body_hash = ?3
+                       AND status = 'pending' AND updated_at >= ?4
+                     ORDER BY updated_at DESC LIMIT 1",
+                    params![principal_id, conversation_id, body_hash, updated_since],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(DbError::from)
+        })
+    }
+
     /// Save the exact HTTP response for retries. Only pending reservations
     /// can transition to completed.
     pub fn complete(
@@ -547,6 +577,66 @@ mod tests {
             store
                 .reserve("controller", "thread-a", "req-1", &changed, "run-new", 14)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn active_duplicate_lookup_requires_same_scope_body_and_live_reservation() {
+        let db = fresh_db();
+        let store = ChatRequestStore::new(&db);
+        let hash = ChatRequestStore::body_hash(&serde_json::json!({"text":"slow reply"})).unwrap();
+        store
+            .reserve(
+                "controller",
+                "thread-a",
+                "first",
+                &hash,
+                "turn:thread-a:1",
+                100,
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .in_progress_run_for_body("controller", "thread-a", &hash, 99)
+                .unwrap(),
+            Some("turn:thread-a:1".into())
+        );
+        assert!(
+            store
+                .in_progress_run_for_body("other", "thread-a", &hash, 99)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            store
+                .in_progress_run_for_body("controller", "thread-a", &hash, 101)
+                .unwrap()
+                .is_none()
+        );
+        let different =
+            ChatRequestStore::body_hash(&serde_json::json!({"text":"new work"})).unwrap();
+        assert!(
+            store
+                .in_progress_run_for_body("controller", "thread-a", &different, 99)
+                .unwrap()
+                .is_none()
+        );
+        store
+            .complete(
+                "controller",
+                "thread-a",
+                "first",
+                "turn:thread-a:1",
+                200,
+                "{}",
+                102,
+            )
+            .unwrap();
+        assert!(
+            store
+                .in_progress_run_for_body("controller", "thread-a", &hash, 99)
+                .unwrap()
+                .is_none()
         );
     }
 
