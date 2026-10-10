@@ -6,6 +6,7 @@ import {
     type DurableTurnControl,
     type TurnControlKind,
 } from "../api/endpoints";
+import { randomUuid } from "../api/randomId";
 
 const REFRESH_MS = 4_000;
 
@@ -65,7 +66,7 @@ export function DurableTurnControls({ conversationId, getToken }: Props) {
         const intentText = kind === "steer" || kind === "queue_next_turn" ? text : "";
         const intentKey = JSON.stringify([kind, intentText]);
         const pending = readPendingKeys(storageKey);
-        const idempotencyKey = pending[intentKey] ?? crypto.randomUUID();
+        const idempotencyKey = pending[intentKey] ?? randomUuid();
         if (!pending[intentKey]) {
             pending[intentKey] = idempotencyKey;
             writePendingKeys(storageKey, pending);

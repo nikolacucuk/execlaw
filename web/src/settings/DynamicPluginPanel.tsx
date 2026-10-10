@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from "react"
 import { useAuth } from "../auth/AuthContext";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { listUiPanels, type UiPanelSummary } from "../api/endpoints";
+import { randomUuid } from "../api/randomId";
 import {
     isAllowedPanelRpc,
     isPanelFrameMessageTrusted,
@@ -74,7 +75,7 @@ export function DynamicPluginPanel({
                     kind: "ready",
                     source,
                     policy,
-                    nonce: crypto.randomUUID(),
+                    nonce: randomUuid(),
                 });
             } catch (cause) {
                 if (!cancelled) {

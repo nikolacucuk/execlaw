@@ -14,6 +14,7 @@ import { Navigate, useNavigate, useParams } from "react-router-dom";
 import { useChatTransition } from "../anim/useChatTransition";
 import { useScreenTransition } from "../anim/useScreenTransition";
 import { ApiError } from "../api/client";
+import { randomUuid } from "../api/randomId";
 import {
     getAlertCount,
     listCards,
@@ -92,10 +93,7 @@ function mintConversationId(): string {
     // Browser crypto is fine for a client-minted thread id; the
     // server treats whatever the client posts as the conversation id
     // for the lifetime of that thread.
-    if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
-        return crypto.randomUUID();
-    }
-    return `conv-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    return randomUuid();
 }
 
 export function Chat() {
@@ -472,7 +470,7 @@ export function Chat() {
                 Intl.DateTimeFormat().resolvedOptions().timeZone || undefined;
             // Keep this key in the request options so apiFetch can safely
             // repeat the same send after access-token refresh.
-            const clientRequestId = incognito ? undefined : crypto.randomUUID();
+            const clientRequestId = incognito ? undefined : randomUuid();
             try {
                 const resp = await postMessage(
                     targetId,

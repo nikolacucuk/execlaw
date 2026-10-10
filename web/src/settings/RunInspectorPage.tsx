@@ -4,6 +4,7 @@ import Form from "react-bootstrap/Form";
 import { ApiError } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
 import { postMessage } from "../api/endpoints";
+import { randomUuid } from "../api/randomId";
 import { ErrorBanner } from "../components/ErrorBanner";
 import { ArtifactDownloadLink } from "../components/ArtifactDownloadLink";
 import { CompletionEvidenceRef } from "../components/CompletionEvidenceRef";
@@ -305,7 +306,7 @@ export function RunInspectorPage() {
                 snapshot.run.conversation_id,
                 { text: "", resume_run_id: snapshot.run.run_id },
                 token,
-                crypto.randomUUID(),
+                randomUuid(),
             );
             setError(null);
             await Promise.all([refreshRuns(), refreshTrace(snapshot.run.run_id)]);
@@ -376,7 +377,7 @@ export function RunInspectorPage() {
         if (!snapshot || !workspaceDiff || workspaceDiff.conflicts > 0) return;
         const request = workspaceApplyRequest.current?.previewHash === workspaceDiff.preview_hash
             ? workspaceApplyRequest.current
-            : { previewHash: workspaceDiff.preview_hash, requestId: crypto.randomUUID() };
+            : { previewHash: workspaceDiff.preview_hash, requestId: randomUuid() };
         workspaceApplyRequest.current = request;
         if (!window.confirm(`Apply ${workspaceDiff.changes.length} reviewed file changes to the registered workspace? External sends, commits, and publication are not part of this operation.`)) return;
         setWorkspaceApplying(true);
@@ -397,7 +398,7 @@ export function RunInspectorPage() {
         const source = workspaceApplyState.latest_apply;
         const request = workspaceRestoreRequest.current?.applyId === source.apply_id
             ? workspaceRestoreRequest.current
-            : { applyId: source.apply_id, requestId: crypto.randomUUID() };
+            : { applyId: source.apply_id, requestId: randomUuid() };
         workspaceRestoreRequest.current = request;
         if (!window.confirm(`Restore only the changes owned by ${source.apply_id}? Any file changed since that apply will be preserved and reported as a conflict.`)) return;
         setWorkspaceApplying(true);

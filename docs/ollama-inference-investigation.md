@@ -155,6 +155,29 @@ content with `finish_reason=length` after 512 output tokens; Ollama's native
 `/api/chat` returned a nonempty plan. The saved `binary_hint: "ollama"` selects
 the native client, but current app-turn evidence is still needed.
 
+### October 9 TrueNAS root cause: `crypto.randomUUID` in a non-secure context
+
+The TrueNAS SPA is served over plain HTTP on a LAN IP
+(`http://192.168.1.76:3031`), which browsers treat as a non-secure context and
+therefore do not expose `crypto.randomUUID`. Commit `56cedf5` (roadmap harness
+improvements) added an unguarded `crypto.randomUUID()` for the send
+idempotency key in [`Chat.tsx`](../web/src/routes/Chat.tsx). It threw before
+`postMessage`, outside the `try`, so no request reached the server: the UI
+showed a spinner, then reset, and `GET /api/chats/<id>/messages` returned an
+empty list. The local deployment was unaffected because `127.0.0.1` is a
+secure context.
+
+Evidence: on the live TrueNAS page, `crypto.randomUUID` was undefined. With a
+page-only polyfill and no server change, a **New chat** `Reply OK` returned
+`OK` from Ollama in conversation `8e01a37b-e096-4131-b18a-77dc4df15884` at
+8:15 p.m. The backend, qualification, and Ollama path were healthy.
+
+Fix: [`randomId.ts`](../web/src/api/randomId.ts) `randomUuid()` falls back to
+`crypto.getRandomValues`; it replaces every unguarded `crypto.randomUUID()` in
+`Chat.tsx`, `DurableTurnControls.tsx`, `DynamicPluginPanel.tsx`, and
+`RunInspectorPage.tsx`. The SPA suite passed 554/554 and `tsc --noEmit`
+passed. TrueNAS needs `git pull` plus an `execlaw` image rebuild to pick it up.
+
 ## Source and verification state
 
 The local checkout is at `bd3bcdc` with **uncommitted** overlapping-send
