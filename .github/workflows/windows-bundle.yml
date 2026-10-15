@@ -221,7 +221,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "installed execlaw doctor failed ($LASTEXITCODE)" }
 
       - name: Upload installer
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: execlaw-windows-x64
           path: |
@@ -233,7 +233,7 @@ jobs:
 
       - name: Upload offline update bundle
         if: startsWith(github.ref, 'refs/tags/v')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: execlaw-offline-update-windows-x64
           path: |
@@ -247,7 +247,7 @@ jobs:
         # Bundle all plugin ZIPs into a single workflow artifact
         # (so a `gh run download` grabs them in one shot) AND
         # attach them individually to the GitHub Release below.
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: execlaw-plugins-windows
           path: |
